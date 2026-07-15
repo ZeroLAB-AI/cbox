@@ -1,0 +1,1583 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SERVICE=cbox
+CONF="$INSTALL_DIR/cbox.conf"
+
+[ -f "$INSTALL_DIR/_common.sh" ] && . "$INSTALL_DIR/_common.sh"
+[ -f "$INSTALL_DIR/templates/generators.sh" ] && . "$INSTALL_DIR/templates/generators.sh"
+
+HAVE_GLOBAL_CONF=0
+if [ -f "$CONF" ]; then
+  source "$CONF"
+  HAVE_GLOBAL_CONF=1
+fi
+
+COMPOSE=(docker compose -f "$INSTALL_DIR/docker-compose.yml")
+
+require_global_conf() {
+  [ "$HAVE_GLOBAL_CONF" = 1 ] || { echo "cbox: $CONF not found - run ./setup.sh first" >&2; exit 1; }
+}
+
+die_no_conf() {
+  echo "cbox: no configuration applies to $PWD - run ./setup.sh (global) or ./setup.sh --local <root> (isolated) first" >&2
+  exit 1
+}
+
+check_tpl_sha() {
+  require_global_conf
+  local cur
+  cur="$(sha256sum "$INSTALL_DIR/templates/generators.sh" | awk '{print $1}')"
+  if [ "$cur" != "${CBOX_TPL_SHA:-}" ]; then
+    echo "cbox: templates changed since last generation - run ./setup.sh update to re-bless"
+    exit 1
+  fi
+}
+
+_cbox_local_effdir_for() {
+  local root="$1" p
+  p="$(_cbox_path_hash "$root")"
+  printf '%s/.config/cbox/projects/%s' "$HOME" "$p"
+}
+
+_cbox_effective_mode() {
+  local root eff
+  if [ "$HAVE_GLOBAL_CONF" = 1 ] && [ "${CBOX_MODE:-global}" = global ]; then
+    printf 'global'
+    return 0
+  fi
+  if root="$(_cbox_workspace_root 2>/dev/null)"; then
+    eff="$(_cbox_local_effdir_for "$root")"
+    if [ -f "$eff/cbox.conf" ]; then
+      printf 'isolated'
+      return 0
+    fi
+  fi
+  if [ "$HAVE_GLOBAL_CONF" = 1 ]; then
+    printf '%s' "${CBOX_MODE:-global}"
+    return 0
+  fi
+  printf 'none'
+}
+
+_compose_p() {
+  local eff="$1"; shift
+  docker compose --project-directory "$eff" -f "$eff/docker-compose.yml" "$@"
+}
+
+_run_global() {
+  local bin="$1"; shift
+  local workspaces=() w root inscope=0
+  read -r -a workspaces <<< "${CBOX_WORKSPACES:-}"
+  root="$(realpath "$PWD" 2>/dev/null || printf '%s' "$PWD")"
+  for w in "${workspaces[@]}"; do
+    [ -n "$w" ] || continue
+    case "$root" in
+      "$w"|"$w"/*) inscope=1; break ;;
+    esac
+  done
+  if [ "${#workspaces[@]}" -gt 0 ] && [ "$inscope" != 1 ]; then
+    if [ -t 0 ] && [ -t 1 ]; then
+      local ans
+      printf 'cbox: global container does not mount this folder - switch to an isolated per-project container? [y/N] '
+      read -r ans
+      case "$ans" in
+        y|Y)
+          _run_isolated "$bin" "$@"
+          return
+          ;;
+        *)
+          echo "cbox: cancelled" >&2
+          return 1
+          ;;
+      esac
+    else
+      echo "cbox: global container does not mount $PWD and no TTY to confirm switching to isolated mode" >&2
+      return 1
+    fi
+  fi
+  check_tpl_sha
+  "${COMPOSE[@]}" build >/dev/null
+  _bins_soft "cbox:${CBOX_NAME:-cbox}"
+  "${COMPOSE[@]}" up -d >/dev/null
+  local workdir="$CBOX_WORKDIR"
+  for w in "${workspaces[@]}"; do
+    case "$root" in
+      "$w"|"$w"/*) workdir="$root" ;;
+    esac
+  done
+  if [ -t 0 ] && [ -t 1 ]; then
+    exec "${COMPOSE[@]}" exec -it -w "$workdir" "$SERVICE" /entrypoint.sh "$bin" "$@"
+  else
+    exec "${COMPOSE[@]}" exec -T -w "$workdir" "$SERVICE" /entrypoint.sh "$bin" "$@"
+  fi
+}
+
+_first_run_init() {
+  local root="$1" eff="$2" ans rc
+  if ! { [ -t 0 ] && [ -t 1 ]; }; then
+    echo "cbox: no effective config for $root and no TTY - run 'cbox run claude' interactively or 'setup.sh --local $root' first" >&2
+    return 1
+  fi
+  mkdir -p "$HOME/.config/cbox/projects"
+  exec 7> "$HOME/.config/cbox/projects/.init.lock"
+  flock -w 60 7 || { echo "cbox: another init is running" >&2; exec 7>&-; return 1; }
+  if [ -f "$eff/cbox.conf" ]; then
+    exec 7>&-
+    return 0
+  fi
+  printf 'cbox: new project %s\n  [n] configure from scratch\n  [d] derive from global config\n  [z] cancel\n> ' "$root"
+  read -r ans
+  rc=0
+  case "$ans" in
+    n) "$INSTALL_DIR/setup.sh" --local "$root" || rc=$? ;;
+    d) "$INSTALL_DIR/setup.sh" --local "$root" --from-global || rc=$? ;;
+    *) echo "cbox: cancelled" >&2; exec 7>&-; return 1 ;;
+  esac
+  exec 7>&-
+  [ "$rc" -eq 0 ] && [ -f "$eff/cbox.conf" ]
+}
+
+_gen_effective() {
+  local eff="$1" root="$2" digest
+  digest="$(_cbox_resolve_base_digest ubuntu:24.04)" || die "cannot resolve base image digest and no local image - network required for first build"
+  cp "$INSTALL_DIR/entrypoint.sh" "$eff/entrypoint.sh"
+  cp "$INSTALL_DIR/install-bins.sh" "$eff/install-bins.sh"
+  gen_image_inputs "$eff" "$digest"
+  IMG_HASH="$(_cbox_image_hash "$eff")"
+  IMG_TAG="$(_cbox_image_tag "$IMG_HASH")"
+  gen_dockerfile_into "$eff" "$digest"
+  gen_env_file_into "$eff"
+  gen_compose_isolated "$eff" "$root" "$IMG_TAG" "$IMG_HASH"
+}
+
+_ensure_image() {
+  local eff="$1" img_hash img_tag base
+  img_hash="$(_cbox_image_hash "$eff")"
+  img_tag="$(_cbox_image_tag "$img_hash")"
+  IMG_HASH="$img_hash"
+  IMG_TAG="$img_tag"
+  docker image inspect "$img_tag" >/dev/null 2>&1 && return 0
+  echo "cbox: building $img_tag (inputs changed or first build)" >&2
+  base="$(_cbox_manifest_field "$eff/image.inputs" base 2>/dev/null || true)"
+  docker build -t "$img_tag" \
+    --label "cbox.inputs=$img_hash" \
+    --label "cbox.base=$base" \
+    -f "$eff/Dockerfile" "$eff"
+}
+
+_bins_cache_file() {
+  printf '%s/.config/cbox/bins.stamp' "$HOME"
+}
+
+_bins_lock_file() {
+  printf '%s/.config/cbox/bins.lock' "$HOME"
+}
+
+_bins_want() {
+  local tool="$1"
+  case "$tool" in
+    claude) printf '%s' "${CBOX_CLAUDE_TARGET:-stable}" ;;
+    codex) printf '%s|%s' "${CBOX_CODEX_VERSION:-latest}" "${CBOX_CODEX_TARGET:-}" ;;
+  esac
+}
+
+_bins_cache_get() {
+  local volume="$1" cache line
+  cache="$(_bins_cache_file)"
+  [ -f "$cache" ] || return 1
+  line="$(grep -F "$volume|" "$cache" 2>/dev/null | tail -n1)" || true
+  [ -n "$line" ] || return 1
+  printf '%s' "$line"
+}
+
+_bins_cache_put() {
+  local volume="$1" tool="$2" want="$3" version="$4" cache dir tmp
+  cache="$(_bins_cache_file)"
+  dir="$(dirname "$cache")"
+  mkdir -p "$dir"
+  tmp="$(mktemp "$dir/.cbox.XXXXXX")"
+  {
+    if [ -f "$cache" ]; then
+      grep -Fv "$volume|" "$cache" 2>/dev/null || true
+    fi
+    printf '%s|%s|%s|%s|%s\n' "$volume" "$tool" "$want" "$version" "$(date +%s)"
+  } > "$tmp"
+  mv "$tmp" "$cache"
+}
+
+_bins_cache_field() {
+  local line="$1" field="$2"
+  printf '%s' "$line" | awk -F'|' -v f="$field" '{
+    n = NF
+    if (f == "volume") { print $1; next }
+    if (f == "tool") { print $2; next }
+    if (f == "version") { print $(n - 1); next }
+    if (f == "epoch") { print $n; next }
+    if (f == "want") {
+      out = $3
+      for (i = 4; i <= n - 2; i++) out = out "|" $i
+      print out
+      next
+    }
+  }'
+}
+
+_bins_stale() {
+  local volume="$1" tool="$2" want="$3" line cur_tool cur_want
+  docker volume inspect "$volume" >/dev/null 2>&1 || return 0
+  line="$(_bins_cache_get "$volume")" || return 0
+  cur_tool="$(_bins_cache_field "$line" tool)"
+  cur_want="$(_bins_cache_field "$line" want)"
+  [ "$cur_tool" = "$tool" ] || return 0
+  [ "$cur_want" = "$want" ] || return 0
+  return 1
+}
+
+_bins_run_install() {
+  local img_tag="$1" tools="$2" force="$3" claude_vol codex_vol rc line name version hash status status_word
+  claude_vol="$(_cbox_bins_volume claude)"
+  codex_vol="$(_cbox_bins_volume codex)"
+  docker volume create "$claude_vol" >/dev/null
+  docker volume create "$codex_vol" >/dev/null
+  rc=0
+  status="$(docker run --rm \
+    -v "$claude_vol:$HOME/.local:rw" \
+    -v "$codex_vol:$HOME/.codex/packages:rw" \
+    -e HOST_USER="$(id -un)" \
+    -e HOST_UID="$(id -u)" \
+    -e HOST_GID="$(id -g)" \
+    -e HOST_HOME="$HOME" \
+    -e CBOX_CLAUDE_TARGET="${CBOX_CLAUDE_TARGET:-stable}" \
+    -e CBOX_CODEX_VERSION="${CBOX_CODEX_VERSION:-latest}" \
+    -e CBOX_CODEX_TARGET="${CBOX_CODEX_TARGET:-}" \
+    -e CBOX_INSTALL_TOOLS="$tools" \
+    -e CBOX_INSTALL_FORCE="$force" \
+    --entrypoint /opt/cbox/install-bins.sh \
+    "$img_tag")" || rc=$?
+  printf '%s\n' "$status" | while IFS= read -r line; do
+    case "$line" in
+      ""|cbox-bins:*) ;;
+      *) echo "$line" >&2 ;;
+    esac
+  done
+  while IFS= read -r line; do
+    case "$line" in
+      cbox-bins:*)
+        name="$(printf '%s' "$line" | awk '{print $2}')"
+        version="$(printf '%s' "$line" | awk '{print $3}')"
+        hash="$(printf '%s' "$line" | awk '{print $4}')"
+        status_word="$(printf '%s' "$line" | awk '{print $5}')"
+        case "$status_word" in
+          refuse|fail)
+            echo "cbox: bins install refused for $name (see message above) - re-pin the project, run '$0 reinstall-bins' to move the shared tuple, or set CBOX_BINS_SCOPE=pinned for a private volume" >&2
+            rc=1
+            ;;
+          ok|adopt)
+            _bins_cache_put "$(_cbox_bins_volume "$name")" "$name" "$(_bins_want "$name")" "$version"
+            ;;
+        esac
+        ;;
+    esac
+  done <<< "$status"
+  return "$rc"
+}
+
+_ensure_bins() {
+  local img_tag="$1" force="${2:-0}" lock claude_vol codex_vol
+  local -a stale_tools=()
+  claude_vol="$(_cbox_bins_volume claude)"
+  codex_vol="$(_cbox_bins_volume codex)"
+  if [ "$force" != 1 ]; then
+    _bins_stale "$claude_vol" claude "$(_bins_want claude)" && stale_tools+=(claude)
+    _bins_stale "$codex_vol" codex "$(_bins_want codex)" && stale_tools+=(codex)
+    [ "${#stale_tools[@]}" -eq 0 ] && return 0
+  else
+    stale_tools=(claude codex)
+  fi
+  lock="$(_bins_lock_file)"
+  mkdir -p "$(dirname "$lock")"
+  exec 6> "$lock"
+  flock -w 900 6 || { echo "cbox: timed out waiting for another bins install to finish" >&2; exec 6>&-; return 1; }
+  if [ "$force" != 1 ]; then
+    stale_tools=()
+    _bins_stale "$claude_vol" claude "$(_bins_want claude)" && stale_tools+=(claude)
+    _bins_stale "$codex_vol" codex "$(_bins_want codex)" && stale_tools+=(codex)
+    if [ "${#stale_tools[@]}" -eq 0 ]; then
+      exec 6>&-
+      return 0
+    fi
+  fi
+  echo "cbox: installing/updating binaries (${stale_tools[*]}) into shared volumes" >&2
+  local rc=0
+  _bins_run_install "$img_tag" "${stale_tools[*]}" "$force" || rc=$?
+  exec 6>&-
+  return "$rc"
+}
+
+_bins_soft() {
+  _ensure_bins "$@" || echo "cbox: warning: bins install failed - continuing; affected tools stay unavailable until you fix the pin or network and run '$0 reinstall-bins'" >&2
+  return 0
+}
+
+_bins_conflict_scan() {
+  local tool="$1" want="$2" proj conf p_want p_scope hits=""
+  for proj in "$HOME"/.config/cbox/projects/*/; do
+    [ -d "$proj" ] || continue
+    conf="$proj/cbox.conf"
+    [ -f "$conf" ] || continue
+    p_want="$(unset CBOX_CLAUDE_TARGET CBOX_CODEX_VERSION CBOX_CODEX_TARGET CBOX_BINS_SCOPE; source "$conf" 2>/dev/null; _bins_want "$tool")"
+    p_scope="$(unset CBOX_BINS_SCOPE; source "$conf" 2>/dev/null; printf '%s' "${CBOX_BINS_SCOPE:-global}")"
+    [ "$p_scope" = "global" ] || continue
+    if [ "$p_want" != "$want" ]; then
+      hits="$hits $(basename "$proj")"
+    fi
+  done
+  printf '%s' "${hits# }"
+}
+
+reinstall_bins() {
+  local fresh=0 if_stale=0
+  case "${1:-}" in
+    --fresh) fresh=1; shift ;;
+    --if-stale) if_stale=1; shift ;;
+  esac
+  local mode img_tag force=0 hits_claude hits_codex
+  mode="$(_cbox_effective_mode)"
+  case "$mode" in
+    isolated)
+      local root eff
+      root="$(_cbox_workspace_root)" || die "refusing to run in $PWD (home, /, or a mount root)"
+      eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
+      [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run claude' or 'setup.sh --local $root' first"
+      (
+        set -e
+        unset CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL CBOX_CODEX_TARGET
+        . "$eff/cbox.conf"
+        img_tag="$(_cbox_image_tag "$(_cbox_image_hash "$eff")")"
+        docker image inspect "$img_tag" >/dev/null 2>&1 || die "image $img_tag not built - run 'cbox run claude' first"
+        if [ "$if_stale" = 1 ]; then
+          _ensure_bins "$img_tag" 0
+        else
+          if [ "$fresh" = 1 ]; then
+            force=1
+            docker volume rm "$(_cbox_bins_volume claude)" >/dev/null 2>&1 || true
+            docker volume rm "$(_cbox_bins_volume codex)" >/dev/null 2>&1 || true
+          else
+            hits_claude="$(_bins_conflict_scan claude "$(_bins_want claude)")"
+            hits_codex="$(_bins_conflict_scan codex "$(_bins_want codex)")"
+            [ -z "$hits_claude" ] || echo "cbox: moving the shared claude tuple will make these projects mismatch:$hits_claude" >&2
+            [ -z "$hits_codex" ] || echo "cbox: moving the shared codex tuple will make these projects mismatch:$hits_codex" >&2
+          fi
+          _ensure_bins "$img_tag" "$force"
+        fi
+      )
+      ;;
+    global)
+      require_global_conf
+      img_tag="cbox:${CBOX_NAME:-cbox}"
+      docker image inspect "$img_tag" >/dev/null 2>&1 || die "image $img_tag not built - run 'cbox up' first"
+      if [ "$if_stale" = 1 ]; then
+        _ensure_bins "$img_tag" 0
+        return
+      fi
+      if [ "$fresh" = 1 ]; then
+        force=1
+        docker volume rm "$(_cbox_bins_volume claude)" >/dev/null 2>&1 || true
+        docker volume rm "$(_cbox_bins_volume codex)" >/dev/null 2>&1 || true
+      else
+        hits_claude="$(_bins_conflict_scan claude "$(_bins_want claude)")"
+        hits_codex="$(_bins_conflict_scan codex "$(_bins_want codex)")"
+        [ -z "$hits_claude" ] || echo "cbox: moving the shared claude tuple will make these projects mismatch:$hits_claude" >&2
+        [ -z "$hits_codex" ] || echo "cbox: moving the shared codex tuple will make these projects mismatch:$hits_codex" >&2
+      fi
+      _ensure_bins "$img_tag" "$force"
+      ;;
+    *)
+      die_no_conf
+      ;;
+  esac
+}
+
+_ensure_volumes() {
+  local eff="$1" p_hash
+  p_hash="$(_cbox_path_hash "$(cat "$eff/workspace")")"
+  if [ "${CBOX_CLAUDE_MODE:-mount}" = volume ]; then
+    docker volume create "cbox-p${p_hash}-claude" >/dev/null
+  fi
+  if [ "${CBOX_CODEX_MODE:-mount}" = volume ]; then
+    docker volume create "cbox-p${p_hash}-codex" >/dev/null
+  fi
+  if [ "${CBOX_VENV_MODE:-none}" = volume ]; then
+    docker volume create "cbox-p${p_hash}-venv" >/dev/null
+  fi
+  case "${CBOX_SSH_MODE:-none}" in
+    container-keys|mixed) docker volume create "cbox-p${p_hash}-ssh" >/dev/null ;;
+  esac
+}
+
+_mirror_write_one() {
+  local dir="$1" src="$2" name="$3" tmp
+  [ -f "$src" ] || return 0
+  tmp="$(mktemp "$dir/.cbox.XXXXXX")" || return 0
+  if cp "$src" "$tmp" 2>/dev/null; then
+    chmod 0644 "$tmp"
+    mv "$tmp" "$dir/$name" 2>/dev/null || rm -f "$tmp"
+  else
+    rm -f "$tmp"
+  fi
+}
+
+_write_mirror() {
+  local root="$1" eff="$2" dir tmp
+  dir="$root/.claude/cbox"
+  if [ -L "$root/.claude" ] || [ -L "$dir" ]; then
+    echo "cbox: warning: $dir is a symlink - skipping mirror" >&2
+    return 0
+  fi
+  mkdir -p "$dir" 2>/dev/null || { echo "cbox: warning: cannot create $dir - skipping mirror" >&2; return 0; }
+  case "$(realpath "$dir" 2>/dev/null)" in
+    "$root"/*) ;;
+    *) echo "cbox: warning: $dir escapes workspace - skipping mirror" >&2; return 0 ;;
+  esac
+  _mirror_write_one "$dir" "$eff/docker-compose.yml" docker-compose.mirror.yml
+  _mirror_write_one "$dir" "$eff/cbox.conf" cbox.conf.mirror
+  _mirror_write_one "$dir" "$eff/Dockerfile" Dockerfile.mirror
+  _mirror_write_one "$dir" "$eff/image.inputs" image-inputs.mirror
+  tmp="$(mktemp "$dir/.cbox.XXXXXX")"
+  if [ -n "$tmp" ]; then
+    printf '*\n' > "$tmp"
+    mv "$tmp" "$dir/.gitignore" 2>/dev/null || rm -f "$tmp"
+  fi
+  tmp="$(mktemp "$dir/.cbox.XXXXXX")"
+  if [ -n "$tmp" ]; then
+    {
+      printf 'mirror of %s\n' "$eff"
+      printf 'not authoritative; edits here have no effect and are overwritten\n'
+      printf 'add .claude/cbox/ (never .claude/) to your repo .gitignore if you want it untracked there too\n'
+    } > "$tmp"
+    mv "$tmp" "$dir/README" 2>/dev/null || rm -f "$tmp"
+  fi
+}
+
+_probe() {
+  docker exec "$1" sh -c '
+cp="$(sed -n 2p "$HOST_HOME/.local/.cbox-stamp" 2>/dev/null)"
+xp="$(sed -n 2p "$HOST_HOME/.codex/packages/.cbox-stamp" 2>/dev/null)"
+n=0
+for p in /proc/[0-9]*/exe; do
+  e="$(readlink "$p" 2>/dev/null)" || continue
+  e="${e% (deleted)}"
+  if [ -n "$cp" ] && [ "$e" = "$cp" ]; then n=$((n+1)); continue; fi
+  if [ -n "$xp" ] && [ "$e" = "$xp" ]; then n=$((n+1)); fi
+done
+printf %s "$n"'
+}
+
+_reap() {
+  local eff="$1" cid n
+  exec 9> "$eff/session.lock"
+  if ! flock -n -x 9; then
+    exec 9>&-
+    return 0
+  fi
+  cid="$(_compose_p "$eff" ps -q cbox 2>/dev/null)" || cid=""
+  if [ -z "$cid" ]; then
+    exec 9>&-
+    return 0
+  fi
+  n="$(_probe "$cid" 2>/dev/null)" || n=unknown
+  if [ "$n" = 0 ]; then
+    _compose_p "$eff" down --remove-orphans >/dev/null 2>&1 || true
+  fi
+  exec 9>&-
+}
+
+_session_run() {
+  local eff="$1" bin="$2"; shift 2
+  local rc=0 wd root
+  root="$(cat "$eff/workspace" 2>/dev/null || printf '%s' "$PWD")"
+  exec 8> "$eff/session.lock"
+  flock -s 8 || { echo "cbox: cannot lock session for $eff" >&2; exec 8>&-; return 1; }
+  _compose_p "$eff" up -d || { exec 8>&-; return 1; }
+  wd="$(realpath "$PWD" 2>/dev/null || printf '%s' "$PWD")"
+  case "$wd" in
+    "$root"|"$root"/*) ;;
+    *) wd="$root" ;;
+  esac
+  if [ -t 0 ] && [ -t 1 ]; then
+    _compose_p "$eff" exec -it -w "$wd" cbox /entrypoint.sh "$bin" "$@" || rc=$?
+  else
+    _compose_p "$eff" exec -T -w "$wd" cbox /entrypoint.sh "$bin" "$@" || rc=$?
+  fi
+  exec 8>&-
+  _reap "$eff"
+  return "$rc"
+}
+
+_cbox_tpl_changed_only() {
+  local eff="$1" root="$2" conf mf want_ws want_conf want_gen have_conf have_gen
+  conf="$eff/cbox.conf"; mf="$eff/manifest.sha256"
+  [ -f "$conf" ] || return 1
+  [ -f "$mf" ] || return 1
+  want_ws="$(_cbox_manifest_field "$mf" workspace)" || return 1
+  [ "$want_ws" = "$root" ] || return 1
+  want_conf="$(_cbox_manifest_field "$mf" conf)" || return 1
+  want_gen="$(_cbox_manifest_field "$mf" generators)" || return 1
+  have_conf="$(sha256sum "$conf" | awk '{print $1}')"
+  have_gen="$(sha256sum "$INSTALL_DIR/templates/generators.sh" | awk '{print $1}')"
+  [ "$have_conf" = "$want_conf" ] || return 1
+  [ "$have_gen" != "$want_gen" ] || return 1
+  return 0
+}
+
+_cbox_rebless_local() {
+  local root="$1" eff="$2" rc=0
+  mkdir -p "$HOME/.config/cbox/projects"
+  exec 7> "$HOME/.config/cbox/projects/.init.lock"
+  flock -w 60 7 || { echo "cbox: another init is running" >&2; exec 7>&-; return 1; }
+  "$INSTALL_DIR/setup.sh" --local "$root" --from-global || rc=$?
+  exec 7>&-
+  [ "$rc" -eq 0 ] && [ -f "$eff/cbox.conf" ]
+}
+
+_cbox_manifest_verify_conf_interactive() {
+  local eff="$1" root="$2"
+  if _cbox_tpl_changed_only "$eff" "$root"; then
+    if [ -t 0 ] && [ -t 1 ]; then
+      local ans
+      printf 'cbox: templates changed - re-bless now? [y/N] '
+      read -r ans
+      case "$ans" in
+        y|Y)
+          _cbox_rebless_local "$root" "$eff" || die "re-bless failed for $root"
+          ;;
+      esac
+    fi
+  fi
+  _cbox_manifest_verify_conf "$eff" "$root"
+}
+
+_run_isolated() {
+  local bin="$1"; shift
+  local root P eff
+  root="$(_cbox_workspace_root)" || die "refusing to run in $PWD (home, /, or a mount root)"
+  _cbox_check_workspace_overlap "$root"
+  P="$(_cbox_path_hash "$root")"
+  eff="$HOME/.config/cbox/projects/$P"
+  if [ ! -f "$eff/cbox.conf" ]; then
+    _first_run_init "$root" "$eff" || return 1
+  fi
+  _cbox_manifest_verify_conf_interactive "$eff" "$root"
+  (
+    set -e
+    unset CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL CBOX_CODEX_TARGET
+    . "$eff/cbox.conf"
+    _gen_effective "$eff" "$root"
+    _ensure_image "$eff"
+    _bins_soft "$IMG_TAG"
+    _ensure_volumes "$eff"
+    local slug
+    slug="$(_cbox_slug "$root")"
+    mkdir -p "$HOME/.claude/projects/$slug"
+    _write_mirror "$root" "$eff"
+    _cbox_manifest_write_generated "$eff"
+    _session_run "$eff" "$bin" "$@"
+  )
+}
+
+run() {
+  local bin="${1:-}"
+  [ -n "$bin" ] || { echo "cbox: usage: $0 run <bin> [args...]" >&2; return 1; }
+  shift
+  if [ "$(_cbox_effective_mode)" = global ]; then
+    _run_global "$bin" "$@"
+    return
+  fi
+  _run_isolated "$bin" "$@"
+}
+
+_project_eff_from_cwd() {
+  local root P eff
+  root="$(_cbox_workspace_root)" || die "refusing to operate in $PWD (home, /, or a mount root)"
+  P="$(_cbox_path_hash "$root")"
+  eff="$HOME/.config/cbox/projects/$P"
+  [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run claude' or 'setup.sh --local $root' first"
+  printf '%s' "$eff"
+}
+
+down_project() {
+  local eff
+  eff="$(_project_eff_from_cwd)"
+  _cbox_manifest_verify_generated "$eff"
+  _compose_p "$eff" down --remove-orphans
+}
+
+gc() {
+  local cid eff n1 n2
+  while IFS="$(printf '\t')" read -r cid eff; do
+    [ -n "$cid" ] || continue
+    if [ ! -d "$eff" ]; then
+      docker stop "$cid" >/dev/null 2>&1 || true
+      continue
+    fi
+    exec 9> "$eff/session.lock"
+    if ! flock -n -x 9; then
+      exec 9>&-
+      continue
+    fi
+    n1="$(_probe "$cid" 2>/dev/null)" || n1=unknown
+    if [ "$n1" = 0 ]; then
+      exec 9>&-
+      sleep 10
+      exec 9> "$eff/session.lock"
+      if flock -n -x 9; then
+        n2="$(_probe "$cid" 2>/dev/null)" || n2=unknown
+        if [ "$n2" = 0 ]; then
+          _compose_p "$eff" down --remove-orphans >/dev/null 2>&1 || docker stop "$cid" >/dev/null 2>&1 || true
+        fi
+      fi
+    fi
+    exec 9>&-
+  done < <(docker ps --filter label=cbox.kind=isolated --format '{{.ID}}'$'\t''{{.Label "cbox.effdir"}}')
+  docker ps -a --filter label=cbox.kind=isolated --filter status=exited -q | xargs -r docker rm >/dev/null 2>&1 || true
+  _gc_legacy_bins_volumes
+}
+
+_gc_legacy_bins_volumes() {
+  local v
+  docker volume ls --format '{{.Name}}' 2>/dev/null | while IFS= read -r v; do
+    case "$v" in
+      cbox-i[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-local|cbox-i[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-codex-packages)
+        if docker volume rm "$v" >/dev/null 2>&1; then
+          echo "cbox: gc: removed legacy volume $v"
+        fi
+        ;;
+    esac
+  done
+  if [ "$HAVE_GLOBAL_CONF" = 1 ]; then
+    for v in "${CBOX_NAME:-cbox}-claude-local" "${CBOX_NAME:-cbox}-codex-packages"; do
+      if docker volume rm "$v" >/dev/null 2>&1; then
+        echo "cbox: gc: removed legacy volume $v"
+      fi
+    done
+  fi
+}
+
+ls_projects() {
+  printf '%-14s %-14s %s\n' PHASH IMGHASH ROOT
+  docker ps --filter label=cbox.kind=isolated --format '{{.Label "cbox.phash"}}'$'\t''{{.Label "cbox.imghash"}}'$'\t''{{.Label "cbox.root"}}' \
+  | while IFS="$(printf '\t')" read -r p i r; do
+      printf '%-14s %-14s %s\n' "${p:0:12}" "${i:0:12}" "$r"
+    done
+}
+
+images_list() {
+  printf '%-24s %-10s %s\n' TAG SIZE PROJECTS
+  local line tag size hash refs proj
+  docker images --filter reference='cbox-img:*' --format '{{.Repository}}:{{.Tag}}'$'\t''{{.Size}}' \
+  | while IFS="$(printf '\t')" read -r tag size; do
+      hash="${tag#cbox-img:}"
+      refs=""
+      for proj in "$HOME"/.config/cbox/projects/*/; do
+        [ -f "$proj/image.inputs" ] || continue
+        if grep -q "^base=" "$proj/image.inputs" 2>/dev/null; then
+          local ih
+          ih="$(sha256sum "$proj/image.inputs" | awk '{print $1}')"
+          case "$ih" in "$hash"*) refs="$refs $(basename "$proj")" ;; esac
+        fi
+      done
+      printf '%-24s %-10s %s\n' "$tag" "$size" "${refs# }"
+    done
+}
+
+images_rm() {
+  local hash="${1:-}" tag running refs proj ih
+  [ -n "$hash" ] || die "usage: $0 images rm <hash>"
+  tag="cbox-img:${hash:0:12}"
+  running="$(docker ps -q --filter ancestor="$tag" 2>/dev/null)" || running=""
+  [ -z "$running" ] || die "refusing: $tag is in use by a running container"
+  refs=""
+  for proj in "$HOME"/.config/cbox/projects/*/; do
+    [ -f "$proj/image.inputs" ] || continue
+    ih="$(sha256sum "$proj/image.inputs" | awk '{print $1}')"
+    case "$ih" in "$hash"*) refs="$refs $(basename "$proj")" ;; esac
+  done
+  [ -z "$refs" ] || die "refusing: $tag is referenced by project(s):$refs"
+  docker rmi "$tag"
+}
+
+images_cmd() {
+  case "${1:-}" in
+    rm) shift; images_rm "${1:-}" ;;
+    ""|list) images_list ;;
+    *) echo "cbox: usage: $0 images [list|rm <hash>]" >&2; return 1 ;;
+  esac
+}
+
+up() {
+  local gpu=0
+  if [ "${1:-}" = "--gpu" ]; then gpu=1; fi
+  check_tpl_sha
+  source "$INSTALL_DIR/templates/generators.sh"
+  gen_env_file
+  local cmd=("${COMPOSE[@]}")
+  if [ "$gpu" = 1 ]; then
+    [ -f "$INSTALL_DIR/docker-compose.gpu.yml" ] || { echo "cbox: docker-compose.gpu.yml not found - run ./setup.sh update gpu"; exit 1; }
+    cmd+=(-f "$INSTALL_DIR/docker-compose.gpu.yml")
+  fi
+  "${cmd[@]}" build
+  _bins_soft "cbox:${CBOX_NAME:-cbox}"
+  "${cmd[@]}" up -d
+  if [ -t 0 ] && [ -t 1 ] && [ "${CBOX_NO_EXEC:-0}" != 1 ]; then
+    exec "${COMPOSE[@]}" exec -it "$SERVICE" /entrypoint.sh claude
+  fi
+  echo "cbox: up"
+}
+
+down() {
+  require_global_conf
+  "${COMPOSE[@]}" down
+}
+
+restart() {
+  down
+  up "$@"
+}
+
+shell() {
+  require_global_conf
+  exec "${COMPOSE[@]}" exec -it "$SERVICE" /entrypoint.sh bash
+}
+
+logs() {
+  require_global_conf
+  "${COMPOSE[@]}" logs "$@"
+}
+
+install_hooks() {
+  require_global_conf
+  [ -t 0 ] || { echo "cbox: install-hooks requires a TTY"; return 1; }
+  local files=(codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py orchestrator-global.txt codex_scope.container.json ask_claude_mcp.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py)
+  local srcs=(
+    "$INSTALL_DIR/etc/hooks/codex_mode_guard.py"
+    "$INSTALL_DIR/etc/hooks/agent_label_guard.py"
+    "$INSTALL_DIR/etc/hooks/code_hygiene_guard.py"
+    "$INSTALL_DIR/etc/hooks/commit_guard.py"
+    "$INSTALL_DIR/etc/hooks/orchestrator-global.txt"
+    "$INSTALL_DIR/generated/hooks/codex_scope.container.json"
+    "$INSTALL_DIR/etc/codex/ask_claude_mcp.py"
+    "$INSTALL_DIR/etc/hooks/continuity_commit_log.py"
+    "$INSTALL_DIR/etc/hooks/continuity_ledger_sweep.py"
+    "$INSTALL_DIR/etc/hooks/continuity_session_digest.py"
+  )
+  local s f i stage target ans changed=0
+  for s in "${srcs[@]}"; do
+    [ -f "$s" ] || { echo "cbox: $s missing - run ./setup.sh first"; return 1; }
+  done
+  stage="$(mktemp -d)"
+  trap 'rm -rf "$stage"' RETURN
+  for i in "${!files[@]}"; do
+    cp "${srcs[$i]}" "$stage/${files[$i]}"
+  done
+  if [ "${CBOX_CLAUDE_MODE:-mount}" = mount ]; then
+    target="${CBOX_CLAUDE_PATH:-$HOME/.claude}/hooks"
+    mkdir -p "$target"
+    for f in "${files[@]}"; do
+      if cmp -s "$stage/$f" "$target/$f" 2>/dev/null; then
+        echo "cbox: $f unchanged"
+        continue
+      fi
+      echo "== $f: $target/$f vs staged =="
+      if [ -f "$target/$f" ]; then
+        diff -u "$target/$f" "$stage/$f" || true
+      else
+        echo "(new file)"
+        sed 's/^/+ /' "$stage/$f"
+      fi
+      changed=1
+    done
+    if [ "$changed" = 0 ]; then
+      echo "cbox: install-hooks: nothing to do"
+      return 0
+    fi
+    read -r -p "Install the changes above into $target? [y/N] " ans
+    case "$ans" in
+      y|Y) ;;
+      *) echo "cbox: install-hooks: cancelled"; return 1;;
+    esac
+    for f in "${files[@]}"; do
+      install -m 0644 "$stage/$f" "$target/$f"
+    done
+  else
+    target="$INSTALL_DIR/generated/hooks"
+    mkdir -p "$target"
+    for f in "${files[@]}"; do
+      if cmp -s "$stage/$f" "$target/$f" 2>/dev/null; then
+        echo "cbox: $f unchanged"
+      else
+        install -m 0644 "$stage/$f" "$target/$f"
+        echo "cbox: $f updated"
+      fi
+    done
+  fi
+  echo "cbox: install-hooks: done - apply with: $0 restart"
+}
+
+backup() {
+  require_global_conf
+  local ts v vols=()
+  if [ "${CBOX_CLAUDE_MODE:-mount}" = volume ]; then vols+=("${CBOX_NAME:-cbox}-claude"); fi
+  if [ "${CBOX_CODEX_MODE:-mount}" = volume ]; then vols+=("${CBOX_NAME:-cbox}-codex"); fi
+  if [ "${CBOX_VENV_MODE:-none}" = volume ]; then vols+=("${CBOX_NAME:-cbox}-venv"); fi
+  case "${CBOX_SSH_MODE:-none}" in
+    container-keys|mixed) vols+=("${CBOX_NAME:-cbox}-ssh");;
+  esac
+  ts="$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$INSTALL_DIR/backups"
+  for v in "${vols[@]}"; do
+    if ! docker volume inspect "$v" >/dev/null 2>&1; then
+      echo "cbox: volume $v not found - skipped"
+      continue
+    fi
+    docker run --rm -v "$v:/src:ro" -v "$INSTALL_DIR/backups:/out" ubuntu:24.04 tar czf "/out/$v-$ts.tar.gz" -C /src .
+    du -h "$INSTALL_DIR/backups/$v-$ts.tar.gz"
+  done
+}
+
+login_codex() {
+  require_global_conf
+  if [ "${CBOX_EGRESS_MODE:-off}" = off ]; then
+    echo "cbox: egress mode is off - the login bridge is only needed with egress enabled; run 'codex login' inside '$0 shell'"
+    return 0
+  fi
+  command -v socat >/dev/null 2>&1 || { echo "cbox: socat not found on host - install it first (e.g. apt install socat)"; return 1; }
+  echo "cbox: forwarding host 127.0.0.1:1455 into the container"
+  echo "cbox: run 'codex login' inside '$0 shell' and open the printed URL in a browser on this host"
+  echo "cbox: press Ctrl-C to stop the bridge"
+  trap 'echo; echo "cbox: login bridge stopped"; exit 0' INT
+  local -a inner=(docker compose -f "$INSTALL_DIR/docker-compose.yml" exec -T "$SERVICE" socat - TCP:127.0.0.1:1455)
+  local inner_q exec_addr
+  printf -v inner_q '%q ' "${inner[@]}"
+  inner_q="${inner_q% }"
+  printf -v exec_addr 'EXEC:%q' "$inner_q"
+  socat TCP-LISTEN:1455,bind=127.0.0.1,reuseaddr,fork "$exec_addr"
+}
+
+VN=0
+VOK=0
+VFAIL=0
+VSKIP=0
+
+v_t() {
+  VN=$((VN + 1))
+  printf '[%d] %s: ' "$VN" "$1"
+}
+
+v_ok() {
+  VOK=$((VOK + 1))
+  if [ -n "${1:-}" ]; then echo "OK ($1)"; else echo "OK"; fi
+}
+
+v_fail() {
+  VFAIL=$((VFAIL + 1))
+  if [ -n "${1:-}" ]; then echo "FAIL ($1)"; else echo "FAIL"; fi
+}
+
+v_skip() {
+  VSKIP=$((VSKIP + 1))
+  if [ -n "${1:-}" ]; then echo "SKIP ($1)"; else echo "SKIP"; fi
+}
+
+verify() {
+  require_global_conf
+  local gpu=0
+  if [ "${1:-}" = "--gpu" ]; then gpu=1; fi
+  local X=("${COMPOSE[@]}" exec -T "$SERVICE" /entrypoint.sh)
+  local workspaces=()
+  read -r -a workspaces <<< "${CBOX_WORKSPACES:-}"
+  local w v got want rc ref payload gitws
+  echo "== cbox verify =="
+
+  v_t "uid/gid match"
+  got="$("${X[@]}" sh -c 'echo "$(id -u):$(id -g)"' 2>/dev/null)" || got=""
+  want="$(id -u):$(id -g)"
+  if [ "$got" = "$want" ]; then v_ok "$got"; else v_fail "container ${got:-unknown}, host $want"; fi
+
+  for w in "${workspaces[@]}"; do
+    v_t "workspace writable $w"
+    if "${X[@]}" sh -c 'touch "$1/.cbox-verify" && rm "$1/.cbox-verify"' sh "$w" >/dev/null 2>&1; then v_ok; else v_fail; fi
+  done
+
+  for w in "${workspaces[@]}"; do
+    v_t "workspace is a git work-tree $w"
+    if "${X[@]}" sh -c 'git -C "$1" rev-parse --is-inside-work-tree' sh "$w" >/dev/null 2>&1; then
+      v_ok
+    else
+      v_fail "no git history - run git init in $w"
+    fi
+  done
+
+  if [ "${CBOX_VENV_MODE:-none}" = host ]; then
+    v_t "venv mount read-only ${CBOX_VENV_PATH:-}"
+    if "${X[@]}" sh -c 'touch "$1/.cbox-verify"' sh "${CBOX_VENV_PATH:-}" >/dev/null 2>&1; then
+      v_fail "writable"
+    else
+      v_ok "write denied"
+    fi
+  fi
+
+  v_t "claude --version"
+  if v="$("${X[@]}" claude --version 2>&1)"; then v_ok "$v"; else v_fail "$v"; fi
+
+  v_t "codex --version"
+  if v="$("${X[@]}" codex --version 2>&1)"; then v_ok "$v"; else v_fail "$v"; fi
+
+  v_t "binaries from volumes"
+  if "${X[@]}" sh -c 'test "$(command -v claude)" = "$HOME/.local/bin/claude" && test "$(command -v codex)" = "$HOME/.local/bin/codex" && case "$(readlink -f "$HOME/.local/bin/codex")" in "$HOME/.codex/packages/"*) exit 0;; *) exit 1;; esac' >/dev/null 2>&1; then
+    v_ok
+  else
+    v_fail "claude/codex not from ~/.local/bin or codex does not resolve under ~/.codex/packages"
+  fi
+
+  v_t "claude bins mount read-only (write denied)"
+  if "${X[@]}" sh -c 'touch "$HOME/.local/.cbox-verify"' >/dev/null 2>&1; then
+    v_fail "writable"
+  else
+    v_ok "write denied"
+  fi
+
+  v_t "codex bins mount read-only (write denied)"
+  if "${X[@]}" sh -c 'touch "$HOME/.codex/packages/.cbox-verify"' >/dev/null 2>&1; then
+    v_fail "writable"
+  else
+    v_ok "write denied"
+  fi
+
+  v_t "claude stamp present and want matches pin"
+  want="${CBOX_CLAUDE_TARGET:-stable}"
+  if got="$("${X[@]}" sh -c 'sed -n 1p "$HOME/.local/.cbox-stamp"' 2>/dev/null)" && [ "$got" = "$want" ]; then
+    v_ok "$got"
+  else
+    v_fail "stamp missing or want '${got:-}' != pin '$want'"
+  fi
+
+  v_t "codex stamp present and want matches pin"
+  want="${CBOX_CODEX_VERSION:-latest}|${CBOX_CODEX_TARGET:-}"
+  if got="$("${X[@]}" sh -c 'sed -n 1p "$HOME/.codex/packages/.cbox-stamp"' 2>/dev/null)" && [ "$got" = "$want" ]; then
+    v_ok "$got"
+  else
+    v_fail "stamp missing or want '${got:-}' != pin '$want'"
+  fi
+
+  v_t "claude resolved binary executable and matches stamp"
+  if "${X[@]}" sh -c '
+p="$(sed -n 2p "$HOME/.local/.cbox-stamp")"
+v="$(sed -n 4p "$HOME/.local/.cbox-stamp")"
+test -n "$p" && test -x "$p" || exit 1
+case "$("$p" --version 2>&1)" in *"$v"*) exit 0;; *) exit 1;; esac
+' >/dev/null 2>&1; then
+    v_ok
+  else
+    v_fail "resolved binary missing, not executable, or --version does not match stamp"
+  fi
+
+  v_t "codex resolved binary executable and matches stamp"
+  if "${X[@]}" sh -c '
+p="$(sed -n 2p "$HOME/.codex/packages/.cbox-stamp")"
+v="$(sed -n 4p "$HOME/.codex/packages/.cbox-stamp")"
+test -n "$p" && test -x "$p" || exit 1
+case "$("$p" --version 2>&1)" in *"$v"*) exit 0;; *) exit 1;; esac
+' >/dev/null 2>&1; then
+    v_ok
+  else
+    v_fail "resolved binary missing, not executable, or --version does not match stamp"
+  fi
+
+  v_t "guard read-only (append denied)"
+  if "${X[@]}" sh -c 'echo x >> "$HOME/.claude/hooks/codex_mode_guard.py"' >/dev/null 2>&1; then
+    v_fail "writable"
+  else
+    v_ok "write denied"
+  fi
+
+  v_t "guard read-only (rm denied)"
+  if "${X[@]}" sh -c 'rm "$HOME/.claude/hooks/codex_mode_guard.py"' >/dev/null 2>&1; then
+    v_fail "removable"
+  else
+    v_ok "remove denied"
+  fi
+
+  v_t "guard wired in settings.json"
+  if "${X[@]}" sh -c 'p="$(jq -r ".hooks.PreToolUse[] | select(.matcher==\"mcp__codex-.*\") | .hooks[0].command" "$HOME/.claude/settings.json" | grep -oE "/[^ ]+codex_mode_guard\.py" | head -n 1)"; test -n "$p" && test -f "$p"' >/dev/null 2>&1; then
+    v_ok
+  else
+    v_fail
+  fi
+
+  if [ "${CBOX_CLAUDE_MODE:-mount}" = mount ]; then
+    ref="${CBOX_CLAUDE_PATH:-$HOME/.claude}/hooks/codex_mode_guard.py"
+  else
+    ref="$INSTALL_DIR/generated/hooks/codex_mode_guard.py"
+  fi
+  v_t "guard in sync with $ref"
+  if [ ! -f "$ref" ]; then
+    v_fail "reference file missing"
+  elif "${COMPOSE[@]}" exec -T "$SERVICE" /entrypoint.sh sh -c 'cmp -s - "$HOME/.claude/hooks/codex_mode_guard.py"' < "$ref" >/dev/null 2>&1; then
+    v_ok
+  else
+    v_fail "drift - run $0 install-hooks"
+  fi
+
+  if [ "${CBOX_CLAUDE_MODE:-mount}" = mount ]; then
+    ref="${CBOX_CLAUDE_PATH:-$HOME/.claude}/settings.json"
+  else
+    ref="$INSTALL_DIR/generated/settings.json"
+  fi
+  v_t "settings.json in sync with $ref"
+  if [ ! -f "$ref" ]; then
+    v_fail "reference file missing"
+  elif "${COMPOSE[@]}" exec -T "$SERVICE" /entrypoint.sh sh -c 'cmp -s - "$HOME/.claude/settings.json"' < "$ref" >/dev/null 2>&1; then
+    v_ok
+  else
+    v_fail "drift - run $0 install-hooks"
+  fi
+
+  v_t "CLAUDE.md read-only (append denied)"
+  if "${X[@]}" sh -c 'echo x >> "$HOME/.claude/CLAUDE.md"' >/dev/null 2>&1; then
+    v_fail "writable"
+  else
+    v_ok "write denied"
+  fi
+
+  v_t "CLAUDE.md read-only (rm denied)"
+  if "${X[@]}" sh -c 'rm "$HOME/.claude/CLAUDE.md"' >/dev/null 2>&1; then
+    v_fail "removable"
+  else
+    v_ok "remove denied"
+  fi
+
+  v_t "agents dir read-only (create denied)"
+  if "${X[@]}" sh -c 'touch "$HOME/.claude/agents/.cbox-verify"' >/dev/null 2>&1; then
+    v_fail "writable"
+  else
+    v_ok "write denied"
+  fi
+
+  v_t "agents dir read-only (rm denied)"
+  if "${X[@]}" sh -c 'rm -rf "$HOME/.claude/agents"' >/dev/null 2>&1; then
+    v_fail "removable"
+  else
+    v_ok "remove denied"
+  fi
+
+  if [ "${CBOX_HISTORY:-1}" = 1 ]; then
+    v_t "agents and policies populated"
+    if "${X[@]}" sh -c '[ -n "$(ls -A "$HOME/.claude/agents" 2>/dev/null)" ] && [ -n "$(ls -A "$HOME/.claude/policies" 2>/dev/null)" ]' >/dev/null 2>&1; then
+      v_ok
+    else
+      v_fail "empty - run ./setup.sh update agents / update claude-md"
+    fi
+
+    v_t "CLAUDE.md imports resolve"
+    if "${X[@]}" sh -c 'ok=1; while IFS= read -r l; do case "$l" in "@~/"*) p="$HOME/${l#@~/}"; [ -f "$p" ] || ok=0;; esac; done < "$HOME/.claude/CLAUDE.md"; [ "$ok" = 1 ]' >/dev/null 2>&1; then
+      v_ok
+    else
+      v_fail "missing policy file for an @import line"
+    fi
+  fi
+
+  if [ "${CBOX_CLAUDE_MODE:-mount}" = mount ]; then
+    v_t "host sessions readable"
+    if "${X[@]}" sh -c 'test -d "$HOME/.claude/projects" && ls "$HOME/.claude/projects" >/dev/null' >/dev/null 2>&1; then
+      v_ok
+    else
+      v_fail
+    fi
+  fi
+
+  gitws=""
+  for w in "${workspaces[@]}" "${CBOX_WORKDIR:-}"; do
+    [ -n "$w" ] || continue
+    if git -C "$w" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      gitws="$w"
+      break
+    fi
+  done
+  v_t "guard allows danger-full-access in scope"
+  if [ -z "$gitws" ]; then
+    v_skip "no git work-tree among workspaces"
+  else
+    printf -v payload '{"tool_name":"mcp__codex-terra__codex","permission_mode":"auto","tool_input":{"cwd":"%s","sandbox":"danger-full-access","approval-policy":"never"}}' "$gitws"
+    rc=0
+    printf '%s' "$payload" | "${COMPOSE[@]}" exec -T "$SERVICE" /entrypoint.sh sh -c 'CODEX_GUARD_CONFIG="$HOME/.claude/hooks/codex_scope.container.json" python3 "$HOME/.claude/hooks/codex_mode_guard.py"' >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -eq 0 ]; then v_ok "$gitws"; else v_fail "exit $rc"; fi
+  fi
+
+  v_t "guard denies out-of-scope cwd (git gate)"
+  payload='{"tool_name":"mcp__codex-terra__codex","permission_mode":"bypassPermissions","tool_input":{"cwd":"/etc","sandbox":"danger-full-access","approval-policy":"never"}}'
+  rc=0
+  printf '%s' "$payload" | "${COMPOSE[@]}" exec -T "$SERVICE" /entrypoint.sh sh -c 'CODEX_GUARD_CONFIG="$HOME/.claude/hooks/codex_scope.container.json" python3 "$HOME/.claude/hooks/codex_mode_guard.py"' >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq 2 ]; then v_ok; else v_fail "exit $rc, expected 2"; fi
+
+  v_t "ask-claude wrapper present and read-only"
+  if "${X[@]}" sh -c 'test -f "$HOME/.claude/hooks/ask_claude_mcp.py" && ! { echo x >> "$HOME/.claude/hooks/ask_claude_mcp.py"; } 2>/dev/null' >/dev/null 2>&1; then
+    v_ok
+  else
+    v_fail "missing or writable"
+  fi
+
+  v_t "ask-claude mcp protocol roundtrip"
+  payload='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"verify","version":"0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+  if printf '%s\n' "$payload" | "${COMPOSE[@]}" exec -T "$SERVICE" /entrypoint.sh sh -c 'python3 "$HOME/.claude/hooks/ask_claude_mcp.py"' 2>/dev/null | grep -q '"ask-claude"'; then
+    v_ok
+  else
+    v_fail "tools/list did not report ask-claude"
+  fi
+
+  v_t "ask-claude depth guard refuses nested calls"
+  payload='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"verify","version":"0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ask-claude","arguments":{"prompt":"ping"}}}'
+  if printf '%s\n' "$payload" | "${COMPOSE[@]}" exec -T "$SERVICE" /entrypoint.sh sh -c 'CBOX_MCP_DEPTH=1 python3 "$HOME/.claude/hooks/ask_claude_mcp.py"' 2>/dev/null | grep -q 'depth limit'; then
+    v_ok
+  else
+    v_fail "nested call was not refused"
+  fi
+
+  if [ "${CBOX_CODEX_MCP:-0}" = 1 ]; then
+    v_t "codex-mcp wired in config.toml"
+    if "${X[@]}" sh -c 'grep -q "^\[mcp_servers\.claude\]" "$HOME/.codex/config.toml"' >/dev/null 2>&1; then
+      v_ok
+    else
+      v_fail "run ./setup.sh update codex-mcp"
+    fi
+  fi
+
+  if [ "${CBOX_EGRESS_MODE:-off}" != off ] && [ "${CBOX_EGRESS_APPLIED:-0}" != 1 ]; then
+    v_t "egress topology"
+    v_skip "configured but not applied - run ./setup.sh update egress"
+  elif [ "${CBOX_EGRESS_MODE:-off}" != off ]; then
+    v_t "egress proxy allows api.anthropic.com"
+    if "${X[@]}" curl -s -o /dev/null --connect-timeout 10 -x http://proxy:8888 https://api.anthropic.com >/dev/null 2>&1; then
+      v_ok
+    else
+      v_fail
+    fi
+
+    v_t "egress proxy denies example.com"
+    if "${X[@]}" curl -s -o /dev/null --connect-timeout 10 -x http://proxy:8888 https://example.com >/dev/null 2>&1; then
+      v_fail "reachable through proxy"
+    else
+      v_ok "denied"
+    fi
+
+    v_t "direct egress bypass fails"
+    if "${X[@]}" curl -s -o /dev/null --noproxy "*" --connect-timeout 3 https://api.anthropic.com >/dev/null 2>&1; then
+      v_fail "direct connection succeeded"
+    else
+      v_ok "blocked"
+    fi
+
+    v_t "proxy service running"
+    if [ -n "$("${COMPOSE[@]}" ps -q --status running proxy 2>/dev/null)" ]; then v_ok; else v_fail; fi
+  fi
+
+  case "${CBOX_SSH_MODE:-none}" in
+    none)
+      v_t "ssh isolation (~/.ssh absent)"
+      if "${X[@]}" sh -c 'test -e "$HOME/.ssh"' >/dev/null 2>&1; then v_fail "exists"; else v_ok; fi
+      ;;
+    host-agent)
+      v_t "ssh agent socket present"
+      if "${X[@]}" sh -c 'test -S /run/cbox-ssh/agent.sock' >/dev/null 2>&1; then v_ok; else v_fail; fi
+      v_t "no private key files in ~/.ssh"
+      if "${X[@]}" sh -c 'ls "$HOME/.ssh"/id_* >/dev/null 2>&1' >/dev/null 2>&1; then v_fail "key files present"; else v_ok; fi
+      ;;
+    container-keys)
+      v_t "~/.ssh owned by user"
+      if "${X[@]}" sh -c 'test -d "$HOME/.ssh" && test "$(stat -c %u "$HOME/.ssh")" = "$(id -u)"' >/dev/null 2>&1; then v_ok; else v_fail; fi
+      ;;
+    mixed)
+      v_t "ssh agent socket present"
+      if "${X[@]}" sh -c 'test -S /run/cbox-ssh/agent.sock' >/dev/null 2>&1; then v_ok; else v_fail; fi
+      v_t "~/.ssh owned by user"
+      if "${X[@]}" sh -c 'test -d "$HOME/.ssh" && test "$(stat -c %u "$HOME/.ssh")" = "$(id -u)"' >/dev/null 2>&1; then v_ok; else v_fail; fi
+      ;;
+  esac
+
+  if [ "$gpu" = 1 ]; then
+    v_t "nvidia-smi in container"
+    if "${X[@]}" nvidia-smi -L >/dev/null 2>&1; then v_ok; else v_fail; fi
+  fi
+
+  echo "== cbox verify: $VN tests, $VOK ok, $VFAIL failed, $VSKIP skipped =="
+  [ "$VFAIL" -eq 0 ] || exit 1
+}
+
+_cbox_verify_v13_restore() {
+  [ "${v13_restored:-1}" = 0 ] || return 0
+  v13_restored=1
+  if [ "$v13_had_cache" = 1 ]; then
+    printf '%s\n' "$v13_saved" > "$v13_cache"
+  else
+    rm -f "$v13_cache"
+  fi
+  rm -f "$v13_cache.verify"
+}
+
+_cbox_verify_v13_digest_bump() {
+  local eff="$1" root="$2"
+  local v13_cache="$HOME/.config/cbox/base-digest.cache"
+  local v13_saved="" v13_had_cache=0 v13_restored=0
+  local fake_digest tag_before tag_after
+  if [ -f "$v13_cache" ]; then
+    v13_saved="$(cat "$v13_cache")"
+    v13_had_cache=1
+  fi
+  trap '_cbox_verify_v13_restore' RETURN
+  fake_digest="sha256:$(printf 'cbox-verify-fake-%s' "$$" | sha256sum | awk '{print $1}')"
+  tag_before="$(_cbox_image_tag "$(_cbox_image_hash "$eff")")"
+  {
+    if [ -n "$v13_saved" ]; then
+      printf '%s\n' "$v13_saved" | grep -v '^ubuntu:24.04|' || true
+    fi
+    printf 'ubuntu:24.04|%s|%s\n' "$fake_digest" "$(date +%s)"
+  } > "$v13_cache.verify" 2>/dev/null
+  if [ ! -s "$v13_cache.verify" ]; then
+    v_skip "could not stage cache poke"
+    return 0
+  fi
+  mv "$v13_cache.verify" "$v13_cache"
+  ( . "$eff/cbox.conf" 2>/dev/null; _gen_effective "$eff" "$root" ) >/dev/null 2>&1 || true
+  tag_after="$(_cbox_image_tag "$(_cbox_image_hash "$eff")")"
+  _cbox_verify_v13_restore
+  ( . "$eff/cbox.conf" 2>/dev/null; _gen_effective "$eff" "$root" ) >/dev/null 2>&1 || true
+  if [ "$tag_before" != "$tag_after" ]; then
+    v_ok "$tag_before -> $tag_after"
+  else
+    v_fail "tag unchanged after digest bump"
+  fi
+}
+
+verify_isolated() {
+  echo "== cbox verify (isolated) =="
+  local root P eff cid n rc
+  if ! root="$(_cbox_workspace_root)"; then
+    v_t "isolated project resolvable from cwd"
+    v_skip "cwd is home, /, or a mount root"
+    echo "== cbox verify: $VN tests, $VOK ok, $VFAIL failed, $VSKIP skipped =="
+    return 0
+  fi
+  P="$(_cbox_path_hash "$root")"
+  eff="$HOME/.config/cbox/projects/$P"
+  if [ ! -f "$eff/cbox.conf" ]; then
+    v_t "effective config present for $root"
+    v_skip "no project - run 'cbox run claude' first"
+    echo "== cbox verify: $VN tests, $VOK ok, $VFAIL failed, $VSKIP skipped =="
+    return 0
+  fi
+  _cbox_manifest_verify_conf "$eff" "$root"
+
+  v_t "manifest verify (conf+generators)"
+  v_ok
+
+  cid="$(_compose_p "$eff" ps -q cbox 2>/dev/null)" || cid=""
+
+  v_t "v10 mirror tamper ignored"
+  if [ -f "$root/.claude/cbox/docker-compose.yml" ]; then
+    local before after
+    before="$(sha256sum "$eff/docker-compose.yml" | awk '{print $1}')"
+    printf 'tampered: this line must never be read\n' >> "$root/.claude/cbox/docker-compose.yml"
+    _compose_p "$eff" config >/dev/null 2>&1 || true
+    after="$(sha256sum "$eff/docker-compose.yml" | awk '{print $1}')"
+    if [ "$before" = "$after" ]; then v_ok "effdir compose unchanged"; else v_fail "effdir compose mutated"; fi
+  else
+    v_skip "no mirror written yet"
+  fi
+
+  v_t "v11 SIGKILL-then-gc reap"
+  if [ -n "$cid" ] && [ -z "${CBOX_VERIFY_NO_KILL:-}" ]; then
+    n="$(_probe "$cid" 2>/dev/null)" || n=unknown
+    if [ "$n" = 0 ]; then
+      docker kill "$cid" >/dev/null 2>&1 || true
+      gc >/dev/null 2>&1 || true
+      if [ -z "$(_compose_p "$eff" ps -q cbox 2>/dev/null)" ]; then v_ok "reaped"; else v_fail "container survived gc"; fi
+    else
+      v_skip "container has $n live session(s) - refusing to kill a real session"
+    fi
+  else
+    v_skip "no running container or CBOX_VERIFY_NO_KILL set"
+  fi
+
+  v_t "v12 piped claude -p no hang"
+  if [ -n "$cid" ] || [ -f "$eff/docker-compose.yml" ]; then
+    rc=0
+    printf '' | _compose_p "$eff" exec -T cbox timeout 20 /entrypoint.sh true >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -ne 124 ]; then v_ok "no timeout"; else v_fail "hung past 20s"; fi
+  else
+    v_skip "no effective compose"
+  fi
+
+  v_t "v13 digest-bump triggers rebuild"
+  if command -v docker >/dev/null 2>&1; then
+    _cbox_verify_v13_digest_bump "$eff" "$root" || true
+  else
+    v_skip "docker not available"
+  fi
+
+  v_t "v14 slug round-trip vs live claude run"
+  local slug slugdir
+  slug="$(_cbox_slug "$root")"
+  slugdir="$HOME/.claude/projects/$slug"
+  if [ -d "$slugdir" ]; then v_ok "$slug"; else v_skip "no session recorded yet under $slugdir - run 'cbox run claude' once"; fi
+
+  v_t "v15 agent-copies-binary still stops (B-2)"
+  if [ -n "$cid" ]; then
+    n="$(_probe "$cid" 2>/dev/null)" || n=unknown
+    if [ "$n" = 0 ]; then
+      if docker exec "$cid" sh -c 'cp "$HOME/.local/bin/claude" /tmp/.cbox-verify-copy 2>/dev/null && /tmp/.cbox-verify-copy --version' >/dev/null 2>&1; then
+        n="$(_probe "$cid" 2>/dev/null)" || n=unknown
+        docker exec "$cid" sh -c 'rm -f /tmp/.cbox-verify-copy' >/dev/null 2>&1 || true
+        if [ "$n" = 0 ]; then v_ok "copy not counted"; else v_fail "copy inflated probe count to $n"; fi
+      else
+        v_skip "could not stage a binary copy in the container"
+      fi
+    else
+      v_skip "container has $n live session(s) already"
+    fi
+  else
+    v_skip "no running container"
+  fi
+
+  v_t "v16 buildx-absent digest fallback"
+  if command -v docker >/dev/null 2>&1; then
+    local stub stubdir dg
+    stubdir="$(mktemp -d)"
+    stub="$stubdir/docker"
+    {
+      printf '#!/bin/sh\n'
+      printf 'if [ "$1" = buildx ]; then exit 1; fi\n'
+      printf 'exec %q "$@"\n' "$(command -v docker)"
+    } > "$stub"
+    chmod 755 "$stub"
+    dg="$(PATH="$stubdir:$PATH" CBOX_BASE_DIGEST_TTL=0 _cbox_resolve_base_digest ubuntu:24.04 2>/dev/null)" || dg=""
+    rm -rf "$stubdir"
+    if [ -n "$dg" ]; then v_ok "resolved via fallback"; else v_fail "digest resolution failed without buildx"; fi
+  else
+    v_skip "docker not available"
+  fi
+
+  v_t "restart policy is no"
+  if grep -q 'restart: "no"' "$eff/docker-compose.yml" 2>/dev/null; then v_ok; else v_fail "restart policy is not \"no\""; fi
+
+  v_t "external bins volumes (cbox-bins-claude/codex)"
+  if grep -q 'name: cbox-bins-claude' "$eff/docker-compose.yml" 2>/dev/null \
+    && grep -q 'name: cbox-bins-codex' "$eff/docker-compose.yml" 2>/dev/null \
+    && grep -q 'external: true' "$eff/docker-compose.yml" 2>/dev/null; then
+    v_ok
+  else
+    v_fail "cbox-bins-claude/codex not declared external"
+  fi
+
+  v_t "no claude-home volume overlapping projects/"
+  if grep -q 'claude-home' "$eff/docker-compose.yml" 2>/dev/null; then v_fail "claude-home volume present"; else v_ok; fi
+
+  v_t "session-scope isolated mounts only own slug"
+  if [ "${CBOX_SESSION_SCOPE:-isolated}" = "isolated" ]; then
+    if grep -q "projects/$slug:" "$eff/docker-compose.yml" 2>/dev/null && ! grep -q '\.claude/projects:\${HOST_HOME}' "$eff/docker-compose.yml" 2>/dev/null; then
+      v_ok
+    else
+      v_fail "compose does not scope to slug $slug"
+    fi
+  else
+    v_skip "CBOX_SESSION_SCOPE=global"
+  fi
+
+  v_t "workspace B absent in A (label-based cross-project check)"
+  if command -v docker >/dev/null 2>&1; then
+    local other has_other=0
+    for other in "$HOME"/.config/cbox/projects/*/; do
+      [ -d "$other" ] || continue
+      [ "$(realpath "$other")" = "$(realpath "$eff")" ] && continue
+      has_other=1
+      break
+    done
+    if [ "$has_other" = 1 ] && [ -n "$cid" ]; then
+      local otherroot
+      otherroot="$(cat "$other/workspace" 2>/dev/null || true)"
+      if [ -n "$otherroot" ] && docker exec "$cid" sh -c "test -e '$otherroot'" >/dev/null 2>&1; then
+        v_fail "$otherroot visible inside this container"
+      else
+        v_ok "not visible"
+      fi
+    else
+      v_skip "no other project or no running container to check"
+    fi
+  else
+    v_skip "docker not available"
+  fi
+
+  v_t "two windows no premature stop / last exit immediate stop"
+  v_skip "requires two concurrent live sessions - exercised manually, not by automated verify"
+
+  v_t "two projects share one image (by inputs hash)"
+  if command -v docker >/dev/null 2>&1; then
+    local other otherhash myhash=""
+    myhash="$(_cbox_image_hash "$eff" 2>/dev/null)" || myhash=""
+    local found=0
+    for other in "$HOME"/.config/cbox/projects/*/; do
+      [ -d "$other" ] || continue
+      [ "$(realpath "$other")" = "$(realpath "$eff")" ] && continue
+      [ -f "$other/image.inputs" ] || continue
+      otherhash="$(sha256sum "$other/image.inputs" 2>/dev/null | awk '{print $1}')" || otherhash=""
+      if [ -n "$myhash" ] && [ "$otherhash" = "$myhash" ]; then found=1; break; fi
+    done
+    if [ "$found" = 1 ]; then v_ok "shared image confirmed"; else v_skip "no other project with matching inputs"; fi
+  else
+    v_skip "docker not available"
+  fi
+
+  v_t "claude bins mount read-only (write denied)"
+  if [ -n "$cid" ]; then
+    if _compose_p "$eff" exec -T cbox /entrypoint.sh sh -c 'touch "$HOME/.local/.cbox-verify"' >/dev/null 2>&1; then
+      v_fail "writable"
+    else
+      v_ok "write denied"
+    fi
+  else
+    v_skip "no running container"
+  fi
+
+  v_t "codex bins mount read-only (write denied)"
+  if [ -n "$cid" ]; then
+    if _compose_p "$eff" exec -T cbox /entrypoint.sh sh -c 'touch "$HOME/.codex/packages/.cbox-verify"' >/dev/null 2>&1; then
+      v_fail "writable"
+    else
+      v_ok "write denied"
+    fi
+  else
+    v_skip "no running container"
+  fi
+
+  v_t "claude stamp present and want matches pin"
+  if [ -n "$cid" ]; then
+    local iso_want iso_got
+    iso_want="${CBOX_CLAUDE_TARGET:-stable}"
+    if iso_got="$(_compose_p "$eff" exec -T cbox /entrypoint.sh sh -c 'sed -n 1p "$HOME/.local/.cbox-stamp"' 2>/dev/null)" && [ "$iso_got" = "$iso_want" ]; then
+      v_ok "$iso_got"
+    else
+      v_fail "stamp missing or want '${iso_got:-}' != pin '$iso_want'"
+    fi
+  else
+    v_skip "no running container"
+  fi
+
+  v_t "codex stamp present and want matches pin"
+  if [ -n "$cid" ]; then
+    local iso_want iso_got
+    iso_want="${CBOX_CODEX_VERSION:-latest}|${CBOX_CODEX_TARGET:-}"
+    if iso_got="$(_compose_p "$eff" exec -T cbox /entrypoint.sh sh -c 'sed -n 1p "$HOME/.codex/packages/.cbox-stamp"' 2>/dev/null)" && [ "$iso_got" = "$iso_want" ]; then
+      v_ok "$iso_got"
+    else
+      v_fail "stamp missing or want '${iso_got:-}' != pin '$iso_want'"
+    fi
+  else
+    v_skip "no running container"
+  fi
+
+  v_t "resolved binaries executable and match stamp"
+  if [ -n "$cid" ]; then
+    if _compose_p "$eff" exec -T cbox /entrypoint.sh sh -c '
+for f in "$HOME/.local/.cbox-stamp" "$HOME/.codex/packages/.cbox-stamp"; do
+  p="$(sed -n 2p "$f")"
+  v="$(sed -n 4p "$f")"
+  test -n "$p" && test -x "$p" || exit 1
+  case "$("$p" --version 2>&1)" in *"$v"*) ;; *) exit 1;; esac
+done
+' >/dev/null 2>&1; then
+      v_ok
+    else
+      v_fail "resolved binary missing, not executable, or --version does not match stamp"
+    fi
+  else
+    v_skip "no running container"
+  fi
+
+  v_t "bins volumes are the shared global names, not per-project"
+  if grep -oE 'name: cbox-bins-(claude|codex)(-[0-9a-f]{8})?' "$eff/docker-compose.yml" 2>/dev/null \
+    | grep -qE -- '-[0-9a-f]{8}$'; then
+    v_skip "CBOX_BINS_SCOPE=pinned - per-tool private volume by design"
+  elif grep -q 'name: cbox-bins-claude$' "$eff/docker-compose.yml" 2>/dev/null \
+    && grep -q 'name: cbox-bins-codex$' "$eff/docker-compose.yml" 2>/dev/null; then
+    v_ok "global cbox-bins-claude/codex"
+  else
+    v_fail "bins volume names are not the fixed global cbox-bins-claude/codex pair"
+  fi
+
+  v_t "two effdir composes reference the same bins volume names"
+  local other_eff found_share=0
+  for other_eff in "$HOME"/.config/cbox/projects/*/; do
+    [ -d "$other_eff" ] || continue
+    [ "$(realpath "$other_eff")" = "$(realpath "$eff")" ] && continue
+    [ -f "$other_eff/docker-compose.yml" ] || continue
+    if grep -q 'name: cbox-bins-claude$' "$eff/docker-compose.yml" 2>/dev/null \
+      && grep -q 'name: cbox-bins-claude$' "$other_eff/docker-compose.yml" 2>/dev/null; then
+      found_share=1
+      break
+    fi
+  done
+  if [ "$found_share" = 1 ]; then
+    v_ok "shared with $(basename "$other_eff")"
+  else
+    v_skip "no other project with a matching global bins volume name"
+  fi
+
+  echo "== cbox verify: $VN tests, $VOK ok, $VFAIL failed, $VSKIP skipped =="
+  [ "$VFAIL" -eq 0 ] || exit 1
+}
+
+usage() {
+  echo "usage: $0 {run <bin> [args]|up [--gpu]|down|restart [--gpu]|shell|logs [args]|update|reinstall-bins [--fresh|--if-stale]|install-hooks|verify [--gpu|--isolated]|backup|login-codex|gc|ls|images [list|rm <hash>]}"
+  exit 1
+}
+
+case "${1:-}" in
+  run) shift; run "$@";;
+  up) shift; up "$@";;
+  down)
+    case "$(_cbox_effective_mode)" in
+      isolated) down_project;;
+      global) down;;
+      *) die_no_conf;;
+    esac
+    ;;
+  restart) shift; restart "$@";;
+  shell) shell;;
+  logs) shift; logs "$@";;
+  update) shift; reinstall_bins "$@";;
+  reinstall-bins) shift; reinstall_bins "$@";;
+  install-hooks) install_hooks;;
+  verify)
+    shift
+    if [ "${1:-}" = "--isolated" ]; then
+      shift
+      verify_isolated "$@"
+    else
+      case "$(_cbox_effective_mode)" in
+        isolated) verify_isolated "$@";;
+        global) verify "$@";;
+        *) die_no_conf;;
+      esac
+    fi
+    ;;
+  backup) backup;;
+  login-codex) login_codex;;
+  gc) gc;;
+  ls) ls_projects;;
+  images) shift; images_cmd "$@";;
+  *) usage;;
+esac

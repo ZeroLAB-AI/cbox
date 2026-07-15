@@ -1,0 +1,9 @@
+generated/
+backups/
+etc/
+.env
+cbox.conf
+*.log
+.gitignore
+README.md
+LICENSE

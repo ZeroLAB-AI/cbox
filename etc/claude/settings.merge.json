@@ -1,0 +1,112 @@
+{
+  "permissions": {
+    "defaultMode": "auto"
+  },
+  "env": {
+    "DISABLE_ERROR_REPORTING": "1"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat @HOME@/.claude/hooks/orchestrator-global.txt"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'cat \"$CLAUDE_PROJECT_DIR/.claude/LEDGER.md\" 2>/dev/null || true'",
+            "timeout": 10,
+            "statusMessage": "ledger inject"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "mcp__codex-.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/codex_mode_guard.py",
+            "timeout": 10,
+            "statusMessage": "codex-mode guard"
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/agent_label_guard.py",
+            "timeout": 10,
+            "statusMessage": "agent-label guard"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/code_hygiene_guard.py",
+            "timeout": 10,
+            "statusMessage": "code-hygiene guard"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/commit_guard.py",
+            "timeout": 10,
+            "statusMessage": "commit guard"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/continuity_commit_log.py",
+            "timeout": 10,
+            "statusMessage": "continuity commit log"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/continuity_ledger_sweep.py",
+            "timeout": 10,
+            "statusMessage": "continuity ledger sweep"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/continuity_session_digest.py",
+            "timeout": 10,
+            "statusMessage": "continuity session digest"
+          }
+        ]
+      }
+    ]
+  }
+}

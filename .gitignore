@@ -1,0 +1,10 @@
+Dockerfile
+docker-compose.yml
+docker-compose.gpu.yml
+Dockerfile.egress
+.env
+cbox.conf
+generated/
+backups/
+*.log
+__pycache__/
