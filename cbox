@@ -41,18 +41,36 @@ _cbox_local_effdir_for() {
   printf '%s/.config/cbox/projects/%s' "$HOME" "$p"
 }
 
+_cbox_root_in_global_scope() {
+  local root="$1" w
+  local -a ws=()
+  read -r -a ws <<< "${CBOX_WORKSPACES:-}"
+  for w in "${ws[@]}"; do
+    [ -n "$w" ] || continue
+    case "$root" in
+      "$w"|"$w"/*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 _cbox_effective_mode() {
-  local root eff
-  if [ "$HAVE_GLOBAL_CONF" = 1 ] && [ "${CBOX_MODE:-global}" = global ]; then
-    printf 'global'
-    return 0
-  fi
+  local root eff have_eff=0
   if root="$(_cbox_workspace_root 2>/dev/null)"; then
     eff="$(_cbox_local_effdir_for "$root")"
-    if [ -f "$eff/cbox.conf" ]; then
+    [ -f "$eff/cbox.conf" ] && have_eff=1
+  fi
+  if [ "$HAVE_GLOBAL_CONF" = 1 ] && [ "${CBOX_MODE:-global}" = global ]; then
+    if [ "$have_eff" = 1 ] && ! _cbox_root_in_global_scope "$root"; then
       printf 'isolated'
       return 0
     fi
+    printf 'global'
+    return 0
+  fi
+  if [ "$have_eff" = 1 ]; then
+    printf 'isolated'
+    return 0
   fi
   if [ "$HAVE_GLOBAL_CONF" = 1 ]; then
     printf '%s' "${CBOX_MODE:-global}"
@@ -98,8 +116,9 @@ _run_global() {
     fi
   fi
   check_tpl_sha
-  "${COMPOSE[@]}" build >/dev/null
-  _bins_soft "cbox:${CBOX_NAME:-cbox}"
+  _global_prepare
+  _bins_soft "$IMG_TAG"
+  if _cbox_egress_active; then "${COMPOSE[@]}" build >/dev/null; fi
   "${COMPOSE[@]}" up -d >/dev/null
   local workdir="$CBOX_WORKDIR"
   for w in "${workspaces[@]}"; do
@@ -376,7 +395,8 @@ reinstall_bins() {
       ;;
     global)
       require_global_conf
-      img_tag="cbox:${CBOX_NAME:-cbox}"
+      [ -f "$INSTALL_DIR/image.inputs" ] || die "global image inputs missing - run 'cbox up' first"
+      img_tag="$(_cbox_image_tag "$(_cbox_image_hash "$INSTALL_DIR")")"
       docker image inspect "$img_tag" >/dev/null 2>&1 || die "image $img_tag not built - run 'cbox up' first"
       if [ "$if_stale" = 1 ]; then
         _ensure_bins "$img_tag" 0
@@ -688,6 +708,11 @@ images_list() {
           case "$ih" in "$hash"*) refs="$refs $(basename "$proj")" ;; esac
         fi
       done
+      if [ -f "$INSTALL_DIR/image.inputs" ]; then
+        local gih
+        gih="$(sha256sum "$INSTALL_DIR/image.inputs" | awk '{print $1}')"
+        case "$gih" in "$hash"*) refs="$refs global" ;; esac
+      fi
       printf '%-24s %-10s %s\n' "$tag" "$size" "${refs# }"
     done
 }
@@ -704,6 +729,10 @@ images_rm() {
     ih="$(sha256sum "$proj/image.inputs" | awk '{print $1}')"
     case "$ih" in "$hash"*) refs="$refs $(basename "$proj")" ;; esac
   done
+  if [ -f "$INSTALL_DIR/image.inputs" ]; then
+    ih="$(sha256sum "$INSTALL_DIR/image.inputs" | awk '{print $1}')"
+    case "$ih" in "$hash"*) refs="$refs global" ;; esac
+  fi
   [ -z "$refs" ] || die "refusing: $tag is referenced by project(s):$refs"
   docker rmi "$tag"
 }
@@ -716,19 +745,34 @@ images_cmd() {
   esac
 }
 
+_global_prepare() {
+  local digest
+  digest="$(_cbox_resolve_base_digest ubuntu:24.04)" || die "cannot resolve base image digest and no local image - network required for first build"
+  gen_dockerfile_into "$INSTALL_DIR" "$digest"
+  gen_image_inputs "$INSTALL_DIR" "$digest"
+  gen_env_file
+  gen_compose
+  gen_compose_gpu
+  gen_dockerfile_egress
+  gen_tinyproxy_conf
+  gen_egress_filter
+  gen_ssh_config
+  _ensure_image "$INSTALL_DIR"
+}
+
 up() {
   local gpu=0
   if [ "${1:-}" = "--gpu" ]; then gpu=1; fi
   check_tpl_sha
   source "$INSTALL_DIR/templates/generators.sh"
-  gen_env_file
+  _global_prepare
   local cmd=("${COMPOSE[@]}")
   if [ "$gpu" = 1 ]; then
     [ -f "$INSTALL_DIR/docker-compose.gpu.yml" ] || { echo "cbox: docker-compose.gpu.yml not found - run ./setup.sh update gpu"; exit 1; }
     cmd+=(-f "$INSTALL_DIR/docker-compose.gpu.yml")
   fi
-  "${cmd[@]}" build
-  _bins_soft "cbox:${CBOX_NAME:-cbox}"
+  if _cbox_egress_active; then "${cmd[@]}" build; fi
+  _bins_soft "$IMG_TAG"
   "${cmd[@]}" up -d
   if [ -t 0 ] && [ -t 1 ] && [ "${CBOX_NO_EXEC:-0}" != 1 ]; then
     exec "${COMPOSE[@]}" exec -it "$SERVICE" /entrypoint.sh claude
@@ -902,8 +946,12 @@ verify() {
 
   v_t "uid/gid match"
   got="$("${X[@]}" sh -c 'echo "$(id -u):$(id -g)"' 2>/dev/null)" || got=""
-  want="$(id -u):$(id -g)"
-  if [ "$got" = "$want" ]; then v_ok "$got"; else v_fail "container ${got:-unknown}, host $want"; fi
+  if _cbox_is_rootless_docker; then
+    want="0:0"
+  else
+    want="$(id -u):$(id -g)"
+  fi
+  if [ "$got" = "$want" ]; then v_ok "$got"; else v_fail "container ${got:-unknown}, expected $want"; fi
 
   for w in "${workspaces[@]}"; do
     v_t "workspace writable $w"

@@ -4,13 +4,21 @@ set -euo pipefail
 : "${CBOX_CLAUDE_TARGET:?}"; : "${CBOX_CODEX_VERSION:?}"
 CBOX_CODEX_TARGET="${CBOX_CODEX_TARGET:-}"
 
+_is_rootless() {
+  [ -f /proc/self/uid_map ] || return 1
+  awk -v hu="$HOST_UID" '$1 == 0 { found=1; if ($2 == hu) ok=1 } END { exit (found && ok) ? 0 : 1 }' /proc/self/uid_map
+}
+
+CBOX_ROOTLESS=0
+_is_rootless && CBOX_ROOTLESS=1
+
 getent group "$HOST_GID" >/dev/null || groupadd -g "$HOST_GID" "$HOST_USER"
 id -u "$HOST_USER" >/dev/null 2>&1 || useradd -o -u "$HOST_UID" -g "$HOST_GID" -d "$HOST_HOME" -s /bin/bash "$HOST_USER"
 
 if [ ! -d "$HOST_HOME" ]; then
   mkdir -p "$HOST_HOME"
 fi
-chown "$HOST_UID:$HOST_GID" "$HOST_HOME" 2>/dev/null || true
+[ "$CBOX_ROOTLESS" = 1 ] || chown "$HOST_UID:$HOST_GID" "$HOST_HOME" 2>/dev/null || true
 
 _no_symlinks() {
   local p="$1"
@@ -29,13 +37,15 @@ _ensure_owned() {
   if [ ! -e "$d" ]; then
     _no_symlinks "$d"
     mkdir -p "$d"
-    chown -R "$HOST_UID:$HOST_GID" "$d"
-  elif [ "$(stat -c %u "$d")" != "$HOST_UID" ]; then
+    [ "$CBOX_ROOTLESS" = 1 ] || chown -R "$HOST_UID:$HOST_GID" "$d"
+  elif [ -e "$d" ]; then
     _no_symlinks "$d"
-    if [ -z "$(ls -A "$d" 2>/dev/null || true)" ]; then
-      chown -R "$HOST_UID:$HOST_GID" "$d"
-    else
-      chown "$HOST_UID:$HOST_GID" "$d"
+    if [ "$CBOX_ROOTLESS" != 1 ] && [ "$(stat -c %u "$d")" != "$HOST_UID" ]; then
+      if [ -z "$(ls -A "$d" 2>/dev/null || true)" ]; then
+        chown -R "$HOST_UID:$HOST_GID" "$d"
+      else
+        chown "$HOST_UID:$HOST_GID" "$d"
+      fi
     fi
   fi
 }
@@ -84,6 +94,14 @@ _bins_ready() {
   [ "$resolved" = "$p" ] && printf '%s' "$p"
 }
 
+_run_as_user() {
+  if [ "$CBOX_ROOTLESS" = 1 ]; then
+    exec "$@"
+  else
+    exec /usr/sbin/gosu "$HOST_UID:$HOST_GID" "$@"
+  fi
+}
+
 case "${1:-}" in
   claude|codex)
     if ! _resolved="$(_bins_ready "$1")"; then
@@ -95,8 +113,8 @@ case "${1:-}" in
       exit 1
     fi
     shift
-    exec /usr/sbin/gosu "$HOST_UID:$HOST_GID" "$_resolved" "$@"
+    _run_as_user "$_resolved" "$@"
     ;;
 esac
 
-exec /usr/sbin/gosu "$HOST_UID:$HOST_GID" "$@"
+_run_as_user "$@"

@@ -406,15 +406,14 @@ gen_compose() {
   _cbox_check_workspace_overlap "${ws[@]-}"
   local guard_roots
   guard_roots="$(IFS=:; printf '%s' "${ws[*]-}")"
+  local img_tag
+  img_tag="$(_cbox_image_tag "$(_cbox_image_hash "$INSTALL_DIR")")"
   tmp="$(mktemp "$INSTALL_DIR/.cbox.XXXXXX")"
   cat > "$tmp" <<EOF
 name: $name
 services:
   cbox:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: cbox:$name
+    image: $img_tag
     init: true
     stdin_open: true
     tty: true
@@ -1080,7 +1079,10 @@ _cbox_conf_set_tpl_sha() {
 regen_all() {
   mkdir -p "$INSTALL_DIR/generated/hooks" "$INSTALL_DIR/generated/state" "$INSTALL_DIR/generated/ssh" "$INSTALL_DIR/backups"
   gen_env_file
-  gen_dockerfile
+  local _digest
+  _digest="$(_cbox_resolve_base_digest ubuntu:24.04)" || die "cannot resolve base image digest and no local image - network required for first build"
+  gen_dockerfile_into "$INSTALL_DIR" "$_digest"
+  gen_image_inputs "$INSTALL_DIR" "$_digest"
   gen_dockerignore
   gen_compose
   gen_compose_gpu

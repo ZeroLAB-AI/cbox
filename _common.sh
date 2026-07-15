@@ -42,3 +42,7 @@ _cbox_workspace_file_check() {
     [ "$recorded" = "$root" ] || die "path-hash collision or moved project for $root (effective dir claims $recorded); remove $eff after review"
   fi
 }
+
+_cbox_is_rootless_docker() {
+  docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless
+}

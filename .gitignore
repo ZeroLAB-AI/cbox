@@ -1,9 +1,11 @@
+.*/
 Dockerfile
 docker-compose.yml
 docker-compose.gpu.yml
 Dockerfile.egress
 .env
 cbox.conf
+image.inputs
 generated/
 backups/
 *.log
