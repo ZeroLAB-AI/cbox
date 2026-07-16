@@ -62,6 +62,9 @@ _cbox_managed_dirs() {
   if [ "${CBOX_CLAUDE_MODE:-mount}" = "volume" ]; then
     managed="$managed"':${HOST_HOME}/.claude'
   fi
+  if [ "${CBOX_CLAUDE_MODE:-mount}" = "mount" ]; then
+    managed="$managed"':${HOST_HOME}/.claude-cbox'
+  fi
   if [ "${CBOX_CODEX_MODE:-mount}" = "volume" ]; then
     managed="$managed"':${HOST_HOME}/.codex'
   fi
@@ -455,6 +458,9 @@ services:
       - CBOX_MANAGED_DIRS=$managed
       - DISABLE_AUTOUPDATER=1
 EOF
+  if [ "$claude_mode" = "mount" ]; then
+    printf '      - CLAUDE_CONFIG_DIR=${HOST_HOME}/.claude-cbox\n' >> "$tmp"
+  fi
   case "$ssh_mode" in
     host-agent|mixed)
       printf '      - SSH_AUTH_SOCK=/run/cbox-ssh/agent.sock\n' >> "$tmp"
@@ -475,7 +481,8 @@ EOF
     printf '      - %s:%s:rw\n' "$w" "$w" >> "$tmp"
   done
   if [ "$claude_mode" = "mount" ]; then
-    mkdir -p "$claude_path/hooks" "$claude_path/agents" "$claude_path/policies" "$claude_path/templates"
+    gen_claude_config_into "$INSTALL_DIR/generated/claude-config"
+    mkdir -p "$claude_path/hooks" "$claude_path/agents" "$claude_path/policies" "$claude_path/templates" "$claude_path/projects" "$claude_path/tasks" "$claude_path/session-env" "$claude_path/plugins" "$claude_path/file-history" "$claude_path/plans" "$claude_path/shell-snapshots" "$claude_path/agent-memory" "$claude_path/commands" "$claude_path/skills" "$claude_path/rules"
     [ -f "$claude_path/settings.json" ] || printf '{}\n' > "$claude_path/settings.json"
     [ -f "$HOME/.claude.json" ] || printf '{}\n' > "$HOME/.claude.json"
     [ -f "$claude_path/CLAUDE.md" ] || : > "$claude_path/CLAUDE.md"
@@ -489,6 +496,25 @@ EOF
       - $claude_path/agents:\${HOST_HOME}/.claude/agents:ro
       - $claude_path/policies:\${HOST_HOME}/.claude/policies:ro
       - $claude_path/templates:\${HOST_HOME}/.claude/templates:ro
+      - $INSTALL_DIR/generated/claude-config:\${HOST_HOME}/.claude-cbox:rw
+      - $claude_path/projects:\${HOST_HOME}/.claude-cbox/projects:rw
+      - $claude_path/tasks:\${HOST_HOME}/.claude-cbox/tasks:rw
+      - $claude_path/commands:\${HOST_HOME}/.claude-cbox/commands:ro
+      - $claude_path/skills:\${HOST_HOME}/.claude-cbox/skills:ro
+      - $claude_path/rules:\${HOST_HOME}/.claude-cbox/rules:ro
+      - $claude_path/session-env:\${HOST_HOME}/.claude-cbox/session-env:rw
+      - $claude_path/plugins:\${HOST_HOME}/.claude-cbox/plugins:rw
+      - $claude_path/file-history:\${HOST_HOME}/.claude-cbox/file-history:rw
+      - $claude_path/plans:\${HOST_HOME}/.claude-cbox/plans:rw
+      - $claude_path/shell-snapshots:\${HOST_HOME}/.claude-cbox/shell-snapshots:rw
+      - $claude_path/agent-memory:\${HOST_HOME}/.claude-cbox/agent-memory:rw
+      - $claude_path/hooks:\${HOST_HOME}/.claude-cbox/hooks:ro
+      - $claude_path/settings.json:\${HOST_HOME}/.claude-cbox/settings.json:rw
+      - $HOME/.claude.json:\${HOST_HOME}/.claude-cbox/.claude.json:ro
+      - $claude_path/CLAUDE.md:\${HOST_HOME}/.claude-cbox/CLAUDE.md:ro
+      - $claude_path/agents:\${HOST_HOME}/.claude-cbox/agents:ro
+      - $claude_path/policies:\${HOST_HOME}/.claude-cbox/policies:ro
+      - $claude_path/templates:\${HOST_HOME}/.claude-cbox/templates:ro
 EOF
   else
     cat >> "$tmp" <<EOF
@@ -674,6 +700,9 @@ services:
       - CBOX_MANAGED_DIRS=$managed
       - DISABLE_AUTOUPDATER=1
 EOF
+  if [ "$claude_mode" = "mount" ]; then
+    printf '      - CLAUDE_CONFIG_DIR=${HOST_HOME}/.claude-cbox\n' >> "$tmp"
+  fi
   case "$ssh_mode" in
     host-agent|mixed)
       printf '      - SSH_AUTH_SOCK=/run/cbox-ssh/agent.sock\n' >> "$tmp"
@@ -693,7 +722,8 @@ EOF
   printf '      - %s:%s:rw\n' "$root" "$root" >> "$tmp"
 
   if [ "$claude_mode" = "mount" ]; then
-    mkdir -p "$claude_path/hooks" "$claude_path/agents" "$claude_path/policies" "$claude_path/templates"
+    gen_claude_config_into "$eff/claude-config"
+    mkdir -p "$claude_path/hooks" "$claude_path/agents" "$claude_path/policies" "$claude_path/templates" "$claude_path/projects" "$claude_path/tasks" "$claude_path/session-env" "$claude_path/plugins" "$claude_path/file-history" "$claude_path/plans" "$claude_path/shell-snapshots" "$claude_path/agent-memory" "$claude_path/commands" "$claude_path/skills" "$claude_path/rules"
     [ -f "$claude_path/settings.json" ] || printf '{}\n' > "$claude_path/settings.json"
     [ -f "$HOME/.claude.json" ] || printf '{}\n' > "$HOME/.claude.json"
     [ -f "$claude_path/CLAUDE.md" ] || : > "$claude_path/CLAUDE.md"
@@ -707,6 +737,24 @@ EOF
       - $claude_path/agents:\${HOST_HOME}/.claude/agents:ro
       - $claude_path/policies:\${HOST_HOME}/.claude/policies:ro
       - $claude_path/templates:\${HOST_HOME}/.claude/templates:ro
+      - $eff/claude-config:\${HOST_HOME}/.claude-cbox:rw
+      - $claude_path/tasks:\${HOST_HOME}/.claude-cbox/tasks:rw
+      - $claude_path/commands:\${HOST_HOME}/.claude-cbox/commands:ro
+      - $claude_path/skills:\${HOST_HOME}/.claude-cbox/skills:ro
+      - $claude_path/rules:\${HOST_HOME}/.claude-cbox/rules:ro
+      - $claude_path/session-env:\${HOST_HOME}/.claude-cbox/session-env:rw
+      - $claude_path/plugins:\${HOST_HOME}/.claude-cbox/plugins:rw
+      - $claude_path/file-history:\${HOST_HOME}/.claude-cbox/file-history:rw
+      - $claude_path/plans:\${HOST_HOME}/.claude-cbox/plans:rw
+      - $claude_path/shell-snapshots:\${HOST_HOME}/.claude-cbox/shell-snapshots:rw
+      - $claude_path/agent-memory:\${HOST_HOME}/.claude-cbox/agent-memory:rw
+      - $claude_path/hooks:\${HOST_HOME}/.claude-cbox/hooks:ro
+      - $claude_path/settings.json:\${HOST_HOME}/.claude-cbox/settings.json:rw
+      - $HOME/.claude.json:\${HOST_HOME}/.claude-cbox/.claude.json:ro
+      - $claude_path/CLAUDE.md:\${HOST_HOME}/.claude-cbox/CLAUDE.md:ro
+      - $claude_path/agents:\${HOST_HOME}/.claude-cbox/agents:ro
+      - $claude_path/policies:\${HOST_HOME}/.claude-cbox/policies:ro
+      - $claude_path/templates:\${HOST_HOME}/.claude-cbox/templates:ro
 EOF
   else
     cat >> "$tmp" <<EOF
@@ -727,10 +775,20 @@ EOF
     cat >> "$tmp" <<EOF
       - $claude_path/projects/$slug:\${HOST_HOME}/.claude/projects/$slug:rw
 EOF
+    if [ "$claude_mode" = "mount" ]; then
+      cat >> "$tmp" <<EOF
+      - $claude_path/projects/$slug:\${HOST_HOME}/.claude-cbox/projects/$slug:rw
+EOF
+    fi
   else
     cat >> "$tmp" <<EOF
       - $claude_path/projects:\${HOST_HOME}/.claude/projects:rw
 EOF
+    if [ "$claude_mode" = "mount" ]; then
+      cat >> "$tmp" <<EOF
+      - $claude_path/projects:\${HOST_HOME}/.claude-cbox/projects:rw
+EOF
+    fi
   fi
 
   if [ "$codex_mode" = "mount" ]; then
@@ -1172,6 +1230,18 @@ sys.stdout.write(json.dumps({"hasCompletedOnboarding": True, "mcpServers": chose
 PY
 )"
   printf '%s\n' "$out" | _cbox_write "$target"
+}
+
+gen_claude_config_into() {
+  local statedir="$1"
+  mkdir -p "$statedir"
+  chmod 700 "$statedir"
+  if [ ! -e "$statedir/.credentials.json" ] && [ ! -L "$statedir/.credentials.json" ]; then
+    ln -s "$HOME/.claude/.credentials.json" "$statedir/.credentials.json" 2>/dev/null || true
+  fi
+  if [ ! -e "$statedir/history.jsonl" ] && [ ! -L "$statedir/history.jsonl" ]; then
+    ln -s "$HOME/.claude/history.jsonl" "$statedir/history.jsonl" 2>/dev/null || true
+  fi
 }
 
 gen_settings_volume() {
