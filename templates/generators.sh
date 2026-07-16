@@ -481,7 +481,7 @@ EOF
     printf '      - %s:%s:rw\n' "$w" "$w" >> "$tmp"
   done
   if [ "$claude_mode" = "mount" ]; then
-    gen_claude_config_into "$INSTALL_DIR/generated/claude-config"
+    gen_claude_config_into "$INSTALL_DIR/generated/claude-config" "$claude_path"
     mkdir -p "$claude_path/hooks" "$claude_path/agents" "$claude_path/policies" "$claude_path/templates" "$claude_path/projects" "$claude_path/tasks" "$claude_path/session-env" "$claude_path/plugins" "$claude_path/file-history" "$claude_path/plans" "$claude_path/shell-snapshots" "$claude_path/agent-memory" "$claude_path/commands" "$claude_path/skills" "$claude_path/rules"
     [ -f "$claude_path/settings.json" ] || printf '{}\n' > "$claude_path/settings.json"
     [ -f "$HOME/.claude.json" ] || printf '{}\n' > "$HOME/.claude.json"
@@ -498,6 +498,7 @@ EOF
       - $claude_path/templates:\${HOST_HOME}/.claude/templates:ro
       - $INSTALL_DIR/generated/claude-config:\${HOST_HOME}/.claude-cbox:rw
       - $claude_path/projects:\${HOST_HOME}/.claude-cbox/projects:rw
+      - $claude_path/jobs:\${HOST_HOME}/.claude-cbox/jobs:rw
       - $claude_path/tasks:\${HOST_HOME}/.claude-cbox/tasks:rw
       - $claude_path/commands:\${HOST_HOME}/.claude-cbox/commands:ro
       - $claude_path/skills:\${HOST_HOME}/.claude-cbox/skills:ro
@@ -722,7 +723,7 @@ EOF
   printf '      - %s:%s:rw\n' "$root" "$root" >> "$tmp"
 
   if [ "$claude_mode" = "mount" ]; then
-    gen_claude_config_into "$eff/claude-config"
+    gen_claude_config_into "$eff/claude-config" "$claude_path"
     mkdir -p "$claude_path/hooks" "$claude_path/agents" "$claude_path/policies" "$claude_path/templates" "$claude_path/projects" "$claude_path/tasks" "$claude_path/session-env" "$claude_path/plugins" "$claude_path/file-history" "$claude_path/plans" "$claude_path/shell-snapshots" "$claude_path/agent-memory" "$claude_path/commands" "$claude_path/skills" "$claude_path/rules"
     [ -f "$claude_path/settings.json" ] || printf '{}\n' > "$claude_path/settings.json"
     [ -f "$HOME/.claude.json" ] || printf '{}\n' > "$HOME/.claude.json"
@@ -738,6 +739,7 @@ EOF
       - $claude_path/policies:\${HOST_HOME}/.claude/policies:ro
       - $claude_path/templates:\${HOST_HOME}/.claude/templates:ro
       - $eff/claude-config:\${HOST_HOME}/.claude-cbox:rw
+      - $claude_path/jobs:\${HOST_HOME}/.claude-cbox/jobs:rw
       - $claude_path/tasks:\${HOST_HOME}/.claude-cbox/tasks:rw
       - $claude_path/commands:\${HOST_HOME}/.claude-cbox/commands:ro
       - $claude_path/skills:\${HOST_HOME}/.claude-cbox/skills:ro
@@ -1233,9 +1235,19 @@ PY
 }
 
 gen_claude_config_into() {
-  local statedir="$1"
-  mkdir -p "$statedir"
+  local statedir="$1" claude_path="$2" j b
+  mkdir -p "$statedir" "$claude_path/jobs"
   chmod 700 "$statedir"
+  if [ -d "$statedir/jobs" ]; then
+    for j in "$statedir/jobs"/*; do
+      [ -e "$j" ] || continue
+      b="$(basename "$j")"
+      if [ ! -e "$claude_path/jobs/$b" ]; then
+        mv "$j" "$claude_path/jobs/" 2>/dev/null || { cp -a "$j" "$claude_path/jobs/$b" 2>/dev/null && rm -rf "$j"; } || true
+      fi
+    done
+    rmdir "$statedir/jobs" 2>/dev/null || true
+  fi
   if [ ! -e "$statedir/.credentials.json" ] && [ ! -L "$statedir/.credentials.json" ]; then
     ln -s "$HOME/.claude/.credentials.json" "$statedir/.credentials.json" 2>/dev/null || true
   fi
