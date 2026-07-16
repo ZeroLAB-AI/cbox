@@ -21,6 +21,14 @@ _cbox_egress_active() {
   [ "${CBOX_EGRESS_MODE:-off}" != "off" ] && [ "${CBOX_EGRESS_APPLIED:-0}" = "1" ]
 }
 
+_cbox_netaccess_active() {
+  [ "${CBOX_NETACCESS_MODE:-off}" != "off" ] && [ "${CBOX_NETACCESS_APPLIED:-0}" = "1" ]
+}
+
+_cbox_proxy_active() {
+  _cbox_egress_active || _cbox_netaccess_active
+}
+
 _cbox_ere_escape() {
   local s="$1" out="" i=0 c
   for ((i = 0; i < ${#s}; i++)); do
@@ -255,6 +263,23 @@ _cbox_manifest_verify_conf() {
   [ "$have_gen" = "$want_gen" ] || die "templates changed since last generation - re-bless with setup.sh --local $root"
 }
 
+_cbox_manifest_status() {
+  local eff="$1" root="$2" conf mf want_ws want_conf want_gen have_conf have_gen
+  conf="$eff/cbox.conf"; mf="$eff/manifest.sha256"
+  [ -f "$conf" ] || { printf 'missing'; return 0; }
+  [ -f "$mf" ] || { printf 'missing'; return 0; }
+  want_ws="$(_cbox_manifest_field "$mf" workspace)" || { printf 'malformed'; return 0; }
+  want_conf="$(_cbox_manifest_field "$mf" conf)" || { printf 'malformed'; return 0; }
+  want_gen="$(_cbox_manifest_field "$mf" generators)" || { printf 'malformed'; return 0; }
+  [ "$want_ws" = "$root" ] || { printf 'collision'; return 0; }
+  have_conf="$(sha256sum "$conf" | awk '{print $1}')"
+  have_gen="$(sha256sum "$INSTALL_DIR/templates/generators.sh" | awk '{print $1}')"
+  if [ "$have_conf" != "$want_conf" ] || [ "$have_gen" != "$want_gen" ]; then
+    printf 'drifted'; return 0
+  fi
+  printf 'ok'
+}
+
 _cbox_manifest_write_generated() {
   local eff="$1"
   local -a names=(compose dockerfile entrypoint env)
@@ -457,7 +482,8 @@ EOF
     cat >> "$tmp" <<EOF
       - $claude_path:\${HOST_HOME}/.claude:rw
       - $claude_path/hooks:\${HOST_HOME}/.claude/hooks:ro
-      - $claude_path/settings.json:\${HOST_HOME}/.claude/settings.json:ro
+      - $claude_path/settings.json:\${HOST_HOME}/.claude/settings.json:rw
+      - $INSTALL_DIR/generated/managed-settings.json:/etc/claude-code/managed-settings.json:ro
       - $HOME/.claude.json:\${HOST_HOME}/.claude.json:ro
       - $claude_path/CLAUDE.md:\${HOST_HOME}/.claude/CLAUDE.md:ro
       - $claude_path/agents:\${HOST_HOME}/.claude/agents:ro
@@ -468,7 +494,8 @@ EOF
     cat >> "$tmp" <<EOF
       - claude:\${HOST_HOME}/.claude
       - $INSTALL_DIR/generated/hooks:\${HOST_HOME}/.claude/hooks:ro
-      - $INSTALL_DIR/generated/settings.json:\${HOST_HOME}/.claude/settings.json:ro
+      - $INSTALL_DIR/generated/settings.json:\${HOST_HOME}/.claude/settings.json:rw
+      - $INSTALL_DIR/generated/managed-settings.json:/etc/claude-code/managed-settings.json:ro
       - $INSTALL_DIR/generated/state/claude.json:\${HOST_HOME}/.claude.json:rw
       - $INSTALL_DIR/generated/claude/CLAUDE.md:\${HOST_HOME}/.claude/CLAUDE.md:ro
       - $INSTALL_DIR/generated/claude/agents:\${HOST_HOME}/.claude/agents:ro
@@ -521,7 +548,7 @@ EOF
       - $HOME/.gitconfig:\${HOST_HOME}/.gitconfig:ro
 EOF
   fi
-  if _cbox_egress_active; then
+  if _cbox_proxy_active; then
     cat >> "$tmp" <<EOF
     networks:
       - internal
@@ -537,8 +564,13 @@ EOF
       - internal
       - egress
     volumes:
-      - $INSTALL_DIR/generated/tinyproxy.conf:/etc/tinyproxy/tinyproxy.conf:ro
-      - $INSTALL_DIR/generated/egress-filter:/etc/tinyproxy/filter:ro
+      - $INSTALL_DIR/generated/proxy:/etc/cbox-generated:ro
+    healthcheck:
+      test: ["CMD-SHELL", "ip=127.0.0.1; [ -f /etc/cbox-generated/internal-ip ] && ip=\$\$(cat /etc/cbox-generated/internal-ip); nc -z -w 2 \"\$\$ip\" 8888 || nc -z -w 2 \"\$\$ip\" 1080"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
 EOF
   fi
   cat >> "$tmp" <<EOF
@@ -576,7 +608,7 @@ EOF
 EOF
       ;;
   esac
-  if _cbox_egress_active; then
+  if _cbox_proxy_active; then
     cat >> "$tmp" <<'EOF'
 networks:
   internal:
@@ -668,7 +700,8 @@ EOF
     cat >> "$tmp" <<EOF
       - $claude_path:\${HOST_HOME}/.claude:rw
       - $claude_path/hooks:\${HOST_HOME}/.claude/hooks:ro
-      - $claude_path/settings.json:\${HOST_HOME}/.claude/settings.json:ro
+      - $claude_path/settings.json:\${HOST_HOME}/.claude/settings.json:rw
+      - $INSTALL_DIR/generated/managed-settings.json:/etc/claude-code/managed-settings.json:ro
       - $HOME/.claude.json:\${HOST_HOME}/.claude.json:ro
       - $claude_path/CLAUDE.md:\${HOST_HOME}/.claude/CLAUDE.md:ro
       - $claude_path/agents:\${HOST_HOME}/.claude/agents:ro
@@ -679,7 +712,8 @@ EOF
     cat >> "$tmp" <<EOF
       - claude:\${HOST_HOME}/.claude
       - $INSTALL_DIR/generated/hooks:\${HOST_HOME}/.claude/hooks:ro
-      - $INSTALL_DIR/generated/settings.json:\${HOST_HOME}/.claude/settings.json:ro
+      - $INSTALL_DIR/generated/settings.json:\${HOST_HOME}/.claude/settings.json:rw
+      - $INSTALL_DIR/generated/managed-settings.json:/etc/claude-code/managed-settings.json:ro
       - $INSTALL_DIR/generated/state/claude.json:\${HOST_HOME}/.claude.json:rw
       - $INSTALL_DIR/generated/claude/CLAUDE.md:\${HOST_HOME}/.claude/CLAUDE.md:ro
       - $INSTALL_DIR/generated/claude/agents:\${HOST_HOME}/.claude/agents:ro
@@ -744,7 +778,7 @@ EOF
       - $HOME/.gitconfig:\${HOST_HOME}/.gitconfig:ro
 EOF
   fi
-  if _cbox_egress_active; then
+  if _cbox_proxy_active; then
     cat >> "$tmp" <<EOF
     networks:
       - internal
@@ -760,8 +794,13 @@ EOF
       - internal
       - egress
     volumes:
-      - $eff/tinyproxy.conf:/etc/tinyproxy/tinyproxy.conf:ro
-      - $eff/egress-filter:/etc/tinyproxy/filter:ro
+      - $eff/proxy:/etc/cbox-generated:ro
+    healthcheck:
+      test: ["CMD-SHELL", "ip=127.0.0.1; [ -f /etc/cbox-generated/internal-ip ] && ip=\$\$(cat /etc/cbox-generated/internal-ip); nc -z -w 2 \"\$\$ip\" 8888 || nc -z -w 2 \"\$\$ip\" 1080"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
 EOF
   fi
   cat >> "$tmp" <<EOF
@@ -799,7 +838,7 @@ EOF
 EOF
       ;;
   esac
-  if _cbox_egress_active; then
+  if _cbox_proxy_active; then
     cat >> "$tmp" <<'EOF'
 networks:
   internal:
@@ -810,10 +849,11 @@ EOF
   chmod 0644 "$tmp"
   mv "$tmp" "$eff/docker-compose.yml"
 
-  if _cbox_egress_active; then
+  if _cbox_proxy_active; then
     gen_dockerfile_egress_into "$eff"
-    gen_tinyproxy_conf_into "$eff"
-    gen_egress_filter_into "$eff"
+    gen_supervisord_conf_into "$eff"
+    gen_tinyproxy_conf_into "$eff/proxy"
+    gen_egress_filter_into "$eff/proxy"
   fi
 }
 
@@ -851,20 +891,61 @@ EOF
 
 gen_dockerfile_egress_into() {
   local effdir="$1"
-  if ! _cbox_egress_active; then
+  if ! _cbox_proxy_active; then
     rm -f "$effdir/Dockerfile.egress"
     return 0
   fi
   _cbox_write "$effdir/Dockerfile.egress" <<'EOF'
 FROM alpine:3.20
-RUN apk add --no-cache tinyproxy
-USER tinyproxy
-ENTRYPOINT ["tinyproxy","-d"]
+RUN apk add --no-cache tinyproxy dante-server supervisor netcat-openbsd
+RUN addgroup -S cboxsockd && adduser -S -D -H -G cboxsockd cboxsockd
+RUN mkdir -p /etc/cbox-generated /run/cbox
+COPY supervisord.conf /etc/supervisord.conf
+ENTRYPOINT ["supervisord","-n","-c","/etc/supervisord.conf"]
 EOF
 }
 
 gen_dockerfile_egress() {
   gen_dockerfile_egress_into "$INSTALL_DIR"
+}
+
+gen_supervisord_conf_into() {
+  local effdir="$1"
+  if ! _cbox_proxy_active; then
+    rm -f "$effdir/supervisord.conf"
+    return 0
+  fi
+  {
+    printf '[supervisord]\n'
+    printf 'nodaemon=true\n'
+    printf 'logfile=/dev/null\n'
+    printf 'logfile_maxbytes=0\n'
+    printf 'pidfile=/run/supervisord.pid\n'
+    if _cbox_egress_active; then
+      printf '\n[program:tinyproxy]\n'
+      printf 'command=tinyproxy -d -c /etc/cbox-generated/tinyproxy.conf\n'
+      printf 'autorestart=true\n'
+      printf 'startretries=3\n'
+      printf 'stdout_logfile=/dev/stdout\n'
+      printf 'stdout_logfile_maxbytes=0\n'
+      printf 'stderr_logfile=/dev/stderr\n'
+      printf 'stderr_logfile_maxbytes=0\n'
+    fi
+    if _cbox_netaccess_active; then
+      printf '\n[program:sockd]\n'
+      printf 'command=/usr/sbin/sockd -D -f /etc/cbox-generated/sockd.conf\n'
+      printf 'autorestart=true\n'
+      printf 'startretries=3\n'
+      printf 'stdout_logfile=/dev/stdout\n'
+      printf 'stdout_logfile_maxbytes=0\n'
+      printf 'stderr_logfile=/dev/stderr\n'
+      printf 'stderr_logfile_maxbytes=0\n'
+    fi
+  } | _cbox_write "$effdir/supervisord.conf"
+}
+
+gen_supervisord_conf() {
+  gen_supervisord_conf_into "$INSTALL_DIR"
 }
 
 gen_tinyproxy_conf_into() {
@@ -885,7 +966,7 @@ gen_tinyproxy_conf_into() {
     printf 'MaxClients 64\n'
     printf 'FilterType ere\n'
     printf 'FilterDefaultDeny %s\n' "$deny"
-    printf 'Filter "/etc/tinyproxy/filter"\n'
+    printf 'Filter "/etc/cbox-generated/egress-filter"\n'
     printf 'ConnectPort 443\n'
     if [ "${CBOX_SSH_MODE:-none}" != "none" ]; then
       printf 'ConnectPort 22\n'
@@ -894,7 +975,7 @@ gen_tinyproxy_conf_into() {
 }
 
 gen_tinyproxy_conf() {
-  gen_tinyproxy_conf_into "$INSTALL_DIR/generated"
+  gen_tinyproxy_conf_into "$INSTALL_DIR/generated/proxy"
 }
 
 gen_egress_filter_into() {
@@ -931,7 +1012,125 @@ gen_egress_filter_into() {
 }
 
 gen_egress_filter() {
-  gen_egress_filter_into "$INSTALL_DIR/generated"
+  gen_egress_filter_into "$INSTALL_DIR/generated/proxy"
+}
+
+_cbox_is_ipv4() {
+  local ip="$1" IFS=. o1 o2 o3 o4
+  case "$ip" in
+    *[!0-9.]*|""|*..*|.*|*.) return 1 ;;
+  esac
+  read -r o1 o2 o3 o4 <<<"$ip"
+  [ -n "$o4" ] || return 1
+  for o in "$o1" "$o2" "$o3" "$o4"; do
+    case "$o" in
+      ""|*[!0-9]*) return 1 ;;
+    esac
+    [ "$o" -ge 0 ] && [ "$o" -le 255 ] || return 1
+  done
+  return 0
+}
+
+_cbox_is_ipv4_cidr() {
+  local cidr="$1" ip prefix
+  case "$cidr" in
+    */*) ;;
+    *) return 1 ;;
+  esac
+  ip="${cidr%/*}"
+  prefix="${cidr#*/}"
+  _cbox_is_ipv4 "$ip" || return 1
+  case "$prefix" in
+    ""|*[!0-9]*) return 1 ;;
+  esac
+  [ "$prefix" -ge 0 ] && [ "$prefix" -le 32 ]
+}
+
+gen_sockd_conf_into() {
+  local effdir="$1" internal_ip="$2" internal_cidr="$3" targets_spec="${4:-}"
+  local port="${CBOX_NETACCESS_SOCKS_PORT:-1080}"
+  case "$port" in
+    ""|*[!0-9]*) port=1080 ;;
+    *) { [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; } || port=1080 ;;
+  esac
+  if ! _cbox_is_ipv4 "$internal_ip" || [ "$internal_ip" = "0.0.0.0" ]; then
+    echo "cbox: gen_sockd_conf_into: invalid internal_ip '$internal_ip'" >&2
+    return 1
+  fi
+  if ! _cbox_is_ipv4_cidr "$internal_cidr" || [ "${internal_cidr#*/}" -eq 0 ]; then
+    echo "cbox: gen_sockd_conf_into: invalid internal_cidr '$internal_cidr'" >&2
+    return 1
+  fi
+  local -a target_ips=() target_cidrs=()
+  local entry ep cidr
+  for entry in $targets_spec; do
+    ep="${entry%%,*}"
+    cidr="${entry#*,}"
+    if [ "$ep" = "$entry" ] || [ "$cidr" = "$entry" ]; then
+      echo "cbox: gen_sockd_conf_into: skipping malformed target '$entry'" >&2
+      continue
+    fi
+    if ! _cbox_is_ipv4 "$ep" || [ "$ep" = "0.0.0.0" ] || ! _cbox_is_ipv4_cidr "$cidr" || [ "${cidr#*/}" -eq 0 ]; then
+      echo "cbox: gen_sockd_conf_into: skipping malformed target '$entry'" >&2
+      continue
+    fi
+    target_ips+=("$ep")
+    target_cidrs+=("$cidr")
+  done
+  {
+    printf 'logoutput: stderr\n'
+    printf 'internal: %s port = %s\n' "$internal_ip" "$port"
+    if [ "${#target_ips[@]}" -gt 0 ]; then
+      for ep in "${target_ips[@]}"; do
+        printf 'external: %s\n' "$ep"
+      done
+      printf 'external.rotation: route\n'
+    else
+      printf 'external: %s\n' "$internal_ip"
+    fi
+    printf 'socksmethod: none\n'
+    printf 'clientmethod: none\n'
+    printf 'user.privileged: root\n'
+    printf 'user.notprivileged: cboxsockd\n'
+    printf '\n'
+    printf 'client pass {\n'
+    printf '  from: %s to: %s/32\n' "$internal_cidr" "$internal_ip"
+    printf '  log: error\n'
+    printf '}\n'
+    printf 'client block {\n'
+    printf '  from: 0.0.0.0/0 to: 0.0.0.0/0\n'
+    printf '  log: error\n'
+    printf '}\n'
+    printf '\n'
+    if [ "${#target_cidrs[@]}" -gt 0 ]; then
+      for cidr in "${target_cidrs[@]}"; do
+        printf 'socks pass {\n'
+        printf '  from: %s to: %s\n' "$internal_cidr" "$cidr"
+        printf '  command: connect\n'
+        printf '  log: connect disconnect error\n'
+        printf '}\n'
+      done
+    fi
+    printf 'socks block {\n'
+    printf '  from: 0.0.0.0/0 to: 0.0.0.0/0\n'
+    printf '  log: error\n'
+    printf '}\n'
+  } | _cbox_write "$effdir/sockd.conf"
+  printf '%s\n' "$internal_ip" | _cbox_write "$effdir/internal-ip"
+}
+
+_cbox_proxy_net_ip() {
+  local container_id="$1" network_name="$2" out
+  [ -n "$container_id" ] && [ -n "$network_name" ] || { printf ''; return 0; }
+  case "$network_name" in
+    [A-Za-z0-9]*) ;;
+    *) printf ''; return 0 ;;
+  esac
+  case "$network_name" in
+    *[!A-Za-z0-9_.-]*) printf ''; return 0 ;;
+  esac
+  out="$(docker inspect -f "{{with index .NetworkSettings.Networks \"$network_name\"}}{{.IPAddress}}{{end}}" "$container_id" 2>/dev/null)" || out=""
+  printf '%s' "$out"
 }
 
 gen_ssh_config() {
@@ -994,6 +1193,27 @@ sys.stdout.write(json.dumps(settings, separators=(",", ":")))
 PY
 )"
   printf '%s\n' "$out" | _cbox_write "$INSTALL_DIR/generated/settings.json"
+}
+
+gen_managed_settings() {
+  local src="$INSTALL_DIR/etc/claude/managed-settings.merge.json" out
+  if [ ! -f "$src" ]; then
+    echo "gen_managed_settings: missing $src" >&2
+    return 1
+  fi
+  out="$(python3 - "$src" "$HOME" <<'PY'
+import json
+import sys
+
+src, home = sys.argv[1], sys.argv[2]
+with open(src) as fh:
+    text = fh.read()
+text = text.replace("@HOME@", home)
+settings = json.loads(text)
+sys.stdout.write(json.dumps(settings, separators=(",", ":")))
+PY
+)"
+  printf '%s\n' "$out" | _cbox_write "$INSTALL_DIR/generated/managed-settings.json"
 }
 
 gen_scope_json() {
@@ -1077,7 +1297,7 @@ _cbox_conf_set_tpl_sha() {
 }
 
 regen_all() {
-  mkdir -p "$INSTALL_DIR/generated/hooks" "$INSTALL_DIR/generated/state" "$INSTALL_DIR/generated/ssh" "$INSTALL_DIR/backups"
+  mkdir -p "$INSTALL_DIR/generated/hooks" "$INSTALL_DIR/generated/state" "$INSTALL_DIR/generated/ssh" "$INSTALL_DIR/generated/proxy" "$INSTALL_DIR/backups"
   gen_env_file
   local _digest
   _digest="$(_cbox_resolve_base_digest ubuntu:24.04)" || die "cannot resolve base image digest and no local image - network required for first build"
@@ -1087,11 +1307,13 @@ regen_all() {
   gen_compose
   gen_compose_gpu
   gen_dockerfile_egress
+  gen_supervisord_conf
   gen_tinyproxy_conf
   gen_egress_filter
   gen_ssh_config
   gen_hooks_dir
   gen_settings_volume
+  gen_managed_settings
   if [ "${CBOX_CLAUDE_MODE:-mount}" = "volume" ]; then
     gen_claude_assets
     gen_claude_json_seed

@@ -1,0 +1,64 @@
+{
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  },
+  "permissions": {
+    "allow": [
+      "mcp__codex-luna",
+      "mcp__codex-terra",
+      "mcp__codex-terra-light",
+      "mcp__codex-sol"
+    ],
+    "deny": [],
+    "disableBypassPermissionsMode": "disable"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__codex-.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/codex_mode_guard.py",
+            "timeout": 10,
+            "statusMessage": "codex-mode guard"
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/agent_label_guard.py",
+            "timeout": 10,
+            "statusMessage": "agent-label guard"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/code_hygiene_guard.py",
+            "timeout": 10,
+            "statusMessage": "code-hygiene guard"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/commit_guard.py",
+            "timeout": 10,
+            "statusMessage": "commit guard"
+          }
+        ]
+      }
+    ]
+  }
+}

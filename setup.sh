@@ -314,6 +314,14 @@ conf_defaults() {
   : "${CBOX_GPU:=0}"
   : "${CBOX_EGRESS_MODE:=off}"
   : "${CBOX_EGRESS_APPLIED:=0}"
+  : "${CBOX_NETACCESS_MODE:=off}"
+  : "${CBOX_NETACCESS_APPLIED:=0}"
+  : "${CBOX_NETACCESS_NETWORKS:=}"
+  : "${CBOX_NETACCESS_SOCKS_PORT:=1080}"
+  : "${CBOX_HOST_ROUTE_MODE:=off}"
+  : "${CBOX_HOST_ROUTE_APPLIED:=0}"
+  : "${CBOX_HOST_PROXY_URL:=}"
+  : "${CBOX_HOST_PROXY_ADDR_MODE:=host-gateway}"
   : "${CBOX_SSH_MODE:=none}"
   : "${CBOX_SSH_AGENT_DIR:=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/cbox-ssh}"
   : "${CBOX_BASHRC:=1}"
@@ -368,6 +376,14 @@ conf_save() {
     printf 'CBOX_GPU=%q\n' "$CBOX_GPU"
     printf 'CBOX_EGRESS_MODE=%q\n' "$CBOX_EGRESS_MODE"
     printf 'CBOX_EGRESS_APPLIED=%q\n' "$CBOX_EGRESS_APPLIED"
+    printf 'CBOX_NETACCESS_MODE=%q\n' "$CBOX_NETACCESS_MODE"
+    printf 'CBOX_NETACCESS_APPLIED=%q\n' "$CBOX_NETACCESS_APPLIED"
+    printf 'CBOX_NETACCESS_NETWORKS=%q\n' "$CBOX_NETACCESS_NETWORKS"
+    printf 'CBOX_NETACCESS_SOCKS_PORT=%q\n' "$CBOX_NETACCESS_SOCKS_PORT"
+    printf 'CBOX_HOST_ROUTE_MODE=%q\n' "$CBOX_HOST_ROUTE_MODE"
+    printf 'CBOX_HOST_ROUTE_APPLIED=%q\n' "$CBOX_HOST_ROUTE_APPLIED"
+    printf 'CBOX_HOST_PROXY_URL=%q\n' "$CBOX_HOST_PROXY_URL"
+    printf 'CBOX_HOST_PROXY_ADDR_MODE=%q\n' "$CBOX_HOST_PROXY_ADDR_MODE"
     printf 'CBOX_SSH_MODE=%q\n' "$CBOX_SSH_MODE"
     printf 'CBOX_SSH_AGENT_DIR=%q\n' "$CBOX_SSH_AGENT_DIR"
     printf 'CBOX_BASHRC=%q\n' "$CBOX_BASHRC"
@@ -1308,6 +1324,69 @@ step_egress() {
   note "login-first: the wizard applies the egress lockdown only after the login step"
 }
 
+step_netaccess() {
+  echo "== section: netaccess =="
+  local prev_mode="$CBOX_NETACCESS_MODE"
+  ask_choice "setup: netaccess mode" "$CBOX_NETACCESS_MODE" off socks
+  CBOX_NETACCESS_MODE="$ASK_VALUE"
+  if [ "$SETUP_MODE" = update ] && [ "$CBOX_NETACCESS_MODE" != off ]; then
+    CBOX_NETACCESS_APPLIED=1
+  elif [ "$CBOX_NETACCESS_MODE" != "$prev_mode" ]; then
+    CBOX_NETACCESS_APPLIED=0
+  fi
+  [ "$CBOX_NETACCESS_MODE" != off ] || return 0
+  note "phase-1 config only: the proxy is not wired to any network yet, and access is whole-network (all TCP on the joined networks)"
+  if [ -n "$CBOX_NETACCESS_NETWORKS" ]; then
+    note "current docker networks: $CBOX_NETACCESS_NETWORKS"
+  fi
+  note "add docker network names one per line; empty line finishes"
+  while :; do
+    ask "setup: docker network: " ""
+    [ -n "$ASK_VALUE" ] || break
+    case "$ASK_VALUE" in
+      [A-Za-z0-9]*) ;;
+      *) echo "setup: invalid network name: $ASK_VALUE"; continue ;;
+    esac
+    case "$ASK_VALUE" in
+      *[!A-Za-z0-9_.-]*) echo "setup: invalid network name: $ASK_VALUE"; continue ;;
+    esac
+    case " $CBOX_NETACCESS_NETWORKS " in
+      *" $ASK_VALUE "*) note "already listed: $ASK_VALUE" ;;
+      *)
+        if [ -z "$CBOX_NETACCESS_NETWORKS" ]; then
+          CBOX_NETACCESS_NETWORKS="$ASK_VALUE"
+        else
+          CBOX_NETACCESS_NETWORKS="$CBOX_NETACCESS_NETWORKS $ASK_VALUE"
+        fi
+        note "added $ASK_VALUE"
+        ;;
+    esac
+  done
+  ask "setup: SOCKS proxy port: " "$CBOX_NETACCESS_SOCKS_PORT"
+  case "$ASK_VALUE" in
+    ''|*[!0-9]*) warn "not a number; keeping $CBOX_NETACCESS_SOCKS_PORT" ;;
+    *) CBOX_NETACCESS_SOCKS_PORT="$ASK_VALUE" ;;
+  esac
+}
+
+step_hostroute() {
+  echo "== section: hostroute =="
+  local prev_mode="$CBOX_HOST_ROUTE_MODE"
+  ask_choice "setup: hostroute mode" "$CBOX_HOST_ROUTE_MODE" off host-proxy
+  CBOX_HOST_ROUTE_MODE="$ASK_VALUE"
+  if [ "$SETUP_MODE" = update ] && [ "$CBOX_HOST_ROUTE_MODE" != off ]; then
+    CBOX_HOST_ROUTE_APPLIED=1
+  elif [ "$CBOX_HOST_ROUTE_MODE" != "$prev_mode" ]; then
+    CBOX_HOST_ROUTE_APPLIED=0
+  fi
+  [ "$CBOX_HOST_ROUTE_MODE" != off ] || return 0
+  note "host-route requires filtered egress (enforced in a later phase); the host proxy itself is user-managed"
+  ask "setup: host proxy URL (e.g. http://host.docker.internal:3128): " "$CBOX_HOST_PROXY_URL"
+  CBOX_HOST_PROXY_URL="$ASK_VALUE"
+  ask_choice "setup: host proxy address mode" "$CBOX_HOST_PROXY_ADDR_MODE" host-gateway explicit
+  CBOX_HOST_PROXY_ADDR_MODE="$ASK_VALUE"
+}
+
 step_ssh() {
   echo "== section: ssh =="
   ask_choice "setup: ssh mode" "$CBOX_SSH_MODE" none host-agent container-keys mixed
@@ -2212,6 +2291,8 @@ default_preset_set() {
   CBOX_VENV_PATH="$HOME/.venvs"
   CBOX_GPU=0
   CBOX_EGRESS_MODE=off
+  CBOX_NETACCESS_MODE=off
+  CBOX_HOST_ROUTE_MODE=off
   CBOX_SSH_MODE=host-agent
   CBOX_SSH_AGENT_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/cbox-ssh"
   CBOX_BASHRC=1
@@ -2580,6 +2661,8 @@ run_local_wizard_subset() {
   step_python
   step_gpu
   step_egress
+  step_netaccess
+  step_hostroute
   step_ssh
   step_apt_extra
   step_binaries

@@ -118,7 +118,7 @@ _run_global() {
   check_tpl_sha
   _global_prepare
   _bins_soft "$IMG_TAG"
-  if _cbox_egress_active; then "${COMPOSE[@]}" build >/dev/null; fi
+  if _cbox_proxy_active; then "${COMPOSE[@]}" build >/dev/null; fi
   "${COMPOSE[@]}" up -d >/dev/null
   local workdir="$CBOX_WORKDIR"
   for w in "${workspaces[@]}"; do
@@ -536,22 +536,6 @@ _session_run() {
   return "$rc"
 }
 
-_cbox_tpl_changed_only() {
-  local eff="$1" root="$2" conf mf want_ws want_conf want_gen have_conf have_gen
-  conf="$eff/cbox.conf"; mf="$eff/manifest.sha256"
-  [ -f "$conf" ] || return 1
-  [ -f "$mf" ] || return 1
-  want_ws="$(_cbox_manifest_field "$mf" workspace)" || return 1
-  [ "$want_ws" = "$root" ] || return 1
-  want_conf="$(_cbox_manifest_field "$mf" conf)" || return 1
-  want_gen="$(_cbox_manifest_field "$mf" generators)" || return 1
-  have_conf="$(sha256sum "$conf" | awk '{print $1}')"
-  have_gen="$(sha256sum "$INSTALL_DIR/templates/generators.sh" | awk '{print $1}')"
-  [ "$have_conf" = "$want_conf" ] || return 1
-  [ "$have_gen" != "$want_gen" ] || return 1
-  return 0
-}
-
 _cbox_rebless_local() {
   local root="$1" eff="$2" rc=0
   mkdir -p "$HOME/.config/cbox/projects"
@@ -563,19 +547,25 @@ _cbox_rebless_local() {
 }
 
 _cbox_manifest_verify_conf_interactive() {
-  local eff="$1" root="$2"
-  if _cbox_tpl_changed_only "$eff" "$root"; then
-    if [ -t 0 ] && [ -t 1 ]; then
-      local ans
-      printf 'cbox: templates changed - re-bless now? [y/N] '
-      read -r ans
-      case "$ans" in
-        y|Y)
-          _cbox_rebless_local "$root" "$eff" || die "re-bless failed for $root"
-          ;;
-      esac
-    fi
-  fi
+  local eff="$1" root="$2" status ans reason
+  status="$(_cbox_manifest_status "$eff" "$root")"
+  case "$status" in
+    missing|malformed|drifted)
+      if [ -t 0 ] && [ -t 1 ]; then
+        case "$status" in
+          missing)  reason="manifest missing" ;;
+          malformed) reason="manifest malformed" ;;
+          drifted)  reason="config/templates drifted" ;;
+        esac
+        printf 'cbox: effective config for %s: %s.\n  Re-derive from the global profile now? [Y/n] ' "$root" "$reason"
+        read -r ans || ans=n
+        case "$ans" in
+          n|N) : ;;
+          *) _cbox_rebless_local "$root" "$eff" || die "re-bless failed for $root" ;;
+        esac
+      fi
+      ;;
+  esac
   _cbox_manifest_verify_conf "$eff" "$root"
 }
 
@@ -754,6 +744,7 @@ _global_prepare() {
   gen_compose
   gen_compose_gpu
   gen_dockerfile_egress
+  gen_supervisord_conf
   gen_tinyproxy_conf
   gen_egress_filter
   gen_ssh_config
@@ -771,7 +762,7 @@ up() {
     [ -f "$INSTALL_DIR/docker-compose.gpu.yml" ] || { echo "cbox: docker-compose.gpu.yml not found - run ./setup.sh update gpu"; exit 1; }
     cmd+=(-f "$INSTALL_DIR/docker-compose.gpu.yml")
   fi
-  if _cbox_egress_active; then "${cmd[@]}" build; fi
+  if _cbox_proxy_active; then "${cmd[@]}" build; fi
   _bins_soft "$IMG_TAG"
   "${cmd[@]}" up -d
   if [ -t 0 ] && [ -t 1 ] && [ "${CBOX_NO_EXEC:-0}" != 1 ]; then
