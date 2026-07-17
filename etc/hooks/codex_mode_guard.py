@@ -101,8 +101,26 @@ def main():
     if danger_ok and not write_capable:
         write_capable = True
 
+    if in_container and mode == "plan":
+        deny("plan mode in the container has no working codex path (read-only "
+             "dies on bwrap, full access is denied by the plan gate) — defer "
+             "the codex call until plan mode ends", tool, mode, ti)
+
     if write_capable:
         _check_scope_and_git(ti.get("cwd"), tool, mode, ti, cfg)
+
+    if in_container and sandbox != "danger-full-access":
+        deny("container: sandbox must be danger-full-access (the container is "
+             "the boundary; read-only and workspace-write die on bwrap and make "
+             "codex escalate via an Accept/Decline elicitation) — re-issue with "
+             "sandbox=danger-full-access", tool, mode, ti)
+
+    if (mode in AUTONOMOUS_MODES or mode == "bypassPermissions") \
+            and approval != "never":
+        deny(f"unattended mode ({mode}): approval-policy must be 'never' — "
+             "anything else makes codex elicit a human Accept/Decline answer "
+             "that nobody is there to give, so the run hangs on it — re-issue "
+             "with approval-policy=never", tool, mode, ti)
 
     if mode == "bypassPermissions":
         allow(tool, mode, ti)

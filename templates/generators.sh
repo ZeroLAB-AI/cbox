@@ -460,6 +460,7 @@ services:
 EOF
   if [ "$claude_mode" = "mount" ]; then
     printf '      - CLAUDE_CONFIG_DIR=${HOST_HOME}/.claude-cbox\n' >> "$tmp"
+    printf '      - CLAUDE_SECURESTORAGE_CONFIG_DIR=${HOST_HOME}/.claude\n' >> "$tmp"
   fi
   case "$ssh_mode" in
     host-agent|mixed)
@@ -703,6 +704,7 @@ services:
 EOF
   if [ "$claude_mode" = "mount" ]; then
     printf '      - CLAUDE_CONFIG_DIR=${HOST_HOME}/.claude-cbox\n' >> "$tmp"
+    printf '      - CLAUDE_SECURESTORAGE_CONFIG_DIR=${HOST_HOME}/.claude\n' >> "$tmp"
   fi
   case "$ssh_mode" in
     host-agent|mixed)
@@ -1248,8 +1250,10 @@ gen_claude_config_into() {
     done
     rmdir "$statedir/jobs" 2>/dev/null || true
   fi
-  if [ ! -e "$statedir/.credentials.json" ] && [ ! -L "$statedir/.credentials.json" ]; then
-    ln -s "$HOME/.claude/.credentials.json" "$statedir/.credentials.json" 2>/dev/null || true
+  rm -f "$statedir/.credentials.json.new" 2>/dev/null || true
+  ln -s "$HOME/.claude/.credentials.json" "$statedir/.credentials.json.new" 2>/dev/null || true
+  if [ -L "$statedir/.credentials.json.new" ]; then
+    mv -T "$statedir/.credentials.json.new" "$statedir/.credentials.json" 2>/dev/null || rm -f "$statedir/.credentials.json.new"
   fi
   if [ ! -e "$statedir/history.jsonl" ] && [ ! -L "$statedir/history.jsonl" ]; then
     ln -s "$HOME/.claude/history.jsonl" "$statedir/history.jsonl" 2>/dev/null || true

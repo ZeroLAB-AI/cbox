@@ -881,6 +881,61 @@ backup() {
   done
 }
 
+login_claude() {
+  local url="${1:-}"
+  if [ -z "$url" ]; then
+    printf 'cbox: run /login in a claude session inside the container, then paste the printed URL here: '
+    IFS= read -r url || return 1
+  fi
+  case "$url" in
+    https://claude.ai/oauth/authorize\?*|https://claude.com/cai/oauth/authorize\?*|https://platform.claude.com/oauth/authorize\?*|https://console.anthropic.com/oauth/authorize\?*) ;;
+    *) echo "cbox: refusing - not a recognized Claude OAuth authorize URL"; return 1 ;;
+  esac
+  local port
+  port="$(printf '%s' "$url" | grep -o 'redirect_uri=http%3A%2F%2Flocalhost%3A[0-9]\{1,5\}' | head -n1 | grep -o '[0-9]\{1,5\}$')" || true
+  case "$port" in
+    ''|*[!0-9]*) echo "cbox: cannot extract the callback port from redirect_uri"; return 1 ;;
+  esac
+  if [ "$port" -lt 1024 ] || [ "$port" -gt 65535 ]; then
+    echo "cbox: callback port $port out of range"
+    return 1
+  fi
+  command -v socat >/dev/null 2>&1 || { echo "cbox: socat not found on host - install it first (e.g. apt install socat)"; return 1; }
+  local -a cc=()
+  local svc eff
+  case "$(_cbox_effective_mode)" in
+    global)
+      require_global_conf
+      cc=("${COMPOSE[@]}")
+      svc="$SERVICE"
+      ;;
+    isolated)
+      eff="$(_project_eff_from_cwd)"
+      cc=(docker compose --project-directory "$eff" -f "$eff/docker-compose.yml")
+      svc=cbox
+      ;;
+    *)
+      echo "cbox: no cbox configuration found (neither global nor for this workspace)"
+      return 1
+      ;;
+  esac
+  echo "cbox: forwarding host 127.0.0.1:$port into the container's loopback for this one login"
+  echo "cbox: finish the login in the browser, then press Ctrl-C to stop the bridge"
+  trap 'echo; echo "cbox: login bridge stopped"; exit 0' INT
+  local -a inner=("${cc[@]}" exec -T "$svc" socat - "TCP:127.0.0.1:$port")
+  local inner_q exec_addr
+  printf -v inner_q '%q ' "${inner[@]}"
+  inner_q="${inner_q% }"
+  printf -v exec_addr 'EXEC:%q' "$inner_q"
+  if command -v xdg-open >/dev/null 2>&1; then
+    (xdg-open "$url" >/dev/null 2>&1 &)
+  else
+    echo "cbox: open this URL in your browser:"
+    printf '%s\n' "$url"
+  fi
+  socat "TCP-LISTEN:$port,bind=127.0.0.1,reuseaddr,fork,max-children=1" "$exec_addr"
+}
+
 login_codex() {
   require_global_conf
   if [ "${CBOX_EGRESS_MODE:-off}" = off ]; then
@@ -1580,7 +1635,7 @@ done
 }
 
 usage() {
-  echo "usage: $0 {run <bin> [args]|up [--gpu]|down|restart [--gpu]|shell|logs [args]|update|reinstall-bins [--fresh|--if-stale]|install-hooks|verify [--gpu|--isolated]|backup|login-codex|gc|ls|images [list|rm <hash>]}"
+  echo "usage: $0 {run <bin> [args]|up [--gpu]|down|restart [--gpu]|shell|logs [args]|update|reinstall-bins [--fresh|--if-stale]|install-hooks|verify [--gpu|--isolated]|backup|login [oauth-url]|login-codex|gc|ls|images [list|rm <hash>]}"
   exit 1
 }
 
@@ -1614,6 +1669,7 @@ case "${1:-}" in
     fi
     ;;
   backup) backup;;
+  login) shift; login_claude "$@";;
   login-codex) login_codex;;
   gc) gc;;
   ls) ls_projects;;
