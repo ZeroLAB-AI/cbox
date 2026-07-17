@@ -21,6 +21,39 @@ _cbox_egress_active() {
   [ "${CBOX_EGRESS_MODE:-off}" != "off" ] && [ "${CBOX_EGRESS_APPLIED:-0}" = "1" ]
 }
 
+_cbox_tz_env_into() {
+  local tmp="$1" tzname=""
+  if [ -L /etc/localtime ]; then
+    tzname="$(readlink /etc/localtime 2>/dev/null)" || tzname=""
+    case "$tzname" in
+      */zoneinfo/*) tzname="${tzname##*/zoneinfo/}" ;;
+      *) tzname="" ;;
+    esac
+  fi
+  if [ -z "$tzname" ] && [ -f /etc/timezone ]; then
+    IFS= read -r tzname < /etc/timezone || tzname=""
+  fi
+  tzname="${tzname#"${tzname%%[!/]*}"}"
+  case "$tzname" in
+    ''|*[!A-Za-z0-9_+/-]*) return 0 ;;
+  esac
+  case "$tzname" in
+    *[A-Za-z]*) ;;
+    *) return 0 ;;
+  esac
+  printf '      - TZ=%s\n' "$tzname" >> "$tmp"
+}
+
+_cbox_tz_mounts_into() {
+  local tmp="$1"
+  if [ -e /etc/localtime ]; then
+    printf '      - /etc/localtime:/etc/localtime:ro\n' >> "$tmp"
+  fi
+  if [ -f /etc/timezone ]; then
+    printf '      - /etc/timezone:/etc/timezone:ro\n' >> "$tmp"
+  fi
+}
+
 _cbox_netaccess_active() {
   [ "${CBOX_NETACCESS_MODE:-off}" != "off" ] && [ "${CBOX_NETACCESS_APPLIED:-0}" = "1" ]
 }
@@ -462,6 +495,7 @@ EOF
     printf '      - CLAUDE_CONFIG_DIR=${HOST_HOME}/.claude-cbox\n' >> "$tmp"
     printf '      - CLAUDE_SECURESTORAGE_CONFIG_DIR=${HOST_HOME}/.claude\n' >> "$tmp"
   fi
+  _cbox_tz_env_into "$tmp"
   case "$ssh_mode" in
     host-agent|mixed)
       printf '      - SSH_AUTH_SOCK=/run/cbox-ssh/agent.sock\n' >> "$tmp"
@@ -478,6 +512,7 @@ EOF
 EOF
   fi
   printf '    volumes:\n' >> "$tmp"
+  _cbox_tz_mounts_into "$tmp"
   for w in "${ws[@]}"; do
     printf '      - %s:%s:rw\n' "$w" "$w" >> "$tmp"
   done
@@ -706,6 +741,7 @@ EOF
     printf '      - CLAUDE_CONFIG_DIR=${HOST_HOME}/.claude-cbox\n' >> "$tmp"
     printf '      - CLAUDE_SECURESTORAGE_CONFIG_DIR=${HOST_HOME}/.claude\n' >> "$tmp"
   fi
+  _cbox_tz_env_into "$tmp"
   case "$ssh_mode" in
     host-agent|mixed)
       printf '      - SSH_AUTH_SOCK=/run/cbox-ssh/agent.sock\n' >> "$tmp"
@@ -722,6 +758,7 @@ EOF
 EOF
   fi
   printf '    volumes:\n' >> "$tmp"
+  _cbox_tz_mounts_into "$tmp"
   printf '      - %s:%s:rw\n' "$root" "$root" >> "$tmp"
 
   if [ "$claude_mode" = "mount" ]; then
@@ -1126,18 +1163,25 @@ gen_sockd_conf_into() {
   local -a target_ips=() target_cidrs=()
   local entry ep cidr
   for entry in $targets_spec; do
-    ep="${entry%%,*}"
-    cidr="${entry#*,}"
-    if [ "$ep" = "$entry" ] || [ "$cidr" = "$entry" ]; then
-      echo "cbox: gen_sockd_conf_into: skipping malformed target '$entry'" >&2
-      continue
-    fi
-    if ! _cbox_is_ipv4 "$ep" || [ "$ep" = "0.0.0.0" ] || ! _cbox_is_ipv4_cidr "$cidr" || [ "${cidr#*/}" -eq 0 ]; then
-      echo "cbox: gen_sockd_conf_into: skipping malformed target '$entry'" >&2
-      continue
-    fi
-    target_ips+=("$ep")
-    target_cidrs+=("$cidr")
+    case "$entry" in
+      *,*)
+        ep="${entry%%,*}"
+        cidr="${entry#*,}"
+        if [ -z "$ep" ] || [ -z "$cidr" ] || ! _cbox_is_ipv4 "$ep" || [ "$ep" = "0.0.0.0" ] || ! _cbox_is_ipv4_cidr "$cidr" || [ "${cidr#*/}" -eq 0 ]; then
+          echo "cbox: gen_sockd_conf_into: skipping malformed target '$entry'" >&2
+          continue
+        fi
+        target_ips+=("$ep")
+        target_cidrs+=("$cidr")
+        ;;
+      *)
+        if ! _cbox_is_ipv4_cidr "$entry" || [ "${entry#*/}" -lt 8 ] || [ "${entry%/*}" = "0.0.0.0" ]; then
+          echo "cbox: gen_sockd_conf_into: skipping malformed target '$entry'" >&2
+          continue
+        fi
+        target_cidrs+=("$entry")
+        ;;
+    esac
   done
   {
     printf 'logoutput: stderr\n'
@@ -1219,17 +1263,31 @@ gen_claude_json_seed() {
   if [ -e "$target" ]; then
     return 0
   fi
-  out="$(python3 - "$INSTALL_DIR/etc/mcp/mcp-servers.json" "${CBOX_MCP_SERVERS:-all}" <<'PY'
+  local shim_mode="${CBOX_CODEX_PROGRESS_MODE:-off}"
+  [ "${CBOX_CLAUDE_MODE:-mount}" = mount ] || shim_mode=off
+  out="$(python3 - "$INSTALL_DIR/etc/mcp/mcp-servers.json" "${CBOX_MCP_SERVERS:-all}" "$shim_mode" "$HOME" <<'PY'
 import json
 import sys
 
 with open(sys.argv[1]) as fh:
     servers = json.load(fh)
 selection = sys.argv[2].split()
+mode, home = sys.argv[3], sys.argv[4]
+
+def shape(name, spec):
+    if mode != "shim" or not name.startswith("codex-"):
+        return spec
+    if not isinstance(spec, dict) or spec.get("command") != "codex":
+        return spec
+    wrapped = dict(spec)
+    wrapped["command"] = "python3"
+    wrapped["args"] = [home + "/.claude/hooks/codex_mcp_shim.py", "--", "codex"] + list(spec.get("args") or [])
+    return wrapped
+
 if not selection or selection == ["all"]:
-    chosen = servers
+    chosen = {name: shape(name, cfg) for name, cfg in servers.items()}
 else:
-    chosen = {name: cfg for name, cfg in servers.items() if name in selection}
+    chosen = {name: shape(name, cfg) for name, cfg in servers.items() if name in selection}
 sys.stdout.write(json.dumps({"hasCompletedOnboarding": True, "mcpServers": chosen}, separators=(",", ":")))
 PY
 )"
@@ -1336,6 +1394,7 @@ gen_hooks_dir() {
   _cbox_write "$INSTALL_DIR/generated/hooks/continuity_session_digest.py" < "$INSTALL_DIR/etc/hooks/continuity_session_digest.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/orchestrator-global.txt" < "$INSTALL_DIR/etc/hooks/orchestrator-global.txt"
   _cbox_write "$INSTALL_DIR/generated/hooks/ask_claude_mcp.py" < "$INSTALL_DIR/etc/codex/ask_claude_mcp.py"
+  _cbox_write "$INSTALL_DIR/generated/hooks/codex_mcp_shim.py" < "$INSTALL_DIR/etc/mcp/codex_mcp_shim.py"
   gen_scope_json
 }
 

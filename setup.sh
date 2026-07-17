@@ -317,6 +317,7 @@ conf_defaults() {
   : "${CBOX_NETACCESS_MODE:=off}"
   : "${CBOX_NETACCESS_APPLIED:=0}"
   : "${CBOX_NETACCESS_NETWORKS:=}"
+  : "${CBOX_NETACCESS_CIDRS:=}"
   : "${CBOX_NETACCESS_SOCKS_PORT:=1080}"
   : "${CBOX_HOST_ROUTE_MODE:=off}"
   : "${CBOX_HOST_ROUTE_APPLIED:=0}"
@@ -326,6 +327,7 @@ conf_defaults() {
   : "${CBOX_SSH_AGENT_DIR:=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/cbox-ssh}"
   : "${CBOX_BASHRC:=1}"
   : "${CBOX_MCP_SERVERS:=all}"
+  : "${CBOX_CODEX_PROGRESS_MODE:=off}"
   : "${CBOX_AGENTS:=all}"
   : "${CBOX_CODEX_MCP:=0}"
   : "${CBOX_GITCONFIG:=0}"
@@ -379,6 +381,7 @@ conf_save() {
     printf 'CBOX_NETACCESS_MODE=%q\n' "$CBOX_NETACCESS_MODE"
     printf 'CBOX_NETACCESS_APPLIED=%q\n' "$CBOX_NETACCESS_APPLIED"
     printf 'CBOX_NETACCESS_NETWORKS=%q\n' "$CBOX_NETACCESS_NETWORKS"
+    printf 'CBOX_NETACCESS_CIDRS=%q\n' "$CBOX_NETACCESS_CIDRS"
     printf 'CBOX_NETACCESS_SOCKS_PORT=%q\n' "$CBOX_NETACCESS_SOCKS_PORT"
     printf 'CBOX_HOST_ROUTE_MODE=%q\n' "$CBOX_HOST_ROUTE_MODE"
     printf 'CBOX_HOST_ROUTE_APPLIED=%q\n' "$CBOX_HOST_ROUTE_APPLIED"
@@ -388,6 +391,7 @@ conf_save() {
     printf 'CBOX_SSH_AGENT_DIR=%q\n' "$CBOX_SSH_AGENT_DIR"
     printf 'CBOX_BASHRC=%q\n' "$CBOX_BASHRC"
     printf 'CBOX_MCP_SERVERS=%q\n' "$CBOX_MCP_SERVERS"
+    printf 'CBOX_CODEX_PROGRESS_MODE=%q\n' "$CBOX_CODEX_PROGRESS_MODE"
     printf 'CBOX_AGENTS=%q\n' "$CBOX_AGENTS"
     printf 'CBOX_CODEX_MCP=%q\n' "$CBOX_CODEX_MCP"
     printf 'CBOX_GITCONFIG=%q\n' "$CBOX_GITCONFIG"
@@ -1035,10 +1039,10 @@ PYEOF
 }
 
 merge_mcp_json() {
-  local target="$1" servers="$2" selected="$3" out="$4"
-  python3 - "$target" "$servers" "$selected" "$out" <<'PYEOF'
+  local target="$1" servers="$2" selected="$3" out="$4" shim_mode="${5:-off}" shim_home="${6:-$HOME}"
+  python3 - "$target" "$servers" "$selected" "$out" "$shim_mode" "$shim_home" <<'PYEOF'
 import json, os, sys
-target, servers_path, selected_raw, out = sys.argv[1:5]
+target, servers_path, selected_raw, out, mode, home = sys.argv[1:7]
 selected = set(selected_raw.split())
 data = {}
 if os.path.isfile(target):
@@ -1049,10 +1053,21 @@ if os.path.isfile(target):
         sys.exit("setup: cannot parse " + target)
 with open(servers_path) as f:
     servers = json.load(f)
+
+def shape(name, spec):
+    if mode != "shim" or not name.startswith("codex-"):
+        return spec
+    if not isinstance(spec, dict) or spec.get("command") != "codex":
+        return spec
+    wrapped = dict(spec)
+    wrapped["command"] = "python3"
+    wrapped["args"] = [home + "/.claude/hooks/codex_mcp_shim.py", "--", "codex"] + list(spec.get("args") or [])
+    return wrapped
+
 mcp = data.setdefault("mcpServers", {})
 for name, spec in servers.items():
     if name in selected:
-        mcp[name] = spec
+        mcp[name] = shape(name, spec)
     else:
         mcp.pop(name, None)
 with open(out, "w") as f:
@@ -1362,6 +1377,30 @@ step_netaccess() {
         ;;
     esac
   done
+  command -v _cbox_is_ipv4_cidr >/dev/null 2>&1 || load_generators
+  if [ -n "$CBOX_NETACCESS_CIDRS" ]; then
+    note "current raw CIDR targets: $CBOX_NETACCESS_CIDRS"
+  fi
+  note "add raw IPv4 CIDR targets outside docker networks (e.g. k3s pods 10.42.0.0/16, services 10.43.0.0/16); like the network list they stay inert until the lifecycle phase renders sockd.conf, and reachability from the proxy is host-routing dependent; empty line finishes"
+  while :; do
+    ask "setup: target CIDR: " ""
+    [ -n "$ASK_VALUE" ] || break
+    if ! _cbox_is_ipv4_cidr "$ASK_VALUE" || [ "${ASK_VALUE%/*}" = "0.0.0.0" ]; then
+      echo "setup: invalid IPv4 CIDR: $ASK_VALUE"
+      continue
+    fi
+    if [ "${ASK_VALUE#*/}" -lt 8 ]; then
+      echo "setup: prefix too broad (minimum /8): $ASK_VALUE"
+      continue
+    fi
+    case " $CBOX_NETACCESS_CIDRS " in
+      *" $ASK_VALUE "*) note "already listed: $ASK_VALUE" ;;
+      *)
+        CBOX_NETACCESS_CIDRS="${CBOX_NETACCESS_CIDRS:+$CBOX_NETACCESS_CIDRS }$ASK_VALUE"
+        note "added $ASK_VALUE"
+        ;;
+    esac
+  done
   ask "setup: SOCKS proxy port: " "$CBOX_NETACCESS_SOCKS_PORT"
   case "$ASK_VALUE" in
     ''|*[!0-9]*) warn "not a number; keeping $CBOX_NETACCESS_SOCKS_PORT" ;;
@@ -1459,19 +1498,20 @@ step_bashrc() {
 
 mcp_apply_selection() {
   local servers_file="$ETC_DIR/mcp/mcp-servers.json"
-  local expanded
+  local expanded shim_mode="${CBOX_CODEX_PROGRESS_MODE:-off}"
+  [ "${CBOX_CLAUDE_MODE:-mount}" = mount ] || shim_mode=off
   expanded="$(canonical_expand "$CBOX_MCP_SERVERS" "$(mcp_all_names)")"
   if [ "$CBOX_CLAUDE_MODE" = mount ]; then
     local target="$HOME/.claude.json" stage
     stage="$(mktemp -d)"
-    merge_mcp_json "$target" "$servers_file" "$expanded" "$stage/claude.json"
+    merge_mcp_json "$target" "$servers_file" "$expanded" "$stage/claude.json" "$shim_mode" "$HOME"
     staged_write "$target" "$stage/claude.json" 0644 || true
     rm -rf "$stage"
   else
     local state="$GEN_DIR/state/claude.json" tmp
     if [ -f "$state" ]; then
       tmp="$(mktemp)"
-      merge_mcp_json "$state" "$servers_file" "$expanded" "$tmp"
+      merge_mcp_json "$state" "$servers_file" "$expanded" "$tmp" "$shim_mode" "$HOME"
       mv "$tmp" "$state"
       note "updated $state"
     else
@@ -1516,6 +1556,39 @@ step_mcp_servers() {
   CBOX_MCP_SERVERS="$(canonical_store "${out[*]-}" "${all[*]-}")"
   note "selected mcp servers: $CBOX_MCP_SERVERS"
   mcp_apply_selection
+}
+
+codex_progress_ensure_hooks_dep() {
+  [ "$CBOX_CODEX_PROGRESS_MODE" = shim ] || return 0
+  [ "$CBOX_CLAUDE_MODE" = mount ] || return 0
+  [ -d "$ETC_DIR/hooks" ] || return 0
+  [ -f "$ETC_DIR/mcp/codex_mcp_shim.py" ] || return 0
+  container_target_ok || return 0
+  gen_hooks_dir
+  staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 codex_mcp_shim.py || true
+}
+
+step_codex_progress() {
+  echo "== section: codex-progress =="
+  local prev="$CBOX_CODEX_PROGRESS_MODE"
+  ask_choice "setup: codex progress relay" "$CBOX_CODEX_PROGRESS_MODE" off shim
+  CBOX_CODEX_PROGRESS_MODE="$ASK_VALUE"
+  if [ "$CBOX_CODEX_PROGRESS_MODE" = shim ] && [ "$CBOX_CLAUDE_MODE" != mount ]; then
+    warn "codex progress relay needs claude mount mode (the shim lives in ~/.claude/hooks); keeping off"
+    CBOX_CODEX_PROGRESS_MODE=off
+  fi
+  if [ "$CBOX_CODEX_PROGRESS_MODE" = shim ]; then
+    section_dep_gate codex-progress
+    if [ "$DEP_ACTION" = dictate ]; then
+      note "hooks dependency: $DEP_REASON"
+    fi
+  fi
+  [ "$CBOX_CODEX_PROGRESS_MODE" != "$prev" ] || return 0
+  codex_progress_ensure_hooks_dep
+  if container_target_ok; then
+    mcp_apply_selection
+  fi
+  note "host claude picks the change up on next start; the container needs re-bless + restart (~/.claude.json bind pins the old inode)"
 }
 
 agents_install() {
@@ -2374,6 +2447,7 @@ apply_default_setup() {
     agents_install
   fi
   codex_mcp_ensure_hooks_dep
+  codex_progress_ensure_hooks_dep
   codex_mcp_apply
   step_continuity
   step_claude_md

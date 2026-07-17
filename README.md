@@ -136,6 +136,10 @@ Mixing modes (hybrid) is supported. When you choose mount, the wizard asks per d
 
 **Warning:** `docker volume prune` deletes volumes not attached to a container and will destroy volume-mode logins and state. cbox itself never removes volumes; `down` is never run with `-v`.
 
+## Host timezone propagation
+
+The generated compose automatically mounts `/etc/localtime` and `/etc/timezone` read-only from the host and derives the container's `TZ` environment variable from the host zone. This ensures container timestamps (logs, file mtime, shell prompts) match the host without manual setup. Applies on next container restart.
+
 ## First login
 
 In volume mode the container starts with empty state. Log in once:
@@ -157,6 +161,10 @@ Egress lockdown adds a tinyproxy sidecar on an internal network. The main contai
 - **blocklist** — listed domains are refused. Hygiene only, not a security boundary.
 
 The `egress` setup section only ever ADDS domains. It prints the current entries of `etc/egress-allowlist.txt` or `etc/egress-blocklist.txt` and prompts for new domains, one per line, until you press Enter on an empty line. To remove a domain, edit the list file directly and re-run `./setup.sh update egress`.
+
+### Container network access
+
+The optional `netaccess` setup section wires a SOCKS proxy on the egress container so the main container can reach other Docker networks. You can list Docker network names or raw IPv4 CIDR ranges (e.g., `10.42.0.0/16`, `10.43.0.0/16` for k3s pod/service ranges). CIDRs are validated (minimum `/8` prefix) and rendered as SOCKS pass rules. Like the network list they stay inert until the lifecycle phase wires the proxy; reachability from the proxy depends on host routing.
 
 What breaks under egress lockdown: ssh-based git remotes (unless you enable the ssh section), direct DNS lookups, and any tool ignoring `HTTP_PROXY`/`HTTPS_PROXY` environment variables.
 
@@ -192,6 +200,14 @@ The optional `codex-mcp` setup section registers Claude as an MCP tool inside Co
 - **Audit trail.** Allowed and denied calls are logged to `~/.claude/ask_claude_audit.container.jsonl`.
 
 **Configuration:** The setup wizard writes a `[mcp_servers.claude]` block to `~/.codex/config.toml`. Re-run `./setup.sh update codex-mcp` to enable or disable; answer 0 to strip the block entirely.
+
+## Codex progress relay (optional)
+
+When enabled, the codex-* MCP servers run under `~/.claude/hooks/codex_mcp_shim.py`, a transparent stdio passthrough that translates codex events into standard MCP progress notifications. Codex activity (task start/end, commands, messages, errors) shows live in the Claude Code UI during a delegation instead of a bare "Calling codex-…" spinner. Every protocol byte passes through verbatim and in order; on any JSON parse error the shim degrades to pure passthrough.
+
+**Setup:** Run `./setup.sh update codex-progress` to enable. Then run `cbox install-hooks` to stage and confirm the host copy of the shim, and re-bless + restart the container to refresh its copy. Requires claude mount mode (in volume mode the relay stays off).
+
+**Optional debugging:** Set `CBOX_CODEX_SHIM_LOG=<path>` in the environment of the claude process (inside the container for container runs) to write a debug journal of all events and synthesized progress notifications to the file.
 
 ## GPU
 

@@ -794,7 +794,7 @@ logs() {
 install_hooks() {
   require_global_conf
   [ -t 0 ] || { echo "cbox: install-hooks requires a TTY"; return 1; }
-  local files=(codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py orchestrator-global.txt codex_scope.container.json ask_claude_mcp.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py)
+  local files=(codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py orchestrator-global.txt codex_scope.container.json ask_claude_mcp.py codex_mcp_shim.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py)
   local srcs=(
     "$INSTALL_DIR/etc/hooks/codex_mode_guard.py"
     "$INSTALL_DIR/etc/hooks/agent_label_guard.py"
@@ -803,6 +803,7 @@ install_hooks() {
     "$INSTALL_DIR/etc/hooks/orchestrator-global.txt"
     "$INSTALL_DIR/generated/hooks/codex_scope.container.json"
     "$INSTALL_DIR/etc/codex/ask_claude_mcp.py"
+    "$INSTALL_DIR/etc/mcp/codex_mcp_shim.py"
     "$INSTALL_DIR/etc/hooks/continuity_commit_log.py"
     "$INSTALL_DIR/etc/hooks/continuity_ledger_sweep.py"
     "$INSTALL_DIR/etc/hooks/continuity_session_digest.py"
@@ -881,6 +882,28 @@ backup() {
   done
 }
 
+_socat_exec_addr() {
+  local tok out=""
+  for tok in "$@"; do
+    case "$tok" in
+      "")
+        echo "cbox: cannot build the socat bridge command - empty argument" >&2
+        return 1
+        ;;
+      *[[:space:]]*|*\\*)
+        echo "cbox: cannot build the socat bridge command - argument contains whitespace or backslash (install cbox under a path without spaces): $tok" >&2
+        return 1
+        ;;
+    esac
+    out+="$tok "
+  done
+  out="${out% }"
+  out="${out//:/\\:}"
+  out="${out//,/\\,}"
+  out="${out//!/\\!}"
+  printf 'EXEC:%s' "$out"
+}
+
 login_claude() {
   local url="${1:-}"
   if [ -z "$url" ]; then
@@ -922,11 +945,8 @@ login_claude() {
   echo "cbox: forwarding host 127.0.0.1:$port into the container's loopback for this one login"
   echo "cbox: finish the login in the browser, then press Ctrl-C to stop the bridge"
   trap 'echo; echo "cbox: login bridge stopped"; exit 0' INT
-  local -a inner=("${cc[@]}" exec -T "$svc" socat - "TCP:127.0.0.1:$port")
-  local inner_q exec_addr
-  printf -v inner_q '%q ' "${inner[@]}"
-  inner_q="${inner_q% }"
-  printf -v exec_addr 'EXEC:%q' "$inner_q"
+  local exec_addr
+  exec_addr="$(_socat_exec_addr "${cc[@]}" exec -T "$svc" socat - "TCP:127.0.0.1:$port")" || return 1
   if command -v xdg-open >/dev/null 2>&1; then
     (xdg-open "$url" >/dev/null 2>&1 &)
   else
@@ -947,12 +967,9 @@ login_codex() {
   echo "cbox: run 'codex login' inside '$0 shell' and open the printed URL in a browser on this host"
   echo "cbox: press Ctrl-C to stop the bridge"
   trap 'echo; echo "cbox: login bridge stopped"; exit 0' INT
-  local -a inner=(docker compose -f "$INSTALL_DIR/docker-compose.yml" exec -T "$SERVICE" socat - TCP:127.0.0.1:1455)
-  local inner_q exec_addr
-  printf -v inner_q '%q ' "${inner[@]}"
-  inner_q="${inner_q% }"
-  printf -v exec_addr 'EXEC:%q' "$inner_q"
-  socat TCP-LISTEN:1455,bind=127.0.0.1,reuseaddr,fork "$exec_addr"
+  local exec_addr
+  exec_addr="$(_socat_exec_addr docker compose -f "$INSTALL_DIR/docker-compose.yml" exec -T "$SERVICE" socat - TCP:127.0.0.1:1455)" || return 1
+  socat TCP-LISTEN:1455,bind=127.0.0.1,reuseaddr,fork,max-children=1 "$exec_addr"
 }
 
 VN=0
