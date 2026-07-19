@@ -548,6 +548,7 @@ EOF
     [ -f "$claude_path/settings.json" ] || printf '{}\n' > "$claude_path/settings.json"
     [ -f "$HOME/.claude.json" ] || printf '{}\n' > "$HOME/.claude.json"
     [ -f "$claude_path/CLAUDE.md" ] || : > "$claude_path/CLAUDE.md"
+    gen_claude_cbox_json_seed_into "$INSTALL_DIR/generated/state/claude-cbox.json"
     cat >> "$tmp" <<EOF
       - $claude_path:\${HOST_HOME}/.claude:rw
       - $claude_path/hooks:\${HOST_HOME}/.claude/hooks:ro
@@ -573,7 +574,7 @@ EOF
       - $claude_path/agent-memory:\${HOST_HOME}/.claude-cbox/agent-memory:rw
       - $claude_path/hooks:\${HOST_HOME}/.claude-cbox/hooks:ro
       - $claude_path/settings.json:\${HOST_HOME}/.claude-cbox/settings.json:rw
-      - $HOME/.claude.json:\${HOST_HOME}/.claude-cbox/.claude.json:ro
+      - $INSTALL_DIR/generated/state/claude-cbox.json:\${HOST_HOME}/.claude-cbox/.claude.json:rw
       - $claude_path/CLAUDE.md:\${HOST_HOME}/.claude-cbox/CLAUDE.md:ro
       - $claude_path/agents:\${HOST_HOME}/.claude-cbox/agents:ro
       - $claude_path/policies:\${HOST_HOME}/.claude-cbox/policies:ro
@@ -814,6 +815,7 @@ EOF
     [ -f "$claude_path/settings.json" ] || printf '{}\n' > "$claude_path/settings.json"
     [ -f "$HOME/.claude.json" ] || printf '{}\n' > "$HOME/.claude.json"
     [ -f "$claude_path/CLAUDE.md" ] || : > "$claude_path/CLAUDE.md"
+    gen_claude_cbox_json_seed_into "$eff/state/claude-cbox.json"
     cat >> "$tmp" <<EOF
       - $claude_path:\${HOST_HOME}/.claude:rw
       - $claude_path/hooks:\${HOST_HOME}/.claude/hooks:ro
@@ -836,7 +838,7 @@ EOF
       - $claude_path/agent-memory:\${HOST_HOME}/.claude-cbox/agent-memory:rw
       - $claude_path/hooks:\${HOST_HOME}/.claude-cbox/hooks:ro
       - $claude_path/settings.json:\${HOST_HOME}/.claude-cbox/settings.json:rw
-      - $HOME/.claude.json:\${HOST_HOME}/.claude-cbox/.claude.json:ro
+      - $eff/state/claude-cbox.json:\${HOST_HOME}/.claude-cbox/.claude.json:rw
       - $claude_path/CLAUDE.md:\${HOST_HOME}/.claude-cbox/CLAUDE.md:ro
       - $claude_path/agents:\${HOST_HOME}/.claude-cbox/agents:ro
       - $claude_path/policies:\${HOST_HOME}/.claude-cbox/policies:ro
@@ -866,6 +868,7 @@ EOF
       - $claude_path/projects:\${HOST_HOME}/.claude-cbox/.host-projects:rw
       - $claude_path/tasks:\${HOST_HOME}/.claude-cbox/.host-tasks:rw
       - $claude_path/jobs:\${HOST_HOME}/.claude-cbox/.host-jobs:rw
+      - $claude_path/projects/$slug:\${HOST_HOME}/.claude-cbox/projects/$slug:rw
 EOF
     fi
   else
@@ -1355,6 +1358,37 @@ import sys
 
 mcp = json.loads(sys.argv[1])
 sys.stdout.write(json.dumps({"hasCompletedOnboarding": True, "mcpServers": mcp}, separators=(",", ":")))
+PY
+)"
+  printf '%s\n' "$out" | _cbox_write "$target"
+}
+
+gen_claude_cbox_json_seed_into() {
+  local target="$1" out
+  local shim_mode="${CBOX_CODEX_PROGRESS_MODE:-off}"
+  [ "${CBOX_CLAUDE_MODE:-mount}" = mount ] || shim_mode=off
+  local progress_flag="off"
+  [ "$shim_mode" = shim ] && progress_flag="on"
+  local servers_file="$INSTALL_DIR/etc/mcp/delegates.json"
+  local expanded hooks_dir="$HOME/.claude/hooks" mcp_json
+  expanded="$(canonical_expand "${CBOX_MCP_SERVERS:-all}" "$(mcp_all_names)")"
+  mcp_json="$(python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$servers_file" "$expanded" "$hooks_dir" "$progress_flag" claude)"
+  out="$(python3 - "$mcp_json" "$target" <<'PY'
+import json
+import sys
+
+mcp = json.loads(sys.argv[1])
+cur = {}
+try:
+    with open(sys.argv[2]) as fh:
+        cur = json.load(fh)
+except (OSError, ValueError):
+    cur = {}
+if not isinstance(cur, dict):
+    cur = {}
+cur["hasCompletedOnboarding"] = True
+cur["mcpServers"] = mcp
+sys.stdout.write(json.dumps(cur, separators=(",", ":")))
 PY
 )"
   printf '%s\n' "$out" | _cbox_write "$target"

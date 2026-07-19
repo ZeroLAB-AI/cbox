@@ -2,7 +2,8 @@
 set -euo pipefail
 
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-[ -f "$INSTALL_DIR/_common.sh" ] && . "$INSTALL_DIR/_common.sh"
+[ -f "$INSTALL_DIR/_common.sh" ] || { echo "setup: error: $INSTALL_DIR/_common.sh missing" >&2; exit 1; }
+. "$INSTALL_DIR/_common.sh"
 ETC_DIR="$INSTALL_DIR/etc"
 GEN_DIR="$INSTALL_DIR/generated"
 CONF_FILE="$INSTALL_DIR/cbox.conf"
@@ -233,20 +234,6 @@ print_settings_help() {
   printf 'wizard navigation: Enter=next  b=back  j=jump  q=save+quit  h=this help\n'
 }
 
-mcp_all_names() {
-  [ -f "$ETC_DIR/mcp/delegates.json" ] || return 0
-  local rendered
-  rendered="$(python3 "$ETC_DIR/mcp/render_mcp.py" "$ETC_DIR/mcp/delegates.json" all "$HOME/.claude/hooks" off claude)" \
-    || die "mcp_all_names: render_mcp.py rejected $ETC_DIR/mcp/delegates.json (malformed registry entry - see stderr above)"
-  python3 -c '
-import json
-import sys
-
-data = json.loads(sys.argv[1])
-print(" ".join(sorted(data.keys())))
-' "$rendered"
-}
-
 agent_all_names() {
   local f names=()
   for f in "$ETC_DIR/agents/"*.md; do
@@ -254,31 +241,6 @@ agent_all_names() {
     names+=("$(basename "$f" .md)")
   done
   printf '%s' "${names[*]-}"
-}
-
-canonical_expand() {
-  local sel="$1" all="$2"
-  if [ -z "$sel" ] || [ "$sel" = all ]; then
-    printf '%s' "$all"
-    return 0
-  fi
-  local -a all_arr sel_arr out
-  read -r -a all_arr <<< "$all"
-  read -r -a sel_arr <<< "$sel"
-  out=()
-  local a s known
-  for a in "${all_arr[@]}"; do
-    known=0
-    for s in "${sel_arr[@]}"; do
-      if [ "$s" = "$a" ]; then
-        known=1
-      fi
-    done
-    if [ "$known" = 1 ]; then
-      out+=("$a")
-    fi
-  done
-  printf '%s' "${out[*]-}"
 }
 
 canonical_store() {
@@ -2615,7 +2577,8 @@ run_wizard() {
   fi
   WIZ_SECTIONS=("${SECTIONS[@]}")
   note "sections: ${WIZ_SECTIONS[*]}"
-  local i=0 fn
+  local i=0 fn hn
+  local -a wiz_hist=()
   while [ "$i" -lt "${#WIZ_SECTIONS[@]}" ]; do
     fn="step_${WIZ_SECTIONS[i]//-/_}"
     header "$(section_title "${WIZ_SECTIONS[i]}")" "$((i+1))" "${#WIZ_SECTIONS[@]}"
@@ -2623,10 +2586,15 @@ run_wizard() {
     nav_prompt
     case "$NAV" in
       next)
+        wiz_hist+=("$i")
         i=$((i+1))
         ;;
       back)
-        if [ "$i" -gt 0 ]; then
+        hn="${#wiz_hist[@]}"
+        if [ "$hn" -gt 0 ]; then
+          i="${wiz_hist[hn-1]}"
+          unset "wiz_hist[hn-1]"
+        elif [ "$i" -gt 0 ]; then
           i=$((i-1))
         fi
         ;;
@@ -2636,6 +2604,9 @@ run_wizard() {
         return 0
         ;;
       *)
+        if [ "$((NAV-1))" -ne "$i" ]; then
+          wiz_hist+=("$i")
+        fi
         i=$((NAV-1))
         ;;
     esac

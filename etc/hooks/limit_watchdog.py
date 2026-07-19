@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import calendar
 import fcntl
 import json
 import os
@@ -35,6 +36,8 @@ MARKER_TTL = 8 * 24 * 3600
 EPOCH_RE = re.compile(r"limit reached\|(\d{10,13})")
 RESETS_RE = re.compile(rb'"resets?At"\s*:\s*"?(\d{10,13})')
 PREFILTER = (b"usage limit", b"usage credit")
+STALE_GRACE = 300
+STALE_STATES = ("working", "running", "blocked")
 
 
 def log(msg):
@@ -316,6 +319,153 @@ def resume_pass():
         injected += 1
 
 
+def parse_iso(value):
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        v = value
+        if v.endswith("Z"):
+            v = v[:-1] + "+00:00"
+        return calendar.timegm(time.strptime(v[:19], "%Y-%m-%dT%H:%M:%S"))
+    except (ValueError, OverflowError):
+        return None
+
+
+def local_sessions():
+    result = {}
+    sdir = os.path.join(CFG, "sessions")
+    for name in farm.entries(sdir):
+        if not name.endswith(".json"):
+            continue
+        rec = load_json(os.path.join(sdir, name))
+        if not rec:
+            continue
+        sid = rec.get("sessionId")
+        if isinstance(sid, str) and sid:
+            result.setdefault(sid, []).append(rec)
+    return result
+
+
+def pid_alive_with_start(pid, proc_start):
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    try:
+        with open("/proc/%d/stat" % pid) as fh:
+            raw = fh.read()
+    except OSError:
+        return False
+    close = raw.rfind(")")
+    if close < 0:
+        return False
+    fields = raw[close + 2:].split()
+    if len(fields) < 20:
+        return False
+    if proc_start is None:
+        return True
+    try:
+        return int(str(fields[19])) == int(float(str(proc_start)))
+    except (TypeError, ValueError):
+        return str(fields[19]) == str(proc_start)
+
+
+def session_alive(rec):
+    return pid_alive_with_start(rec.get("pid"), rec.get("procStart"))
+
+
+def daemon_roster_mentions(sid, job_id):
+    status = load_json(os.path.join(CFG, "daemon.status.json"))
+    if not isinstance(status, dict):
+        return False
+    workers = status.get("workers")
+    try:
+        blob = json.dumps(workers)
+    except (TypeError, ValueError):
+        return False
+    return (sid and sid in blob) or (job_id and job_id in blob)
+
+
+def job_owned_locally(job_id, state, sessions_by_id):
+    sid = state.get("sessionId")
+    if not isinstance(sid, str) or not sid or not farm.SID_RE.match(sid):
+        return False
+    return sid in sessions_by_id
+
+
+def job_alive(job_id, state, sessions_by_id):
+    sid = state.get("sessionId")
+    recs = sessions_by_id.get(sid, []) if isinstance(sid, str) else []
+    for rec in recs:
+        if session_alive(rec):
+            return True
+    if daemon_roster_mentions(sid, job_id):
+        return True
+    return False
+
+
+def job_stale_seconds(job_path, state):
+    updated = parse_iso(state.get("updatedAt"))
+    if updated is None:
+        try:
+            updated = os.path.getmtime(job_path)
+        except OSError:
+            return 0
+    return time.time() - updated
+
+
+def reconcile_locked(path, expect_state, detail_suffix):
+    try:
+        fh = open(path, "r+")
+    except OSError:
+        return None
+    with fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            rec = json.load(fh)
+        except (OSError, ValueError):
+            return None
+        if rec.get("state") != expect_state:
+            return None
+        rec["state"] = "failed"
+        rec["detail"] = (rec.get("detail") or "") + detail_suffix
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w") as tfh:
+                json.dump(rec, tfh)
+            os.replace(tmp, path)
+        except OSError:
+            return None
+        return rec
+
+
+def reconcile_stale_jobs():
+    farm_dir = os.path.join(CFG, "jobs")
+    if not os.path.isdir(farm_dir):
+        return
+    sessions_by_id = local_sessions()
+    for name in farm.entries(farm_dir):
+        if name == "settled" or not farm.SID_RE.match(name):
+            continue
+        job_dir = os.path.join(farm_dir, name)
+        if not os.path.isdir(job_dir):
+            continue
+        state_path = os.path.join(job_dir, "state.json")
+        state = load_json(state_path)
+        if not state or state.get("state") not in STALE_STATES:
+            continue
+        if not job_owned_locally(name, state, sessions_by_id):
+            continue
+        if job_stale_seconds(state_path, state) < STALE_GRACE:
+            continue
+        if job_alive(name, state, sessions_by_id):
+            continue
+        if reconcile_locked(state_path, state.get("state"),
+                             "; reconciled: no live process"):
+            log("reconciled stale job: id=%s prevState=%s" % (
+                name, state.get("state")))
+
+
 def prune():
     cutoff = time.time() - MARKER_TTL
     for name in farm.entries(MARKERS):
@@ -342,12 +492,19 @@ def daemon():
     while True:
         try:
             farm.refresh_all()
+        except Exception as exc:
+            log("loop error (refresh_all): %r" % exc)
+        try:
+            reconcile_stale_jobs()
+        except Exception as exc:
+            log("loop error (reconcile_stale_jobs): %r" % exc)
+        try:
             scan_transcripts(offsets)
             if AUTORESUME:
                 resume_pass()
             prune()
         except Exception as exc:
-            log("loop error: %r" % exc)
+            log("loop error (scan/resume/prune): %r" % exc)
         time.sleep(POLL)
 
 

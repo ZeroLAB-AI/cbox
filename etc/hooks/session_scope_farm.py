@@ -29,6 +29,7 @@ def applicable():
 
 
 def cwd_in_root(cwd):
+    cwd = os.path.normpath(cwd)
     return cwd == ROOT or cwd.startswith(ROOT + "/")
 
 
@@ -130,7 +131,30 @@ def recently_written(path):
     return False
 
 
-def absorb_dir(local, hostdir, target, allow_convert):
+def merge_file(src, name, dfd):
+    cutoff = time.time() - ABSORB_SETTLE_SECONDS
+    try:
+        src_mtime = os.path.getmtime(src)
+        dst_mtime = os.lstat(name, dir_fd=dfd).st_mtime
+    except OSError:
+        return False
+    if src_mtime > cutoff or dst_mtime > cutoff:
+        return False
+    if src_mtime > dst_mtime:
+        try:
+            os.replace(src, name, dst_dir_fd=dfd)
+        except OSError:
+            return False
+        return True
+    return False
+
+
+def absorb_dir(local, hostdir, target, allow_convert, merge=False):
+    try:
+        if os.path.ismount(local):
+            return
+    except OSError:
+        return
     try:
         names = os.listdir(local)
     except OSError:
@@ -140,27 +164,38 @@ def absorb_dir(local, hostdir, target, allow_convert):
             return
         if recently_written(local) or has_open_fds(local):
             return
+    if os.path.islink(hostdir):
+        return
     try:
         os.makedirs(hostdir, exist_ok=True)
+        dfd = os.open(hostdir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
         return
-    clean = True
-    for name in names:
-        src = os.path.join(local, name)
-        dst = os.path.join(hostdir, name)
-        if os.path.lexists(dst):
-            clean = False
-            continue
-        try:
-            shutil.move(src, dst)
-        except OSError:
-            clean = False
-    if clean:
-        try:
-            os.rmdir(local)
-            os.symlink(target, local)
-        except OSError:
-            pass
+    try:
+        clean = True
+        for name in names:
+            src = os.path.join(local, name)
+            try:
+                os.lstat(name, dir_fd=dfd)
+                collides = True
+            except OSError:
+                collides = False
+            if collides:
+                if not merge or not merge_file(src, name, dfd):
+                    clean = False
+                continue
+            try:
+                os.rename(src, name, dst_dir_fd=dfd)
+            except OSError:
+                clean = False
+        if clean:
+            try:
+                os.rmdir(local)
+                os.symlink(target, local)
+            except OSError:
+                pass
+    finally:
+        os.close(dfd)
 
 
 def prune_dangling(farm):
@@ -240,11 +275,17 @@ def refresh_tasks(allow_convert):
     prune_dangling(farm)
 
 
-def job_ref(job_dir):
+def job_state(job_dir):
     try:
         with open(os.path.join(job_dir, "state.json")) as fh:
-            state = json.load(fh)
+            return json.load(fh)
     except (OSError, ValueError):
+        return None
+
+
+def job_ref(job_dir):
+    state = job_state(job_dir)
+    if state is None:
         return None
     path = state.get("linkScanPath") or ""
     marker = "/projects/"
@@ -263,12 +304,23 @@ def job_ref(job_dir):
 
 def job_in_scope(job_dir, scoped):
     ref = job_ref(job_dir)
-    if ref is None:
+    if ref is not None:
+        slug, sid = ref
+        if slug not in scoped:
+            return False
+        return os.path.exists(os.path.join(CFG, "projects", slug, sid + ".jsonl"))
+    state = job_state(job_dir)
+    if state is None:
         return False
-    slug, sid = ref
-    if slug not in scoped:
+    sid = str(state.get("sessionId") or "")
+    return bool(SID_RE.match(sid)) and session_slug_in_farm(sid) is not None
+
+
+def job_terminal(job_dir):
+    state = job_state(job_dir)
+    if state is None:
         return False
-    return os.path.exists(os.path.join(CFG, "projects", slug, sid + ".jsonl"))
+    return state.get("state") in ("done", "failed", "killed")
 
 
 def jobs_sync(host, farm, relbase, allow_convert, scoped):
@@ -284,7 +336,8 @@ def jobs_sync(host, farm, relbase, allow_convert, scoped):
         link = os.path.join(farm, name)
         target = relbase + "/" + name
         if os.path.isdir(link) and not os.path.islink(link):
-            absorb_dir(link, full, target, allow_convert)
+            if job_terminal(link):
+                absorb_dir(link, full, target, allow_convert, True)
         else:
             make_link(link, target)
     if allow_convert:
@@ -294,11 +347,12 @@ def jobs_sync(host, farm, relbase, allow_convert, scoped):
             link = os.path.join(farm, name)
             if os.path.islink(link) or not os.path.isdir(link):
                 continue
-            ref = job_ref(link)
-            if ref and ref[0] in scoped and \
-                    os.path.islink(os.path.join(CFG, "projects", ref[0])):
-                absorb_dir(link, os.path.join(host, name),
-                           relbase + "/" + name, True)
+            if not job_in_scope(link, scoped):
+                continue
+            if not job_terminal(link):
+                continue
+            absorb_dir(link, os.path.join(host, name),
+                       relbase + "/" + name, True, True)
     prune_dangling(farm)
 
 

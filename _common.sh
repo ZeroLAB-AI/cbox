@@ -46,3 +46,43 @@ _cbox_workspace_file_check() {
 _cbox_is_rootless_docker() {
   docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless
 }
+
+mcp_all_names() {
+  local etc="${ETC_DIR:-$INSTALL_DIR/etc}"
+  [ -f "$etc/mcp/delegates.json" ] || return 0
+  local rendered
+  rendered="$(python3 "$etc/mcp/render_mcp.py" "$etc/mcp/delegates.json" all "$HOME/.claude/hooks" off claude)" \
+    || die "mcp_all_names: render_mcp.py rejected $etc/mcp/delegates.json (malformed registry entry - see stderr above)"
+  python3 -c '
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+print(" ".join(sorted(data.keys())))
+' "$rendered"
+}
+
+canonical_expand() {
+  local sel="$1" all="$2"
+  if [ -z "$sel" ] || [ "$sel" = all ]; then
+    printf '%s' "$all"
+    return 0
+  fi
+  local -a all_arr sel_arr out
+  read -r -a all_arr <<< "$all"
+  read -r -a sel_arr <<< "$sel"
+  out=()
+  local a s known
+  for a in "${all_arr[@]}"; do
+    known=0
+    for s in "${sel_arr[@]}"; do
+      if [ "$s" = "$a" ]; then
+        known=1
+      fi
+    done
+    if [ "$known" = 1 ]; then
+      out+=("$a")
+    fi
+  done
+  printf '%s' "${out[*]-}"
+}
