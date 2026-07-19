@@ -1,6 +1,6 @@
 # DIARY_TEMPLATE — norm for the project diary
 
-Claude's private space in the project: `./.claude/DIARY.md` (dated entries, newest on top). **This is not a report.** It is the zone where Claude keeps the project's own personality — recording exceptional events and its own experience: moments that define the relationship to the project, surprises, joys, doubts, breakthroughs.
+The agent's private space in the project: `./.cbox/DIARY.md` (dated entries, newest on top). **This is not a report.** It is the zone where the agent keeps the project's own personality — recording exceptional events and its own experience: moments that define the relationship to the project, surprises, joys, doubts, breakthroughs.
 
 ## Division of roles
 

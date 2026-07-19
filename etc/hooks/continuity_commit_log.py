@@ -16,9 +16,27 @@ def _project_dir(payload):
     if env_dir:
         return env_dir
     ti = payload.get("tool_input") or {}
-    cwd = ti.get("cwd") or payload.get("cwd")
+    cwd = payload.get("cwd") or ti.get("cwd")
     if cwd:
         return cwd
+    return None
+
+
+def _command_text(command):
+    if isinstance(command, str):
+        return command
+    if isinstance(command, list):
+        return " ".join(c for c in command if isinstance(c, str))
+    return ""
+
+
+def _brain_dir(proj):
+    cbox_dir = os.path.join(proj, ".cbox")
+    claude_dir = os.path.join(proj, ".claude")
+    if os.path.isfile(os.path.join(cbox_dir, "LEDGER.md")):
+        return cbox_dir
+    if os.path.isfile(os.path.join(claude_dir, "LEDGER.md")):
+        return claude_dir
     return None
 
 
@@ -170,10 +188,11 @@ def main():
 
     try:
         tool_name = payload.get("tool_name", "")
-        if tool_name != "Bash":
+        known_shell_tools = ("Bash", "shell", "local_shell", "exec", "exec_command", "unified_exec")
+        if tool_name not in known_shell_tools:
             sys.exit(0)
         ti = payload.get("tool_input") or {}
-        command = ti.get("command") or ""
+        command = _command_text(ti.get("command"))
         if "git commit" not in command:
             sys.exit(0)
 
@@ -181,11 +200,10 @@ def main():
         if not proj or not os.path.isdir(proj):
             sys.exit(0)
 
-        ledger_path = os.path.join(proj, ".claude", "LEDGER.md")
-        if not os.path.isfile(ledger_path):
+        claude_dir = _brain_dir(proj)
+        if not claude_dir:
             sys.exit(0)
 
-        claude_dir = os.path.join(proj, ".claude")
         state_path = os.path.join(claude_dir, ".continuity_state.json")
         changelog_path = os.path.join(claude_dir, "CHANGELOG.md")
 

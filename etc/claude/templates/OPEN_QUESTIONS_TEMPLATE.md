@@ -1,6 +1,6 @@
 # OPEN_QUESTIONS_TEMPLATE — norm and template for open questions
 
-User-facing file: `./.claude/OPEN_QUESTIONS.md`. An ALWAYS-CURRENT list of the project's open questions — a quick overview for the user without reading the LEDGER.
+User-facing file: `./.cbox/OPEN_QUESTIONS.md`. An ALWAYS-CURRENT list of the project's open questions — a quick overview for the user without reading the LEDGER.
 
 ## Format
 

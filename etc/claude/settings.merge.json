@@ -15,17 +15,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cat @HOME@/.claude/hooks/orchestrator-global.txt"
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh -c 'cat \"$CLAUDE_PROJECT_DIR/.claude/LEDGER.md\" 2>/dev/null || true'",
+            "command": "python3 @HOME@/.claude/hooks/continuity_session_start.py",
             "timeout": 10,
-            "statusMessage": "ledger inject"
+            "statusMessage": "continuity session start"
           }
         ]
       }

@@ -23,6 +23,8 @@ CODEX_MCP_MARK_START="# >>> cbox codex-mcp >>>"
 CODEX_MCP_MARK_END="# <<< cbox codex-mcp <<<"
 CODEX_MCP_LEGACY_MARK_START="# >>> claude-box codex-mcp >>>"
 CODEX_MCP_LEGACY_MARK_END="# <<< claude-box codex-mcp <<<"
+CLAUDE_MD_KERNEL_MARK_START="<!-- cbox:conduct-kernel:begin -->"
+CLAUDE_MD_KERNEL_MARK_END="<!-- cbox:conduct-kernel:end -->"
 
 CBOX_COLOR=0
 if [ -t 1 ] && [ -t 2 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ] \
@@ -232,8 +234,17 @@ print_settings_help() {
 }
 
 mcp_all_names() {
-  [ -f "$ETC_DIR/mcp/mcp-servers.json" ] || return 0
-  python3 -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1])).keys()))' "$ETC_DIR/mcp/mcp-servers.json"
+  [ -f "$ETC_DIR/mcp/delegates.json" ] || return 0
+  local rendered
+  rendered="$(python3 "$ETC_DIR/mcp/render_mcp.py" "$ETC_DIR/mcp/delegates.json" all "$HOME/.claude/hooks" off claude)" \
+    || die "mcp_all_names: render_mcp.py rejected $ETC_DIR/mcp/delegates.json (malformed registry entry - see stderr above)"
+  python3 -c '
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+print(" ".join(sorted(data.keys())))
+' "$rendered"
 }
 
 agent_all_names() {
@@ -328,6 +339,15 @@ conf_defaults() {
   : "${CBOX_BASHRC:=1}"
   : "${CBOX_MCP_SERVERS:=all}"
   : "${CBOX_CODEX_PROGRESS_MODE:=off}"
+  : "${CBOX_LOCAL_MODEL:=off}"
+  : "${CBOX_LOCAL_MODEL_URL:=}"
+  : "${CBOX_LOCAL_MODEL_NAME:=}"
+  export CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
+  : "${CBOX_LIMIT_AUTORESUME:=off}"
+  : "${CBOX_LIMIT_RESUME_DELAY:=300}"
+  : "${CBOX_LIMIT_RESUME_PROMPT:=pokracuj}"
+  : "${CBOX_LIMIT_RESUME_STAGGER:=30}"
+  : "${CBOX_LIMIT_RESUME_MAX_PER_DAY:=10}"
   : "${CBOX_AGENTS:=all}"
   : "${CBOX_CODEX_MCP:=0}"
   : "${CBOX_GITCONFIG:=0}"
@@ -345,6 +365,7 @@ conf_defaults() {
   : "${CBOX_GIT:=1}"
   : "${CBOX_DIARY:=1}"
   : "${CBOX_OPEN_QUESTIONS:=1}"
+  : "${CBOX_CONTEXT_PROFILE:=full}"
   if [ -z "${CBOX_WORKDIR:-}" ]; then
     CBOX_WORKDIR="${CBOX_WORKSPACES%% *}"
     [ -n "$CBOX_WORKDIR" ] || CBOX_WORKDIR="$HOME"
@@ -392,6 +413,14 @@ conf_save() {
     printf 'CBOX_BASHRC=%q\n' "$CBOX_BASHRC"
     printf 'CBOX_MCP_SERVERS=%q\n' "$CBOX_MCP_SERVERS"
     printf 'CBOX_CODEX_PROGRESS_MODE=%q\n' "$CBOX_CODEX_PROGRESS_MODE"
+    printf 'CBOX_LOCAL_MODEL=%q\n' "$CBOX_LOCAL_MODEL"
+    printf 'CBOX_LOCAL_MODEL_URL=%q\n' "$CBOX_LOCAL_MODEL_URL"
+    printf 'CBOX_LOCAL_MODEL_NAME=%q\n' "$CBOX_LOCAL_MODEL_NAME"
+    printf 'CBOX_LIMIT_AUTORESUME=%q\n' "$CBOX_LIMIT_AUTORESUME"
+    printf 'CBOX_LIMIT_RESUME_DELAY=%q\n' "$CBOX_LIMIT_RESUME_DELAY"
+    printf 'CBOX_LIMIT_RESUME_PROMPT=%q\n' "$CBOX_LIMIT_RESUME_PROMPT"
+    printf 'CBOX_LIMIT_RESUME_STAGGER=%q\n' "$CBOX_LIMIT_RESUME_STAGGER"
+    printf 'CBOX_LIMIT_RESUME_MAX_PER_DAY=%q\n' "$CBOX_LIMIT_RESUME_MAX_PER_DAY"
     printf 'CBOX_AGENTS=%q\n' "$CBOX_AGENTS"
     printf 'CBOX_CODEX_MCP=%q\n' "$CBOX_CODEX_MCP"
     printf 'CBOX_GITCONFIG=%q\n' "$CBOX_GITCONFIG"
@@ -409,6 +438,7 @@ conf_save() {
     printf 'CBOX_GIT=%q\n' "$CBOX_GIT"
     printf 'CBOX_DIARY=%q\n' "$CBOX_DIARY"
     printf 'CBOX_OPEN_QUESTIONS=%q\n' "$CBOX_OPEN_QUESTIONS"
+    printf 'CBOX_CONTEXT_PROFILE=%q\n' "$CBOX_CONTEXT_PROFILE"
   } > "$tmp"
   chmod 0644 "$tmp"
   mv "$tmp" "$out"
@@ -1040,9 +1070,16 @@ PYEOF
 
 merge_mcp_json() {
   local target="$1" servers="$2" selected="$3" out="$4" shim_mode="${5:-off}" shim_home="${6:-$HOME}"
-  python3 - "$target" "$servers" "$selected" "$out" "$shim_mode" "$shim_home" <<'PYEOF'
+  local progress_flag="off"
+  [ "$shim_mode" = shim ] && progress_flag="on"
+  local hooks_dir="$shim_home/.claude/hooks"
+  local rendered_file
+  rendered_file="$(mktemp)"
+  python3 "$ETC_DIR/mcp/render_mcp.py" "$servers" "$selected" "$hooks_dir" "$progress_flag" claude > "$rendered_file" \
+    || { rm -f "$rendered_file"; die "render_mcp.py failed for $servers"; }
+  python3 - "$target" "$selected" "$out" "$rendered_file" "$servers" <<'PYEOF'
 import json, os, sys
-target, servers_path, selected_raw, out, mode, home = sys.argv[1:7]
+target, selected_raw, out, rendered_file, servers_file = sys.argv[1:6]
 selected = set(selected_raw.split())
 data = {}
 if os.path.isfile(target):
@@ -1051,29 +1088,21 @@ if os.path.isfile(target):
             data = json.load(f)
     except ValueError:
         sys.exit("setup: cannot parse " + target)
-with open(servers_path) as f:
-    servers = json.load(f)
-
-def shape(name, spec):
-    if mode != "shim" or not name.startswith("codex-"):
-        return spec
-    if not isinstance(spec, dict) or spec.get("command") != "codex":
-        return spec
-    wrapped = dict(spec)
-    wrapped["command"] = "python3"
-    wrapped["args"] = [home + "/.claude/hooks/codex_mcp_shim.py", "--", "codex"] + list(spec.get("args") or [])
-    return wrapped
-
+with open(rendered_file) as f:
+    rendered = json.load(f)
+with open(servers_file) as f:
+    delegates = json.load(f)
+known_cbox = set(delegates.keys())
 mcp = data.setdefault("mcpServers", {})
-for name, spec in servers.items():
-    if name in selected:
-        mcp[name] = shape(name, spec)
-    else:
+for name in list(mcp.keys()):
+    if name in known_cbox and name not in rendered:
         mcp.pop(name, None)
+mcp.update(rendered)
 with open(out, "w") as f:
     json.dump(data, f, indent=2, ensure_ascii=False)
     f.write("\n")
 PYEOF
+  rm -f "$rendered_file"
 }
 
 bashrc_block_file() {
@@ -1497,7 +1526,7 @@ step_bashrc() {
 }
 
 mcp_apply_selection() {
-  local servers_file="$ETC_DIR/mcp/mcp-servers.json"
+  local servers_file="$ETC_DIR/mcp/delegates.json"
   local expanded shim_mode="${CBOX_CODEX_PROGRESS_MODE:-off}"
   [ "${CBOX_CLAUDE_MODE:-mount}" = mount ] || shim_mode=off
   expanded="$(canonical_expand "$CBOX_MCP_SERVERS" "$(mcp_all_names)")"
@@ -1522,7 +1551,7 @@ mcp_apply_selection() {
 
 step_mcp_servers() {
   echo "== section: mcp-servers =="
-  local servers_file="$ETC_DIR/mcp/mcp-servers.json"
+  local servers_file="$ETC_DIR/mcp/delegates.json"
   if [ ! -f "$servers_file" ]; then
     note "missing $servers_file; section skipped"
     return 0
@@ -1559,17 +1588,17 @@ step_mcp_servers() {
 }
 
 codex_progress_ensure_hooks_dep() {
-  [ "$CBOX_CODEX_PROGRESS_MODE" = shim ] || return 0
   [ "$CBOX_CLAUDE_MODE" = mount ] || return 0
   [ -d "$ETC_DIR/hooks" ] || return 0
   [ -f "$ETC_DIR/mcp/codex_mcp_shim.py" ] || return 0
   container_target_ok || return 0
   gen_hooks_dir
-  staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 codex_mcp_shim.py || true
+  staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 codex_mcp_shim.py conduct-kernel.txt codex_notify.py || true
 }
 
 step_codex_progress() {
   echo "== section: codex-progress =="
+  note "the tier-injecting relay (codex_mcp_shim.py) is always on for codex-* mcp servers; this toggle only controls whether it also translates codex events into MCP progress notifications"
   local prev="$CBOX_CODEX_PROGRESS_MODE"
   ask_choice "setup: codex progress relay" "$CBOX_CODEX_PROGRESS_MODE" off shim
   CBOX_CODEX_PROGRESS_MODE="$ASK_VALUE"
@@ -1577,18 +1606,70 @@ step_codex_progress() {
     warn "codex progress relay needs claude mount mode (the shim lives in ~/.claude/hooks); keeping off"
     CBOX_CODEX_PROGRESS_MODE=off
   fi
-  if [ "$CBOX_CODEX_PROGRESS_MODE" = shim ]; then
-    section_dep_gate codex-progress
-    if [ "$DEP_ACTION" = dictate ]; then
-      note "hooks dependency: $DEP_REASON"
-    fi
+  section_dep_gate codex-progress
+  if [ "$DEP_ACTION" = dictate ]; then
+    note "hooks dependency: $DEP_REASON"
   fi
-  [ "$CBOX_CODEX_PROGRESS_MODE" != "$prev" ] || return 0
   codex_progress_ensure_hooks_dep
+  [ "$CBOX_CODEX_PROGRESS_MODE" != "$prev" ] || return 0
   if container_target_ok; then
     mcp_apply_selection
   fi
   note "host claude picks the change up on next start; the container needs re-bless + restart (~/.claude.json bind pins the old inode)"
+}
+
+step_local_model() {
+  echo "== section: local-model =="
+  note "off by default; a text-only MCP delegate (local-qwen) backed by an OpenAI-compatible endpoint such as ollama - see etc/docs/LOCAL_MODEL_RUNBOOK.md"
+  note "ollama runs outside cbox; local-qwen is absent from the rendered mcp server list unless CBOX_LOCAL_MODEL_URL is set, regardless of CBOX_MCP_SERVERS"
+  local prev_on="$CBOX_LOCAL_MODEL" prev_url="$CBOX_LOCAL_MODEL_URL" prev_name="$CBOX_LOCAL_MODEL_NAME"
+  ask_choice "setup: enable the local model delegate" "$CBOX_LOCAL_MODEL" off on
+  CBOX_LOCAL_MODEL="$ASK_VALUE"
+  if [ "$CBOX_LOCAL_MODEL" = on ]; then
+    ask "setup: local model endpoint url (OpenAI-compatible, e.g. http://ollama:11434 or http://host-gateway:11434)" "$CBOX_LOCAL_MODEL_URL"
+    CBOX_LOCAL_MODEL_URL="$ASK_VALUE"
+    ask "setup: local model name (as known to the endpoint, e.g. qwen2.5:7b)" "$CBOX_LOCAL_MODEL_NAME"
+    CBOX_LOCAL_MODEL_NAME="$ASK_VALUE"
+    if [ -z "$CBOX_LOCAL_MODEL_URL" ] || [ -z "$CBOX_LOCAL_MODEL_NAME" ]; then
+      warn "local model url or name left empty - keeping the delegate off (CBOX_LOCAL_MODEL=off) until both are set"
+      CBOX_LOCAL_MODEL=off
+    fi
+  else
+    CBOX_LOCAL_MODEL_URL=""
+    CBOX_LOCAL_MODEL_NAME=""
+  fi
+  export CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
+  if [ "$CBOX_LOCAL_MODEL" = "$prev_on" ] && [ "$CBOX_LOCAL_MODEL_URL" = "$prev_url" ] \
+      && [ "$CBOX_LOCAL_MODEL_NAME" = "$prev_name" ]; then
+    return 0
+  fi
+  if container_target_ok; then
+    mcp_apply_selection
+  fi
+  note "host claude/codex pick the change up on next start; the container needs re-bless + restart"
+}
+
+autoresume_ensure_hooks() {
+  [ "$CBOX_LIMIT_AUTORESUME" = on ] || return 0
+  [ "$CBOX_CLAUDE_MODE" = mount ] || return 0
+  [ -d "$ETC_DIR/hooks" ] || return 0
+  container_target_ok || return 0
+  gen_hooks_dir
+  staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 session_scope_farm.py limit_watchdog.py session_pane_map.py || true
+}
+
+step_autoresume() {
+  echo "== section: autoresume =="
+  local prev="$CBOX_LIMIT_AUTORESUME"
+  ask_choice "setup: session-limit auto-resume (tmux-wrapped sessions, watchdog continues them after the limit resets)" "$CBOX_LIMIT_AUTORESUME" off on
+  CBOX_LIMIT_AUTORESUME="$ASK_VALUE"
+  if [ "$CBOX_LIMIT_AUTORESUME" = on ] && [ "$CBOX_CLAUDE_MODE" != mount ]; then
+    warn "session-limit auto-resume needs claude mount mode (watchdog lives in ~/.claude/hooks); keeping off"
+    CBOX_LIMIT_AUTORESUME=off
+  fi
+  [ "$CBOX_LIMIT_AUTORESUME" != "$prev" ] || return 0
+  autoresume_ensure_hooks
+  note "applies on container recreate; the image rebuild (adds tmux) happens automatically on the next run"
 }
 
 agents_install() {
@@ -1679,7 +1760,7 @@ codex_mcp_block_file() {
     printf '%s\n' "$CODEX_MCP_MARK_START"
     printf '[mcp_servers.claude]\n'
     printf 'command = "python3"\n'
-    printf 'args = ["%s/.claude/hooks/ask_claude_mcp.py"]\n' "$HOME"
+    printf 'args = [%s]\n' "$(_cbox_toml_string "$HOME/.claude/hooks/ask_claude_mcp.py")"
     printf 'startup_timeout_sec = 30\n'
     printf 'tool_timeout_sec = 600\n'
     printf '%s\n' "$CODEX_MCP_MARK_END"
@@ -1735,11 +1816,7 @@ codex_mcp_strip_block() {
 }
 
 codex_mcp_render() {
-  if [ "$CBOX_CODEX_MCP" = 1 ]; then
-    codex_mcp_merge_block "$1"
-  else
-    codex_mcp_strip_block "$1"
-  fi
+  codex_mcp_strip_block "$1"
 }
 
 codex_mcp_apply() {
@@ -1759,7 +1836,7 @@ codex_mcp_apply() {
       note "$target unchanged"
     else
       _cbox_write_local "$target" < "$work"
-      note "updated $target"
+      note "updated $target - [mcp_servers.claude] now lives in the cbox-container profile only; raw codex without --profile cbox-container loses ask-claude"
     fi
   elif [ "$CBOX_CODEX_MODE" = mount ]; then
     target="$CBOX_CODEX_PATH/config.toml"
@@ -1778,7 +1855,7 @@ codex_mcp_apply() {
       note "codex config.toml unchanged in the codex volume"
     else
       docker compose -f "$COMPOSE_FILE" exec -T "$SERVICE" /entrypoint.sh sh -c 'mkdir -p "$HOME/.codex" && cat > "$HOME/.codex/config.toml.cbox" && mv "$HOME/.codex/config.toml.cbox" "$HOME/.codex/config.toml"' < "$work"
-      note "codex config.toml updated in the codex volume"
+      note "codex config.toml updated in the codex volume - [mcp_servers.claude] now lives in the cbox-container profile only"
     fi
   else
     note "container not running; codex volume config not touched - start it and re-run ./setup.sh update codex-mcp"
@@ -1792,8 +1869,46 @@ codex_mcp_ensure_hooks_dep() {
   [ -d "$ETC_DIR/hooks" ] || return 0
   container_target_ok || return 0
   gen_hooks_dir
-  staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 ask_claude_mcp.py || true
+  staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 ask_claude_mcp.py codex_notify.py codex_bump_probe.sh || true
 }
+
+codex_profile_precreate_host_files() {
+  [ "$CBOX_CODEX_MODE" = mount ] || return 0
+  mkdir -p "$CBOX_CODEX_PATH"
+  [ -e "$CBOX_CODEX_PATH/AGENTS.override.md" ] || : > "$CBOX_CODEX_PATH/AGENTS.override.md"
+  [ -e "$CBOX_CODEX_PATH/cbox-container.config.toml" ] || : > "$CBOX_CODEX_PATH/cbox-container.config.toml"
+  [ -e "$CBOX_CODEX_PATH/cbox-host.config.toml" ] || : > "$CBOX_CODEX_PATH/cbox-host.config.toml"
+  [ -e "$CBOX_CODEX_PATH/config.toml" ] || : > "$CBOX_CODEX_PATH/config.toml"
+  [ -e "$CBOX_CODEX_PATH/AGENTS.md" ] || : > "$CBOX_CODEX_PATH/AGENTS.md"
+}
+
+codex_host_profile_render() {
+  local outdir="$1" mode="${2:-global}" root="${3:-}" stage
+  stage="$(mktemp -d)"
+  gen_codex_profile_into "$stage" "$mode" "$root"
+  sed -e 's/^approval_policy = "never"$/approval_policy = "on-request"/' \
+      -e 's/^sandbox_mode = "danger-full-access"$/sandbox_mode = "workspace-write"/' \
+      "$stage/cbox-container.config.toml" > "$stage/cbox-host.config.toml"
+  mkdir -p "$outdir"
+  mv "$stage/cbox-host.config.toml" "$outdir/cbox-host.config.toml"
+  rm -rf "$stage"
+}
+
+codex_profile_apply_host() {
+  [ "$CBOX_CODEX_MODE" = mount ] || return 0
+  container_target_ok || return 0
+  codex_profile_precreate_host_files
+  local stage
+  stage="$(mktemp -d)"
+  codex_host_profile_render "$stage" global ""
+  staged_write "$CBOX_CODEX_PATH/cbox-host.config.toml" "$stage/cbox-host.config.toml" 0644 || true
+  rm -rf "$stage"
+  if [ -f "$GEN_DIR/codex/hooks.json" ]; then
+    staged_write "$CBOX_CODEX_PATH/hooks.json" "$GEN_DIR/codex/hooks.json" 0644 || true
+    note "host codex does not run with --dangerously-bypass-hook-trust (unlike the container); a bare host-side 'codex' or the first 'cbox ai ... codex --host' run skips continuity_session_start.py until you run codex's '/hooks' command once to trust it"
+  fi
+}
+
 
 continuity_ensure_hooks_dep() {
   [ "$CBOX_HISTORY" = 1 ] || return 0
@@ -1801,7 +1916,7 @@ continuity_ensure_hooks_dep() {
   [ -d "$ETC_DIR/hooks" ] || return 0
   container_target_ok || return 0
   gen_hooks_dir
-  staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py || true
+  staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py continuity_session_start.py session-core.txt || true
 }
 
 step_codex_mcp() {
@@ -1869,31 +1984,45 @@ stage_policies_and_templates() {
   done < <(claude_md_template_files)
 }
 
-claude_md_import_lines() {
-  local f
-  while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    printf '@~/.claude/policies/%s\n' "$f"
-  done < <(claude_md_policy_files)
+claude_md_kernel_block_file() {
+  local out="$1"
+  local kernel_src="$ETC_DIR/hooks/conduct-kernel.txt"
+  [ -f "$kernel_src" ] || die "missing conduct-kernel source $kernel_src"
+  local rendered digest
+  rendered="$(mktemp)"
+  apply_name_substitution "$kernel_src" "$rendered"
+  digest="$(sha256sum "$kernel_src" | awk '{print $1}')"
+  digest="${digest:0:16}"
+  {
+    printf '%s\n' "$CLAUDE_MD_KERNEL_MARK_START"
+    cat "$rendered"
+    printf 'Digest: %s\n' "$digest"
+    printf '%s\n' "$CLAUDE_MD_KERNEL_MARK_END"
+  } > "$out"
+  rm -f "$rendered"
 }
 
-append_missing_imports() {
-  local file="$1" line first=1 tmp
+claude_md_merge_kernel_block() {
+  local file="$1" block tmp
+  block="$(mktemp)"
+  claude_md_kernel_block_file "$block"
   tmp="$(mktemp)"
-  cp "$file" "$tmp"
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    if ! grep -qxF "$line" "$tmp"; then
-      if [ "$first" = 1 ]; then
-        if [ -s "$tmp" ]; then
-          printf '\n' >> "$tmp"
-        fi
-        first=0
-      fi
-      printf '%s\n' "$line" >> "$tmp"
+  if grep -qF "$CLAUDE_MD_KERNEL_MARK_START" "$file" && grep -qF "$CLAUDE_MD_KERNEL_MARK_END" "$file"; then
+    awk -v s="$CLAUDE_MD_KERNEL_MARK_START" -v e="$CLAUDE_MD_KERNEL_MARK_END" -v bf="$block" '
+      index($0, s) { skip = 1; while ((getline line < bf) > 0) print line; close(bf); next }
+      index($0, e) { skip = 0; next }
+      skip { next }
+      { print }
+    ' "$file" > "$tmp"
+  else
+    cp "$file" "$tmp"
+    if [ -s "$tmp" ]; then
+      printf '\n' >> "$tmp"
     fi
-  done < <(claude_md_import_lines)
+    cat "$block" >> "$tmp"
+  fi
   mv "$tmp" "$file"
+  rm -f "$block"
 }
 
 step_claude_md() {
@@ -1927,7 +2056,7 @@ step_claude_md() {
     else
       cp "$stage/CLAUDE.md" "$work"
     fi
-    append_missing_imports "$work"
+    claude_md_merge_kernel_block "$work"
     staged_write "$target" "$work" 0644 || true
   else
     mkdir -p "$GEN_DIR/claude/policies" "$GEN_DIR/claude/templates"
@@ -1942,7 +2071,7 @@ step_claude_md() {
     if [ ! -f "$work" ]; then
       cp "$stage/CLAUDE.md" "$work"
     fi
-    append_missing_imports "$work"
+    claude_md_merge_kernel_block "$work"
     note "wrote $GEN_DIR/claude/{policies,templates,CLAUDE.md} (served read-only via bind mounts; restart to pick up)"
   fi
   rm -rf "$stage"
@@ -1984,10 +2113,11 @@ step_hooks() {
   fi
   gen_hooks_dir
   if [ "$CBOX_CLAUDE_MODE" = mount ]; then
-    staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py orchestrator-global.txt codex_scope.container.json ask_claude_mcp.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py || true
+    staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py orchestrator-global.txt conduct-kernel.txt session-core.txt codex_scope.container.json ask_claude_mcp.py codex_notify.py codex_bump_probe.sh codex_mcp_shim.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py continuity_session_start.py session_scope_farm.py limit_watchdog.py session_pane_map.py || true
   else
     note "volume mode: hooks are served read-only from $GEN_DIR/hooks (synced)"
   fi
+  codex_profile_apply_host
 }
 
 step_continuity() {
@@ -1995,7 +2125,7 @@ step_continuity() {
   if [ "$SEC_AUTO" = 1 ]; then
     note "auto: keeping CBOX_HISTORY=$CBOX_HISTORY CBOX_GIT=$CBOX_GIT CBOX_DIARY=$CBOX_DIARY CBOX_OPEN_QUESTIONS=$CBOX_OPEN_QUESTIONS"
   else
-    ask_choice "setup: history y/n (track project state in ./.claude/ LEDGER + daily PROGRESS - mandatory pair)" "$([ "$CBOX_HISTORY" = 1 ] && echo y || echo n)" y n
+    ask_choice "setup: history y/n (track project state in ./.cbox/ LEDGER + daily PROGRESS - mandatory pair)" "$([ "$CBOX_HISTORY" = 1 ] && echo y || echo n)" y n
     case "$ASK_VALUE" in
       y) CBOX_HISTORY=1 ;;
       n) CBOX_HISTORY=0 ;;
@@ -2027,6 +2157,8 @@ step_continuity() {
       y) CBOX_OPEN_QUESTIONS=1 ;;
       n) CBOX_OPEN_QUESTIONS=0 ;;
     esac
+    ask_choice "setup: session context profile (full = complete driver core + progress history each startup; light = conduct kernel + one-writer + ledger RESUME + digest only, no orchestration detail, no progress)" "$CBOX_CONTEXT_PROFILE" full light
+    CBOX_CONTEXT_PROFILE="$ASK_VALUE"
   fi
   section_dep_gate continuity
   if [ "$DEP_ACTION" = dictate ]; then
@@ -2384,6 +2516,7 @@ default_preset_set() {
   CBOX_GIT=1
   CBOX_DIARY=1
   CBOX_OPEN_QUESTIONS=1
+  CBOX_CONTEXT_PROFILE=full
 }
 
 default_preset_validate_paths() {
@@ -2428,7 +2561,7 @@ default_preset_summary() {
   note "  mcp-servers: $CBOX_MCP_SERVERS  agents: $CBOX_AGENTS  codex-mcp: $CBOX_CODEX_MCP"
   note "  claude target: $CBOX_CLAUDE_TARGET  codex version: $CBOX_CODEX_VERSION  bins scope: $CBOX_BINS_SCOPE"
   note "  container mode: $CBOX_MODE  restart policy: $CBOX_RESTART_POLICY"
-  note "  history: $CBOX_HISTORY  git: $CBOX_GIT  diary: $CBOX_DIARY  open-questions: $CBOX_OPEN_QUESTIONS"
+  note "  history: $CBOX_HISTORY  git: $CBOX_GIT  diary: $CBOX_DIARY  open-questions: $CBOX_OPEN_QUESTIONS  context-profile: $CBOX_CONTEXT_PROFILE"
 }
 
 apply_default_setup() {
@@ -2588,9 +2721,13 @@ run_config() {
   if [ "$CBOX_HISTORY" = 1 ] && [ "$CBOX_CLAUDE_MODE" = mount ]; then
     note "continuity hooks staging is skipped in --config mode; apply with ./setup.sh update continuity"
   fi
+  if [ "$CBOX_CODEX_MODE" = mount ]; then
+    note "codex managed profile host files (~/.codex/cbox-container.config.toml, AGENTS.override.md, cbox-host.config.toml) are skipped in --config mode; apply with ./setup.sh update hooks"
+  fi
   conf_save
   regen_all
   conf_load
+  codex_profile_precreate_host_files
   if [ "$CBOX_CLAUDE_MODE" = volume ]; then
     agents_install
     step_claude_md

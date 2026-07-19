@@ -25,8 +25,23 @@ Third-Party Notices
 The following third-party software is installed via distribution packages at
 container build or run time and is not distributed with this repository:
 
-- tinyproxy (GPL-2.0)
-- socat (GPL-2.0)
+- ca-certificates (GPL-2.0-or-later; Mozilla CA data MPL-2.0)
+- curl (curl license)
+- dante-server (BSD-3-Clause)
+- git (GPL-2.0-only)
+- gosu (Apache-2.0)
+- jq (MIT)
+- netcat-openbsd (BSD-3-Clause)
+- openssh-client (OpenSSH BSD-style)
+- python3 / python3-venv (PSF-2.0)
+- ripgrep (MIT OR Unlicense)
+- socat (GPL-2.0-or-later)
+- supervisor (BSD-4-Clause AND BSD-3-Clause-Clear)
+- tinyproxy (GPL-2.0-or-later)
+- tmux (ISC)
+- wl-clipboard (GPL-3.0-or-later)
+- xclip (GPL-2.0-or-later)
+- xsel (HPND-sell-variant)
 
 Claude Code (Anthropic) and Codex CLI (OpenAI) binaries are downloaded at
 image build time from their official distribution sources and remain subject

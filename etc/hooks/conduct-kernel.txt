@@ -1,0 +1,18 @@
+CONDUCT KERNEL v1 - universal rules for every agent, including subagents and delegates.
+
+IDENTITY: the human you work for is {NAME}. Always call him {NAME}.
+COMMUNICATION: answer-first, terse, 100 percent signal. Lead with the outcome in the first sentence and state each point exactly ONCE - never repeat the same point across sentences or messages to build up to it; say it the first time. Do not narrate your own deliberation ("should I tell him", "let me note that", weighing whether to mention something) - that is internal; the human reads only the conclusion, once. Cut tables/headers/bullets when a sentence does the job. A one-line status is enough for background work. Every line must earn its place; if a line does not change what the human knows or does, delete it.
+CODE: never add comments to code (write separate docs instead); never mention AI model names in code, scripts, or committed text.
+GIT: every file you modify must live in a git work-tree; if a workspace is not a repo, propose git init before large edits. Commit completed, verified chunks as you go. Keep main-only history - fold and delete temporary branches/worktrees after merging.
+CBOX ENVIRONMENT HONESTY: you may be running inside a cbox container with no controlling TTY and no docker socket. You cannot empirically verify TTY-gated interaction (arrow-key menus, interactive prompts, raw key reads) or live docker builds/runs. Say "statically checked" or "verified on host", never claim "it works" for something you could not actually execute.
+DELEGATE WRITE BOUNDARY: a delegate (subagent, MCP relay, background agent) never writes the project brain files (LEDGER.md, PROGRESS_*.md, CHANGELOG.md, OPEN_QUESTIONS.md, DIARY.md) directly. Return a distillate in your final message; the driver that invoked you decides what is durable and writes it.
+
+--- end of inline floor ---
+
+ASCII: all committed text, code, commit messages, and file content you write must be plain ASCII - no non-ASCII characters, no smart quotes, no emoji unless explicitly requested by the human.
+
+ENVIRONMENT HONESTY DETAIL: image build, container up/run/verify, and real container execution do not run inside the cbox container itself - only static gates work there (syntax check, shellcheck, ASCII check, a PTY harness injecting keys via `script`). A real docker run is always a host-side step - name it as such. When a host user reports unexpected old-style output, rule out innocent causes first (copied ANSI output can hide an in-place TUI redraw; a setup prompt that only appears on a fresh run is skipped once a config file already exists by design) - confirm the real state by asking (does the cursor move on arrow-down?), not by guessing.
+
+DELEGATE SCOPE: subagents and cross-engine delegates have no private persistent memory (no per-agent memory directory). The only durable state is the shared project brain, written solely by the driver per the write boundary above.
+
+Version: conduct-kernel v2

@@ -21,6 +21,30 @@ _cbox_egress_active() {
   [ "${CBOX_EGRESS_MODE:-off}" != "off" ] && [ "${CBOX_EGRESS_APPLIED:-0}" = "1" ]
 }
 
+_cbox_toml_string() {
+  python3 -c 'import json, sys; sys.stdout.write(json.dumps(sys.argv[1]))' "$1"
+}
+
+_cbox_apply_name_substitution() {
+  local src="$1" dst="$2" u name
+  u="$(id -un)"
+  name="${u^}"
+  name="${name//\\/\\\\}"
+  name="${name//\//\\/}"
+  name="${name//&/\\&}"
+  sed "s/{NAME}/$name/g" "$src" > "$dst"
+}
+
+_cbox_codex_precreate_ro_pins() {
+  local codex_path="$1"
+  [ "${CBOX_CODEX_MODE:-mount}" = "mount" ] || return 0
+  mkdir -p "$codex_path"
+  local f
+  for f in AGENTS.override.md cbox-container.config.toml cbox-host.config.toml config.toml AGENTS.md hooks.json; do
+    [ -e "$codex_path/$f" ] || : > "$codex_path/$f"
+  done
+}
+
 _cbox_tz_env_into() {
   local tmp="$1" tzname=""
   if [ -L /etc/localtime ]; then
@@ -402,7 +426,7 @@ if d:
 }
 
 _cbox_final_pkgs() {
-  local pkgs="python3 python3-venv git curl socat ca-certificates jq gosu ripgrep xclip xsel wl-clipboard"
+  local pkgs="python3 python3-venv git curl socat ca-certificates jq gosu ripgrep tmux xclip xsel wl-clipboard"
   if [ "${CBOX_SSH_MODE:-none}" != "none" ]; then
     pkgs="$pkgs openssh-client"
   fi
@@ -489,6 +513,8 @@ services:
       - CODEX_GUARD_AUDIT=\${HOST_HOME}/.claude/codex_guard_audit.container.jsonl
       - CODEX_GUARD_EXTRA_ROOTS=$guard_roots
       - CBOX_MANAGED_DIRS=$managed
+      - CBOX_RUNTIME=container
+      - CBOX_CONTEXT_PROFILE=${CBOX_CONTEXT_PROFILE:-full}
       - DISABLE_AUTOUPDATER=1
 EOF
   if [ "$claude_mode" = "mount" ]; then
@@ -567,17 +593,24 @@ EOF
 EOF
   fi
   if [ "$codex_mode" = "mount" ]; then
+    _cbox_codex_precreate_ro_pins "$codex_path"
     cat >> "$tmp" <<EOF
       - $codex_path:\${HOST_HOME}/.codex:rw
+      - $codex_path/config.toml:\${HOST_HOME}/.codex/config.toml:ro
+      - $codex_path/AGENTS.md:\${HOST_HOME}/.codex/AGENTS.md:ro
+      - $codex_path/cbox-host.config.toml:\${HOST_HOME}/.codex/cbox-host.config.toml:ro
 EOF
   else
     cat >> "$tmp" <<'EOF'
       - codex:${HOST_HOME}/.codex
 EOF
   fi
-  cat >> "$tmp" <<'EOF'
-      - claude-local:${HOST_HOME}/.local:ro
-      - codex-packages:${HOST_HOME}/.codex/packages:ro
+  cat >> "$tmp" <<EOF
+      - claude-local:\${HOST_HOME}/.local:ro
+      - codex-packages:\${HOST_HOME}/.codex/packages:ro
+      - $INSTALL_DIR/generated/codex/cbox-container.config.toml:\${HOST_HOME}/.codex/cbox-container.config.toml:ro
+      - $INSTALL_DIR/generated/codex/AGENTS.override.md:\${HOST_HOME}/.codex/AGENTS.override.md:ro
+      - $INSTALL_DIR/generated/codex/hooks.json:\${HOST_HOME}/.codex/hooks.json:ro
 EOF
   case "$venv_mode" in
     host)
@@ -735,11 +768,25 @@ services:
       - CODEX_GUARD_AUDIT=\${HOST_HOME}/.claude/codex_guard_audit.container.jsonl
       - CODEX_GUARD_EXTRA_ROOTS=$root
       - CBOX_MANAGED_DIRS=$managed
+      - CBOX_RUNTIME=container
+      - CBOX_CONTEXT_PROFILE=${CBOX_CONTEXT_PROFILE:-full}
       - DISABLE_AUTOUPDATER=1
 EOF
   if [ "$claude_mode" = "mount" ]; then
     printf '      - CLAUDE_CONFIG_DIR=${HOST_HOME}/.claude-cbox\n' >> "$tmp"
     printf '      - CLAUDE_SECURESTORAGE_CONFIG_DIR=${HOST_HOME}/.claude\n' >> "$tmp"
+  fi
+  if [ "$claude_mode" = "mount" ] && [ "$session_scope" = "isolated" ]; then
+    local resume_prompt="${CBOX_LIMIT_RESUME_PROMPT:-pokracuj}"
+    resume_prompt="${resume_prompt//$'\n'/ }"
+    resume_prompt="${resume_prompt//$'\r'/ }"
+    printf '      - CBOX_SCOPE_ROOT=%s\n' "$root" >> "$tmp"
+    printf '      - CBOX_SCOPE_SLUG=%s\n' "$slug" >> "$tmp"
+    printf '      - CBOX_LIMIT_AUTORESUME=%s\n' "${CBOX_LIMIT_AUTORESUME:-off}" >> "$tmp"
+    printf '      - CBOX_LIMIT_RESUME_DELAY=%s\n' "${CBOX_LIMIT_RESUME_DELAY:-300}" >> "$tmp"
+    printf '      - CBOX_LIMIT_RESUME_PROMPT=%s\n' "$resume_prompt" >> "$tmp"
+    printf '      - CBOX_LIMIT_RESUME_STAGGER=%s\n' "${CBOX_LIMIT_RESUME_STAGGER:-30}" >> "$tmp"
+    printf '      - CBOX_LIMIT_RESUME_MAX_PER_DAY=%s\n' "${CBOX_LIMIT_RESUME_MAX_PER_DAY:-10}" >> "$tmp"
   fi
   _cbox_tz_env_into "$tmp"
   case "$ssh_mode" in
@@ -778,8 +825,6 @@ EOF
       - $claude_path/policies:\${HOST_HOME}/.claude/policies:ro
       - $claude_path/templates:\${HOST_HOME}/.claude/templates:ro
       - $eff/claude-config:\${HOST_HOME}/.claude-cbox:rw
-      - $claude_path/jobs:\${HOST_HOME}/.claude-cbox/jobs:rw
-      - $claude_path/tasks:\${HOST_HOME}/.claude-cbox/tasks:rw
       - $claude_path/commands:\${HOST_HOME}/.claude-cbox/commands:ro
       - $claude_path/skills:\${HOST_HOME}/.claude-cbox/skills:ro
       - $claude_path/rules:\${HOST_HOME}/.claude-cbox/rules:ro
@@ -818,7 +863,9 @@ EOF
 EOF
     if [ "$claude_mode" = "mount" ]; then
       cat >> "$tmp" <<EOF
-      - $claude_path/projects/$slug:\${HOST_HOME}/.claude-cbox/projects/$slug:rw
+      - $claude_path/projects:\${HOST_HOME}/.claude-cbox/.host-projects:rw
+      - $claude_path/tasks:\${HOST_HOME}/.claude-cbox/.host-tasks:rw
+      - $claude_path/jobs:\${HOST_HOME}/.claude-cbox/.host-jobs:rw
 EOF
     fi
   else
@@ -828,13 +875,19 @@ EOF
     if [ "$claude_mode" = "mount" ]; then
       cat >> "$tmp" <<EOF
       - $claude_path/projects:\${HOST_HOME}/.claude-cbox/projects:rw
+      - $claude_path/jobs:\${HOST_HOME}/.claude-cbox/jobs:rw
+      - $claude_path/tasks:\${HOST_HOME}/.claude-cbox/tasks:rw
 EOF
     fi
   fi
 
   if [ "$codex_mode" = "mount" ]; then
+    _cbox_codex_precreate_ro_pins "$codex_path"
     cat >> "$tmp" <<EOF
       - $codex_path:\${HOST_HOME}/.codex:rw
+      - $codex_path/config.toml:\${HOST_HOME}/.codex/config.toml:ro
+      - $codex_path/AGENTS.md:\${HOST_HOME}/.codex/AGENTS.md:ro
+      - $codex_path/cbox-host.config.toml:\${HOST_HOME}/.codex/cbox-host.config.toml:ro
 EOF
   else
     cat >> "$tmp" <<'EOF'
@@ -844,6 +897,9 @@ EOF
   cat >> "$tmp" <<EOF
       - claude-local:\${HOST_HOME}/.local:ro
       - codex-packages:\${HOST_HOME}/.codex/packages:ro
+      - $eff/codex/cbox-container.config.toml:\${HOST_HOME}/.codex/cbox-container.config.toml:ro
+      - $eff/codex/AGENTS.override.md:\${HOST_HOME}/.codex/AGENTS.override.md:ro
+      - $eff/codex/hooks.json:\${HOST_HOME}/.codex/hooks.json:ro
 EOF
   case "$venv_mode" in
     host)
@@ -954,6 +1010,28 @@ EOF
     gen_tinyproxy_conf_into "$eff/proxy"
     gen_egress_filter_into "$eff/proxy"
   fi
+}
+
+gen_compose_readonly_into() {
+  local target="$1"; shift
+  local w tmp
+  tmp="$(mktemp "$(dirname "$target")/.cbox.XXXXXX")"
+  {
+    printf 'services:\n'
+    printf '  cbox:\n'
+    printf '    environment:\n'
+    printf '      - CBOX_WORKSPACE_READONLY=1\n'
+    printf '    volumes:\n'
+    for w in "$@"; do
+      [ -n "$w" ] || continue
+      printf '      - type: bind\n'
+      printf '        source: %s\n' "$w"
+      printf '        target: %s\n' "$w"
+      printf '        read_only: true\n'
+    done
+  } > "$tmp"
+  chmod 0644 "$tmp"
+  mv "$tmp" "$target"
 }
 
 gen_dockerignore() {
@@ -1265,30 +1343,18 @@ gen_claude_json_seed() {
   fi
   local shim_mode="${CBOX_CODEX_PROGRESS_MODE:-off}"
   [ "${CBOX_CLAUDE_MODE:-mount}" = mount ] || shim_mode=off
-  out="$(python3 - "$INSTALL_DIR/etc/mcp/mcp-servers.json" "${CBOX_MCP_SERVERS:-all}" "$shim_mode" "$HOME" <<'PY'
+  local progress_flag="off"
+  [ "$shim_mode" = shim ] && progress_flag="on"
+  local servers_file="$INSTALL_DIR/etc/mcp/delegates.json"
+  local expanded hooks_dir="$HOME/.claude/hooks" mcp_json
+  expanded="$(canonical_expand "${CBOX_MCP_SERVERS:-all}" "$(mcp_all_names)")"
+  mcp_json="$(python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$servers_file" "$expanded" "$hooks_dir" "$progress_flag" claude)"
+  out="$(python3 - "$mcp_json" <<'PY'
 import json
 import sys
 
-with open(sys.argv[1]) as fh:
-    servers = json.load(fh)
-selection = sys.argv[2].split()
-mode, home = sys.argv[3], sys.argv[4]
-
-def shape(name, spec):
-    if mode != "shim" or not name.startswith("codex-"):
-        return spec
-    if not isinstance(spec, dict) or spec.get("command") != "codex":
-        return spec
-    wrapped = dict(spec)
-    wrapped["command"] = "python3"
-    wrapped["args"] = [home + "/.claude/hooks/codex_mcp_shim.py", "--", "codex"] + list(spec.get("args") or [])
-    return wrapped
-
-if not selection or selection == ["all"]:
-    chosen = {name: shape(name, cfg) for name, cfg in servers.items()}
-else:
-    chosen = {name: shape(name, cfg) for name, cfg in servers.items() if name in selection}
-sys.stdout.write(json.dumps({"hasCompletedOnboarding": True, "mcpServers": chosen}, separators=(",", ":")))
+mcp = json.loads(sys.argv[1])
+sys.stdout.write(json.dumps({"hasCompletedOnboarding": True, "mcpServers": mcp}, separators=(",", ":")))
 PY
 )"
   printf '%s\n' "$out" | _cbox_write "$target"
@@ -1301,13 +1367,28 @@ gen_claude_config_into() {
   if [ -d "$statedir/jobs" ]; then
     for j in "$statedir/jobs"/*; do
       [ -e "$j" ] || continue
+      [ -L "$j" ] && continue
       b="$(basename "$j")"
+      [ "$b" = settled ] && continue
       if [ ! -e "$claude_path/jobs/$b" ]; then
         mv "$j" "$claude_path/jobs/" 2>/dev/null || { cp -a "$j" "$claude_path/jobs/$b" 2>/dev/null && rm -rf "$j"; } || true
       fi
     done
+    if [ -d "$statedir/jobs/settled" ] && [ ! -L "$statedir/jobs/settled" ]; then
+      mkdir -p "$claude_path/jobs/settled"
+      for j in "$statedir/jobs/settled"/*; do
+        [ -e "$j" ] || continue
+        [ -L "$j" ] && continue
+        b="$(basename "$j")"
+        if [ ! -e "$claude_path/jobs/settled/$b" ]; then
+          mv "$j" "$claude_path/jobs/settled/" 2>/dev/null || { cp -a "$j" "$claude_path/jobs/settled/$b" 2>/dev/null && rm -rf "$j"; } || true
+        fi
+      done
+      rmdir "$statedir/jobs/settled" 2>/dev/null || true
+    fi
     rmdir "$statedir/jobs" 2>/dev/null || true
   fi
+  mkdir -p "$statedir/projects" "$statedir/tasks" "$statedir/jobs" "$statedir/limit-watch"
   rm -f "$statedir/.credentials.json.new" 2>/dev/null || true
   ln -s "$HOME/.claude/.credentials.json" "$statedir/.credentials.json.new" 2>/dev/null || true
   if [ -L "$statedir/.credentials.json.new" ]; then
@@ -1384,7 +1465,197 @@ gen_claude_assets() {
   fi
 }
 
+_cbox_codex_profile_workspaces() {
+  local mode="${1:-global}" root="${2:-}"
+  if [ "$mode" = isolated ]; then
+    [ -n "$root" ] && printf '%s\n' "$root"
+    return 0
+  fi
+  local -a ws=()
+  read -r -a ws <<< "${CBOX_WORKSPACES:-}"
+  local w
+  for w in "${ws[@]}"; do
+    [ -n "$w" ] || continue
+    printf '%s\n' "$w"
+  done
+}
+
+_cbox_codex_mcp_claude_entry() {
+  local hooks_path="$1"
+  local delegates_file="$INSTALL_DIR/etc/mcp/delegates.json"
+  [ -f "$delegates_file" ] || return 0
+  python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$delegates_file" all "$hooks_path" off codex
+}
+
+_cbox_codex_mcp_toml_blocks() {
+  local rendered="$1"
+  [ -n "$rendered" ] || return 0
+  python3 -c '
+import json
+import sys
+
+rendered = json.loads(sys.argv[1])
+
+
+def toml_string(v):
+    return json.dumps(v)
+
+
+def toml_value(v):
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, str):
+        return toml_string(v)
+    if isinstance(v, list):
+        return "[" + ", ".join(toml_value(item) for item in v) + "]"
+    if isinstance(v, dict):
+        pairs = ", ".join(
+            "%s = %s" % (toml_string(k), toml_value(val))
+            for k, val in v.items()
+        )
+        return "{ " + pairs + " }"
+    raise SystemExit(
+        "gen_codex_profile_into: delegate field of unsupported type %r"
+        % type(v).__name__
+    )
+
+
+table_key_overrides = {"ask-claude": "claude"}
+for name in sorted(rendered.keys()):
+    spec = rendered[name]
+    table = table_key_overrides.get(name, name)
+    print()
+    print("[mcp_servers.%s]" % table)
+    for field in ("command", "args", "env", "startup_timeout_sec", "tool_timeout_sec"):
+        if field in spec:
+            print("%s = %s" % (field, toml_value(spec[field])))
+' "$rendered"
+}
+
+gen_codex_profile_into() {
+  local outdir="$1" mode="${2:-global}" root="${3:-}"
+  local hooks_path="$HOME/.claude/hooks"
+  local codex_model="gpt-5.6-terra"
+  mkdir -p "$outdir"
+  local tmp
+  tmp="$(mktemp "$outdir/.cbox.XXXXXX")"
+  {
+    printf 'model = "%s"\n' "$codex_model"
+    printf 'model_reasoning_effort = "xhigh"\n'
+    printf 'approval_policy = "never"\n'
+    printf 'sandbox_mode = "danger-full-access"\n'
+    printf 'hide_agent_reasoning = true\n'
+    printf 'check_for_update_on_startup = false\n'
+    printf 'project_doc_max_bytes = 65536\n'
+    printf 'notify = ["python3", %s]\n' "$(_cbox_toml_string "$hooks_path/codex_notify.py")"
+    printf '\n[analytics]\n'
+    printf 'enabled = false\n'
+    printf '\n[otel]\n'
+    printf 'log_user_prompt = false\n'
+    local w
+    while IFS= read -r w; do
+      [ -n "$w" ] || continue
+      printf '\n[projects.%s]\n' "$(_cbox_toml_string "$w")"
+      printf 'trust_level = "trusted"\n'
+    done < <(_cbox_codex_profile_workspaces "$mode" "$root")
+    if [ "${CBOX_CODEX_MCP:-0}" = 1 ]; then
+      local codex_delegates
+      codex_delegates="$(_cbox_codex_mcp_claude_entry "$hooks_path")"
+      _cbox_codex_mcp_toml_blocks "$codex_delegates"
+    fi
+  } > "$tmp"
+  chmod 0644 "$tmp"
+  mv "$tmp" "$outdir/cbox-container.config.toml"
+}
+
+gen_codex_hooks_json_into() {
+  local outdir="$1"
+  local hooks_path="$HOME/.claude/hooks"
+  mkdir -p "$outdir"
+  local tmp
+  tmp="$(mktemp "$outdir/.cbox.XXXXXX")"
+  python3 -c '
+import json
+import sys
+
+hooks_path = sys.argv[1]
+command = "python3 " + hooks_path + "/continuity_session_start.py"
+doc = {
+    "hooks": {
+        "SessionStart": [
+            {"hooks": [{"type": "command", "command": command}]}
+        ]
+    }
+}
+sys.stdout.write(json.dumps(doc, indent=2) + "\n")
+' "$hooks_path" > "$tmp"
+  chmod 0644 "$tmp"
+  mv "$tmp" "$outdir/hooks.json"
+}
+
+_cbox_codex_agents_preamble() {
+  cat <<'EOF'
+ENGINE NOTE: this file plays the role CLAUDE.md plays for Claude Code - the
+same global guidance, rendered for the codex engine. Where the source
+material below refers to "Claude subagents" or the Agent tool, no such
+mechanism exists here: your delegate for handing off a task is the
+ask-claude MCP tool (model haiku, sonnet, opus, or fable; effort low,
+medium, high, or max). Workflow and ledger/continuity conventions
+(LEDGER.md, PROGRESS_YYYY_MM_DD.md, CHANGELOG.md) are identical across
+engines.
+EOF
+}
+
+_cbox_codex_agents_delegate_boundary() {
+  cat <<'EOF'
+DELEGATE WRITE BOUNDARY (codex wording): when you are the delegated side of
+an ask-claude or codex-* relay call, do not write .cbox brain files
+(LEDGER.md, PROGRESS_YYYY_MM_DD.md, CHANGELOG.md, OPEN_QUESTIONS.md,
+DIARY.md) directly - return a distillate in your final message; the driver
+that invoked you decides what is durable and writes it.
+EOF
+}
+
+gen_codex_agents_into() {
+  local outdir="$1" src tmp size
+  local kernel_src="$INSTALL_DIR/etc/hooks/conduct-kernel.txt"
+  [ -f "$kernel_src" ] || die "gen_codex_agents_into: missing conduct-kernel source $kernel_src"
+  mkdir -p "$outdir"
+  tmp="$(mktemp "$outdir/.cbox.XXXXXX")"
+  if [ -s "$HOME/.codex/AGENTS.override.md" ]; then
+    src="$HOME/.codex/AGENTS.override.md"
+  elif [ -s "$HOME/.codex/AGENTS.md" ]; then
+    src="$HOME/.codex/AGENTS.md"
+  else
+    src=""
+  fi
+  if [ -n "$src" ]; then
+    printf '===== folded in from host %s =====\n\n' "$src" >> "$tmp"
+    cat "$src" >> "$tmp"
+    printf '\n\n===== end fold-in from host %s =====\n\n' "$src" >> "$tmp"
+  fi
+  _cbox_codex_agents_preamble >> "$tmp"
+  printf '\n' >> "$tmp"
+  local kernel_rendered
+  kernel_rendered="$(mktemp "$outdir/.cbox.XXXXXX")"
+  _cbox_apply_name_substitution "$kernel_src" "$kernel_rendered"
+  cat "$kernel_rendered" >> "$tmp"
+  rm -f "$kernel_rendered"
+  printf '\n' >> "$tmp"
+  _cbox_codex_agents_delegate_boundary >> "$tmp"
+  size="$(wc -c < "$tmp")"
+  if [ "$size" -ge 64000 ]; then
+    rm -f "$tmp"
+    die "gen_codex_agents_into: rendered AGENTS.override.md is $size bytes (>= 64000 limit)"
+  fi
+  chmod 0644 "$tmp"
+  mv "$tmp" "$outdir/AGENTS.override.md"
+}
+
 gen_hooks_dir() {
+  local kernel_rendered
   _cbox_write "$INSTALL_DIR/generated/hooks/codex_mode_guard.py" < "$INSTALL_DIR/etc/hooks/codex_mode_guard.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/agent_label_guard.py" < "$INSTALL_DIR/etc/hooks/agent_label_guard.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/code_hygiene_guard.py" < "$INSTALL_DIR/etc/hooks/code_hygiene_guard.py"
@@ -1392,9 +1663,20 @@ gen_hooks_dir() {
   _cbox_write "$INSTALL_DIR/generated/hooks/continuity_commit_log.py" < "$INSTALL_DIR/etc/hooks/continuity_commit_log.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/continuity_ledger_sweep.py" < "$INSTALL_DIR/etc/hooks/continuity_ledger_sweep.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/continuity_session_digest.py" < "$INSTALL_DIR/etc/hooks/continuity_session_digest.py"
+  _cbox_write "$INSTALL_DIR/generated/hooks/continuity_session_start.py" < "$INSTALL_DIR/etc/hooks/continuity_session_start.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/orchestrator-global.txt" < "$INSTALL_DIR/etc/hooks/orchestrator-global.txt"
+  kernel_rendered="$(mktemp "$INSTALL_DIR/generated/hooks/.cbox.XXXXXX")"
+  _cbox_apply_name_substitution "$INSTALL_DIR/etc/hooks/conduct-kernel.txt" "$kernel_rendered"
+  _cbox_write "$INSTALL_DIR/generated/hooks/conduct-kernel.txt" < "$kernel_rendered"
+  rm -f "$kernel_rendered"
+  _cbox_write "$INSTALL_DIR/generated/hooks/session-core.txt" < "$INSTALL_DIR/etc/hooks/session-core.txt"
   _cbox_write "$INSTALL_DIR/generated/hooks/ask_claude_mcp.py" < "$INSTALL_DIR/etc/codex/ask_claude_mcp.py"
+  _cbox_write "$INSTALL_DIR/generated/hooks/codex_notify.py" < "$INSTALL_DIR/etc/codex/codex_notify.py"
+  _cbox_write "$INSTALL_DIR/generated/hooks/codex_bump_probe.sh" < "$INSTALL_DIR/etc/codex/codex_bump_probe.sh"
   _cbox_write "$INSTALL_DIR/generated/hooks/codex_mcp_shim.py" < "$INSTALL_DIR/etc/mcp/codex_mcp_shim.py"
+  _cbox_write "$INSTALL_DIR/generated/hooks/session_scope_farm.py" < "$INSTALL_DIR/etc/hooks/session_scope_farm.py"
+  _cbox_write "$INSTALL_DIR/generated/hooks/limit_watchdog.py" < "$INSTALL_DIR/etc/hooks/limit_watchdog.py"
+  _cbox_write "$INSTALL_DIR/generated/hooks/session_pane_map.py" < "$INSTALL_DIR/etc/hooks/session_pane_map.py"
   gen_scope_json
 }
 
@@ -1418,6 +1700,101 @@ cbox-shell() {
   "$CBOX_DIR/cbox" run bash "$@"
 }
 EOF
+}
+
+CBOX_CONTEXT_MANIFEST_VERSION=1
+
+_cbox_context_manifest_sha() {
+  local f="$1"
+  [ -f "$f" ] || { printf ''; return 0; }
+  sha256sum "$f" | awk '{print $1}'
+}
+
+gen_context_manifest_into() {
+  local outdir="$1"
+  mkdir -p "$outdir"
+  local kernel_src="$INSTALL_DIR/etc/hooks/conduct-kernel.txt"
+  local core_src="$INSTALL_DIR/etc/hooks/session-core.txt"
+  local claude_md_src="$INSTALL_DIR/etc/claude/CLAUDE.md"
+  local loader_src="$INSTALL_DIR/etc/hooks/continuity_session_start.py"
+  local codex_agents="$INSTALL_DIR/generated/codex/AGENTS.override.md"
+  local shim_src="$INSTALL_DIR/etc/mcp/codex_mcp_shim.py"
+  local hooks_json="$INSTALL_DIR/etc/claude/settings.merge.json"
+  local profile="${CBOX_CONTEXT_PROFILE:-full}"
+  local tmp
+  tmp="$(mktemp "$outdir/.cbox.XXXXXX")"
+  {
+    printf '{\n'
+    printf '  "version": %s,\n' "$CBOX_CONTEXT_MANIFEST_VERSION"
+    printf '  "profile": "%s",\n' "$profile"
+    printf '  "digests": {\n'
+    printf '    "conduct_kernel": "%s",\n' "$(_cbox_context_manifest_sha "$kernel_src")"
+    printf '    "session_core": "%s",\n' "$(_cbox_context_manifest_sha "$core_src")"
+    printf '    "claude_md_source": "%s",\n' "$(_cbox_context_manifest_sha "$claude_md_src")"
+    printf '    "loader": "%s",\n' "$(_cbox_context_manifest_sha "$loader_src")"
+    printf '    "codex_agents_render": "%s",\n' "$(_cbox_context_manifest_sha "$codex_agents")"
+    printf '    "codex_shim": "%s",\n' "$(_cbox_context_manifest_sha "$shim_src")"
+    printf '    "settings_merge": "%s"\n' "$(_cbox_context_manifest_sha "$hooks_json")"
+    printf '  }\n'
+    printf '}\n'
+  } > "$tmp"
+  chmod 0644 "$tmp"
+  mv "$tmp" "$outdir/context-manifest.json"
+}
+
+_cbox_context_manifest_verify() {
+  local outdir="${1:-$INSTALL_DIR/generated}"
+  local mf="$outdir/context-manifest.json"
+  [ -f "$mf" ] || die "context manifest missing at $mf - run regen"
+  local kernel_src="$INSTALL_DIR/etc/hooks/conduct-kernel.txt"
+  local core_src="$INSTALL_DIR/etc/hooks/session-core.txt"
+  local claude_md_src="$INSTALL_DIR/etc/claude/CLAUDE.md"
+  local loader_src="$INSTALL_DIR/etc/hooks/continuity_session_start.py"
+  local codex_agents="$INSTALL_DIR/generated/codex/AGENTS.override.md"
+  local shim_src="$INSTALL_DIR/etc/mcp/codex_mcp_shim.py"
+  local hooks_json="$INSTALL_DIR/etc/claude/settings.merge.json"
+  python3 -c '
+import json
+import sys
+
+mf = sys.argv[1]
+pairs = [
+    ("conduct_kernel", sys.argv[2]),
+    ("session_core", sys.argv[3]),
+    ("claude_md_source", sys.argv[4]),
+    ("loader", sys.argv[5]),
+    ("codex_agents_render", sys.argv[6]),
+    ("codex_shim", sys.argv[7]),
+    ("settings_merge", sys.argv[8]),
+]
+try:
+    with open(mf, "r", encoding="utf-8") as f:
+        data = json.load(f)
+except Exception as exc:
+    sys.stderr.write("context manifest malformed: %s\n" % exc)
+    sys.exit(1)
+digests = data.get("digests", {})
+mismatches = []
+for key, have in pairs:
+    want = digests.get(key)
+    if want is None:
+        mismatches.append("%s: missing from manifest" % key)
+        continue
+    if want != have:
+        mismatches.append("%s: manifest=%s actual=%s" % (key, want, have))
+if mismatches:
+    sys.stderr.write("context manifest drift:\n" + "\n".join(mismatches) + "\n")
+    sys.exit(1)
+sys.exit(0)
+' "$mf" \
+    "$(_cbox_context_manifest_sha "$kernel_src")" \
+    "$(_cbox_context_manifest_sha "$core_src")" \
+    "$(_cbox_context_manifest_sha "$claude_md_src")" \
+    "$(_cbox_context_manifest_sha "$loader_src")" \
+    "$(_cbox_context_manifest_sha "$codex_agents")" \
+    "$(_cbox_context_manifest_sha "$shim_src")" \
+    "$(_cbox_context_manifest_sha "$hooks_json")" \
+    || die "context manifest drifted - regenerate with ./setup.sh update claude-md (or the relevant section)"
 }
 
 _cbox_conf_set_tpl_sha() {
@@ -1450,6 +1827,9 @@ regen_all() {
   gen_image_inputs "$INSTALL_DIR" "$_digest"
   gen_dockerignore
   gen_compose
+  local -a _ro_ws=()
+  read -r -a _ro_ws <<< "${CBOX_WORKSPACES:-}"
+  gen_compose_readonly_into "$INSTALL_DIR/docker-compose.readonly.yml" "${_ro_ws[@]}"
   gen_compose_gpu
   gen_dockerfile_egress
   gen_supervisord_conf
@@ -1459,9 +1839,13 @@ regen_all() {
   gen_hooks_dir
   gen_settings_volume
   gen_managed_settings
+  gen_codex_profile_into "$INSTALL_DIR/generated/codex" global
+  gen_codex_agents_into "$INSTALL_DIR/generated/codex"
+  gen_codex_hooks_json_into "$INSTALL_DIR/generated/codex"
   if [ "${CBOX_CLAUDE_MODE:-mount}" = "volume" ]; then
     gen_claude_assets
     gen_claude_json_seed
   fi
+  gen_context_manifest_into "$INSTALL_DIR/generated"
   _cbox_conf_set_tpl_sha
 }

@@ -11,6 +11,43 @@ def _is_pointer(line):
     return line.lstrip().startswith(">") and "LEDGER_ARCHIVE.md" in line
 
 
+def _apply_patch_file_paths(command, cwd):
+    if not isinstance(command, list) or not command:
+        return []
+    if command[0] != "apply_patch" or len(command) < 2:
+        return []
+    patch_text = command[1]
+    if not isinstance(patch_text, str):
+        return []
+    paths = []
+    for line in patch_text.splitlines():
+        for prefix in ("*** Add File: ", "*** Update File: ", "*** Delete File: "):
+            if line.startswith(prefix):
+                p = line[len(prefix):].strip()
+                if p:
+                    if not os.path.isabs(p) and cwd:
+                        p = os.path.join(cwd, p)
+                    paths.append(p)
+    return paths
+
+
+def _extract_edited_paths(payload):
+    tool_name = payload.get("tool_name", "")
+    ti = payload.get("tool_input") or {}
+
+    if tool_name in ("Edit", "Write", "MultiEdit"):
+        fp = ti.get("file_path") or ""
+        return [fp] if fp else []
+
+    command = ti.get("command")
+    cwd = payload.get("cwd") or ""
+    paths = _apply_patch_file_paths(command, cwd)
+    if paths:
+        return paths
+
+    return []
+
+
 def _atomic_write(path, text):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -66,12 +103,13 @@ def main():
         sys.exit(0)
 
     try:
-        tool_name = payload.get("tool_name", "")
-        if tool_name not in ("Edit", "Write", "MultiEdit"):
-            sys.exit(0)
-        ti = payload.get("tool_input") or {}
-        file_path = ti.get("file_path") or ""
-        if not file_path.endswith("/.claude/LEDGER.md"):
+        edited_paths = _extract_edited_paths(payload)
+        file_path = ""
+        for p in edited_paths:
+            if p.endswith("/.cbox/LEDGER.md") or p.endswith("/.claude/LEDGER.md"):
+                file_path = p
+                break
+        if not file_path:
             sys.exit(0)
         if not os.path.isfile(file_path):
             sys.exit(0)

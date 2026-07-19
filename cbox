@@ -7,6 +7,7 @@ CONF="$INSTALL_DIR/cbox.conf"
 
 [ -f "$INSTALL_DIR/_common.sh" ] && . "$INSTALL_DIR/_common.sh"
 [ -f "$INSTALL_DIR/templates/generators.sh" ] && . "$INSTALL_DIR/templates/generators.sh"
+[ -f "$INSTALL_DIR/lib/cbox-ai.sh" ] && . "$INSTALL_DIR/lib/cbox-ai.sh"
 
 HAVE_GLOBAL_CONF=0
 if [ -f "$CONF" ]; then
@@ -169,6 +170,10 @@ _gen_effective() {
   gen_dockerfile_into "$eff" "$digest"
   gen_env_file_into "$eff"
   gen_compose_isolated "$eff" "$root" "$IMG_TAG" "$IMG_HASH"
+  gen_compose_readonly_into "$eff/docker-compose.readonly.yml" "$root"
+  gen_codex_profile_into "$eff/codex" isolated "$root"
+  gen_codex_agents_into "$eff/codex"
+  gen_codex_hooks_json_into "$eff/codex"
 }
 
 _ensure_image() {
@@ -451,8 +456,8 @@ _mirror_write_one() {
 
 _write_mirror() {
   local root="$1" eff="$2" dir tmp
-  dir="$root/.claude/cbox"
-  if [ -L "$root/.claude" ] || [ -L "$dir" ]; then
+  dir="$root/.cbox/runtime"
+  if [ -L "$root/.cbox" ] || [ -L "$dir" ]; then
     echo "cbox: warning: $dir is a symlink - skipping mirror" >&2
     return 0
   fi
@@ -475,7 +480,7 @@ _write_mirror() {
     {
       printf 'mirror of %s\n' "$eff"
       printf 'not authoritative; edits here have no effect and are overwritten\n'
-      printf 'add .claude/cbox/ (never .claude/) to your repo .gitignore if you want it untracked there too\n'
+      printf 'add .cbox/runtime/ (never .cbox/) to your repo .gitignore if you want it untracked there too\n'
     } > "$tmp"
     mv "$tmp" "$dir/README" 2>/dev/null || rm -f "$tmp"
   fi
@@ -794,19 +799,27 @@ logs() {
 install_hooks() {
   require_global_conf
   [ -t 0 ] || { echo "cbox: install-hooks requires a TTY"; return 1; }
-  local files=(codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py orchestrator-global.txt codex_scope.container.json ask_claude_mcp.py codex_mcp_shim.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py)
+  local files=(codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py orchestrator-global.txt conduct-kernel.txt session-core.txt codex_scope.container.json ask_claude_mcp.py codex_notify.py codex_bump_probe.sh codex_mcp_shim.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py continuity_session_start.py session_scope_farm.py limit_watchdog.py session_pane_map.py)
   local srcs=(
     "$INSTALL_DIR/etc/hooks/codex_mode_guard.py"
     "$INSTALL_DIR/etc/hooks/agent_label_guard.py"
     "$INSTALL_DIR/etc/hooks/code_hygiene_guard.py"
     "$INSTALL_DIR/etc/hooks/commit_guard.py"
     "$INSTALL_DIR/etc/hooks/orchestrator-global.txt"
+    "$INSTALL_DIR/generated/hooks/conduct-kernel.txt"
+    "$INSTALL_DIR/etc/hooks/session-core.txt"
     "$INSTALL_DIR/generated/hooks/codex_scope.container.json"
     "$INSTALL_DIR/etc/codex/ask_claude_mcp.py"
+    "$INSTALL_DIR/etc/codex/codex_notify.py"
+    "$INSTALL_DIR/etc/codex/codex_bump_probe.sh"
     "$INSTALL_DIR/etc/mcp/codex_mcp_shim.py"
     "$INSTALL_DIR/etc/hooks/continuity_commit_log.py"
     "$INSTALL_DIR/etc/hooks/continuity_ledger_sweep.py"
     "$INSTALL_DIR/etc/hooks/continuity_session_digest.py"
+    "$INSTALL_DIR/etc/hooks/continuity_session_start.py"
+    "$INSTALL_DIR/etc/hooks/session_scope_farm.py"
+    "$INSTALL_DIR/etc/hooks/limit_watchdog.py"
+    "$INSTALL_DIR/etc/hooks/session_pane_map.py"
   )
   local s f i stage target ans changed=0
   for s in "${srcs[@]}"; do
@@ -859,6 +872,71 @@ install_hooks() {
     done
   fi
   echo "cbox: install-hooks: done - apply with: $0 restart"
+}
+
+_continuity_brain_files() {
+  local root="$1" f
+  for f in LEDGER.md LEDGER_ARCHIVE.md DIARY.md CHANGELOG.md OPEN_QUESTIONS.md .continuity_state.json; do
+    [ -e "$root/.claude/$f" ] && printf '%s\n' "$f"
+  done
+  for f in "$root/.claude"/PROGRESS_*.md; do
+    [ -e "$f" ] || continue
+    printf '%s\n' "$(basename "$f")"
+  done
+}
+
+continuity_migrate() {
+  local root gitroot has_claude=0 has_cbox=0 f tracked
+  gitroot="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+    echo "cbox: continuity migrate: not inside a git work-tree" >&2
+    return 1
+  }
+  root="$gitroot"
+
+  local -a files=()
+  while IFS= read -r f; do
+    [ -n "$f" ] && files+=("$f")
+  done < <(_continuity_brain_files "$root")
+
+  if [ "${#files[@]}" -gt 0 ]; then
+    has_claude=1
+  fi
+  if [ -d "$root/.cbox" ]; then
+    for f in LEDGER.md LEDGER_ARCHIVE.md DIARY.md CHANGELOG.md OPEN_QUESTIONS.md .continuity_state.json "$root/.cbox"/PROGRESS_*.md; do
+      case "$f" in
+        "$root/.cbox"/*) [ -e "$f" ] && has_cbox=1 ;;
+        *) [ -e "$root/.cbox/$f" ] && has_cbox=1 ;;
+      esac
+    done
+  fi
+
+  if [ "$has_claude" = 1 ] && [ "$has_cbox" = 1 ]; then
+    echo "cbox: continuity migrate: both .claude/ and .cbox/ already contain brain files in $root - refusing to merge; resolve by hand" >&2
+    return 1
+  fi
+
+  if [ "$has_claude" = 0 ]; then
+    echo "cbox: continuity migrate: no known brain files under $root/.claude - nothing to do"
+    return 0
+  fi
+
+  mkdir -p "$root/.cbox"
+
+  for f in "${files[@]}"; do
+    tracked=0
+    if git -C "$root" ls-files --error-unmatch ".claude/$f" >/dev/null 2>&1; then
+      tracked=1
+    fi
+    if [ "$tracked" = 1 ]; then
+      git -C "$root" mv ".claude/$f" ".cbox/$f"
+      echo "cbox: continuity migrate: git mv .claude/$f -> .cbox/$f"
+    else
+      mv "$root/.claude/$f" "$root/.cbox/$f"
+      echo "cbox: continuity migrate: mv .claude/$f -> .cbox/$f"
+    fi
+  done
+
+  echo "cbox: continuity migrate: done - ${#files[@]} file(s) moved to $root/.cbox"
 }
 
 backup() {
@@ -1082,6 +1160,18 @@ verify() {
     v_fail "stamp missing or want '${got:-}' != pin '$want'"
   fi
 
+  v_t "Codex MCP contract exposes developer-instructions"
+  if "${X[@]}" env \
+    CBOX_CONTRACT_INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"cbox-contract-canary","version":"1"}}}' \
+    CBOX_CONTRACT_READY='{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+    CBOX_CONTRACT_LIST='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+    sh -c 'codex mcp-server --help >/dev/null 2>&1 && printf "%s\n" "$CBOX_CONTRACT_INIT" "$CBOX_CONTRACT_READY" "$CBOX_CONTRACT_LIST" | timeout 10 codex mcp-server 2>/dev/null | grep -qF developer-instructions'; then
+    v_ok
+  else
+    v_fail "Codex MCP contract broken: developer-instructions not found"
+    exit 1
+  fi
+
   v_t "claude resolved binary executable and matches stamp"
   if "${X[@]}" sh -c '
 p="$(sed -n 2p "$HOME/.local/.cbox-stamp")"
@@ -1197,6 +1287,24 @@ case "$("$p" --version 2>&1)" in *"$v"*) exit 0;; *) exit 1;; esac
     else
       v_fail "missing policy file for an @import line"
     fi
+
+    v_t "CLAUDE.md carries the conduct kernel literally"
+    if "${X[@]}" sh -c 'grep -qF "cbox:conduct-kernel:begin" "$HOME/.claude/CLAUDE.md" && grep -qF "cbox:conduct-kernel:end" "$HOME/.claude/CLAUDE.md" && grep -qF "CONDUCT KERNEL" "$HOME/.claude/CLAUDE.md"' >/dev/null 2>&1; then
+      v_ok
+    else
+      v_fail "kernel block missing - run ./setup.sh update claude-md"
+    fi
+
+    v_t "context manifest digests match rendered artifacts"
+    local manifest_err manifest_tmp
+    manifest_tmp="$(mktemp)"
+    if ( _cbox_context_manifest_verify "$INSTALL_DIR/generated" ) >"$manifest_tmp" 2>&1; then
+      v_ok
+    else
+      manifest_err="$(tr '\n' ' ' < "$manifest_tmp")"
+      v_fail "$manifest_err"
+    fi
+    rm -f "$manifest_tmp"
   fi
 
   if [ "${CBOX_CLAUDE_MODE:-mount}" = mount ]; then
@@ -1253,7 +1361,7 @@ case "$("$p" --version 2>&1)" in *"$v"*) exit 0;; *) exit 1;; esac
   payload='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"verify","version":"0"}}}
 {"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ask-claude","arguments":{"prompt":"ping"}}}'
-  if printf '%s\n' "$payload" | "${COMPOSE[@]}" exec -T "$SERVICE" /entrypoint.sh sh -c 'CBOX_MCP_DEPTH=1 python3 "$HOME/.claude/hooks/ask_claude_mcp.py"' 2>/dev/null | grep -q 'depth limit'; then
+  if printf '%s\n' "$payload" | "${COMPOSE[@]}" exec -T "$SERVICE" /entrypoint.sh sh -c 'CBOX_MCP_DEPTH=1 CBOX_DELEGATION_DEPTH=1 python3 "$HOME/.claude/hooks/ask_claude_mcp.py"' 2>/dev/null | grep -q 'depth limit'; then
     v_ok
   else
     v_fail "nested call was not refused"
@@ -1325,8 +1433,49 @@ case "$("$p" --version 2>&1)" in *"$v"*) exit 0;; *) exit 1;; esac
     if "${X[@]}" nvidia-smi -L >/dev/null 2>&1; then v_ok; else v_fail; fi
   fi
 
+  _cbox_verify_doc_coverage
+
   echo "== cbox verify: $VN tests, $VOK ok, $VFAIL failed, $VSKIP skipped =="
   [ "$VFAIL" -eq 0 ] || exit 1
+}
+
+_cbox_verify_doc_coverage() {
+  local sec="$INSTALL_DIR/templates/sections.sh"
+  local manual="$INSTALL_DIR/MANUAL.md"
+  v_t "setup-doc coverage: every wizard section documented"
+  if [ ! -f "$sec" ] || [ ! -f "$manual" ]; then
+    v_skip "sections.sh or MANUAL.md not present (host-side check)"
+    return 0
+  fi
+  if ! . "$sec" 2>/dev/null; then v_skip "sections.sh not readable"; return 0; fi
+  [ -n "${SECTIONS[*]:-}" ] || { v_skip "SECTIONS not readable"; return 0; }
+  local missing="" doctor_src="$INSTALL_DIR/cbox" s tok row
+  local expected=""
+  for s in "${SECTIONS[@]}"; do
+    grep -qiE "^### +$s *\$" "$manual" || missing="$missing manual:$s"
+    if [ -n "${SEC_DOCTOR_ROWS[$s]+set}" ]; then
+      expected="$expected ${SEC_DOCTOR_ROWS[$s]}"
+    else
+      expected="$expected $s"
+    fi
+  done
+  expected="$expected ${DOCTOR_EXTRA_ROWS:-}"
+  for tok in "${!SEC_DEPS[@]}"; do
+    [ -n "${SEC_DEP_TEXT[${SEC_DEPS[$tok]%% *}]:-}" ] || [ -n "${SEC_DEP_TEXT[${SEC_DEPS[$tok]}]:-}" ] || missing="$missing deptext:$tok"
+  done
+  for row in $expected; do
+    grep -qE "_cbox_doctor_row \"$row\"" "$doctor_src" || missing="$missing missing-row:$row"
+  done
+  local present
+  present="$(grep -oE '_cbox_doctor_row "[a-z][a-z-]*"' "$doctor_src" | sed 's/_cbox_doctor_row "//;s/"//' | sort -u)"
+  for row in $present; do
+    case " $expected " in *" $row "*) ;; *) missing="$missing undeclared-row:$row" ;; esac
+  done
+  if [ -z "$missing" ]; then
+    v_ok "sections in MANUAL, dep-text complete, doctor rows match declarations both ways"
+  else
+    v_fail "coverage gaps:$missing"
+  fi
 }
 
 _cbox_verify_v13_restore() {
@@ -1399,10 +1548,10 @@ verify_isolated() {
   cid="$(_compose_p "$eff" ps -q cbox 2>/dev/null)" || cid=""
 
   v_t "v10 mirror tamper ignored"
-  if [ -f "$root/.claude/cbox/docker-compose.yml" ]; then
+  if [ -f "$root/.cbox/runtime/docker-compose.yml" ]; then
     local before after
     before="$(sha256sum "$eff/docker-compose.yml" | awk '{print $1}')"
-    printf 'tampered: this line must never be read\n' >> "$root/.claude/cbox/docker-compose.yml"
+    printf 'tampered: this line must never be read\n' >> "$root/.cbox/runtime/docker-compose.yml"
     _compose_p "$eff" config >/dev/null 2>&1 || true
     after="$(sha256sum "$eff/docker-compose.yml" | awk '{print $1}')"
     if [ "$before" = "$after" ]; then v_ok "effdir compose unchanged"; else v_fail "effdir compose mutated"; fi
@@ -1651,13 +1800,265 @@ done
   [ "$VFAIL" -eq 0 ] || exit 1
 }
 
+_cbox_doctor_in_container() {
+  [ -n "${HOST_HOME:-}" ] && [ -n "${HOST_USER:-}" ] && [ -f /entrypoint.sh ]
+}
+
+_cbox_doctor_row() {
+  printf '%-28s %-11s %s\n' "$1" "$2" "$3"
+}
+
+_cbox_doctor_file() {
+  [ -e "$1" ]
+}
+
+_cbox_doctor_nonempty() {
+  [ -s "$1" ]
+}
+
+doctor() {
+  local in_container=0
+  _cbox_doctor_in_container && in_container=1
+
+  echo "== cbox doctor =="
+  if [ "$in_container" = 1 ]; then
+    echo "context: inside container (HOST_USER=${HOST_USER:-} HOST_HOME=${HOST_HOME:-})"
+  else
+    echo "context: host (run this from inside the container for a live per-container report)"
+  fi
+  echo
+
+  local home="${HOME:-}"
+  local claude_dir="$home/.claude"
+  local codex_dir="$home/.codex"
+  local hooks_dir="$claude_dir/hooks"
+
+  _cbox_doctor_row FEATURE STATUS DETAIL
+  _cbox_doctor_row "------------------------" "-----------" "------"
+
+  local mode
+  if [ -n "${CBOX_MODE:-}" ]; then
+    mode="$CBOX_MODE"
+    _cbox_doctor_row "mode" ACTIVE "CBOX_MODE=$mode"
+  elif [ -n "${CBOX_SCOPE_ROOT:-}" ] || [ -n "${CBOX_SCOPE_SLUG:-}" ]; then
+    _cbox_doctor_row "mode" ACTIVE "CBOX_MODE unset, farm scope CBOX_SCOPE_ROOT=${CBOX_SCOPE_ROOT:-} slug=${CBOX_SCOPE_SLUG:-}"
+  else
+    _cbox_doctor_row "mode" MISSING "CBOX_MODE not set and no scope env - cannot identify global/isolated"
+  fi
+
+  if [ -n "${CBOX_CONTEXT_PROFILE:-}" ]; then
+    _cbox_doctor_row "context-profile" ACTIVE "CBOX_CONTEXT_PROFILE=$CBOX_CONTEXT_PROFILE"
+  else
+    _cbox_doctor_row "context-profile" MISSING "CBOX_CONTEXT_PROFILE not set, default would be full"
+  fi
+
+  if _cbox_doctor_nonempty "$hooks_dir/conduct-kernel.txt" 2>/dev/null; then
+    if grep -qF "cbox:conduct-kernel:begin" "$claude_dir/CLAUDE.md" 2>/dev/null; then
+      _cbox_doctor_row "continuity-brain" ACTIVE "conduct kernel present in hooks/ and inlined in CLAUDE.md"
+    else
+      _cbox_doctor_row "continuity-brain" CONFIG-ONLY "hooks/conduct-kernel.txt present but not inlined in CLAUDE.md"
+    fi
+  else
+    _cbox_doctor_row "continuity-brain" MISSING "no hooks/conduct-kernel.txt in this container's ~/.claude"
+  fi
+
+  if [ "${CBOX_HISTORY:-}" = 1 ] || { [ -z "${CBOX_HISTORY:-}" ] && _cbox_doctor_nonempty "$claude_dir/CLAUDE.md" 2>/dev/null; }; then
+    if _cbox_doctor_nonempty "$claude_dir/CLAUDE.md" 2>/dev/null; then
+      _cbox_doctor_row "history" ACTIVE "CLAUDE.md deployed (CBOX_HISTORY=${CBOX_HISTORY:-unset,inferred})"
+    else
+      _cbox_doctor_row "history" MISSING "CLAUDE.md absent or empty"
+    fi
+  else
+    _cbox_doctor_row "history" OFF "CBOX_HISTORY=${CBOX_HISTORY:-0}"
+  fi
+
+  if [ "${CBOX_GIT:-1}" = 1 ]; then
+    _cbox_doctor_row "git-changelog" ACTIVE "CBOX_GIT=${CBOX_GIT:-1}"
+  else
+    _cbox_doctor_row "git-changelog" OFF "CBOX_GIT=$CBOX_GIT"
+  fi
+
+  if [ "${CBOX_DIARY:-1}" = 1 ]; then
+    _cbox_doctor_row "diary" ACTIVE "CBOX_DIARY=${CBOX_DIARY:-1}"
+  else
+    _cbox_doctor_row "diary" OFF "CBOX_DIARY=$CBOX_DIARY"
+  fi
+
+  if [ "${CBOX_OPEN_QUESTIONS:-1}" = 1 ]; then
+    _cbox_doctor_row "open-questions" ACTIVE "CBOX_OPEN_QUESTIONS=${CBOX_OPEN_QUESTIONS:-1}"
+  else
+    _cbox_doctor_row "open-questions" OFF "CBOX_OPEN_QUESTIONS=$CBOX_OPEN_QUESTIONS"
+  fi
+
+  if [ "${CBOX_GITCONFIG:-0}" = 1 ]; then
+    if _cbox_doctor_file "$home/.gitconfig" 2>/dev/null; then
+      _cbox_doctor_row "git-identity" ACTIVE "CBOX_GITCONFIG=1, ~/.gitconfig mounted"
+    else
+      _cbox_doctor_row "git-identity" CONFIG-ONLY "CBOX_GITCONFIG=1 but ~/.gitconfig not present"
+    fi
+  elif _cbox_doctor_file "$home/.gitconfig" 2>/dev/null; then
+    _cbox_doctor_row "git-identity" ACTIVE "~/.gitconfig present (CBOX_GITCONFIG unset in this shell)"
+  else
+    _cbox_doctor_row "git-identity" OFF "no ~/.gitconfig, CBOX_GITCONFIG=${CBOX_GITCONFIG:-0}"
+  fi
+
+  if grep -q '^\[mcp_servers\.claude\]' "$codex_dir/config.toml" 2>/dev/null; then
+    if [ -f "$hooks_dir/codex_mode_guard.py" ]; then
+      _cbox_doctor_row "codex-mcp" ACTIVE "mcp_servers.claude wired in config.toml, guard hook present"
+    else
+      _cbox_doctor_row "codex-mcp" CONFIG-ONLY "mcp_servers.claude wired but codex_mode_guard.py missing"
+    fi
+  elif [ "${CBOX_CODEX_MCP:-0}" = 1 ]; then
+    _cbox_doctor_row "codex-mcp" CONFIG-ONLY "CBOX_CODEX_MCP=1 but not wired in config.toml"
+  else
+    _cbox_doctor_row "codex-mcp" OFF "no mcp_servers.claude in config.toml, CBOX_CODEX_MCP=${CBOX_CODEX_MCP:-0}"
+  fi
+
+  local shim_mode="${CBOX_CODEX_PROGRESS_MODE:-}"
+  if [ "$shim_mode" = shim ]; then
+    if [ -f "$hooks_dir/codex_mcp_shim.py" ]; then
+      _cbox_doctor_row "codex-progress" ACTIVE "CBOX_CODEX_PROGRESS_MODE=shim, shim file present"
+    else
+      _cbox_doctor_row "codex-progress" CONFIG-ONLY "CBOX_CODEX_PROGRESS_MODE=shim but shim file missing"
+    fi
+  elif [ -z "$shim_mode" ] && [ -f "$hooks_dir/codex_mcp_shim.py" ]; then
+    _cbox_doctor_row "codex-progress" CONFIG-ONLY "shim file present but CBOX_CODEX_PROGRESS_MODE unset in this shell"
+  else
+    _cbox_doctor_row "codex-progress" OFF "CBOX_CODEX_PROGRESS_MODE=${shim_mode:-off}"
+  fi
+
+  if [ "$in_container" = 1 ]; then
+    _cbox_doctor_row "egress" HOST-CHECK "network topology decided host-side (docker compose networks)"
+    _cbox_doctor_row "netaccess" HOST-CHECK "SOCKS proxy topology decided host-side"
+    _cbox_doctor_row "hostroute" HOST-CHECK "host forward-proxy route decided host-side"
+    _cbox_doctor_row "gpu" HOST-CHECK "CDI/nvidia-ctk wiring decided host-side"
+    _cbox_doctor_row "ssh" HOST-CHECK "agent-forward/keys mount decided host-side"
+  else
+    if [ "${CBOX_EGRESS_MODE:-off}" != off ]; then
+      _cbox_doctor_row "egress" CONFIG-ONLY "CBOX_EGRESS_MODE=$CBOX_EGRESS_MODE, applied=${CBOX_EGRESS_APPLIED:-0} - verify in a running container"
+    else
+      _cbox_doctor_row "egress" OFF "CBOX_EGRESS_MODE=off"
+    fi
+    if [ -n "${CBOX_NETACCESS_MODE:-}" ] && [ "${CBOX_NETACCESS_MODE:-off}" != off ]; then
+      _cbox_doctor_row "netaccess" CONFIG-ONLY "CBOX_NETACCESS_MODE=$CBOX_NETACCESS_MODE - verify in a running container"
+    else
+      _cbox_doctor_row "netaccess" OFF "CBOX_NETACCESS_MODE=${CBOX_NETACCESS_MODE:-off}"
+    fi
+    if [ -n "${CBOX_HOST_ROUTE_MODE:-}" ] && [ "${CBOX_HOST_ROUTE_MODE:-off}" != off ]; then
+      _cbox_doctor_row "hostroute" CONFIG-ONLY "CBOX_HOST_ROUTE_MODE=$CBOX_HOST_ROUTE_MODE, applied=${CBOX_HOST_ROUTE_APPLIED:-0} - verify in a running container"
+    else
+      _cbox_doctor_row "hostroute" OFF "CBOX_HOST_ROUTE_MODE=${CBOX_HOST_ROUTE_MODE:-off}"
+    fi
+    if [ "${CBOX_GPU:-0}" = 1 ]; then
+      _cbox_doctor_row "gpu" CONFIG-ONLY "CBOX_GPU=1 - verify in a running container"
+    else
+      _cbox_doctor_row "gpu" OFF "CBOX_GPU=${CBOX_GPU:-0}"
+    fi
+    if [ -n "${CBOX_SSH_MODE:-}" ] && [ "${CBOX_SSH_MODE:-none}" != none ]; then
+      _cbox_doctor_row "ssh" CONFIG-ONLY "CBOX_SSH_MODE=$CBOX_SSH_MODE - verify in a running container"
+    else
+      _cbox_doctor_row "ssh" OFF "CBOX_SSH_MODE=${CBOX_SSH_MODE:-none}"
+    fi
+  fi
+
+  if [ "${CBOX_LOCAL_MODEL:-off}" = on ] && [ -n "${CBOX_LOCAL_MODEL_URL:-}" ] && [ -n "${CBOX_LOCAL_MODEL_NAME:-}" ]; then
+    _cbox_doctor_row "local-model" ACTIVE "CBOX_LOCAL_MODEL=on, url and name set - local-qwen delegate is rendered"
+  elif [ "${CBOX_LOCAL_MODEL:-off}" = on ]; then
+    _cbox_doctor_row "local-model" CONFIG-ONLY "CBOX_LOCAL_MODEL=on but CBOX_LOCAL_MODEL_URL or CBOX_LOCAL_MODEL_NAME unset - delegate absent from render"
+  else
+    _cbox_doctor_row "local-model" OFF "CBOX_LOCAL_MODEL unset or off (default) - see cbox/etc/docs/LOCAL_MODEL_RUNBOOK.md"
+  fi
+
+  if [ -f "$claude_dir/settings.json" ] && [ -s "$claude_dir/settings.json" ] \
+    && python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$claude_dir/settings.json" >/dev/null 2>&1; then
+    _cbox_doctor_row "settings" ACTIVE "~/.claude/settings.json present and valid JSON"
+  else
+    _cbox_doctor_row "settings" MISSING "~/.claude/settings.json absent, empty, or invalid JSON"
+  fi
+
+  if [ "$in_container" = 1 ]; then
+    if [ -n "${CBOX_MANAGED_DIRS:-}" ]; then
+      local md_bad="" md_dir md_owner_ok=1
+      IFS=':' read -ra _doctor_managed_dirs <<< "$CBOX_MANAGED_DIRS"
+      for md_dir in "${_doctor_managed_dirs[@]}"; do
+        [ -n "$md_dir" ] || continue
+        [ -e "$md_dir" ] || { md_bad="$md_bad $md_dir"; continue; }
+        [ -w "$md_dir" ] || md_owner_ok=0
+      done
+      if [ -n "$md_bad" ]; then
+        _cbox_doctor_row "managed-dirs" CONFIG-ONLY "CBOX_MANAGED_DIRS set but missing:$md_bad"
+      elif [ "$md_owner_ok" = 1 ]; then
+        _cbox_doctor_row "managed-dirs" ACTIVE "CBOX_MANAGED_DIRS ownership fixed up by entrypoint, all writable"
+      else
+        _cbox_doctor_row "managed-dirs" CONFIG-ONLY "CBOX_MANAGED_DIRS set but at least one dir not writable by this user"
+      fi
+    else
+      _cbox_doctor_row "managed-dirs" OFF "CBOX_MANAGED_DIRS not set in this shell"
+    fi
+  else
+    _cbox_doctor_row "managed-dirs" HOST-CHECK "CBOX_MANAGED_DIRS ownership fixup runs in the entrypoint, not decidable on the host"
+  fi
+
+  local ss_ok=0
+  if [ -f "$claude_dir/settings.json" ]; then
+    if python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+hooks = d.get('hooks', {}).get('SessionStart', [])
+text = json.dumps(hooks)
+sys.exit(0 if 'SessionStart' not in ('',) and hooks else 1)
+" "$claude_dir/settings.json" >/dev/null 2>&1; then
+      ss_ok=1
+    fi
+  fi
+  if [ "$ss_ok" = 1 ] && [ -f "$hooks_dir/continuity_session_start.py" ]; then
+    _cbox_doctor_row "sessionstart-hooks" ACTIVE "SessionStart wired in settings.json, continuity_session_start.py present"
+  elif [ "$ss_ok" = 1 ]; then
+    _cbox_doctor_row "sessionstart-hooks" CONFIG-ONLY "SessionStart wired but continuity_session_start.py missing (older orchestrator-global.txt style?)"
+  else
+    _cbox_doctor_row "sessionstart-hooks" MISSING "no SessionStart hooks in settings.json"
+  fi
+
+  if [ -f "$codex_dir/AGENTS.override.md" ] && [ -f "$codex_dir/cbox-container.config.toml" ] && [ -f "$hooks_dir/codex_mcp_shim.py" ]; then
+    if _cbox_doctor_nonempty "$codex_dir/AGENTS.override.md" 2>/dev/null; then
+      _cbox_doctor_row "codex-profile" ACTIVE "AGENTS.override.md non-empty, container config + shim present"
+    else
+      _cbox_doctor_row "codex-profile" CONFIG-ONLY "AGENTS.override.md present but empty, container config + shim present"
+    fi
+  elif [ -f "$codex_dir/AGENTS.override.md" ] || [ -f "$codex_dir/cbox-container.config.toml" ] || [ -f "$hooks_dir/codex_mcp_shim.py" ]; then
+    _cbox_doctor_row "codex-profile" CONFIG-ONLY "some codex profile artifacts present, not all three"
+  else
+    _cbox_doctor_row "codex-profile" MISSING "no AGENTS.override.md / cbox-container.config.toml / codex_mcp_shim.py"
+  fi
+
+  local manifest="$INSTALL_DIR/generated/context-manifest.json"
+  if [ "$in_container" = 1 ]; then
+    _cbox_doctor_row "context-manifest" HOST-CHECK "generated/context-manifest.json is a host-side setup artifact, not mounted into the container"
+  elif [ -f "$manifest" ]; then
+    if python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$manifest" >/dev/null 2>&1; then
+      _cbox_doctor_row "context-manifest" ACTIVE "generated/context-manifest.json present and valid JSON"
+    else
+      _cbox_doctor_row "context-manifest" MISSING "generated/context-manifest.json present but not valid JSON"
+    fi
+  else
+    _cbox_doctor_row "context-manifest" MISSING "no generated/context-manifest.json - run ./setup.sh update"
+  fi
+
+  echo
+  echo "legend: ACTIVE=wired and operational here, CONFIG-ONLY=configured but not active in this container, OFF=disabled, MISSING=expected artifact absent, HOST-CHECK=needs docker/GPU/TTY, not decidable in-container"
+}
+
 usage() {
-  echo "usage: $0 {run <bin> [args]|up [--gpu]|down|restart [--gpu]|shell|logs [args]|update|reinstall-bins [--fresh|--if-stale]|install-hooks|verify [--gpu|--isolated]|backup|login [oauth-url]|login-codex|gc|ls|images [list|rm <hash>]}"
+  echo "usage: $0 {run <bin> [args]|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down|restart [--gpu]|shell|logs [args]|update|reinstall-bins [--fresh|--if-stale]|install-hooks|continuity migrate|verify [--gpu|--isolated]|doctor|backup|login [oauth-url]|login-codex|gc|ls|images [list|rm <hash>]}"
   exit 1
 }
 
 case "${1:-}" in
   run) shift; run "$@";;
+  ai) shift; ai "$@";;
   up) shift; up "$@";;
   down)
     case "$(_cbox_effective_mode)" in
@@ -1672,6 +2073,13 @@ case "${1:-}" in
   update) shift; reinstall_bins "$@";;
   reinstall-bins) shift; reinstall_bins "$@";;
   install-hooks) install_hooks;;
+  continuity)
+    shift
+    case "${1:-}" in
+      migrate) continuity_migrate;;
+      *) usage;;
+    esac
+    ;;
   verify)
     shift
     if [ "${1:-}" = "--isolated" ]; then
@@ -1685,6 +2093,7 @@ case "${1:-}" in
       esac
     fi
     ;;
+  doctor) shift; doctor "$@";;
   backup) backup;;
   login) shift; login_claude "$@";;
   login-codex) login_codex;;

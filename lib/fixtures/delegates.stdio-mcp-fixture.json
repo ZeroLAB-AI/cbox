@@ -1,0 +1,114 @@
+{
+  "codex-terra-light": {
+    "type": "stdio",
+    "command": "codex",
+    "args": [
+      "mcp-server"
+    ],
+    "_cbox": {
+      "adapter": "codex-mcp",
+      "available_to": [
+        "claude"
+      ],
+      "backend": "codex",
+      "side_effects": [
+        "spawns-codex-subprocess"
+      ],
+      "model": "gpt-5.6-terra",
+      "model_reasoning_effort": "medium"
+    }
+  },
+  "codex-sol": {
+    "type": "stdio",
+    "command": "codex",
+    "args": [
+      "mcp-server"
+    ],
+    "_cbox": {
+      "adapter": "codex-mcp",
+      "available_to": [
+        "claude"
+      ],
+      "backend": "codex",
+      "side_effects": [
+        "spawns-codex-subprocess"
+      ],
+      "model": "gpt-5.6-sol",
+      "model_reasoning_effort": "xhigh"
+    }
+  },
+  "codex-terra": {
+    "type": "stdio",
+    "command": "codex",
+    "args": [
+      "mcp-server"
+    ],
+    "_cbox": {
+      "adapter": "codex-mcp",
+      "available_to": [
+        "claude"
+      ],
+      "backend": "codex",
+      "side_effects": [
+        "spawns-codex-subprocess"
+      ],
+      "model": "gpt-5.6-terra",
+      "model_reasoning_effort": "max"
+    }
+  },
+  "codex-luna": {
+    "type": "stdio",
+    "command": "codex",
+    "args": [
+      "mcp-server"
+    ],
+    "_cbox": {
+      "adapter": "codex-mcp",
+      "available_to": [
+        "claude"
+      ],
+      "backend": "codex",
+      "side_effects": [
+        "spawns-codex-subprocess"
+      ],
+      "model": "gpt-5.6-luna",
+      "model_reasoning_effort": "max"
+    }
+  },
+  "ask-claude": {
+    "_cbox": {
+      "adapter": "claude-cli",
+      "available_to": [
+        "codex"
+      ],
+      "backend": "claude",
+      "side_effects": [
+        "spawns-claude-subprocess"
+      ],
+      "command": "python3",
+      "script": "ask_claude_mcp.py",
+      "startup_timeout_sec": 30,
+      "tool_timeout_sec": 3600
+    }
+  },
+  "fixture-tool": {
+    "type": "stdio",
+    "command": "fixture-tool-bin",
+    "args": [
+      "--serve"
+    ],
+    "env": {
+      "FIXTURE_TOOL_MODE": "test"
+    },
+    "_cbox": {
+      "adapter": "stdio-mcp",
+      "available_to": [
+        "claude"
+      ],
+      "backend": "fixture-tool-bin",
+      "side_effects": [
+        "none"
+      ]
+    }
+  }
+}

@@ -1,6 +1,6 @@
 # PROGRESS_TEMPLATE — norm and template for the daily progress log
 
-Chronological daily record of work in the project: `./.claude/PROGRESS_YYYY_MM_DD.md` (one file per day, underscores in the date). Division of roles: **LEDGER** = state and queue (what holds now), **PROGRESS** = the day's chronology (what happened when), **DIARY** = narrative and reasoning (why).
+Chronological daily record of work in the project: `./.cbox/PROGRESS_YYYY_MM_DD.md` (one file per day, underscores in the date). Division of roles: **LEDGER** = state and queue (what holds now), **PROGRESS** = the day's chronology (what happened when), **DIARY** = narrative and reasoning (why).
 
 ## Format
 

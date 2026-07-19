@@ -59,6 +59,32 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/session_pane_map.py",
+            "timeout": 10,
+            "statusMessage": "session scope map"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/session_pane_map.py",
+            "timeout": 10,
+            "statusMessage": "session scope unmap"
+          }
+        ]
+      }
     ]
   }
 }

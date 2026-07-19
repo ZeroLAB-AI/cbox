@@ -16,6 +16,16 @@ def _project_dir(payload):
     return None
 
 
+def _brain_dir(proj):
+    cbox_dir = os.path.join(proj, ".cbox")
+    claude_dir = os.path.join(proj, ".claude")
+    if os.path.isfile(os.path.join(cbox_dir, "LEDGER.md")):
+        return cbox_dir
+    if os.path.isfile(os.path.join(claude_dir, "LEDGER.md")):
+        return claude_dir
+    return None
+
+
 def _agent_label(tool_input):
     desc = tool_input.get("description") if isinstance(tool_input, dict) else None
     if isinstance(desc, str) and desc.strip():
@@ -139,9 +149,8 @@ def main():
         if not proj or not os.path.isdir(proj):
             sys.exit(0)
 
-        claude_dir = os.path.join(proj, ".claude")
-        ledger_path = os.path.join(claude_dir, "LEDGER.md")
-        if not os.path.isfile(ledger_path):
+        claude_dir = _brain_dir(proj)
+        if not claude_dir:
             sys.exit(0)
 
         digest = _parse_transcript(transcript_path)

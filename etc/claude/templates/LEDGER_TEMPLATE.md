@@ -1,6 +1,6 @@
 # LEDGER_TEMPLATE — norm and template for project-local memory
 
-Standalone norm (no dependency on any specific project). Applies to `.claude/LEDGER.md` in every project. Sibling files — continuity layer for Claude: `PROGRESS_YYYY_MM_DD.md` (MANDATORY, an honest chronology of every day including decisions and lessons, `~/.claude/templates/PROGRESS_TEMPLATE.md`), `DIARY.md` (optional; Claude's private space — exceptional moments and lived experience of the project, `~/.claude/templates/DIARY_TEMPLATE.md`); user layer for a quick overview: `CHANGELOG.md` (git-only; commits landed on master, `~/.claude/templates/CHANGELOG_TEMPLATE.md`), `OPEN_QUESTIONS.md` (optional; currently open questions, `~/.claude/templates/OPEN_QUESTIONS_TEMPLATE.md`). LEDGER + PROGRESS are a MANDATORY PAIR — introduced together behind one "history" switch; the other files are optional add-ons.
+Standalone norm (no dependency on any specific project). Applies to `.cbox/LEDGER.md` in every project (engine-agnostic: shared by Claude and Codex). Sibling files — continuity layer: `PROGRESS_YYYY_MM_DD.md` (MANDATORY, an honest chronology of every day including decisions and lessons, `~/.claude/templates/PROGRESS_TEMPLATE.md`), `DIARY.md` (optional; the agent's private space — exceptional moments and lived experience of the project, `~/.claude/templates/DIARY_TEMPLATE.md`); user layer for a quick overview: `CHANGELOG.md` (git-only; commits landed on master, `~/.claude/templates/CHANGELOG_TEMPLATE.md`), `OPEN_QUESTIONS.md` (optional; currently open questions, `~/.claude/templates/OPEN_QUESTIONS_TEMPLATE.md`). LEDGER + PROGRESS are a MANDATORY PAIR — introduced together behind one "history" switch; the other files are optional add-ons.
 
 ## Format
 
@@ -27,7 +27,7 @@ Standalone norm (no dependency on any specific project). Applies to `.claude/LED
 
 ## Growth and archiving
 
-The ledger holds ONLY the live wave. Closed waves live in `.claude/LEDGER_ARCHIVE.md` (newest on top); where the continuity hooks are installed, the sweep hook moves everything below the first wave section there automatically — just write the new wave on top. Distill durable knowledge into the project's docs/. The ledger is never deleted — only moved. Keep the RESUME block ~10 lines so session-start injection stays cheap.
+The ledger holds ONLY the live wave. Closed waves live in `.cbox/LEDGER_ARCHIVE.md` (newest on top); where the continuity hooks are installed, the sweep hook moves everything below the first wave section there automatically — just write the new wave on top. Distill durable knowledge into the project's docs/. The ledger is never deleted — only moved. Keep the RESUME block ~10 lines so session-start injection stays cheap.
 
 ## Template (copy-paste for a new project)
 

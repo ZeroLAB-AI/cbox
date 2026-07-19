@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import hashlib
 import json
 import os
 import subprocess
@@ -10,16 +11,40 @@ CONFIG = os.environ.get("CODEX_GUARD_CONFIG",
 AUDIT = os.environ.get("CODEX_GUARD_AUDIT",
                        os.path.expanduser("~/.claude/hooks/codex_guard_audit.jsonl"))
 AUTONOMOUS_MODES = {"auto", "acceptEdits", "dontAsk"}
+AUDIT_LINE_MAX = 2048
+
+
+def _audit_text(value, limit=128):
+    if not isinstance(value, str):
+        return None
+    text = "".join(ch for ch in value if ch.isprintable())
+    return text[:limit]
+
+
+def _audit_digest(value):
+    if not isinstance(value, str):
+        return None
+    return hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()[:16]
 
 
 def _audit(decision, reason, tool, mode, tool_input):
     try:
         ti = tool_input or {}
-        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "decision": decision,
-               "reason": reason, "tool": tool, "mode": mode, "cwd": ti.get("cwd"),
-               "sandbox": ti.get("sandbox"), "approval": ti.get("approval-policy")}
+        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+               "decision": _audit_text(decision, 16),
+               "reason": _audit_text(reason, 128),
+               "tool": _audit_text(tool, 80),
+               "mode": _audit_text(mode, 16),
+               "cwd_sha256": _audit_digest(ti.get("cwd")),
+               "sandbox": _audit_text(ti.get("sandbox"), 32),
+               "approval": _audit_text(ti.get("approval-policy"), 32)}
+        line = json.dumps(rec, ensure_ascii=True)
+        if len(line.encode("utf-8")) > AUDIT_LINE_MAX:
+            line = json.dumps(
+                {"ts": rec["ts"], "event": "audit-record-truncated"},
+                ensure_ascii=True)
         with open(AUDIT, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=True) + "\n")
+            f.write(line + "\n")
     except Exception:
         pass
 
@@ -95,24 +120,30 @@ def main():
     approval = ti.get("approval-policy")
     sandbox = ti.get("sandbox")
     cfg = _load_config()
-    in_container = "CODEX_GUARD_EXTRA_ROOTS" in os.environ
+    in_container = os.path.exists("/.dockerenv") \
+        and os.environ.get("CBOX_RUNTIME") == "container"
     danger_ok = cfg.get("allow_danger_full_access") is True or in_container
     write_capable = sandbox != "read-only"
     if danger_ok and not write_capable:
         write_capable = True
 
-    if in_container and mode == "plan":
+    ro_overlay = os.environ.get("CBOX_RUNTIME") == "container" \
+        and os.environ.get("CBOX_WORKSPACE_READONLY") == "1"
+
+    if in_container and mode == "plan" and not ro_overlay:
         deny("plan mode in the container has no working codex path (read-only "
-             "dies on bwrap, full access is denied by the plan gate) — defer "
+             "dies on bwrap, full access is denied by the plan gate) - defer "
              "the codex call until plan mode ends", tool, mode, ti)
 
     if write_capable:
         _check_scope_and_git(ti.get("cwd"), tool, mode, ti, cfg)
 
-    if in_container and sandbox != "danger-full-access":
+    ro_overlay_plan_call = ro_overlay and mode == "plan" and sandbox == "read-only"
+
+    if in_container and sandbox != "danger-full-access" and not ro_overlay_plan_call:
         deny("container: sandbox must be danger-full-access (the container is "
              "the boundary; read-only and workspace-write die on bwrap and make "
-             "codex escalate via an Accept/Decline elicitation) — re-issue with "
+             "codex escalate via an Accept/Decline elicitation) - re-issue with "
              "sandbox=danger-full-access", tool, mode, ti)
 
     if (mode in AUTONOMOUS_MODES or mode == "bypassPermissions") \

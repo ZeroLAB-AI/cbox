@@ -1,6 +1,6 @@
 # CHANGELOG_TEMPLATE — norm and template for the project changelog
 
-User-facing file: `./.claude/CHANGELOG.md`. A quick overview of what actually landed on master — the user does not need to dig through LEDGER and PROGRESS. **Introduced ONLY in projects that use git** (no git, no changelog).
+User-facing file: `./.cbox/CHANGELOG.md`. A quick overview of what actually landed on master — the user does not need to dig through LEDGER and PROGRESS. **Introduced ONLY in projects that use git** (no git, no changelog).
 
 ## Format
 
