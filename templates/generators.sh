@@ -548,7 +548,7 @@ EOF
     [ -f "$claude_path/settings.json" ] || printf '{}\n' > "$claude_path/settings.json"
     [ -f "$HOME/.claude.json" ] || printf '{}\n' > "$HOME/.claude.json"
     [ -f "$claude_path/CLAUDE.md" ] || : > "$claude_path/CLAUDE.md"
-    gen_claude_cbox_json_seed_into "$INSTALL_DIR/generated/state/claude-cbox.json"
+    gen_claude_cbox_json_seed_into "$INSTALL_DIR/generated/claude-config/.claude.json" "$INSTALL_DIR/generated/state/claude-cbox.json"
     cat >> "$tmp" <<EOF
       - $claude_path:\${HOST_HOME}/.claude:rw
       - $claude_path/hooks:\${HOST_HOME}/.claude/hooks:ro
@@ -574,7 +574,6 @@ EOF
       - $claude_path/agent-memory:\${HOST_HOME}/.claude-cbox/agent-memory:rw
       - $claude_path/hooks:\${HOST_HOME}/.claude-cbox/hooks:ro
       - $claude_path/settings.json:\${HOST_HOME}/.claude-cbox/settings.json:rw
-      - $INSTALL_DIR/generated/state/claude-cbox.json:\${HOST_HOME}/.claude-cbox/.claude.json:rw
       - $claude_path/CLAUDE.md:\${HOST_HOME}/.claude-cbox/CLAUDE.md:ro
       - $claude_path/agents:\${HOST_HOME}/.claude-cbox/agents:ro
       - $claude_path/policies:\${HOST_HOME}/.claude-cbox/policies:ro
@@ -815,7 +814,7 @@ EOF
     [ -f "$claude_path/settings.json" ] || printf '{}\n' > "$claude_path/settings.json"
     [ -f "$HOME/.claude.json" ] || printf '{}\n' > "$HOME/.claude.json"
     [ -f "$claude_path/CLAUDE.md" ] || : > "$claude_path/CLAUDE.md"
-    gen_claude_cbox_json_seed_into "$eff/state/claude-cbox.json"
+    gen_claude_cbox_json_seed_into "$eff/claude-config/.claude.json" "$eff/state/claude-cbox.json"
     cat >> "$tmp" <<EOF
       - $claude_path:\${HOST_HOME}/.claude:rw
       - $claude_path/hooks:\${HOST_HOME}/.claude/hooks:ro
@@ -838,7 +837,6 @@ EOF
       - $claude_path/agent-memory:\${HOST_HOME}/.claude-cbox/agent-memory:rw
       - $claude_path/hooks:\${HOST_HOME}/.claude-cbox/hooks:ro
       - $claude_path/settings.json:\${HOST_HOME}/.claude-cbox/settings.json:rw
-      - $eff/state/claude-cbox.json:\${HOST_HOME}/.claude-cbox/.claude.json:rw
       - $claude_path/CLAUDE.md:\${HOST_HOME}/.claude-cbox/CLAUDE.md:ro
       - $claude_path/agents:\${HOST_HOME}/.claude-cbox/agents:ro
       - $claude_path/policies:\${HOST_HOME}/.claude-cbox/policies:ro
@@ -864,6 +862,10 @@ EOF
       - $claude_path/projects/$slug:\${HOST_HOME}/.claude/projects/$slug:rw
 EOF
     if [ "$claude_mode" = "mount" ]; then
+      if [ -L "$eff/claude-config/projects/$slug" ]; then
+        rm -f "$eff/claude-config/projects/$slug"
+      fi
+      mkdir -p "$eff/claude-config/projects/$slug"
       cat >> "$tmp" <<EOF
       - $claude_path/projects:\${HOST_HOME}/.claude-cbox/.host-projects:rw
       - $claude_path/tasks:\${HOST_HOME}/.claude-cbox/.host-tasks:rw
@@ -1364,7 +1366,16 @@ PY
 }
 
 gen_claude_cbox_json_seed_into() {
-  local target="$1" out
+  local target="$1" legacy="${2:-}" migrate out
+  migrate="$(dirname "$target")/.claude.json.migrate"
+  if [ ! -f "$target" ]; then
+    if [ -f "$migrate" ]; then
+      cp "$migrate" "$target" 2>/dev/null || true
+    elif [ -n "$legacy" ] && [ -f "$legacy" ]; then
+      cp "$legacy" "$target" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$migrate" 2>/dev/null || true
   local shim_mode="${CBOX_CODEX_PROGRESS_MODE:-off}"
   [ "${CBOX_CLAUDE_MODE:-mount}" = mount ] || shim_mode=off
   local progress_flag="off"

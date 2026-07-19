@@ -486,18 +486,32 @@ _write_mirror() {
   fi
 }
 
-_probe() {
-  docker exec "$1" sh -c '
+_CBOX_PROBE_SH='
 cp="$(sed -n 2p "$HOST_HOME/.local/.cbox-stamp" 2>/dev/null)"
 xp="$(sed -n 2p "$HOST_HOME/.codex/packages/.cbox-stamp" 2>/dev/null)"
 n=0
 for p in /proc/[0-9]*/exe; do
   e="$(readlink "$p" 2>/dev/null)" || continue
   e="${e% (deleted)}"
-  if [ -n "$cp" ] && [ "$e" = "$cp" ]; then n=$((n+1)); continue; fi
-  if [ -n "$xp" ] && [ "$e" = "$xp" ]; then n=$((n+1)); fi
+  d="${p%/exe}/cmdline"
+  if [ -n "$cp" ] && [ "$e" = "$cp" ]; then
+    [ -e "$d" ] || continue
+    a1="$(tr "\0" "\n" < "$d" 2>/dev/null | sed -n 2p)"
+    case "$a1" in daemon|--bg-pty-host|--bg-spare) continue ;; esac
+    n=$((n+1)); continue
+  fi
+  if [ -n "$xp" ] && [ "$e" = "$xp" ]; then
+    [ -e "$d" ] || continue
+    a1="$(tr "\0" "\n" < "$d" 2>/dev/null | sed -n 2p)"
+    case "$a1" in mcp-server) continue ;; esac
+    n=$((n+1))
+  fi
 done
-printf %s "$n"'
+printf %s "$n"
+'
+
+_probe() {
+  docker exec "$1" sh -c "$_CBOX_PROBE_SH"
 }
 
 _reap() {

@@ -184,7 +184,7 @@ Binaries mount read-only (install once on host, reuse everywhere). Version pin c
 
 ## Lifecycle: isolated mode
 
-A project's container starts on first `claude`/`codex`/`cbox run` and stops the instant the last live process exits (no idle timeout). "Live" is determined by matching `/proc/<pid>/exe` against the binary path recorded in shared volumes' metadata; a copied binary cannot keep the container alive.
+A project's container starts on first `claude`/`codex`/`cbox run` and stops the instant the last live process exits (no idle timeout). "Live" is determined by matching `/proc/<pid>/exe` against the binary path recorded in shared volumes' metadata; a copied binary cannot keep the container alive. Engine infrastructure processes do not count as live: the Claude daemon (`claude daemon run`), its PTY helpers (`--bg-pty-host`, `--bg-spare`), and `codex mcp-server` relay subprocesses are ignored, so a lingering daemon or MCP relay never keeps an otherwise idle container running.
 
 Two windows in the same project share one container; only the last window's exit triggers the stop.
 
@@ -215,6 +215,8 @@ This prevents prompt injection: subagent bodies are executed as system prompts, 
 Consequence: the global #shortcut in Claude Code does not work inside the container. Manage policies on the host via `./setup.sh update claude-md`.
 
 Project-local files in `./.claude/` of a mounted workspace stay writable (same as the rest of the workspace). Runtime state (`~/.claude/projects/`, `~/.claude/agent-memory/`, credentials) remains writable.
+
+The container's own Claude state file lives as a plain file inside the claude-config directory bind (`<effective dir>/claude-config/.claude.json` per project; `generated/claude-config/.claude.json` in global mode). Each regen re-renders its `mcpServers` from the delegate registry and preserves every other key the container wrote (trust dialog, onboarding). One-shot import: drop a `.claude.json.migrate` file next to it and the next regen adopts it as the initial state (only when no state file exists yet) and deletes it.
 
 ## Wizard re-runs and host activation
 
