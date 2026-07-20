@@ -245,13 +245,17 @@ def update_locked(path, expect_state, **fields):
 
 
 def inject(pane):
-    subprocess.run(["tmux", "send-keys", "-t", pane, "-l", PROMPT],
-                   check=True, timeout=10)
+    typed = False
     try:
+        subprocess.run(["tmux", "send-keys", "-t", pane, "-l", PROMPT],
+                       check=True, timeout=10)
+        typed = True
         subprocess.run(["tmux", "send-keys", "-t", pane, "Enter"],
                        check=True, timeout=10)
     except (OSError, subprocess.SubprocessError) as exc:
-        return repr(exc)
+        if typed:
+            return repr(exc)
+        raise
     return None
 
 

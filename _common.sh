@@ -47,6 +47,10 @@ _cbox_is_rootless_docker() {
   docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless
 }
 
+_cbox_tpl_sha() {
+  cat "$INSTALL_DIR/_common.sh" "$INSTALL_DIR/templates/generators.sh" | sha256sum | awk '{print $1}'
+}
+
 mcp_all_names() {
   local etc="${ETC_DIR:-$INSTALL_DIR/etc}"
   [ -f "$etc/mcp/delegates.json" ] || return 0

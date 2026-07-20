@@ -12,6 +12,7 @@ CONF="$INSTALL_DIR/cbox.conf"
 HAVE_GLOBAL_CONF=0
 if [ -f "$CONF" ]; then
   source "$CONF"
+  export CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
   HAVE_GLOBAL_CONF=1
 fi
 
@@ -29,9 +30,9 @@ die_no_conf() {
 check_tpl_sha() {
   require_global_conf
   local cur
-  cur="$(sha256sum "$INSTALL_DIR/templates/generators.sh" | awk '{print $1}')"
+  cur="$(_cbox_tpl_sha)"
   if [ "$cur" != "${CBOX_TPL_SHA:-}" ]; then
-    echo "cbox: templates changed since last generation - run ./setup.sh update to re-bless"
+    echo "cbox: templates changed since last generation - run $INSTALL_DIR/setup.sh update to re-bless"
     exit 1
   fi
 }
@@ -603,6 +604,7 @@ _run_isolated() {
     set -e
     unset CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL CBOX_CODEX_TARGET
     . "$eff/cbox.conf"
+    export CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
     _gen_effective "$eff" "$root"
     _ensure_image "$eff"
     _bins_soft "$IMG_TAG"
@@ -972,6 +974,11 @@ backup() {
     docker run --rm -v "$v:/src:ro" -v "$INSTALL_DIR/backups:/out" ubuntu:24.04 tar czf "/out/$v-$ts.tar.gz" -C /src .
     du -h "$INSTALL_DIR/backups/$v-$ts.tar.gz"
   done
+  local iso_vols
+  iso_vols="$(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -c '^cbox-p' || true)"
+  if [ "${iso_vols:-0}" -gt 0 ] 2>/dev/null; then
+    echo "cbox: note: $iso_vols isolated project volume(s) (cbox-p*) are not covered by this backup - archive them per project: docker run --rm -v <vol>:/src:ro -v <dest>:/out ubuntu:24.04 tar czf /out/<vol>.tar.gz -C /src ."
+  fi
 }
 
 _socat_exec_addr() {
@@ -1559,6 +1566,11 @@ verify_isolated() {
   v_t "manifest verify (conf+generators)"
   v_ok
 
+  local eff_scope eff_claude_target eff_codex_want
+  eff_scope="$( unset CBOX_SESSION_SCOPE; . "$eff/cbox.conf" 2>/dev/null; printf '%s' "${CBOX_SESSION_SCOPE:-isolated}" )"
+  eff_claude_target="$( unset CBOX_CLAUDE_TARGET; . "$eff/cbox.conf" 2>/dev/null; printf '%s' "${CBOX_CLAUDE_TARGET:-stable}" )"
+  eff_codex_want="$( unset CBOX_CODEX_VERSION CBOX_CODEX_TARGET; . "$eff/cbox.conf" 2>/dev/null; printf '%s|%s' "${CBOX_CODEX_VERSION:-latest}" "${CBOX_CODEX_TARGET:-}" )"
+
   cid="$(_compose_p "$eff" ps -q cbox 2>/dev/null)" || cid=""
 
   v_t "v10 mirror tamper ignored"
@@ -1661,7 +1673,7 @@ verify_isolated() {
   if grep -q 'claude-home' "$eff/docker-compose.yml" 2>/dev/null; then v_fail "claude-home volume present"; else v_ok; fi
 
   v_t "session-scope isolated mounts only own slug"
-  if [ "${CBOX_SESSION_SCOPE:-isolated}" = "isolated" ]; then
+  if [ "$eff_scope" = "isolated" ]; then
     if grep -q "projects/$slug:" "$eff/docker-compose.yml" 2>/dev/null && ! grep -q '\.claude/projects:\${HOST_HOME}' "$eff/docker-compose.yml" 2>/dev/null; then
       v_ok
     else
@@ -1683,7 +1695,7 @@ verify_isolated() {
     if [ "$has_other" = 1 ] && [ -n "$cid" ]; then
       local otherroot
       otherroot="$(cat "$other/workspace" 2>/dev/null || true)"
-      if [ -n "$otherroot" ] && docker exec "$cid" sh -c "test -e '$otherroot'" >/dev/null 2>&1; then
+      if [ -n "$otherroot" ] && docker exec "$cid" test -e "$otherroot" >/dev/null 2>&1; then
         v_fail "$otherroot visible inside this container"
       else
         v_ok "not visible"
@@ -1740,7 +1752,7 @@ verify_isolated() {
   v_t "claude stamp present and want matches pin"
   if [ -n "$cid" ]; then
     local iso_want iso_got
-    iso_want="${CBOX_CLAUDE_TARGET:-stable}"
+    iso_want="$eff_claude_target"
     if iso_got="$(_compose_p "$eff" exec -T cbox /entrypoint.sh sh -c 'sed -n 1p "$HOME/.local/.cbox-stamp"' 2>/dev/null)" && [ "$iso_got" = "$iso_want" ]; then
       v_ok "$iso_got"
     else
@@ -1753,7 +1765,7 @@ verify_isolated() {
   v_t "codex stamp present and want matches pin"
   if [ -n "$cid" ]; then
     local iso_want iso_got
-    iso_want="${CBOX_CODEX_VERSION:-latest}|${CBOX_CODEX_TARGET:-}"
+    iso_want="$eff_codex_want"
     if iso_got="$(_compose_p "$eff" exec -T cbox /entrypoint.sh sh -c 'sed -n 1p "$HOME/.codex/packages/.cbox-stamp"' 2>/dev/null)" && [ "$iso_got" = "$iso_want" ]; then
       v_ok "$iso_got"
     else
@@ -1976,7 +1988,19 @@ doctor() {
   fi
 
   if [ "${CBOX_LOCAL_MODEL:-off}" = on ] && [ -n "${CBOX_LOCAL_MODEL_URL:-}" ] && [ -n "${CBOX_LOCAL_MODEL_NAME:-}" ]; then
-    _cbox_doctor_row "local-model" ACTIVE "CBOX_LOCAL_MODEL=on, url and name set - local-qwen delegate is rendered"
+    local lm_seed
+    if [ "${CBOX_CLAUDE_MODE:-mount}" = mount ]; then
+      lm_seed="$INSTALL_DIR/generated/claude-config/.claude.json"
+    else
+      lm_seed="$INSTALL_DIR/generated/state/claude.json"
+    fi
+    if [ "$in_container" = 1 ]; then
+      _cbox_doctor_row "local-model" ACTIVE "CBOX_LOCAL_MODEL=on, url and name set"
+    elif [ -f "$lm_seed" ] && grep -q '"local-qwen"' "$lm_seed" 2>/dev/null; then
+      _cbox_doctor_row "local-model" ACTIVE "CBOX_LOCAL_MODEL=on, url and name set, local-qwen present in the rendered seed"
+    else
+      _cbox_doctor_row "local-model" CONFIG-ONLY "CBOX_LOCAL_MODEL=on but local-qwen absent from the rendered seed - regenerate (cbox up or ./setup.sh update local-model)"
+    fi
   elif [ "${CBOX_LOCAL_MODEL:-off}" = on ]; then
     _cbox_doctor_row "local-model" CONFIG-ONLY "CBOX_LOCAL_MODEL=on but CBOX_LOCAL_MODEL_URL or CBOX_LOCAL_MODEL_NAME unset - delegate absent from render"
   else

@@ -80,6 +80,7 @@ def tool_text(text, is_error=False):
 def audit(decision, reason, duration_sec, prompt_bytes, response_bytes):
     try:
         path = audit_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         if os.path.isfile(path) and os.path.getsize(path) > AUDIT_MAX_BYTES:
             os.replace(path, path + ".1")
         rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),

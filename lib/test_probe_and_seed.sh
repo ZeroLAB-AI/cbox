@@ -94,7 +94,41 @@ assert d["containerKey"] == "kept", d
 assert d["mcpServers"], d
 PY
 [ ! -e "$S/cfg/.claude.json.migrate" ] || _fail "seed: stale migrate not removed"
-_ok "seed: existing state kept, stale migrate removed"
+_ok "seed: existing state kept, invalid migrate discarded"
+
+printf '{"containerKey":"old","projects":{"/q":{"hasTrustDialogAccepted":true}}}' > "$S/cfg/.claude.json.migrate"
+gen_claude_cbox_json_seed_into "$S/cfg/.claude.json" "$S/state/claude-cbox.json"
+python3 - "$S/cfg/.claude.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["projects"]["/q"]["hasTrustDialogAccepted"] is True, d
+assert d["containerKey"] == "old", d
+assert d["mcpServers"], d
+PY
+[ ! -e "$S/cfg/.claude.json.migrate" ] || _fail "seed: valid migrate not consumed"
+_ok "seed: valid migrate adopted over existing state (operator import wins)"
+
+VICTIM="$TMPBASE/victim-host-secret"
+printf 'HOST SECRET - must survive\n' > "$VICTIM"
+rm -f "$S/cfg/.claude.json" "$S/cfg/.claude.json.migrate"
+ln -s "$VICTIM" "$S/cfg/.claude.json.migrate"
+gen_claude_cbox_json_seed_into "$S/cfg/.claude.json" "$S/state/claude-cbox.json"
+[ "$(cat "$VICTIM")" = "HOST SECRET - must survive" ] || _fail "seed: symlinked migrate followed - host file was read/adopted"
+[ ! -L "$S/cfg/.claude.json" ] || _fail "seed: target became a symlink"
+python3 - "$S/cfg/.claude.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["mcpServers"], d
+PY
+_ok "seed: symlinked migrate is not followed (no host-file traversal)"
+
+printf 'HOST SECRET - must survive\n' > "$VICTIM"
+rm -f "$S/cfg/.claude.json" "$S/cfg/.claude.json.migrate"
+ln -s "$VICTIM" "$S/cfg/.claude.json"
+gen_claude_cbox_json_seed_into "$S/cfg/.claude.json" "$S/state/claude-cbox.json"
+[ "$(cat "$VICTIM")" = "HOST SECRET - must survive" ] || _fail "seed: symlinked target followed - host file overwritten"
+[ ! -L "$S/cfg/.claude.json" ] || _fail "seed: symlinked target survived (write followed the link)"
+_ok "seed: symlinked target replaced in place, host file untouched"
 
 G="$TMPBASE/gen"
 mkdir -p "$G/eff/claude-config/projects" "$G/claude" "$G/codex" "$G/fakeproj"

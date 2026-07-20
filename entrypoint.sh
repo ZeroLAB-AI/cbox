@@ -127,13 +127,25 @@ _ensure_scope_services() {
 }
 
 _check_codex_mcp_shim_seed() {
-  local seed="$HOST_HOME/.claude.json"
-  [ -f "$seed" ] || return 0
-  if ! command -v python3 >/dev/null 2>&1; then
-    echo "entrypoint: python3 missing - cannot validate the codex mcp shim wrapper in $seed, refusing to start claude" >&2
-    return 1
+  local seed
+  local -a seeds=()
+  if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+    seeds+=("$CLAUDE_CONFIG_DIR/.claude.json")
   fi
-  python3 - "$seed" <<'PYEOF'
+  seeds+=("$HOST_HOME/.claude.json")
+  for seed in "${seeds[@]}"; do
+    [ -f "$seed" ] || continue
+    if ! command -v python3 >/dev/null 2>&1; then
+      echo "entrypoint: python3 missing - cannot validate the codex mcp shim wrapper in $seed, refusing to start claude" >&2
+      return 1
+    fi
+    _check_codex_mcp_shim_seed_one "$seed" || return 1
+  done
+  return 0
+}
+
+_check_codex_mcp_shim_seed_one() {
+  python3 - "$1" <<'PYEOF'
 import json
 import sys
 
@@ -177,7 +189,7 @@ for name, spec in servers.items():
 
 if stale:
     sys.stderr.write(
-        "entrypoint: ~/.claude.json has codex mcp server(s) not wrapped by codex_mcp_shim.py ("
+        "entrypoint: " + path + " has codex mcp server(s) not wrapped by codex_mcp_shim.py ("
         + ", ".join(sorted(stale))
         + ") - tier injection and the delegation depth guard would be bypassed; "
         "refusing to start claude - run './setup.sh update mcp-servers' or "

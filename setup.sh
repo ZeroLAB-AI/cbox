@@ -1149,8 +1149,19 @@ step_mode() {
   esac
 }
 
+mounts_outgoing_backup() {
+  local prev_mode="$1" prev_path="$2" new_mode="$3"
+  [ "$prev_mode" = mount ] || return 0
+  [ "$new_mode" = volume ] || return 0
+  [ -d "$prev_path" ] || return 0
+  ask_choice "setup: back up outgoing $prev_path before switching to volume mode (y=copy c=tar.gz n=no)" n y c n
+  backup_one_dir mount "$prev_path" "$ASK_VALUE"
+}
+
 step_mounts() {
   echo "== section: mounts =="
+  local prev_claude_mode="$CBOX_CLAUDE_MODE" prev_claude_path="$CBOX_CLAUDE_PATH"
+  local prev_codex_mode="$CBOX_CODEX_MODE" prev_codex_path="$CBOX_CODEX_PATH"
   ask_choice "setup: ~/.claude mode" "$CBOX_CLAUDE_MODE" mount volume
   if [ "$ASK_VALUE" = mount ]; then
     if path_input "setup: host directory for ~/.claude (empty = switch to volume): " "$CBOX_CLAUDE_PATH" 1; then
@@ -1167,6 +1178,7 @@ step_mounts() {
     CBOX_CLAUDE_MODE=volume
     CBOX_CLAUDE_BACKUP=n
   fi
+  mounts_outgoing_backup "$prev_claude_mode" "$prev_claude_path" "$CBOX_CLAUDE_MODE"
   if [ "$CBOX_CLAUDE_MODE" = volume ]; then
     note "~/.claude lives in volume ${CBOX_NAME}-claude; ~/.claude.json is backed by generated/state/claude.json"
   fi
@@ -1186,6 +1198,7 @@ step_mounts() {
     CBOX_CODEX_MODE=volume
     CBOX_CODEX_BACKUP=n
   fi
+  mounts_outgoing_backup "$prev_codex_mode" "$prev_codex_path" "$CBOX_CODEX_MODE"
   if [ "$CBOX_CODEX_MODE" = volume ]; then
     note "~/.codex lives in volume ${CBOX_NAME}-codex"
   fi
@@ -1577,7 +1590,7 @@ step_codex_progress() {
   if container_target_ok; then
     mcp_apply_selection
   fi
-  note "host claude picks the change up on next start; the container needs re-bless + restart (~/.claude.json bind pins the old inode)"
+  note "host claude picks the change up on next start; the container needs re-bless + restart (the read-only ~/.claude.json seed bind pins the old inode; the live container state is ~/.claude-cbox/.claude.json)"
 }
 
 step_local_model() {
@@ -1634,26 +1647,59 @@ step_autoresume() {
   note "applies on container recreate; the image rebuild (adds tmux) happens automatically on the next run"
 }
 
+_managed_file_matches() {
+  local shipped="$1" installed="$2"
+  [ -f "$shipped" ] && [ -f "$installed" ] || return 1
+  [ ! -L "$installed" ] || return 1
+  cmp -s "$shipped" "$installed"
+}
+
+agents_prune_deselected() {
+  local target="$1"; shift
+  local src b selected
+  selected=" $* "
+  [ -d "$target" ] || return 0
+  for src in "$ETC_DIR/agents"/*.md; do
+    [ -f "$src" ] || continue
+    b="$(basename "$src")"
+    case "$selected" in
+      *" $b "*) continue ;;
+    esac
+    if [ -f "$target/$b" ]; then
+      if _managed_file_matches "$src" "$target/$b"; then
+        rm -f "$target/$b"
+        note "agents: removed deselected $target/$b"
+      else
+        note "agents: kept $target/$b (locally modified - not a managed copy; remove it by hand if unwanted)"
+      fi
+    fi
+  done
+}
+
 agents_install() {
   local expanded
   expanded="$(canonical_expand "$CBOX_AGENTS" "$(agent_all_names)")"
-  if [ -z "$expanded" ]; then
-    note "no agents selected; nothing installed"
-    return 0
-  fi
   local files=() name f
-  read -r -a name <<< "$expanded"
-  for f in "${name[@]}"; do
-    files+=("$f.md")
-  done
+  if [ -n "$expanded" ]; then
+    read -r -a name <<< "$expanded"
+    for f in "${name[@]}"; do
+      files+=("$f.md")
+    done
+  fi
   if [ "$CBOX_CLAUDE_MODE" = mount ]; then
-    staged_install_files "$ETC_DIR/agents" "$CBOX_CLAUDE_PATH/agents" 0644 "${files[@]}" || true
+    agents_prune_deselected "$CBOX_CLAUDE_PATH/agents" "${files[@]-}"
+    [ "${#files[@]}" -gt 0 ] && { staged_install_files "$ETC_DIR/agents" "$CBOX_CLAUDE_PATH/agents" 0644 "${files[@]}" || true; }
   else
     mkdir -p "$GEN_DIR/claude/agents"
-    for f in "${files[@]}"; do
+    agents_prune_deselected "$GEN_DIR/claude/agents" "${files[@]-}"
+    for f in "${files[@]-}"; do
+      [ -n "$f" ] || continue
       _cbox_write_local "$GEN_DIR/claude/agents/$f" < "$ETC_DIR/agents/$f"
     done
     note "agents written into $GEN_DIR/claude/agents (served read-only via bind mount; restart to pick up)"
+  fi
+  if [ "${#files[@]}" -eq 0 ]; then
+    note "no agents selected; managed agent files pruned from the target"
   fi
 }
 
@@ -1987,10 +2033,43 @@ claude_md_merge_kernel_block() {
   rm -f "$block"
 }
 
+claude_md_prune_deselected() {
+  local target="$1" src_dir="$2"; shift 2
+  local selected=" $* " src b
+  [ -d "$target" ] || return 0
+  for src in "$src_dir"/*.md; do
+    [ -f "$src" ] || continue
+    b="$(basename "$src")"
+    case "$selected" in
+      *" $b "*) continue ;;
+    esac
+    if [ -f "$target/$b" ]; then
+      if _managed_file_matches "$src" "$target/$b"; then
+        rm -f "$target/$b"
+        note "claude-md: removed deselected $target/$b"
+      else
+        note "claude-md: kept $target/$b (locally modified - not a managed copy; remove it by hand if unwanted)"
+      fi
+    fi
+  done
+}
+
+claude_md_target_base() {
+  if [ "$CBOX_CLAUDE_MODE" = mount ]; then
+    printf '%s' "$CBOX_CLAUDE_PATH"
+  else
+    printf '%s' "$GEN_DIR/claude"
+  fi
+}
+
 step_claude_md() {
   echo "== section: claude-md =="
   if [ "$CBOX_HISTORY" = 0 ]; then
-    note "history disabled (CBOX_HISTORY=0); claude-md deployment (policies/templates/CLAUDE.md) skipped"
+    local base
+    base="$(claude_md_target_base)"
+    claude_md_prune_deselected "$base/policies" "$ETC_DIR/claude/policies"
+    claude_md_prune_deselected "$base/templates" "$ETC_DIR/claude/templates"
+    note "history disabled (CBOX_HISTORY=0); managed policies/templates pruned, CLAUDE.md deployment skipped"
     return 0
   fi
   local src="$ETC_DIR/claude/CLAUDE.md"
@@ -2009,6 +2088,8 @@ step_claude_md() {
   mapfile -t policy_files < <(claude_md_policy_files)
   mapfile -t template_files < <(claude_md_template_files)
   if [ "$CBOX_CLAUDE_MODE" = mount ]; then
+    claude_md_prune_deselected "$CBOX_CLAUDE_PATH/policies" "$ETC_DIR/claude/policies" "${policy_files[@]}"
+    claude_md_prune_deselected "$CBOX_CLAUDE_PATH/templates" "$ETC_DIR/claude/templates" "${template_files[@]}"
     staged_install_files "$stage/policies" "$CBOX_CLAUDE_PATH/policies" 0644 "${policy_files[@]}" || true
     staged_install_files "$stage/templates" "$CBOX_CLAUDE_PATH/templates" 0644 "${template_files[@]}" || true
     local target="$CBOX_CLAUDE_PATH/CLAUDE.md" work
@@ -2022,6 +2103,8 @@ step_claude_md() {
     staged_write "$target" "$work" 0644 || true
   else
     mkdir -p "$GEN_DIR/claude/policies" "$GEN_DIR/claude/templates"
+    claude_md_prune_deselected "$GEN_DIR/claude/policies" "$ETC_DIR/claude/policies" "${policy_files[@]}"
+    claude_md_prune_deselected "$GEN_DIR/claude/templates" "$ETC_DIR/claude/templates" "${template_files[@]}"
     local f
     for f in "${policy_files[@]}"; do
       _cbox_write_local "$GEN_DIR/claude/policies/$f" < "$stage/policies/$f"
@@ -2279,6 +2362,7 @@ egress_lockdown() {
   conf_save
   regen_all
   docker compose -f "$COMPOSE_FILE" down --remove-orphans
+  docker compose -f "$COMPOSE_FILE" build
   docker compose -f "$COMPOSE_FILE" up -d
   note "egress lockdown applied ($CBOX_EGRESS_MODE)"
 }
@@ -2341,7 +2425,7 @@ apply_change() {
     case "$action" in
       recreate) echo "  docker compose -f docker-compose.yml up -d" ;;
       restart) echo "  docker compose -f docker-compose.yml down && docker compose -f docker-compose.yml up -d" ;;
-      topology) echo "  docker compose -f docker-compose.yml down --remove-orphans && docker compose -f docker-compose.yml up -d" ;;
+      topology) echo "  docker compose -f docker-compose.yml down --remove-orphans && docker compose -f docker-compose.yml build && docker compose -f docker-compose.yml up -d" ;;
       rebuild) echo "  docker compose -f docker-compose.yml build && docker compose -f docker-compose.yml up -d" ;;
     esac
     return 0
@@ -2360,6 +2444,7 @@ apply_change() {
       ;;
     topology)
       docker compose -f "$COMPOSE_FILE" down --remove-orphans
+      docker compose -f "$COMPOSE_FILE" build
       docker compose -f "$COMPOSE_FILE" up -d
       ;;
     rebuild)
@@ -2614,6 +2699,17 @@ run_wizard() {
   run_phase
 }
 
+run_rebless() {
+  SETUP_MODE=update
+  [ -f "$CONF_FILE" ] || die "no $CONF_FILE; run ./setup.sh first"
+  conf_load
+  load_generators
+  regen_all
+  conf_load
+  note "templates re-blessed (CBOX_TPL_SHA updated) and artifacts regenerated"
+  note "restart containers to pick the changes up: cbox down && cbox run <bin>; isolated projects re-bless interactively on their next cbox run"
+}
+
 run_update() {
   require_tty "update"
   SETUP_MODE=update
@@ -2644,6 +2740,13 @@ run_update() {
   conf_save
   regen_all
   conf_load
+  if [ "$section" = mounts ] && [ "$CBOX_CLAUDE_MODE" = volume ]; then
+    rm -f "$GEN_DIR/state/claude.json"
+    gen_claude_json_seed
+    agents_install
+    step_claude_md
+    mcp_apply_selection
+  fi
   if [ "$section" = workspaces ] && [ "$CBOX_CLAUDE_MODE" = mount ]; then
     staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 codex_scope.container.json \
       || note "codex guard scope not synced; run ./setup.sh update hooks (or ./cbox install-hooks) before relying on the new workspace list"
@@ -2702,6 +2805,7 @@ run_config() {
   if [ "$CBOX_CLAUDE_MODE" = volume ]; then
     agents_install
     step_claude_md
+    mcp_apply_selection
   fi
   if ! have_docker; then
     print_host_sequence
@@ -2873,7 +2977,7 @@ run_local() {
 
   SETUP_MODE=local
   load_generators
-  if [ -f "$eff/cbox.conf" ]; then
+  if [ -f "$eff/cbox.conf" ] && [ "$from_global" != 1 ]; then
     CONF_FILE="$eff/cbox.conf"
   fi
   conf_load
@@ -2893,6 +2997,15 @@ run_local() {
   _cbox_conf_set_tpl_sha "$eff/cbox.conf"
   conf_load
 
+  mkdir -p "$GEN_DIR/hooks" "$GEN_DIR/state"
+  [ -f "$GEN_DIR/managed-settings.json" ] || gen_managed_settings
+  if [ "${CBOX_CLAUDE_MODE:-mount}" = volume ]; then
+    [ -f "$GEN_DIR/settings.json" ] || gen_settings_volume
+    [ -n "$(ls -A "$GEN_DIR/hooks" 2>/dev/null)" ] || gen_hooks_dir
+    gen_claude_assets
+    gen_claude_json_seed
+  fi
+
   local digest
   digest="$(_cbox_resolve_base_digest ubuntu:24.04)" || die "cannot resolve base image digest and no local image - network required for first build"
   cp "$INSTALL_DIR/entrypoint.sh" "$eff/entrypoint.sh"
@@ -2908,6 +3021,9 @@ run_local() {
   _cbox_manifest_write "$eff" "$root" "$eff/cbox.conf"
   _cbox_manifest_write_generated "$eff"
 
+  if [ "${CBOX_CLAUDE_MODE:-mount}" = mount ] && [ ! -f "${CBOX_CLAUDE_PATH:-$HOME/.claude}/hooks/session_scope_farm.py" ]; then
+    warn "claude hooks are not installed in ${CBOX_CLAUDE_PATH:-$HOME/.claude}/hooks - scoped sessions, guards and the codex mcp shim will be missing in the container; run ./setup.sh (global wizard) or ./setup.sh update hooks first"
+  fi
   note "blessed effective config in $eff"
   note "the image builds automatically on the first cbox run (reused when inputs are unchanged)"
   note "run from $root: cbox run claude   (or codex)"
@@ -2919,13 +3035,17 @@ main() {
       run_wizard
       ;;
     --help|-h|help)
-      printf 'usage: ./setup.sh [update <section>|list-steps|--config <file>|--local <root> [--from-global]|uninstall|--help]\n'
+      printf 'usage: ./setup.sh [update [<section>]|list-steps|--config <file>|--local <root> [--from-global]|uninstall|--help]\n'
+      printf '  update with no section: re-render all artifacts and re-bless the templates (CBOX_TPL_SHA)\n'
       print_settings_help
       exit 0
       ;;
     update)
-      [ -n "${2:-}" ] || die "usage: ./setup.sh update <section>"
-      run_update "$2"
+      if [ -n "${2:-}" ]; then
+        run_update "$2"
+      else
+        run_rebless
+      fi
       ;;
     list-steps)
       run_list_steps
@@ -2946,7 +3066,7 @@ main() {
       run_uninstall
       ;;
     *)
-      die "usage: ./setup.sh [--help|update <section>|list-steps|--config <file>|--local <root> [--from-global]|uninstall]"
+      die "usage: ./setup.sh [--help|update [<section>]|list-steps|--config <file>|--local <root> [--from-global]|uninstall]"
       ;;
   esac
 }

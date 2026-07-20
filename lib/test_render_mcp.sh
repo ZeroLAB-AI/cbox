@@ -151,7 +151,7 @@ test_entrypoint_gate_passes_on_golden_seed() {
   _seed_shape "$TMPBASE/gate_render.json" "$hosthome/.claude.json"
   local gatefunc="$TMPBASE/gate_func.sh"
   awk '
-    /^_check_codex_mcp_shim_seed\(\) \{/ { infunc=1 }
+    /^_check_codex_mcp_shim_seed(_one)?\(\) \{/ { infunc=1 }
     infunc { print }
     infunc && /^\}/ { infunc=0 }
   ' "$INSTALL_DIR/entrypoint.sh" > "$gatefunc"
@@ -172,7 +172,7 @@ json.dump(d, open(sys.argv[1], "w"))
 ' "$hosthome/.claude.json"
   local gatefunc="$TMPBASE/gate_func2.sh"
   awk '
-    /^_check_codex_mcp_shim_seed\(\) \{/ { infunc=1 }
+    /^_check_codex_mcp_shim_seed(_one)?\(\) \{/ { infunc=1 }
     infunc { print }
     infunc && /^\}/ { infunc=0 }
   ' "$INSTALL_DIR/entrypoint.sh" > "$gatefunc"
@@ -180,6 +180,35 @@ json.dump(d, open(sys.argv[1], "w"))
     _fail "entrypoint boot gate accepted a tampered (unwrapped codex-*) seed"
   fi
   echo "PASS: entrypoint boot gate refuses a tampered seed"
+}
+
+test_entrypoint_gate_checks_active_config_dir_state() {
+  local hosthome="$TMPBASE/hosthome_active"
+  local cfgdir="$TMPBASE/hosthome_active/.claude-cbox"
+  mkdir -p "$cfgdir"
+  local all
+  all="$(_all_names)"
+  _render "$all" on "$TMPBASE/gate_render_active.json"
+  _seed_shape "$TMPBASE/gate_render_active.json" "$hosthome/.claude.json"
+  python3 -c '
+import json
+import sys
+d = {"hasCompletedOnboarding": True, "mcpServers": {"codex-sol": {"type": "stdio", "command": "codex", "args": ["mcp-server"]}}}
+json.dump(d, open(sys.argv[1], "w"))
+' "$cfgdir/.claude.json"
+  local gatefunc="$TMPBASE/gate_func_active.sh"
+  awk '
+    /^_check_codex_mcp_shim_seed(_one)?\(\) \{/ { infunc=1 }
+    infunc { print }
+    infunc && /^\}/ { infunc=0 }
+  ' "$INSTALL_DIR/entrypoint.sh" > "$gatefunc"
+  if ( HOST_HOME="$hosthome"; CLAUDE_CONFIG_DIR="$cfgdir"; source "$gatefunc"; _check_codex_mcp_shim_seed ) 2>/dev/null; then
+    _fail "entrypoint boot gate ignored a tampered active state in CLAUDE_CONFIG_DIR"
+  fi
+  if ! ( HOST_HOME="$hosthome"; source "$gatefunc"; _check_codex_mcp_shim_seed ); then
+    _fail "entrypoint boot gate rejected a clean host seed when CLAUDE_CONFIG_DIR is unset"
+  fi
+  echo "PASS: entrypoint boot gate validates the active CLAUDE_CONFIG_DIR state too"
 }
 
 test_codex_profile_toml_golden_mcp0() {
@@ -376,7 +405,7 @@ print(" ".join(data.keys()))
   _seed_shape "$rendered" "$hosthome/.claude.json"
   local gatefunc="$TMPBASE/gate_func_fixture.sh"
   awk '
-    /^_check_codex_mcp_shim_seed\(\) \{/ { infunc=1 }
+    /^_check_codex_mcp_shim_seed(_one)?\(\) \{/ { infunc=1 }
     infunc { print }
     infunc && /^\}/ { infunc=0 }
   ' "$INSTALL_DIR/entrypoint.sh" > "$gatefunc"
@@ -475,7 +504,7 @@ test_local_qwen_invisible_to_boot_gate_when_configured() {
   _seed_shape "$rendered" "$hosthome/.claude.json"
   local gatefunc="$TMPBASE/gate_func_local_qwen.sh"
   awk '
-    /^_check_codex_mcp_shim_seed\(\) \{/ { infunc=1 }
+    /^_check_codex_mcp_shim_seed(_one)?\(\) \{/ { infunc=1 }
     infunc { print }
     infunc && /^\}/ { infunc=0 }
   ' "$INSTALL_DIR/entrypoint.sh" > "$gatefunc"
@@ -492,6 +521,7 @@ test_merge_mcp_json_call_site
 test_shim_argv_contract_per_tier
 test_entrypoint_gate_passes_on_golden_seed
 test_entrypoint_gate_fails_on_tampered_seed
+test_entrypoint_gate_checks_active_config_dir_state
 test_codex_profile_toml_golden_mcp0
 test_codex_profile_toml_golden_mcp1
 test_shim_behavioral_pin_via_existing_suite

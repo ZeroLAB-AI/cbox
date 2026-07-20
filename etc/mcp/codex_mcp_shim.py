@@ -286,6 +286,7 @@ class Relay:
         if not self.log_path:
             return
         try:
+            os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
             fd = os.open(
                 self.log_path,
                 os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import fcntl
 import json
 import os
 import re
@@ -61,6 +62,20 @@ def _atomic_write(path, text):
 
 def _write_state(state_path, commit_hash):
     _atomic_write(state_path, json.dumps({"last_commit": commit_hash}))
+
+
+def _acquire_lock(state_path):
+    lock_path = state_path + ".lock"
+    fh = open(lock_path, "a+")
+    fcntl.flock(fh, fcntl.LOCK_EX)
+    return fh
+
+
+def _release_lock(fh):
+    try:
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    finally:
+        fh.close()
 
 
 def _is_ancestor(proj, commit_hash):
@@ -207,59 +222,63 @@ def main():
         state_path = os.path.join(claude_dir, ".continuity_state.json")
         changelog_path = os.path.join(claude_dir, "CHANGELOG.md")
 
-        last_commit = _read_state(state_path)
-        if last_commit is not None and not _is_ancestor(proj, last_commit):
-            last_commit = None
+        lock_fh = _acquire_lock(state_path)
+        try:
+            last_commit = _read_state(state_path)
+            if last_commit is not None and not _is_ancestor(proj, last_commit):
+                last_commit = None
 
-        if last_commit is None:
-            head = _head_hash(proj)
-            if not head:
+            if last_commit is None:
+                head = _head_hash(proj)
+                if not head:
+                    sys.exit(0)
+                out = subprocess.run(
+                    ["git", "-C", proj, "log", "-1",
+                     "--format=%H" + FS + "%h" + FS + "%ad" + FS + "%s" + FS + "%b" + RS,
+                     "--date=format:%Y-%m-%d"],
+                    capture_output=True, timeout=10)
+                entries = []
+                if out.returncode == 0:
+                    text = out.stdout.decode("utf-8", "replace")
+                    for chunk in text.split(RS):
+                        chunk = chunk.strip("\n")
+                        if not chunk.strip():
+                            continue
+                        parts = chunk.split(FS)
+                        if len(parts) < 5:
+                            continue
+                        entries.append({
+                            "full": parts[0], "short": parts[1], "date": parts[2],
+                            "subject": parts[3], "body": parts[4],
+                        })
+            else:
+                entries = _git_log(proj, last_commit + "..HEAD")
+
+            if not entries:
+                head = _head_hash(proj)
+                if head:
+                    _write_state(state_path, head)
                 sys.exit(0)
-            out = subprocess.run(
-                ["git", "-C", proj, "log", "-1",
-                 "--format=%H" + FS + "%h" + FS + "%ad" + FS + "%s" + FS + "%b" + RS,
-                 "--date=format:%Y-%m-%d"],
-                capture_output=True, timeout=10)
-            entries = []
-            if out.returncode == 0:
-                text = out.stdout.decode("utf-8", "replace")
-                for chunk in text.split(RS):
-                    chunk = chunk.strip("\n")
-                    if not chunk.strip():
-                        continue
-                    parts = chunk.split(FS)
-                    if len(parts) < 5:
-                        continue
-                    entries.append({
-                        "full": parts[0], "short": parts[1], "date": parts[2],
-                        "subject": parts[3], "body": parts[4],
-                    })
-        else:
-            entries = _git_log(proj, last_commit + "..HEAD")
 
-        if not entries:
+            sections_text = "\n".join(_changelog_section(e) for e in reversed(entries))
+            _insert_into_changelog(changelog_path, sections_text)
+
+            today_str = None
+            try:
+                import datetime
+                today_str = datetime.date.today().strftime("%Y_%m_%d")
+            except Exception:
+                today_str = None
+            if today_str:
+                progress_path = os.path.join(claude_dir, "PROGRESS_%s.md" % today_str)
+                prog_lines = ["- [auto] commit %s: %s" % (e["short"], e["subject"]) for e in entries]
+                _append_progress(progress_path, prog_lines)
+
             head = _head_hash(proj)
             if head:
                 _write_state(state_path, head)
-            sys.exit(0)
-
-        sections_text = "\n".join(_changelog_section(e) for e in reversed(entries))
-        _insert_into_changelog(changelog_path, sections_text)
-
-        today_str = None
-        try:
-            import datetime
-            today_str = datetime.date.today().strftime("%Y_%m_%d")
-        except Exception:
-            today_str = None
-        if today_str:
-            progress_path = os.path.join(claude_dir, "PROGRESS_%s.md" % today_str)
-            prog_lines = ["- [auto] commit %s: %s" % (e["short"], e["subject"]) for e in entries]
-            _append_progress(progress_path, prog_lines)
-
-        head = _head_hash(proj)
-        if head:
-            _write_state(state_path, head)
+        finally:
+            _release_lock(lock_fh)
 
     except Exception:
         pass

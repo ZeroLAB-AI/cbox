@@ -79,6 +79,11 @@ def _ensure_archive_header(path):
 
 def _prepend_archive(archive_path, moved_chunks):
     existing = _ensure_archive_header(archive_path)
+
+    new_chunks = [c for c in moved_chunks if c.strip() and c.strip() not in existing]
+    if not new_chunks:
+        return
+
     lines = existing.splitlines(keepends=True)
     section_starts = [i for i, line in enumerate(lines) if line.startswith("## ")]
     if section_starts:
@@ -89,7 +94,7 @@ def _prepend_archive(archive_path, moved_chunks):
             lines[-1] = lines[-1] + "\n"
     header = "".join(lines[:insert_at])
     rest = "".join(lines[insert_at:])
-    new_moved = "".join(moved_chunks)
+    new_moved = "".join(new_chunks)
     if header and not header.endswith("\n\n") and not header.endswith("\n"):
         header += "\n"
     new_content = header + new_moved + rest

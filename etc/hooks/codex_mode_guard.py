@@ -43,6 +43,7 @@ def _audit(decision, reason, tool, mode, tool_input):
             line = json.dumps(
                 {"ts": rec["ts"], "event": "audit-record-truncated"},
                 ensure_ascii=True)
+        os.makedirs(os.path.dirname(AUDIT), exist_ok=True)
         with open(AUDIT, "a", encoding="utf-8") as f:
             f.write(line + "\n")
     except Exception:
@@ -79,7 +80,7 @@ def _allowed_roots(cfg):
 def _check_scope_and_git(cwd, tool, mode, ti, cfg):
     if not isinstance(cwd, str) or not cwd:
         deny("write-capable call must have an EXPLICIT cwd (absolute working "
-             "directory of the task) — add cwd to the arguments", tool, mode, ti)
+             "directory of the task) - add cwd to the arguments", tool, mode, ti)
     if not os.path.isabs(cwd):
         deny("cwd must be an ABSOLUTE path (a relative one resolves against a "
              "foreign process)", tool, mode, ti)
@@ -97,7 +98,7 @@ def _check_scope_and_git(cwd, tool, mode, ti, cfg):
     except Exception:
         in_git = False
     if not in_git:
-        deny("cwd is not a git work-tree — codex changes must ALWAYS be versioned "
+        deny("cwd is not a git work-tree - codex changes must ALWAYS be versioned "
              "(git init in the target directory, or pick a repo)", tool, mode, ti)
 
 
@@ -108,11 +109,11 @@ def main():
         ti = payload.get("tool_input") or {}
         mode = payload.get("permission_mode") or "default"
     except Exception as e:
-        deny(f"unreadable hook payload ({type(e).__name__}) — fail-closed")
+        deny(f"unreadable hook payload ({type(e).__name__}) - fail-closed")
 
     if tool.endswith("__codex-reply"):
         if mode == "plan":
-            deny("plan mode: continuing a codex thread may carry write scope — "
+            deny("plan mode: continuing a codex thread may carry write scope - "
                  "wait until plan mode ends, or start a new read-only thread",
                  tool, mode, ti)
         allow(tool, mode, ti)
@@ -148,9 +149,9 @@ def main():
 
     if (mode in AUTONOMOUS_MODES or mode == "bypassPermissions") \
             and approval != "never":
-        deny(f"unattended mode ({mode}): approval-policy must be 'never' — "
+        deny(f"unattended mode ({mode}): approval-policy must be 'never' - "
              "anything else makes codex elicit a human Accept/Decline answer "
-             "that nobody is there to give, so the run hangs on it — re-issue "
+             "that nobody is there to give, so the run hangs on it - re-issue "
              "with approval-policy=never", tool, mode, ti)
 
     if mode == "bypassPermissions":
@@ -164,7 +165,7 @@ def main():
 
     if mode == "plan":
         if sandbox != "read-only":
-            deny("plan mode: only sandbox=read-only is allowed — re-issue the call "
+            deny("plan mode: only sandbox=read-only is allowed - re-issue the call "
                  "with codex-mode: read-only (never + read-only)", tool, mode, ti)
         allow(tool, mode, ti)
 
@@ -173,9 +174,16 @@ def main():
 
     if approval == "never" and sandbox != "read-only":
         deny("default mode: approval-policy=never with a write sandbox is not "
-             "allowed — re-issue with codex-mode: ask (on-request + workspace-write) "
+             "allowed - re-issue with codex-mode: ask (on-request + workspace-write) "
              "or read-only", tool, mode, ti)
     allow(tool, mode, ti)
 
 
-main()
+try:
+    main()
+except SystemExit:
+    raise
+except Exception as e:
+    reason = "codex mode guard internal error (%s)" % type(e).__name__
+    print(f"[codex-mode-guard] DENY: {reason}", file=sys.stderr)
+    sys.exit(2)

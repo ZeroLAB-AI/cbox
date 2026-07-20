@@ -290,7 +290,7 @@ _cbox_manifest_write() {
   local eff="$1" root="$2" conf="$3"
   local conf_sha gen_sha
   conf_sha="$(sha256sum "$conf" | awk '{print $1}')"
-  gen_sha="$(sha256sum "$INSTALL_DIR/templates/generators.sh" | awk '{print $1}')"
+  gen_sha="$(_cbox_tpl_sha)"
   {
     printf 'schema=1\n'
     printf 'workspace=%s\n' "$root"
@@ -318,7 +318,7 @@ _cbox_manifest_verify_conf() {
   want_conf="$(_cbox_manifest_field "$mf" conf)" || die "effective config drifted (manifest malformed) - re-bless with setup.sh --local $root"
   want_gen="$(_cbox_manifest_field "$mf" generators)" || die "effective config drifted (manifest malformed) - re-bless with setup.sh --local $root"
   have_conf="$(sha256sum "$conf" | awk '{print $1}')"
-  have_gen="$(sha256sum "$INSTALL_DIR/templates/generators.sh" | awk '{print $1}')"
+  have_gen="$(_cbox_tpl_sha)"
   [ "$have_conf" = "$want_conf" ] || die "effective config drifted - re-bless with setup.sh --local $root"
   [ "$have_gen" = "$want_gen" ] || die "templates changed since last generation - re-bless with setup.sh --local $root"
 }
@@ -333,7 +333,7 @@ _cbox_manifest_status() {
   want_gen="$(_cbox_manifest_field "$mf" generators)" || { printf 'malformed'; return 0; }
   [ "$want_ws" = "$root" ] || { printf 'collision'; return 0; }
   have_conf="$(sha256sum "$conf" | awk '{print $1}')"
-  have_gen="$(sha256sum "$INSTALL_DIR/templates/generators.sh" | awk '{print $1}')"
+  have_gen="$(_cbox_tpl_sha)"
   if [ "$have_conf" != "$want_conf" ] || [ "$have_gen" != "$want_gen" ]; then
     printf 'drifted'; return 0
   fi
@@ -445,7 +445,7 @@ gen_image_inputs() {
   codex_target="${CBOX_CODEX_TARGET:-}"
   entrypoint_sha="$(sha256sum "$eff/entrypoint.sh" | awk '{print $1}')"
   install_bins_sha="$(sha256sum "$eff/install-bins.sh" | awk '{print $1}')"
-  tpl_sha="$(sha256sum "$INSTALL_DIR/templates/generators.sh" | awk '{print $1}')"
+  tpl_sha="$(_cbox_tpl_sha)"
   {
     printf 'schema=1\n'
     printf 'base=ubuntu:24.04@%s\n' "$digest"
@@ -742,6 +742,13 @@ gen_compose_isolated() {
 
   _cbox_check_workspace_overlap "$root"
 
+  if _cbox_proxy_active; then
+    gen_dockerfile_egress_into "$eff"
+    gen_supervisord_conf_into "$eff"
+    gen_tinyproxy_conf_into "$eff/proxy"
+    gen_egress_filter_into "$eff/proxy"
+  fi
+
   tmp="$(mktemp "$eff/.cbox.XXXXXX")"
   cat > "$tmp" <<EOF
 name: cbox-p$p_hash
@@ -862,7 +869,7 @@ EOF
       - $claude_path/projects/$slug:\${HOST_HOME}/.claude/projects/$slug:rw
 EOF
     if [ "$claude_mode" = "mount" ]; then
-      if [ -L "$eff/claude-config/projects/$slug" ]; then
+      if [ -L "$eff/claude-config/projects/$slug" ] || { [ -e "$eff/claude-config/projects/$slug" ] && [ ! -d "$eff/claude-config/projects/$slug" ]; }; then
         rm -f "$eff/claude-config/projects/$slug"
       fi
       mkdir -p "$eff/claude-config/projects/$slug"
@@ -948,7 +955,7 @@ EOF
     build:
       context: $eff
       dockerfile: Dockerfile.egress
-    image: cbox-proxy-img:$(sha256sum "$eff/Dockerfile.egress" 2>/dev/null | awk '{print substr($1,1,12)}')
+    image: cbox-proxy-img:$(cat "$eff/Dockerfile.egress" "$eff/supervisord.conf" 2>/dev/null | sha256sum | awk '{print substr($1,1,12)}')
     restart: "$policy"
     networks:
       - internal
@@ -1008,13 +1015,6 @@ EOF
   fi
   chmod 0644 "$tmp"
   mv "$tmp" "$eff/docker-compose.yml"
-
-  if _cbox_proxy_active; then
-    gen_dockerfile_egress_into "$eff"
-    gen_supervisord_conf_into "$eff"
-    gen_tinyproxy_conf_into "$eff/proxy"
-    gen_egress_filter_into "$eff/proxy"
-  fi
 }
 
 gen_compose_readonly_into() {
@@ -1365,17 +1365,62 @@ PY
   printf '%s\n' "$out" | _cbox_write "$target"
 }
 
+_cbox_seed_adopt_nofollow() {
+  python3 - "$1" "$2" <<'PY'
+import errno
+import json
+import os
+import sys
+
+migrate, target = sys.argv[1], sys.argv[2]
+try:
+    fd = os.open(migrate, os.O_RDONLY | os.O_NOFOLLOW)
+except OSError:
+    sys.exit(0)
+try:
+    with os.fdopen(fd, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, ValueError):
+    sys.exit(0)
+if not isinstance(data, dict):
+    sys.exit(0)
+body = json.dumps(data, separators=(",", ":")).encode("utf-8")
+try:
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+except OSError as e:
+    if e.errno == errno.ELOOP:
+        sys.exit(0)
+    sys.exit(0)
+with os.fdopen(fd, "wb") as fh:
+    fh.write(body)
+PY
+}
+
 gen_claude_cbox_json_seed_into() {
+  local target="$1" legacy="${2:-}" lock lockdir
+  lockdir="$(dirname "$(dirname "$target")")/state"
+  mkdir -p "$lockdir" 2>/dev/null || true
+  lock="$lockdir/.claude.json.lock"
+  if command -v flock >/dev/null 2>&1 && [ ! -L "$lock" ] && ( : 9> "$lock" ) 2>/dev/null; then
+    (
+      exec 9> "$lock"
+      flock -w 10 9 || true
+      _gen_claude_cbox_json_seed_render "$target" "$legacy"
+    )
+  else
+    _gen_claude_cbox_json_seed_render "$target" "$legacy"
+  fi
+}
+
+_gen_claude_cbox_json_seed_render() {
   local target="$1" legacy="${2:-}" migrate out
   migrate="$(dirname "$target")/.claude.json.migrate"
-  if [ ! -f "$target" ]; then
-    if [ -f "$migrate" ]; then
-      cp "$migrate" "$target" 2>/dev/null || true
-    elif [ -n "$legacy" ] && [ -f "$legacy" ]; then
-      cp "$legacy" "$target" 2>/dev/null || true
-    fi
+  if [ -e "$migrate" ] || [ -L "$migrate" ]; then
+    _cbox_seed_adopt_nofollow "$migrate" "$target"
+    rm -f "$migrate" 2>/dev/null || true
+  elif [ ! -e "$target" ] && [ ! -L "$target" ] && [ -n "$legacy" ] && [ -f "$legacy" ] && [ ! -L "$legacy" ]; then
+    cp "$legacy" "$target" 2>/dev/null || true
   fi
-  rm -f "$migrate" 2>/dev/null || true
   local shim_mode="${CBOX_CODEX_PROGRESS_MODE:-off}"
   [ "${CBOX_CLAUDE_MODE:-mount}" = mount ] || shim_mode=off
   local progress_flag="off"
@@ -1388,10 +1433,13 @@ gen_claude_cbox_json_seed_into() {
 import json
 import sys
 
+import os
+
 mcp = json.loads(sys.argv[1])
 cur = {}
 try:
-    with open(sys.argv[2]) as fh:
+    fd = os.open(sys.argv[2], os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "r", encoding="utf-8") as fh:
         cur = json.load(fh)
 except (OSError, ValueError):
     cur = {}
@@ -1844,8 +1892,7 @@ sys.exit(0)
 
 _cbox_conf_set_tpl_sha() {
   local conf="${1:-$INSTALL_DIR/cbox.conf}" sha tmp confdir
-  sha="$(sha256sum "$INSTALL_DIR/templates/generators.sh")"
-  sha="${sha%% *}"
+  sha="$(_cbox_tpl_sha)"
   confdir="$(dirname "$conf")"
   tmp="$(mktemp "$confdir/.cbox.XXXXXX")"
   if [ -f "$conf" ] && grep -q '^CBOX_TPL_SHA=' "$conf"; then

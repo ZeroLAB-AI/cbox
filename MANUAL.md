@@ -16,7 +16,7 @@ Bind-mount or volume-back the host `~/.claude` and `~/.codex` directories. Each 
 - **mount** - host directory bind-mounted into container. Data lives on host; survives volume removal and machine switches.
 - **volume** - Docker named volume. Logins and state persist across restarts but exist only in Docker.
 
-For mount mode, the wizard offers to backup existing data first (plain copy or compressed tar.gz).
+For mount mode, the wizard offers to backup existing data first (plain copy or compressed tar.gz). When switching from mount to volume mode, the wizard offers to back up the outgoing host directory at switch time.
 
 Mounted `~/.claude` and `~/.codex` must be outside every configured workspace path (no nesting).
 
@@ -168,7 +168,7 @@ Set `CBOX_MODE` in `cbox.conf`:
 
 In isolated mode, `claude`/`codex` resolve the project from cwd and launch/reuse that project's container. First run in an unconfigured project (with TTY) prompts: set up new, derive from global, or cancel.
 
-Session scope (isolated mode only): `CBOX_SESSION_SCOPE=isolated` (default) mounts only this project's sessions; `global` shows all. Isolated scope uses symlink farms to keep container and host session views in sync as work moves between scopes.
+Session scope (isolated mode only): `CBOX_SESSION_SCOPE=isolated` (default) mounts only this project's sessions; `global` shows all. Isolated scope uses symlink farms to keep container and host session views in sync as work moves between scopes. For isolated scope, the project slug directory under claude-config/projects/ is pre-created as a real directory (a stale symlink or plain file there is replaced) because Docker resolves symlinks at bind time and the Claude Code /resume picker ignores symlinked project directories.
 
 ## Image hash and per-project input
 
@@ -195,9 +195,11 @@ Two windows in the same project share one container; only the last window's exit
 Each of `~/.claude` and `~/.codex` is independent:
 
 - **mount** - host directory bind-mounted. Data lives on host; survives machine switches and volume removal.
-- **volume** - Docker named volume. Logins and state survive restarts but exist only in Docker. Use `cbox backup` to archive volumes to `./backups/`.
+- **volume** - Docker named volume. Logins and state survive restarts but exist only in Docker. Use `cbox backup` to archive global volumes to `./backups/`.
 
 Mixing modes is supported. Never use `docker volume prune` (it deletes volumes not attached to running containers and will destroy volume-mode state). `cbox down` never removes volumes.
+
+**Backup and mode switching:** `cbox backup` archives the global claude/codex/venv/ssh volumes to `./backups/` but does not cover isolated per-project volumes (named `cbox-p<hash>-*`); the command prints a hint with a per-volume archive command for manual backup. When switching `~/.claude` or `~/.codex` from mount to volume mode, the wizard offers to back up the outgoing host directory at switch time. Agents and claude-md sections prune files that were deselected (managed files shipped by cbox only - user-created files are untouched); disabling history removes the managed policies/templates it previously deployed. With claude volume mode plus isolated session scope, the per-project session directory `~/.claude/projects/<slug>` is a host bind (kept host-visible for /resume) and lives outside the claude volume - back it up as host files, not via volume backup.
 
 ## Behavioral read-only
 
@@ -207,7 +209,7 @@ Inside the container, these are always mounted read-only:
 - `~/.claude/policies/`
 - `~/.claude/templates/`
 - `~/.claude/hooks/`
-- `~/.claude/settings.json`
+- `/etc/claude-code/managed-settings.json` (prompt-injection hardened)
 - `~/.claude.json` (Claude Code seed)
 
 This prevents prompt injection: subagent bodies are executed as system prompts, so a writable agent file is a persistent injection foothold.
@@ -216,13 +218,14 @@ Consequence: the global #shortcut in Claude Code does not work inside the contai
 
 Project-local files in `./.claude/` of a mounted workspace stay writable (same as the rest of the workspace). Runtime state (`~/.claude/projects/`, `~/.claude/agent-memory/`, credentials) remains writable.
 
-The container's own Claude state file lives as a plain file inside the claude-config directory bind (`<effective dir>/claude-config/.claude.json` per project; `generated/claude-config/.claude.json` in global mode). Each regen re-renders its `mcpServers` from the delegate registry and preserves every other key the container wrote (trust dialog, onboarding). One-shot import: drop a `.claude.json.migrate` file next to it and the next regen adopts it as the initial state (only when no state file exists yet) and deletes it.
+The container runs with CLAUDE_CONFIG_DIR=~/.claude-cbox, so its live state file is ~/.claude-cbox/.claude.json. This maps to a plain file inside the claude-config directory bind: `<effective dir>/claude-config/.claude.json` per project, or `generated/claude-config/.claude.json` in global mode. Each regen re-renders its `mcpServers` from the delegate registry and preserves every other key the container wrote (trust dialog, onboarding). Separately, the operator's host ~/.claude.json is bind-mounted read-only at ~/.claude.json inside the container as a seed for initial state - it is not the live state. One-shot import: drop a `.claude.json.migrate` file (valid JSON) next to the live state file and the next regen adopts it as the initial state (operator import wins, even if state already exists) and deletes the migrate file. A malformed JSON migrate file is discarded without adoption; if the copy fails the migrate file is kept for retry.
 
 ## Wizard re-runs and host activation
 
 After the initial wizard run:
 
 - `./setup.sh update <section>` re-runs one section and regenerates related outputs.
+- `./setup.sh update` (no section) re-renders all artifacts and re-blesses the templates (CBOX_TPL_SHA) without changing configuration. This is the standard step after deploying new cbox files; the blessing now covers both `_common.sh` and `templates/generators.sh`, so a deploy of either requires the re-bless.
 - `cbox install-hooks` stages and diffs hook scripts, then confirms before installing to the host.
 - `cbox restart` reloads configuration and restarts the container.
 - `./setup.sh update --config <file>` replicates a saved `cbox.conf` on another machine (non-interactive; skips host-side writes).
@@ -232,6 +235,15 @@ For continuity migration (moving project brain from `~/.claude/` to `./.cbox/`):
 ```bash
 cbox continuity migrate
 ```
+
+## Operational commands
+
+- `cbox ls` - list running isolated project containers: path hash, image hash, root directory.
+- `cbox images [list|rm <hash>]` - list or remove per-project cbox-img images with reference counting. Used after image changes or to free space.
+- `cbox login [oauth-url]` - host-side bridge for the Claude OAuth callback when logging in inside the container. Paste the printed OAuth authorize URL or run `/login` inside `cbox run claude` and paste the result here.
+- `cbox login-codex` - equivalent for Codex device auth (egress mode only); bridges port 1455 to the container.
+- `cbox gc` - sweep orphaned isolated containers and old binary volumes (run regularly, especially during development).
+- `cbox doctor` - report configuration status and active features inside the container.
 
 ## Per-feature toggles
 
@@ -256,7 +268,6 @@ cbox/                           # Install directory
   setup.sh                        # Wizard entry point
   cbox                            # Wrapper script (docker run, lifecycle)
   docker-compose.yml              # Generated compose file (global mode)
-  docker-compose-isolated.yml     # Template for isolated projects
   cbox.conf                       # Generated configuration
   Dockerfile                      # Generated (base image + packages)
   entrypoint.sh                   # Container entry point
@@ -267,15 +278,17 @@ cbox/                           # Install directory
     egress-blocklist.txt
     mcp/
       codex_mcp_shim.py           # Progress relay
-      cbox-container.config.toml  # Codex tier config (rendered)
     hooks/                        # Hook scripts (staged by install-hooks)
+      orchestrator-global.txt     # Codex conduct kernel (host-side)
     codex/
       ask_claude_mcp.py           # Reverse orch wrapper (read-only in container)
-      orchestrator-global.txt     # Codex conduct kernel injected by shim
-    bash/
-      bashrc-cbox                 # Shell aliases (sourced by ~/.bashrc)
+    agents/                       # Subagent definitions (agents section)
+    claude/                       # CLAUDE.md, policies/, templates/, settings merges
+    docs/                         # Runbooks (local model, remote design)
   backups/                        # Volume archives (cbox backup)
 ```
+
+In isolated mode, per-project outputs are written to `~/.config/cbox/projects/<path-hash>/`, including project-specific `docker-compose.yml` and `codex/cbox-container.config.toml`. In global mode, codex tier config is at `generated/codex/cbox-container.config.toml`. Generated aliases (~/.bashrc-cbox) are written directly to the home directory, not staged in etc/.
 
 ## Host gates (verification)
 
@@ -303,6 +316,8 @@ Configurations that fail verification refuse to start.
 **Egress blocklist doesn't work:** The blocklist is hygiene only, not a security boundary. Use an allowlist for actual restrictions.
 
 **SSH-based git with egress:** Enable the SSH section; it tunnels git over HTTPS to `ssh.github.com:443` through the proxy.
+
+**Project paths with similar names:** Project paths that differ only in characters outside [a-zA-Z0-9] map to the same session slug (e.g., /work/client.alpha and /work/client-alpha both become -work-client-alpha). This mirrors Claude Code's own project-directory naming, so such projects share a session directory; distinct effective configs still apply (path hash includes the full path, so they remain independent otherwise).
 
 ## See also
 

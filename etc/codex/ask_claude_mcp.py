@@ -137,6 +137,7 @@ def audit_digest(value):
 
 def audit(decision, reason, args, mode):
     try:
+        os.makedirs(os.path.dirname(AUDIT), exist_ok=True)
         if os.path.isfile(AUDIT) and os.path.getsize(AUDIT) > AUDIT_MAX_BYTES:
             os.replace(AUDIT, AUDIT + ".1")
         rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),

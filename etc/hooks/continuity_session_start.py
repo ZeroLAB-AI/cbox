@@ -3,6 +3,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -23,6 +24,7 @@ WAVE_MARKER = "## "
 RESUME_MARKER = "RESUME"
 
 SESSION_CORE_VERSION = "session-core v1"
+SESSION_CORE_VERSION_RE = re.compile(r"^Version:\s*(session-core v[0-9A-Za-z.]+)\s*$", re.MULTILINE)
 
 LIGHT_CORE = """SESSION CORE (light profile) - minimal driver floor.
 
@@ -188,14 +190,23 @@ def _bound_payload(text, byte_cap):
     return encoded[:limit].decode("utf-8", "ignore").rstrip("\n") + suffix
 
 
-def _read_required(path, component):
+def _derive_core_version(core_text):
+    m = SESSION_CORE_VERSION_RE.search(core_text)
+    if m:
+        return m.group(1)
+    return SESSION_CORE_VERSION
+
+
+def _read_session_core(path):
     if not os.path.isfile(path):
-        _fail(component, "missing file %s" % path)
+        warning = "WARNING: session-core.txt missing - degraded core\n\n"
+        return warning + LIGHT_CORE
     try:
         with open(path, "r", encoding="utf-8") as f:
             return f.read()
-    except Exception as exc:
-        _fail(component, "cannot read %s: %s" % (path, exc))
+    except Exception:
+        warning = "WARNING: session-core.txt missing - degraded core\n\n"
+        return warning + LIGHT_CORE
 
 
 def _hooks_dir():
@@ -253,9 +264,9 @@ def main():
         core_body = LIGHT_CORE
     elif source in ("startup", "clear"):
         session_core_path = os.path.join(hooks_dir, "session-core.txt")
-        core_text = _read_required(session_core_path, "session-core")
+        core_text = _read_session_core(session_core_path)
         core_label = "SESSION CORE"
-        core_version = SESSION_CORE_VERSION
+        core_version = _derive_core_version(core_text)
         core_body = core_text
     else:
         core_label = "SESSION CORE"
