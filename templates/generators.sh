@@ -202,6 +202,7 @@ RUN apt-get update \\
  && rm -rf /var/lib/apt/lists/*
 ENV COLORTERM=truecolor
 ENV TERM=xterm-256color
+ENV LANG=C.UTF-8
 ENV CBOX_CLAUDE_TARGET=$claude_target
 ENV CBOX_CODEX_VERSION=$codex_version
 ENV CBOX_CODEX_TARGET=$codex_target

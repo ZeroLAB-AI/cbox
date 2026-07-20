@@ -286,7 +286,7 @@ case "${1:-}" in
       if command -v tmux >/dev/null 2>&1; then
         _write_tmux_conf
         _cmd="$(printf '%q ' "$_resolved" "$@")"
-        _run_as_user env SHELL=/bin/bash tmux -f /tmp/cbox-tmux.conf new-session -c "$PWD" "$_cmd"
+        _run_as_user env SHELL=/bin/bash LANG=C.UTF-8 tmux -u -f /tmp/cbox-tmux.conf new-session -c "$PWD" "$_cmd"
       fi
       echo "entrypoint: CBOX_LIMIT_AUTORESUME=on but tmux is missing in this image - rebuild on the host (next 'cbox run' after re-bless); running without auto-resume" >&2
     fi
