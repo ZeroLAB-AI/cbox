@@ -105,8 +105,37 @@ JSON
   echo "PASS: resume profile retains security-reviewer gate rule"
 }
 
+test_shared_session_memory_injection() {
+  local d="$TMPBASE/shared" memory payload outside
+  _make_repo "$d"
+  mkdir -p "$d/.cbox/sessions/s-20260721-1200-abcdef/distillates"
+  memory="$d/.cbox/sessions/s-20260721-1200-abcdef/distillates/handoff-000001.json"
+  printf '%s\n' '{"schemaVersion":1,"layerB":[{"engine":"claude","role":"user","timestamp":"old","summary":"older summary"}],"layerA":[{"engine":"codex","role":"assistant","timestamp":"new","text":"recent verbatim"}]}' > "$memory"
+  chmod 0444 "$memory"
+  payload="$(CBOX_SESSION_MEMORY_FILE="$memory" python3 "$HOOK" <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+  case "$payload" in
+    *"CBOX SHARED SESSION MEMORY"*"recent verbatim"*"older summary"*) ;;
+    *) _fail "shared memory payload missing or incomplete" ;;
+  esac
+  outside="$TMPBASE/outside-memory.json"
+  cp "$memory" "$outside"
+  payload="$(CBOX_SESSION_MEMORY_FILE="$outside" python3 "$HOOK" <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+  case "$payload" in
+    *"CBOX SHARED SESSION MEMORY"*) _fail "memory outside project scope was injected" ;;
+    *) ;;
+  esac
+  echo "PASS: shared memory injects only from the project session store"
+}
+
 test_reference_payload_cap
 test_core_payload_cap
 test_light_profile_has_security_floor
 test_resume_profile_has_security_floor
+test_shared_session_memory_injection
 echo "all continuity_session_start tests passed"

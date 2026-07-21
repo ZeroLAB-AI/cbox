@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "engines": {
+    "claude": {
+      "bin": "claude",
+      "install": "bins-volume",
+      "probe": {"kind": "exe-stamp", "stamp": "$HOST_HOME/.local/.cbox-stamp", "infra_filter_argv1": ["daemon", "--bg-pty-host", "--bg-spare"]},
+      "version_vars": ["CBOX_CLAUDE_TARGET"],
+      "enabled_var": null,
+      "login": "oauth-bridge",
+      "preassign_id": true,
+      "resume_argv": "--resume {id}",
+      "seed_channel": "sessionstart-hook",
+      "history_read": "claude-jsonl"
+    },
+    "codex": {
+      "bin": "codex",
+      "install": "bins-volume",
+      "probe": {"kind": "exe-stamp", "stamp": "$HOST_HOME/.codex/packages/.cbox-stamp", "infra_filter_argv1": ["mcp-server"]},
+      "version_vars": ["CBOX_CODEX_VERSION", "CBOX_CODEX_TARGET"],
+      "enabled_var": null,
+      "login": "port-bridge:1455",
+      "preassign_id": false,
+      "resume_argv": "resume {id}",
+      "seed_channel": "sessionstart-hook",
+      "history_read": "codex-jsonl"
+    },
+    "hermes": {
+      "bin": "hermes",
+      "install": "image",
+      "probe": {"kind": "canonical-paths", "exe_realpath_prefix": "/usr/bin/python3", "argv0_prefix": "/opt/hermes/bin/", "argv1": ["/opt/hermes/bin/hermes", "/usr/local/bin/hermes"]},
+      "version_vars": ["CBOX_HERMES_VERSION"],
+      "enabled_var": "CBOX_HERMES",
+      "login": "none",
+      "preassign_id": false,
+      "resume_argv": "--resume {id}",
+      "seed_channel": "ephemeral-system-prompt",
+      "history_read": "hermes-sqlite"
+    }
+  }
+}

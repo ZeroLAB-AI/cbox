@@ -8,11 +8,13 @@ CONF="$INSTALL_DIR/cbox.conf"
 [ -f "$INSTALL_DIR/_common.sh" ] && . "$INSTALL_DIR/_common.sh"
 [ -f "$INSTALL_DIR/templates/generators.sh" ] && . "$INSTALL_DIR/templates/generators.sh"
 [ -f "$INSTALL_DIR/lib/cbox-ai.sh" ] && . "$INSTALL_DIR/lib/cbox-ai.sh"
+[ -f "$INSTALL_DIR/lib/cbox-session.sh" ] && . "$INSTALL_DIR/lib/cbox-session.sh"
 
 HAVE_GLOBAL_CONF=0
 if [ -f "$CONF" ]; then
   source "$CONF"
   export CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
+  export CBOX_HERMES CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME
   HAVE_GLOBAL_CONF=1
 fi
 
@@ -86,6 +88,90 @@ _compose_p() {
   docker compose --project-directory "$eff" -f "$eff/docker-compose.yml" "$@"
 }
 
+_cbox_compose_files_digest() {
+  local expect_f=0 arg out=""
+  for arg in "$@"; do
+    if [ "$expect_f" = 1 ]; then
+      expect_f=0
+      [ -f "$arg" ] || continue
+      out="$out$(sha256sum "$arg" | awk '{print $1}')"
+      continue
+    fi
+    case "$arg" in
+      -f|--file) expect_f=1 ;;
+    esac
+  done
+  printf '%s' "$out" | sha256sum | awk '{print $1}'
+}
+
+_cbox_compose_up() {
+  local stamp="$1"; shift
+  local new old="" force=0 rc=0 have=""
+  new="$(_cbox_compose_files_digest "$@")"
+  [ -n "$stamp" ] && [ -f "$stamp" ] && old="$(cat "$stamp" 2>/dev/null || true)"
+  have="$("$@" ps -q cbox 2>/dev/null | head -n1)" || have=""
+  if [ -n "$have" ] && [ "$old" != "$new" ]; then
+    force=1
+  fi
+  if [ "$force" = 1 ]; then
+    "$@" up -d --force-recreate || rc=$?
+  else
+    "$@" up -d || rc=$?
+  fi
+  if [ "$rc" -eq 0 ] && [ -n "$stamp" ]; then
+    printf '%s\n' "$new" > "$stamp" 2>/dev/null || true
+  fi
+  return "$rc"
+}
+
+_cbox_netaccess_render() {
+  local container_id="$1" state_dir="$2" scope network cidr result internal_ip internal_cidr targets
+  local -a args=()
+  _cbox_proxy_active || return 0
+  [ -n "$container_id" ] || { echo "cbox: netaccess proxy container is not running" >&2; return 1; }
+  if _cbox_netaccess_active; then
+    scope="$(_cbox_netaccess_scope)"
+    for network in ${CBOX_NETACCESS_NETWORKS:-}; do
+      args+=(--network "$network")
+    done
+    for cidr in ${CBOX_NETACCESS_CIDRS:-}; do
+      args+=(--cidr "$cidr")
+    done
+  else
+    scope=list
+  fi
+  result="$(python3 "$INSTALL_DIR/lib/cbox_netaccess.py" \
+    --container "$container_id" \
+    --state-dir "$state_dir" \
+    --scope "$scope" \
+    "${args[@]}")" || return 1
+  internal_ip="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["internalIp"])' <<<"$result")" || return 1
+  internal_cidr="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["internalCidr"])' <<<"$result")" || return 1
+  targets="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(" ".join(x["externalIp"]+","+x["cidr"] for x in d["targets"]))' <<<"$result")" || return 1
+  if _cbox_egress_active; then
+    gen_tinyproxy_conf_into "$state_dir" "$internal_ip"
+  fi
+  if _cbox_netaccess_active; then
+    gen_sockd_conf_into "$state_dir" "$internal_ip" "$internal_cidr" "$targets"
+  fi
+}
+
+_cbox_netaccess_apply_global() {
+  _cbox_proxy_active || return 0
+  local container_id
+  container_id="$("${COMPOSE[@]}" ps -q proxy 2>/dev/null)" || container_id=""
+  _cbox_netaccess_render "$container_id" "$INSTALL_DIR/generated/proxy" || return 1
+  "${COMPOSE[@]}" restart proxy >/dev/null
+}
+
+_cbox_netaccess_apply_isolated() {
+  local eff="$1" container_id
+  _cbox_proxy_active || return 0
+  container_id="$(_compose_p "$eff" ps -q proxy 2>/dev/null)" || container_id=""
+  _cbox_netaccess_render "$container_id" "$eff/proxy" || return 1
+  _compose_p "$eff" restart proxy >/dev/null
+}
+
 _run_global() {
   local bin="$1"; shift
   local workspaces=() w root inscope=0
@@ -118,10 +204,27 @@ _run_global() {
     fi
   fi
   check_tpl_sha
-  _global_prepare
+  _cbox_global_prepare_locked
+  _gc_bg
   _bins_soft "$IMG_TAG"
   if _cbox_proxy_active; then "${COMPOSE[@]}" build >/dev/null; fi
-  "${COMPOSE[@]}" up -d >/dev/null
+  _clip_bridge_start "$(_cbox_clip_dir "${CBOX_NAME:-cbox}")"
+  local workspace_scope
+  workspace_scope="$(_cbox_workspace_root 2>/dev/null)" || workspace_scope="$root"
+  _container_exec_bridge_start "$(_cbox_container_exec_dir "${CBOX_NAME:-cbox}")" "$workspace_scope" global || {
+    _clip_bridge_stop
+    return 1
+  }
+  _cbox_compose_up "$HOME/.config/cbox/compose.up.stamp" "${COMPOSE[@]}" >/dev/null || {
+    _container_exec_bridge_stop
+    _clip_bridge_stop
+    return 1
+  }
+  _cbox_netaccess_apply_global || {
+    _container_exec_bridge_stop
+    _clip_bridge_stop
+    return 1
+  }
   local workdir="$CBOX_WORKDIR"
   for w in "${workspaces[@]}"; do
     case "$root" in
@@ -129,16 +232,16 @@ _run_global() {
     esac
   done
   if [ -t 0 ] && [ -t 1 ]; then
-    exec "${COMPOSE[@]}" exec -it -w "$workdir" "$SERVICE" /entrypoint.sh "$bin" "$@"
+    exec "${COMPOSE[@]}" exec -it "${CBOX_CONTAINER_EXEC_ENV[@]}" -w "$workdir" "$SERVICE" /entrypoint.sh "$bin" "$@"
   else
-    exec "${COMPOSE[@]}" exec -T -w "$workdir" "$SERVICE" /entrypoint.sh "$bin" "$@"
+    exec "${COMPOSE[@]}" exec -T "${CBOX_CONTAINER_EXEC_ENV[@]}" -w "$workdir" "$SERVICE" /entrypoint.sh "$bin" "$@"
   fi
 }
 
 _first_run_init() {
   local root="$1" eff="$2" ans rc
   if ! { [ -t 0 ] && [ -t 1 ]; }; then
-    echo "cbox: no effective config for $root and no TTY - run 'cbox run claude' interactively or 'setup.sh --local $root' first" >&2
+    echo "cbox: no effective config for $root and no TTY - run 'cbox run codex' interactively or 'setup.sh --local $root' first" >&2
     return 1
   fi
   mkdir -p "$HOME/.config/cbox/projects"
@@ -165,6 +268,7 @@ _gen_effective() {
   digest="$(_cbox_resolve_base_digest ubuntu:24.04)" || die "cannot resolve base image digest and no local image - network required for first build"
   cp "$INSTALL_DIR/entrypoint.sh" "$eff/entrypoint.sh"
   cp "$INSTALL_DIR/install-bins.sh" "$eff/install-bins.sh"
+  cp "$INSTALL_DIR/.dockerignore" "$eff/.dockerignore"
   gen_image_inputs "$eff" "$digest"
   IMG_HASH="$(_cbox_image_hash "$eff")"
   IMG_TAG="$(_cbox_image_tag "$IMG_HASH")"
@@ -175,6 +279,11 @@ _gen_effective() {
   gen_codex_profile_into "$eff/codex" isolated "$root"
   gen_codex_agents_into "$eff/codex"
   gen_codex_hooks_json_into "$eff/codex"
+  if [ "${CBOX_HERMES:-off}" = on ]; then
+    gen_hermes_managed_into "$eff/hermes/managed.env"
+  else
+    rm -f "$eff/hermes/managed.env"
+  fi
 }
 
 _ensure_image() {
@@ -343,7 +452,70 @@ _ensure_bins() {
 
 _bins_soft() {
   _ensure_bins "$@" || echo "cbox: warning: bins install failed - continuing; affected tools stay unavailable until you fix the pin or network and run '$0 reinstall-bins'" >&2
+  _bins_autoupdate_bg "$1"
   return 0
+}
+
+_bins_channel() {
+  case "$1" in
+    claude)
+      case "${CBOX_CLAUDE_TARGET:-stable}" in stable|latest) return 0 ;; esac
+      ;;
+    codex)
+      case "${CBOX_CODEX_VERSION:-latest}" in latest) return 0 ;; esac
+      ;;
+  esac
+  return 1
+}
+
+_engine_autoupdate_off() {
+  case "$1" in
+    claude)
+      grep -Eqs '"autoUpdates"[[:space:]]*:[[:space:]]*false' "$HOME/.claude/settings.json"
+      ;;
+    codex)
+      grep -Eqs '^[[:space:]]*check_for_update_on_startup[[:space:]]*=[[:space:]]*false' "$HOME/.codex/config.toml"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+_bins_autoupdate() {
+  local img_tag="$1" ttl_h="${CBOX_AUTOUPDATE_TTL_HOURS:-24}" tool stampdir stampf last now lock
+  case "$ttl_h" in ''|*[!0-9]*) ttl_h=24 ;; esac
+  stampdir="$HOME/.config/cbox"
+  now="$(date +%s)"
+  local -a due=()
+  for tool in claude codex; do
+    _bins_channel "$tool" || continue
+    _engine_autoupdate_off "$tool" && continue
+    stampf="$stampdir/autoupdate.$(_cbox_bins_volume "$tool").stamp"
+    last="$(cat "$stampf" 2>/dev/null || echo 0)"
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    [ "$last" -gt "$now" ] && last=0
+    [ $((now - last)) -ge $((ttl_h * 3600)) ] && due+=("$tool")
+  done
+  [ "${#due[@]}" -gt 0 ] || return 0
+  lock="$(_bins_lock_file)"
+  mkdir -p "$stampdir"
+  exec 5> "$lock"
+  flock -n 5 || { exec 5>&-; return 0; }
+  for tool in "${due[@]}"; do
+    printf '%s\n' "$now" > "$stampdir/autoupdate.$(_cbox_bins_volume "$tool").stamp"
+  done
+  echo "cbox: autoupdate: refreshing channel bins (${due[*]}) at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  _bins_run_install "$img_tag" "${due[*]}" refresh || echo "cbox: autoupdate: install failed; next attempt after TTL"
+  exec 5>&-
+}
+
+_bins_autoupdate_bg() {
+  [ "${CBOX_AUTOUPDATE:-on}" = on ] || return 0
+  local img_tag="$1" log="$HOME/.config/cbox/autoupdate.log"
+  mkdir -p "$HOME/.config/cbox"
+  ( _bins_autoupdate "$img_tag" >> "$log" 2>&1 ) </dev/null >/dev/null 2>&1 &
+  disown 2>/dev/null || true
 }
 
 _bins_conflict_scan() {
@@ -375,13 +547,13 @@ reinstall_bins() {
       local root eff
       root="$(_cbox_workspace_root)" || die "refusing to run in $PWD (home, /, or a mount root)"
       eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
-      [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run claude' or 'setup.sh --local $root' first"
+      [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run codex' or 'setup.sh --local $root' first"
       (
         set -e
         unset CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL CBOX_CODEX_TARGET
         . "$eff/cbox.conf"
         img_tag="$(_cbox_image_tag "$(_cbox_image_hash "$eff")")"
-        docker image inspect "$img_tag" >/dev/null 2>&1 || die "image $img_tag not built - run 'cbox run claude' first"
+        docker image inspect "$img_tag" >/dev/null 2>&1 || die "image $img_tag not built - run 'cbox run codex' first"
         if [ "$if_stale" = 1 ]; then
           _ensure_bins "$img_tag" 0
         else
@@ -505,8 +677,22 @@ for p in /proc/[0-9]*/exe; do
     [ -e "$d" ] || continue
     a1="$(tr "\0" "\n" < "$d" 2>/dev/null | sed -n 2p)"
     case "$a1" in mcp-server) continue ;; esac
-    n=$((n+1))
+    n=$((n+1)); continue
   fi
+  case "$e" in
+    /usr/bin/python3*|/opt/hermes/bin/python3*)
+      [ -e "$d" ] || continue
+      a0="$(tr "\0" "\n" < "$d" 2>/dev/null | sed -n 1p)"
+      case "$a0" in
+        /opt/hermes/bin/*)
+          a1="$(tr "\0" "\n" < "$d" 2>/dev/null | sed -n 2p)"
+          case "$a1" in
+            /opt/hermes/bin/hermes|/usr/local/bin/hermes) n=$((n+1)) ;;
+          esac
+          ;;
+      esac
+      ;;
+  esac
 done
 printf %s "$n"
 '
@@ -528,30 +714,188 @@ _reap() {
     return 0
   fi
   n="$(_probe "$cid" 2>/dev/null)" || n=unknown
-  if [ "$n" = 0 ]; then
+  case "$n" in ''|*[!0-9]*) n=unknown ;; esac
+  if [ "$n" = unknown ]; then
+    sleep 1
+    n="$(_probe "$cid" 2>/dev/null)" || n=unknown
+    case "$n" in ''|*[!0-9]*) n=unknown ;; esac
+  fi
+  if [ "$n" = unknown ]; then
+    echo "cbox: probe failed for ${cid:0:12}; container left up, cbox gc will retry" >&2
+  elif [ "$n" = 0 ]; then
     _compose_p "$eff" down --remove-orphans >/dev/null 2>&1 || true
   fi
   exec 9>&-
 }
 
+_clip_bridge_start() {
+  [ "${CBOX_CLIPBOARD_MODE:-off}" = bridge ] || return 0
+  local dir="$1"
+  [ -f "$INSTALL_DIR/etc/clipboard/clip_bridge.py" ] || return 0
+  mkdir -p -m 0700 "$dir" 2>/dev/null || true
+  python3 "$INSTALL_DIR/etc/clipboard/clip_bridge.py" --sock-dir "$dir" --parent-pid "${BASHPID:-$$}" >/dev/null 2>&1 &
+  _CBOX_CLIP_PID=$!
+}
+
+_clip_bridge_stop() {
+  [ -n "${_CBOX_CLIP_PID:-}" ] || return 0
+  kill "$_CBOX_CLIP_PID" 2>/dev/null || true
+  _CBOX_CLIP_PID=""
+}
+
+_container_exec_bridge_start() {
+  local dir="$1" workspace_root="${2:-}" workspace_mode="${3:-isolated}" network token socket_dir audit_dir parent_pid parent_start root
+  local -a networks=() workspace_args=() guard_roots=()
+  CBOX_CONTAINER_EXEC_ENV=()
+  _cbox_netaccess_exec_active || return 0
+  [ -f "$INSTALL_DIR/etc/container/docker_exec_bridge.py" ] || return 1
+  for network in ${CBOX_NETACCESS_NETWORKS:-}; do
+    networks+=("$network")
+  done
+  [ "${#networks[@]}" -gt 0 ] || return 1
+  if [ "${CBOX_NETACCESS_EXEC_WORKSPACE_GUARD:-off}" = on ]; then
+    if [ "$workspace_mode" = global ]; then
+      read -r -a guard_roots <<< "${CBOX_WORKSPACES:-}"
+    else
+      [ -n "$workspace_root" ] || workspace_root="$(_cbox_workspace_root 2>/dev/null)" || return 1
+      guard_roots=("$workspace_root")
+    fi
+    [ "${#guard_roots[@]}" -gt 0 ] || return 1
+    for root in "${guard_roots[@]}"; do
+      root="$(realpath "$root" 2>/dev/null)" || return 1
+      [ -d "$root" ] && [ "$root" != / ] || return 1
+      workspace_args+=(--workspace-root "$root")
+    done
+  fi
+  token="p${BASHPID:-$$}-$(od -An -tx1 -N4 /dev/urandom 2>/dev/null | tr -d ' \n')"
+  case "$token" in *-) token="p${BASHPID:-$$}-${RANDOM}${RANDOM}" ;; esac
+  socket_dir="$dir/sockets/$token"
+  audit_dir="$dir/audit"
+  mkdir -p -m 0700 "$socket_dir" "$audit_dir"
+  chmod 0700 "$dir" "$dir/sockets" "$socket_dir" "$audit_dir"
+  parent_pid="${BASHPID:-$$}"
+  parent_start="$(awk '{print $22}' "/proc/$parent_pid/stat" 2>/dev/null)" || return 1
+  case "$parent_start" in ''|*[!0-9]*) return 1 ;; esac
+  python3 "$INSTALL_DIR/etc/container/docker_exec_bridge.py" \
+    --sock-dir "$socket_dir" \
+    --parent-pid "$parent_pid" \
+    --parent-start "$parent_start" \
+    --audit-path "$audit_dir/$token.jsonl" \
+    --timeout "${CBOX_NETACCESS_EXEC_TIMEOUT:-900}" \
+    --max-bytes "${CBOX_NETACCESS_EXEC_MAX_BYTES:-10485760}" \
+    "${workspace_args[@]}" \
+    --networks "${networks[@]}" >/dev/null 2>&1 &
+  _CBOX_CONTAINER_EXEC_PID=$!
+  _CBOX_CONTAINER_EXEC_SOCKET_HOST_DIR="$socket_dir"
+  CBOX_CONTAINER_EXEC_ENV=(-e "CBOX_CONTAINER_EXEC_SOCKET=/run/cbox-container-exec/$token/bridge.sock")
+  local i
+  for i in {1..20}; do
+    [ -S "$socket_dir/bridge.sock" ] && return 0
+    kill -0 "$_CBOX_CONTAINER_EXEC_PID" 2>/dev/null || break
+    sleep 0.1
+  done
+  _container_exec_bridge_stop
+  CBOX_CONTAINER_EXEC_ENV=()
+  echo "cbox: scoped container exec bridge failed to start" >&2
+  return 1
+}
+
+_container_exec_bridge_stop() {
+  [ -n "${_CBOX_CONTAINER_EXEC_PID:-}" ] || return 0
+  kill "$_CBOX_CONTAINER_EXEC_PID" 2>/dev/null || true
+  wait "$_CBOX_CONTAINER_EXEC_PID" 2>/dev/null || true
+  _CBOX_CONTAINER_EXEC_PID=""
+  [ -z "${_CBOX_CONTAINER_EXEC_SOCKET_HOST_DIR:-}" ] || rmdir "$_CBOX_CONTAINER_EXEC_SOCKET_HOST_DIR" 2>/dev/null || true
+  _CBOX_CONTAINER_EXEC_SOCKET_HOST_DIR=""
+  CBOX_CONTAINER_EXEC_ENV=()
+}
+
+_session_sig() {
+  local sig="$1"
+  trap - INT TERM HUP
+  exec 8>&- 2>/dev/null || true
+  _container_exec_bridge_stop
+  _clip_bridge_stop
+  _reap "$_CBOX_SESSION_EFF"
+  kill -s "$sig" "${BASHPID:-$$}" 2>/dev/null
+  exit 1
+}
+
 _session_run() {
   local eff="$1" bin="$2"; shift 2
   local rc=0 wd root
+  local use_session_env=0
+  local -a extra_env=()
+  if [ "${1:-}" = "--session-env" ]; then
+    shift
+    use_session_env=1
+  fi
+  local pre_hook=""
+  if [ "${1:-}" = "--pre-hook" ]; then
+    pre_hook="$2"
+    shift 2
+  fi
+  local post_hook=""
+  if [ "${1:-}" = "--post-hook" ]; then
+    post_hook="$2"
+    shift 2
+  fi
+  if [ "${1:-}" = "--" ]; then
+    shift
+  fi
   root="$(cat "$eff/workspace" 2>/dev/null || printf '%s' "$PWD")"
   exec 8> "$eff/session.lock"
   flock -s 8 || { echo "cbox: cannot lock session for $eff" >&2; exec 8>&-; return 1; }
-  _compose_p "$eff" up -d || { exec 8>&-; return 1; }
+  _gc_bg
+  _CBOX_SESSION_EFF="$eff"
+  trap '_session_sig INT' INT
+  trap '_session_sig TERM' TERM
+  trap '_session_sig HUP' HUP
+  _clip_bridge_start "$(_cbox_clip_dir "p$(basename "$eff")")"
+  _container_exec_bridge_start "$(_cbox_container_exec_dir "p$(basename "$eff")")" "$root" || {
+    trap - INT TERM HUP
+    _clip_bridge_stop
+    exec 8>&-
+    return 1
+  }
+  _cbox_compose_up "$eff/.compose.up.stamp" docker compose --project-directory "$eff" -f "$eff/docker-compose.yml" || {
+    trap - INT TERM HUP
+    _container_exec_bridge_stop
+    _clip_bridge_stop
+    exec 8>&-
+    return 1
+  }
+  _cbox_netaccess_apply_isolated "$eff" || {
+    trap - INT TERM HUP
+    _container_exec_bridge_stop
+    _clip_bridge_stop
+    exec 8>&-
+    return 1
+  }
+  if [ -n "$pre_hook" ]; then
+    "$pre_hook" || true
+  fi
+  extra_env=("${CBOX_CONTAINER_EXEC_ENV[@]}")
+  if [ "$use_session_env" = 1 ]; then
+    extra_env+=("${CBOX_SESSION_EXEC_ENV[@]}")
+  fi
   wd="$(realpath "$PWD" 2>/dev/null || printf '%s' "$PWD")"
   case "$wd" in
     "$root"|"$root"/*) ;;
     *) wd="$root" ;;
   esac
   if [ -t 0 ] && [ -t 1 ]; then
-    _compose_p "$eff" exec -it -w "$wd" cbox /entrypoint.sh "$bin" "$@" || rc=$?
+    _compose_p "$eff" exec -it "${extra_env[@]}" -w "$wd" cbox /entrypoint.sh "$bin" "$@" || rc=$?
   else
-    _compose_p "$eff" exec -T -w "$wd" cbox /entrypoint.sh "$bin" "$@" || rc=$?
+    _compose_p "$eff" exec -T "${extra_env[@]}" -w "$wd" cbox /entrypoint.sh "$bin" "$@" || rc=$?
+  fi
+  if [ -n "$post_hook" ]; then
+    "$post_hook" "$rc" || true
   fi
   exec 8>&-
+  trap - INT TERM HUP
+  _container_exec_bridge_stop
+  _clip_bridge_stop
   _reap "$eff"
   return "$rc"
 }
@@ -603,25 +947,54 @@ _run_isolated() {
   (
     set -e
     unset CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL CBOX_CODEX_TARGET
+    local lockfile="$eff/.regen.lock"
+    exec 6> "$lockfile"
+    flock -x 6 || { echo "cbox: cannot lock $lockfile" >&2; exit 1; }
     . "$eff/cbox.conf"
     export CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
+    export CBOX_HERMES CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME
     _gen_effective "$eff" "$root"
-    _ensure_image "$eff"
-    _bins_soft "$IMG_TAG"
-    _ensure_volumes "$eff"
     local slug
     slug="$(_cbox_slug "$root")"
     mkdir -p "$HOME/.claude/projects/$slug"
     _write_mirror "$root" "$eff"
     _cbox_manifest_write_generated "$eff"
+    exec 6>&-
+    _ensure_image "$eff"
+    _bins_soft "$IMG_TAG"
+    _ensure_volumes "$eff"
     _session_run "$eff" "$bin" "$@"
   )
 }
 
+_gc_bg() {
+  mkdir -p "$HOME/.config/cbox"
+  ( flock -n 200 || exit 0
+    gc
+  ) 200> "$HOME/.config/cbox/gc.auto.lock" >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+}
+
 run() {
+  local session_id=""
+  if [ "${1:-}" = "--session" ]; then
+    session_id="${2:-}"
+    [ -n "$session_id" ] || { echo "cbox: usage: $0 run --session <id> <bin> [args...]" >&2; return 1; }
+    _cbox_session_id_valid "$session_id" || { echo "cbox: refusing - invalid session id '$session_id'" >&2; return 1; }
+    shift 2
+  fi
   local bin="${1:-}"
   [ -n "$bin" ] || { echo "cbox: usage: $0 run <bin> [args...]" >&2; return 1; }
   shift
+  if [ -n "$session_id" ]; then
+    if [ "$(_cbox_effective_mode)" = global ]; then
+      echo "cbox: sessions unsupported in global mode v1 - falling back to plain run" >&2
+      _run_global "$bin" "$@"
+      return
+    fi
+    _cbox_session_run_leg "$session_id" "$bin" "$@"
+    return
+  fi
   if [ "$(_cbox_effective_mode)" = global ]; then
     _run_global "$bin" "$@"
     return
@@ -634,15 +1007,102 @@ _project_eff_from_cwd() {
   root="$(_cbox_workspace_root)" || die "refusing to operate in $PWD (home, /, or a mount root)"
   P="$(_cbox_path_hash "$root")"
   eff="$HOME/.config/cbox/projects/$P"
-  [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run claude' or 'setup.sh --local $root' first"
+  [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run codex' or 'setup.sh --local $root' first"
   printf '%s' "$eff"
 }
 
+_cbox_down_guard_decision() {
+  local locked="$1" probe_n="$2" force="$3"
+  if [ "$force" = 1 ]; then
+    printf 'proceed'
+    return 0
+  fi
+  if [ "$locked" != 1 ]; then
+    printf 'refuse'
+    return 0
+  fi
+  case "$probe_n" in
+    ''|*[!0-9]*) printf 'refuse'; return 0 ;;
+    0) printf 'proceed'; return 0 ;;
+    *) printf 'refuse'; return 0 ;;
+  esac
+}
+
 down_project() {
-  local eff
+  local force="${1:-0}" eff cid locked=0 n decision rc=0
   eff="$(_project_eff_from_cwd)"
   _cbox_manifest_verify_generated "$eff"
-  _compose_p "$eff" down --remove-orphans
+  exec 9> "$eff/session.lock"
+  if flock -n -x 9; then
+    locked=1
+  fi
+  local ps_rc=0
+  cid="$(_compose_p "$eff" ps -q cbox 2>/dev/null)" || ps_rc=$?
+  n=unknown
+  if [ "$ps_rc" -ne 0 ]; then
+    n=unknown
+  elif [ -n "$cid" ]; then
+    n="$(_probe "$cid" 2>/dev/null)" || n=unknown
+  else
+    n=0
+  fi
+  decision="$(_cbox_down_guard_decision "$locked" "$n" "$force")"
+  if [ "$decision" = refuse ]; then
+    exec 9>&-
+    echo "cbox: refusing down - a session looks live for $eff (probe: $n live process(es)); use 'cbox down --force' to stop anyway" >&2
+    return 1
+  fi
+  if [ "$force" = 1 ] && [ "$locked" != 1 ]; then
+    echo "cbox: --force: a session lock is held for $eff; stopping anyway" >&2
+  elif [ "$force" = 1 ] && { [ "$n" = unknown ] || [ "$n" != 0 ]; }; then
+    echo "cbox: --force: probe reports $n live process(es) for $eff; stopping anyway" >&2
+  fi
+  _compose_p "$eff" down --remove-orphans || rc=$?
+  exec 9>&-
+  return "$rc"
+}
+
+shell_isolated() {
+  local eff root rc=0
+  eff="$(_project_eff_from_cwd)"
+  . "$eff/cbox.conf"
+  root="$(cat "$eff/workspace" 2>/dev/null)" || return 1
+  exec 8> "$eff/session.lock"
+  flock -s 8 || { echo "cbox: cannot lock session for $eff" >&2; exec 8>&-; return 1; }
+  _clip_bridge_start "$(_cbox_clip_dir "p$(basename "$eff")")"
+  _container_exec_bridge_start "$(_cbox_container_exec_dir "p$(basename "$eff")")" "$root" || {
+    _clip_bridge_stop
+    exec 8>&-
+    return 1
+  }
+  _cbox_compose_up "$eff/.compose.up.stamp" docker compose --project-directory "$eff" -f "$eff/docker-compose.yml" || {
+    _container_exec_bridge_stop
+    _clip_bridge_stop
+    exec 8>&-
+    return 1
+  }
+  _cbox_netaccess_apply_isolated "$eff" || {
+    _container_exec_bridge_stop
+    _clip_bridge_stop
+    exec 8>&-
+    return 1
+  }
+  if [ -t 0 ] && [ -t 1 ]; then
+    _compose_p "$eff" exec -it "${CBOX_CONTAINER_EXEC_ENV[@]}" cbox /entrypoint.sh bash || rc=$?
+  else
+    _compose_p "$eff" exec -T "${CBOX_CONTAINER_EXEC_ENV[@]}" cbox /entrypoint.sh bash || rc=$?
+  fi
+  exec 8>&-
+  _container_exec_bridge_stop
+  _clip_bridge_stop
+  _reap "$eff"
+  return "$rc"
+}
+
+logs_isolated() {
+  local eff
+  eff="$(_project_eff_from_cwd)"
+  _compose_p "$eff" logs "$@"
 }
 
 gc() {
@@ -674,6 +1134,19 @@ gc() {
   done < <(docker ps --filter label=cbox.kind=isolated --format '{{.ID}}'$'\t''{{.Label "cbox.effdir"}}')
   docker ps -a --filter label=cbox.kind=isolated --filter status=exited -q | xargs -r docker rm >/dev/null 2>&1 || true
   _gc_legacy_bins_volumes
+}
+
+net_refresh() {
+  local cid img n=0
+  while IFS="$(printf '\t')" read -r cid img; do
+    [ -n "$cid" ] || continue
+    case "$img" in
+      cbox-proxy:*|cbox-proxy-img:*)
+        docker restart "$cid" >/dev/null 2>&1 && n=$((n+1))
+        ;;
+    esac
+  done < <(docker ps --filter label=com.docker.compose.service=proxy --format '{{.ID}}'$'\t''{{.Image}}')
+  echo "cbox: net-refresh: restarted $n proxy container(s); main containers keep their DNS until restart (use CBOX_DNS_MODE=public|stub to make them immune)"
 }
 
 _gc_legacy_bins_volumes() {
@@ -769,15 +1242,47 @@ _global_prepare() {
   gen_tinyproxy_conf
   gen_egress_filter
   gen_ssh_config
+  if [ "${CBOX_HERMES:-off}" = on ]; then
+    mkdir -p "$INSTALL_DIR/generated/hermes"
+    gen_hermes_managed_into "$INSTALL_DIR/generated/hermes/managed.env"
+  else
+    rm -f "$INSTALL_DIR/generated/hermes/managed.env"
+  fi
+  _ensure_image "$INSTALL_DIR"
+}
+
+_cbox_global_prepare_locked() {
+  local lockfile="$INSTALL_DIR/.regen.lock"
+  exec 8> "$lockfile"
+  flock -x 8 || { echo "cbox: cannot lock $lockfile" >&2; exec 8>&-; return 1; }
+  local digest rc=0
+  digest="$(_cbox_resolve_base_digest ubuntu:24.04)" || { exec 8>&-; die "cannot resolve base image digest and no local image - network required for first build"; }
+  gen_dockerfile_into "$INSTALL_DIR" "$digest"
+  gen_image_inputs "$INSTALL_DIR" "$digest"
+  gen_env_file
+  gen_compose
+  gen_compose_gpu
+  gen_dockerfile_egress
+  gen_supervisord_conf
+  gen_tinyproxy_conf
+  gen_egress_filter
+  gen_ssh_config
+  if [ "${CBOX_HERMES:-off}" = on ]; then
+    mkdir -p "$INSTALL_DIR/generated/hermes"
+    gen_hermes_managed_into "$INSTALL_DIR/generated/hermes/managed.env"
+  else
+    rm -f "$INSTALL_DIR/generated/hermes/managed.env"
+  fi
+  exec 8>&-
   _ensure_image "$INSTALL_DIR"
 }
 
 up() {
-  local gpu=0
+  local gpu=0 workspace_root=""
   if [ "${1:-}" = "--gpu" ]; then gpu=1; fi
   check_tpl_sha
   source "$INSTALL_DIR/templates/generators.sh"
-  _global_prepare
+  _cbox_global_prepare_locked
   local cmd=("${COMPOSE[@]}")
   if [ "$gpu" = 1 ]; then
     [ -f "$INSTALL_DIR/docker-compose.gpu.yml" ] || { echo "cbox: docker-compose.gpu.yml not found - run ./setup.sh update gpu"; exit 1; }
@@ -785,26 +1290,72 @@ up() {
   fi
   if _cbox_proxy_active; then "${cmd[@]}" build; fi
   _bins_soft "$IMG_TAG"
-  "${cmd[@]}" up -d
+  if _cbox_netaccess_exec_active; then
+    mkdir -p -m 0700 "$(_cbox_container_exec_dir "${CBOX_NAME:-cbox}")/sockets"
+    chmod 0700 "$(_cbox_container_exec_dir "${CBOX_NAME:-cbox}")" "$(_cbox_container_exec_dir "${CBOX_NAME:-cbox}")/sockets"
+  fi
+  _cbox_compose_up "$HOME/.config/cbox/compose.up.stamp" "${cmd[@]}"
+  _cbox_netaccess_apply_global
   if [ -t 0 ] && [ -t 1 ] && [ "${CBOX_NO_EXEC:-0}" != 1 ]; then
-    exec "${COMPOSE[@]}" exec -it "$SERVICE" /entrypoint.sh claude
+    _clip_bridge_start "$(_cbox_clip_dir "${CBOX_NAME:-cbox}")"
+    workspace_root="$(_cbox_workspace_root 2>/dev/null)" || workspace_root=""
+    _container_exec_bridge_start "$(_cbox_container_exec_dir "${CBOX_NAME:-cbox}")" "$workspace_root" global || {
+      _clip_bridge_stop
+      return 1
+    }
+    exec "${COMPOSE[@]}" exec -it "${CBOX_CONTAINER_EXEC_ENV[@]}" "$SERVICE" /entrypoint.sh claude
   fi
   echo "cbox: up"
 }
 
 down() {
   require_global_conf
+  local force="${1:-0}" cid n decision ps_rc=0 locked=0
+  exec 9> "$INSTALL_DIR/session.lock"
+  if flock -n -x 9; then
+    locked=1
+  fi
+  cid="$("${COMPOSE[@]}" ps -q "$SERVICE" 2>/dev/null)" || ps_rc=$?
+  if [ "$ps_rc" -ne 0 ]; then
+    n=unknown
+  elif [ -n "$cid" ]; then
+    n="$(_probe "$cid" 2>/dev/null)" || n=unknown
+  else
+    n=0
+  fi
+  decision="$(_cbox_down_guard_decision "$locked" "$n" "$force")"
+  if [ "$decision" = refuse ]; then
+    exec 9>&-
+    echo "cbox: refusing down - the global container looks live (probe: $n live process(es)); use 'cbox down --force' to stop anyway" >&2
+    return 1
+  fi
+  if [ "$force" = 1 ] && [ "$locked" != 1 ]; then
+    echo "cbox: --force: a session lock is held for the global container; stopping anyway" >&2
+  elif [ "$force" = 1 ] && { [ "$n" = unknown ] || [ "$n" != 0 ]; }; then
+    echo "cbox: --force: probe reports $n live process(es) for the global container; stopping anyway" >&2
+  fi
   "${COMPOSE[@]}" down
+  exec 9>&-
 }
 
 restart() {
-  down
+  down 1
   up "$@"
 }
 
 shell() {
+  local workspace_root
   require_global_conf
-  exec "${COMPOSE[@]}" exec -it "$SERVICE" /entrypoint.sh bash
+  workspace_root="$(_cbox_workspace_root 2>/dev/null)" || workspace_root=""
+  exec 8> "$INSTALL_DIR/session.lock"
+  flock -s 8 || { echo "cbox: cannot lock session for the global container" >&2; exec 8>&-; return 1; }
+  _clip_bridge_start "$(_cbox_clip_dir "${CBOX_NAME:-cbox}")"
+  _container_exec_bridge_start "$(_cbox_container_exec_dir "${CBOX_NAME:-cbox}")" "$workspace_root" global || {
+    _clip_bridge_stop
+    exec 8>&-
+    return 1
+  }
+  exec "${COMPOSE[@]}" exec -it "${CBOX_CONTAINER_EXEC_ENV[@]}" "$SERVICE" /entrypoint.sh bash
 }
 
 logs() {
@@ -1455,9 +2006,220 @@ case "$("$p" --version 2>&1)" in *"$v"*) exit 0;; *) exit 1;; esac
   fi
 
   _cbox_verify_doc_coverage
+  _cbox_verify_engines_registry
+  _cbox_verify_netaccess_scope
 
   echo "== cbox verify: $VN tests, $VOK ok, $VFAIL failed, $VSKIP skipped =="
   [ "$VFAIL" -eq 0 ] || exit 1
+}
+
+_cbox_verify_engines_registry() {
+  local reg="$INSTALL_DIR/etc/engines/engines.json"
+  local py="$INSTALL_DIR/etc/engines/engines_registry.py"
+  local install_bins="$INSTALL_DIR/install-bins.sh"
+  local entrypoint="$INSTALL_DIR/entrypoint.sh"
+  local sec="$INSTALL_DIR/templates/sections.sh"
+  local cbox_self="$INSTALL_DIR/cbox"
+  v_t "engines registry: schema valid"
+  if [ ! -f "$reg" ] || [ ! -f "$py" ]; then
+    v_skip "engines.json or engines_registry.py not present (host-side check)"
+    return 0
+  fi
+  local msg
+  if msg="$(python3 "$py" validate "$reg" 2>&1)"; then
+    v_ok
+  else
+    v_fail "$msg"
+    return 0
+  fi
+
+  local names
+  names="$(python3 "$py" names "$reg" 2>/dev/null)" || names=""
+  [ -n "$names" ] || { v_t "engines registry: at least one engine declared"; v_fail "names command returned nothing"; return 0; }
+
+  if [ ! -f "$install_bins" ] || [ ! -f "$entrypoint" ] || [ ! -f "$sec" ]; then
+    v_t "engines registry: cross-file agreement"
+    v_skip "install-bins.sh, entrypoint.sh or sections.sh not present (host-side check)"
+    return 0
+  fi
+
+  local ib_allow ep_arm
+  ib_allow="$(grep -oE '^\s*[A-Za-z0-9_|-]+\)\s*;;' "$install_bins" | head -1 | sed -E 's/^\s*//; s/\)\s*;;\s*$//')"
+  ep_arm="$(grep -oE '^  [A-Za-z0-9_|-]+\)\s*$' "$entrypoint" | sed -E 's/^\s*//; s/\)\s*$//' | tr '\n' '|' | sed 's/|$//')"
+
+  . "$sec" 2>/dev/null || true
+
+  local name bin install version_vars enabled_var pending=""
+  local missing="" mismatch="" sec_gaps="" get_fail=""
+  for name in $names; do
+    bin="$(python3 "$py" get "$reg" "$name" bin 2>/dev/null)" || { get_fail="$get_fail $name.bin"; bin=""; }
+    install="$(python3 "$py" get "$reg" "$name" install 2>/dev/null)" || { get_fail="$get_fail $name.install"; install=""; }
+    enabled_var="$(python3 "$py" get "$reg" "$name" enabled_var 2>/dev/null)" || { get_fail="$get_fail $name.enabled_var"; enabled_var=""; }
+
+    if [ "$install" = "bins-volume" ]; then
+      case "|$ib_allow|" in
+        *"|$name|"*) ;;
+        *) missing="$missing install-bins:$name" ;;
+      esac
+    fi
+
+    local armed=1
+    case "|$ep_arm|" in
+      *"|$name|"*)
+        if [ "$bin" != "$name" ]; then
+          mismatch="$mismatch entrypoint-bin:$name(bin=$bin)"
+        fi
+        ;;
+      *)
+        pending="$pending $name"
+        armed=0
+        ;;
+    esac
+
+    version_vars="$(python3 "$py" get "$reg" "$name" version_vars 2>/dev/null)" || { get_fail="$get_fail $name.version_vars"; version_vars=""; }
+    local vv
+    vv="$(printf '%s' "$version_vars" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)))' 2>/dev/null)" || vv=""
+    local sec_binaries="${SEC_VARS[binaries]:-}"
+    local sec_own="${SEC_VARS[$name]:-}"
+    local v
+    for v in $vv; do
+      case " $sec_binaries " in
+        *" $v "*) continue ;;
+      esac
+      case " $sec_own " in
+        *" $v "*) continue ;;
+      esac
+      if [ "$armed" = 1 ]; then
+        missing="$missing sec-vars:$name:$v"
+      else
+        sec_gaps="$sec_gaps sec-vars:$name:$v"
+      fi
+    done
+  done
+
+  v_t "engines registry: per-engine field lookups succeed"
+  if [ -z "$get_fail" ]; then
+    v_ok
+  else
+    v_fail "${get_fail}"
+  fi
+
+  v_t "engines registry: bins-volume engines in install-bins.sh allowlist"
+  local missing_ib
+  missing_ib="$(printf '%s' "$missing" | grep -o 'install-bins:[^ ]*' | tr '\n' ' ' || true)"
+  if [ -z "$missing_ib" ]; then
+    v_ok
+  else
+    v_fail "${missing_ib}"
+  fi
+
+  v_t "engines registry: version_vars covered by SEC_VARS[binaries] or own section (entrypoint-armed engines)"
+  local missing_sv
+  missing_sv="$(printf '%s' "$missing" | grep -o 'sec-vars:[^ ]*' | tr '\n' ' ' || true)"
+  if [ -z "$missing_sv" ]; then
+    v_ok
+  else
+    v_fail "${missing_sv}"
+  fi
+
+  v_t "engines registry: entrypoint-armed engines agree on bin name"
+  if [ -z "$mismatch" ]; then
+    v_ok
+  else
+    v_fail "${mismatch}"
+  fi
+
+  v_t "engines registry: entrypoint-armed and install-bins-allowlisted engines are all declared in the registry"
+  local names_bar="|$(printf '%s' "$names" | tr '\n' '|' | sed 's/||*/|/g')|"
+  local unreg="" tok
+  local IFS_bak="$IFS"; IFS='|'
+  for tok in $ep_arm; do
+    [ -n "$tok" ] || continue
+    case "$names_bar" in *"|$tok|"*) ;; *) unreg="$unreg entrypoint-arm:$tok" ;; esac
+  done
+  for tok in $ib_allow; do
+    [ -n "$tok" ] || continue
+    case "$names_bar" in *"|$tok|"*) ;; *) unreg="$unreg install-bins:$tok" ;; esac
+  done
+  IFS="$IFS_bak"
+  if [ -z "$unreg" ]; then
+    v_ok
+  else
+    v_fail "engines armed/allowlisted in code but missing from engines.json:${unreg}"
+  fi
+
+  v_t "engines registry: canonical-paths probe literals appear verbatim in the _CBOX_PROBE_SH heredoc"
+  if [ ! -f "$cbox_self" ]; then
+    v_skip "cbox script not present at $cbox_self (host-side check)"
+  else
+    local probe_kind cp_missing="" cp_none=1
+    for name in $names; do
+      probe_kind="$(python3 "$py" get "$reg" "$name" probe.kind 2>/dev/null)" || probe_kind=""
+      [ "$probe_kind" = "canonical-paths" ] || continue
+      cp_none=0
+      local exe_prefix argv0_prefix argv1_json argv1_item
+      exe_prefix="$(python3 "$py" get "$reg" "$name" probe.exe_realpath_prefix 2>/dev/null)" || exe_prefix=""
+      argv0_prefix="$(python3 "$py" get "$reg" "$name" probe.argv0_prefix 2>/dev/null)" || argv0_prefix=""
+      argv1_json="$(python3 "$py" get "$reg" "$name" probe.argv1 2>/dev/null)" || argv1_json=""
+      if [ -z "$exe_prefix" ] || ! grep -qF "$exe_prefix" "$cbox_self"; then
+        cp_missing="$cp_missing $name.exe_realpath_prefix"
+      fi
+      if [ -z "$argv0_prefix" ] || ! grep -qF "$argv0_prefix" "$cbox_self"; then
+        cp_missing="$cp_missing $name.argv0_prefix"
+      fi
+      for argv1_item in $(printf '%s' "$argv1_json" | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)))' 2>/dev/null); do
+        grep -qF "$argv1_item" "$cbox_self" || cp_missing="$cp_missing $name.argv1:$argv1_item"
+      done
+    done
+    if [ "$cp_none" = 1 ]; then
+      v_skip "no canonical-paths engines declared"
+    elif [ -z "$cp_missing" ]; then
+      v_ok
+    else
+      v_fail "probe literals absent from _CBOX_PROBE_SH:${cp_missing}"
+    fi
+  fi
+
+  v_t "engines registry: shared-session capability fields populated"
+  local cap_missing="" resume seed hist
+  for name in claude codex hermes; do
+    resume="$(python3 "$py" get "$reg" "$name" resume_argv 2>/dev/null)" || resume=""
+    seed="$(python3 "$py" get "$reg" "$name" seed_channel 2>/dev/null)" || seed=""
+    hist="$(python3 "$py" get "$reg" "$name" history_read 2>/dev/null)" || hist=""
+    case "$resume" in ""|null) cap_missing="$cap_missing $name.resume_argv" ;; esac
+    case "$seed" in ""|null) cap_missing="$cap_missing $name.seed_channel" ;; esac
+    case "$hist" in ""|null) cap_missing="$cap_missing $name.history_read" ;; esac
+  done
+  if [ -z "$cap_missing" ]; then
+    v_ok
+  else
+    v_fail "shared-session capability fields missing/unpopulated:${cap_missing}"
+  fi
+
+  if [ -n "$pending" ]; then
+    echo "NOTE: engines pending an entrypoint arm:${pending}"
+  fi
+  if [ -n "$sec_gaps" ]; then
+    echo "NOTE: pending engines with no SEC_VARS coverage yet:${sec_gaps}"
+  fi
+}
+
+_cbox_verify_netaccess_scope() {
+  v_t "netaccess scope resolution: legacy configs never widen to all"
+  command -v _cbox_netaccess_scope >/dev/null 2>&1 || { v_skip "generators not loaded"; return 0; }
+  local bad=""
+  _cbox_verify_scope_case() {
+    local got
+    got="$(CBOX_NETACCESS_SCOPE="$1" CBOX_NETACCESS_NETWORKS="$2" CBOX_NETACCESS_CIDRS="$3" _cbox_netaccess_scope)"
+    [ "$got" = "$4" ] || bad="$bad [scope=$1 nets=$2 cidrs=$3 -> $got, want $4]"
+  }
+  _cbox_verify_scope_case "" "" "" all
+  _cbox_verify_scope_case "" "mynet" "" list
+  _cbox_verify_scope_case "" "" "10.42.0.0/16" list
+  _cbox_verify_scope_case all "mynet" "" all
+  _cbox_verify_scope_case list "" "" list
+  _cbox_verify_scope_case bogus "mynet" "" list
+  if [ -z "$bad" ]; then v_ok; else v_fail "scope matrix:$bad"; fi
 }
 
 _cbox_verify_doc_coverage() {
@@ -1557,7 +2319,7 @@ verify_isolated() {
   eff="$HOME/.config/cbox/projects/$P"
   if [ ! -f "$eff/cbox.conf" ]; then
     v_t "effective config present for $root"
-    v_skip "no project - run 'cbox run claude' first"
+    v_skip "no project - run 'cbox run codex' first"
     echo "== cbox verify: $VN tests, $VOK ok, $VFAIL failed, $VSKIP skipped =="
     return 0
   fi
@@ -1619,7 +2381,7 @@ verify_isolated() {
   local slug slugdir
   slug="$(_cbox_slug "$root")"
   slugdir="$HOME/.claude/projects/$slug"
-  if [ -d "$slugdir" ]; then v_ok "$slug"; else v_skip "no session recorded yet under $slugdir - run 'cbox run claude' once"; fi
+  if [ -d "$slugdir" ]; then v_ok "$slug"; else v_skip "no session recorded yet under $slugdir - run 'cbox run codex' once"; fi
 
   v_t "v15 agent-copies-binary still stops (B-2)"
   if [ -n "$cid" ]; then
@@ -1822,6 +2584,8 @@ done
     v_skip "no other project with a matching global bins volume name"
   fi
 
+  _cbox_verify_engines_registry
+
   echo "== cbox verify: $VN tests, $VOK ok, $VFAIL failed, $VSKIP skipped =="
   [ "$VFAIL" -eq 0 ] || exit 1
 }
@@ -1840,6 +2604,51 @@ _cbox_doctor_file() {
 
 _cbox_doctor_nonempty() {
   [ -s "$1" ]
+}
+
+_cbox_doctor_netaccess_detail() {
+  local scope="${1:-list}"
+  local nets="" n members mark missing="" cidr routes
+  nets="$(_cbox_list_docker_networks)" || nets=""
+  if [ -z "$nets" ]; then
+    printf '  %s\n' "docker CLI or daemon not reachable - cannot enumerate networks"
+    return 0
+  fi
+  if [ "$scope" = all ]; then
+    printf '  %s\n' "docker networks on this host (scope=all - the proxy joins every one at apply time):"
+  else
+    printf '  %s\n' "docker networks on this host (* = configured for netaccess):"
+  fi
+  for n in $nets; do
+    members="$(_cbox_docker_bounded network inspect -f '{{range $k, $v := .Containers}}{{$v.Name}} {{end}}' "$n")" || members=""
+    members="${members% }"
+    mark=" "
+    if [ "$scope" = all ]; then
+      mark="*"
+    else
+      case " ${CBOX_NETACCESS_NETWORKS:-} " in *" $n "*) mark="*" ;; esac
+    fi
+    printf '  %s %-26s %s\n' "$mark" "$n" "${members:-<no containers>}"
+  done
+  if [ "$scope" != all ]; then
+    local nets_sp
+    nets_sp="$(printf '%s' "$nets" | tr '\n' ' ')"
+    for n in ${CBOX_NETACCESS_NETWORKS:-}; do
+      case " $nets_sp " in
+        *" $n "*) ;;
+        *) missing="$missing $n" ;;
+      esac
+    done
+    [ -z "$missing" ] || printf '  ! %s\n' "configured networks not found on this host:$missing"
+  fi
+  for cidr in ${CBOX_NETACCESS_CIDRS:-}; do
+    routes="$(ip route show to match "$cidr" 2>/dev/null | grep -v '^default' | head -1)" || routes=""
+    if [ -n "$routes" ]; then
+      printf '    cidr %-18s closest matching host route (prefix match, may be broader): %s\n' "$cidr" "$routes"
+    else
+      printf '    cidr %-18s no non-default host route - reachability from the proxy is not guaranteed\n' "$cidr"
+    fi
+  done
 }
 
 doctor() {
@@ -1955,7 +2764,16 @@ doctor() {
 
   if [ "$in_container" = 1 ]; then
     _cbox_doctor_row "egress" HOST-CHECK "network topology decided host-side (docker compose networks)"
-    _cbox_doctor_row "netaccess" HOST-CHECK "SOCKS proxy topology decided host-side"
+    if [ -n "${CBOX_SOCKS_PROXY:-}" ]; then
+      _cbox_doctor_row "netaccess" ACTIVE "CBOX_SOCKS_PROXY=$CBOX_SOCKS_PROXY; use it explicitly for target-network TCP"
+    else
+      _cbox_doctor_row "netaccess" HOST-CHECK "SOCKS proxy topology decided host-side"
+    fi
+    if [ -S "${CBOX_CONTAINER_EXEC_SOCKET:-/run/cbox-container-exec/bridge.sock}" ] && command -v cbox-container >/dev/null 2>&1; then
+      _cbox_doctor_row "container-exec" ACTIVE "cbox-container client and private bridge socket are present"
+    else
+      _cbox_doctor_row "container-exec" OFF "no scoped host exec bridge in this session"
+    fi
     _cbox_doctor_row "hostroute" HOST-CHECK "host forward-proxy route decided host-side"
     _cbox_doctor_row "gpu" HOST-CHECK "CDI/nvidia-ctk wiring decided host-side"
     _cbox_doctor_row "ssh" HOST-CHECK "agent-forward/keys mount decided host-side"
@@ -1966,9 +2784,23 @@ doctor() {
       _cbox_doctor_row "egress" OFF "CBOX_EGRESS_MODE=off"
     fi
     if [ -n "${CBOX_NETACCESS_MODE:-}" ] && [ "${CBOX_NETACCESS_MODE:-off}" != off ]; then
-      _cbox_doctor_row "netaccess" CONFIG-ONLY "CBOX_NETACCESS_MODE=$CBOX_NETACCESS_MODE - verify in a running container"
+      local na_scope
+      na_scope="$(_cbox_netaccess_scope)"
+      if [ "$na_scope" = all ]; then
+        _cbox_doctor_row "netaccess" CONFIG-ONLY "CBOX_NETACCESS_MODE=$CBOX_NETACCESS_MODE, scope=all - eligible Docker networks attach on cbox run, cidrs=[${CBOX_NETACCESS_CIDRS:-}]"
+      elif [ -z "${CBOX_NETACCESS_NETWORKS:-}" ] && [ -z "${CBOX_NETACCESS_CIDRS:-}" ]; then
+        _cbox_doctor_row "netaccess" CONFIG-ONLY "CBOX_NETACCESS_MODE=$CBOX_NETACCESS_MODE, scope=list with no targets - proxy denies everything"
+      else
+        _cbox_doctor_row "netaccess" CONFIG-ONLY "CBOX_NETACCESS_MODE=$CBOX_NETACCESS_MODE, scope=list networks=[${CBOX_NETACCESS_NETWORKS:-}] cidrs=[${CBOX_NETACCESS_CIDRS:-}] - lifecycle applies on cbox run"
+      fi
+      _cbox_doctor_netaccess_detail "$na_scope"
     else
       _cbox_doctor_row "netaccess" OFF "CBOX_NETACCESS_MODE=${CBOX_NETACCESS_MODE:-off}"
+    fi
+    if _cbox_netaccess_exec_active; then
+      _cbox_doctor_row "container-exec" CONFIG-ONLY "host bridge is session-bound; explicit networks=[${CBOX_NETACCESS_NETWORKS:-}], workspace-guard=${CBOX_NETACCESS_EXEC_WORKSPACE_GUARD:-off}"
+    else
+      _cbox_doctor_row "container-exec" OFF "CBOX_NETACCESS_EXEC_MODE=${CBOX_NETACCESS_EXEC_MODE:-off}"
     fi
     if [ -n "${CBOX_HOST_ROUTE_MODE:-}" ] && [ "${CBOX_HOST_ROUTE_MODE:-off}" != off ]; then
       _cbox_doctor_row "hostroute" CONFIG-ONLY "CBOX_HOST_ROUTE_MODE=$CBOX_HOST_ROUTE_MODE, applied=${CBOX_HOST_ROUTE_APPLIED:-0} - verify in a running container"
@@ -2007,6 +2839,40 @@ doctor() {
     _cbox_doctor_row "local-model" OFF "CBOX_LOCAL_MODEL unset or off (default) - see cbox/etc/docs/LOCAL_MODEL_RUNBOOK.md"
   fi
 
+  if [ "${CBOX_HERMES:-off}" = on ]; then
+    local hermes_managed="$INSTALL_DIR/generated/hermes/managed.env"
+    if { [ "${CBOX_HERMES_PROVIDER:-local}" = local ] && [ -z "${CBOX_HERMES_MODEL_URL:-}" ]; } \
+      || [ -z "${CBOX_HERMES_MODEL_NAME:-}" ] || [ ! -f "$hermes_managed" ]; then
+      _cbox_doctor_row "hermes" CONFIG-ONLY "CBOX_HERMES=on but provider/url/name incomplete or $hermes_managed missing - regenerate (cbox up or ./setup.sh update hermes)"
+    else
+      _cbox_doctor_row "hermes" ACTIVE "CBOX_HERMES=on, provider=${CBOX_HERMES_PROVIDER:-local}, version=${CBOX_HERMES_VERSION:-}"
+    fi
+  else
+    _cbox_doctor_row "hermes" OFF "CBOX_HERMES unset or off (default)"
+  fi
+
+  if [ "${CBOX_HERMES_DELEGATE:-off}" = on ]; then
+    if [ "${CBOX_HERMES:-off}" != on ]; then
+      _cbox_doctor_row "hermes-delegate" CONFIG-ONLY "CBOX_HERMES_DELEGATE=on but CBOX_HERMES != on - the delegate requires the hermes console engine"
+    else
+      local hd_seed
+      if [ "${CBOX_CLAUDE_MODE:-mount}" = mount ]; then
+        hd_seed="$INSTALL_DIR/generated/claude-config/.claude.json"
+      else
+        hd_seed="$INSTALL_DIR/generated/state/claude.json"
+      fi
+      if [ "$in_container" = 1 ]; then
+        _cbox_doctor_row "hermes-delegate" ACTIVE "CBOX_HERMES_DELEGATE=on, CBOX_HERMES=on"
+      elif [ -f "$hd_seed" ] && grep -q '"hermes-local"' "$hd_seed" 2>/dev/null; then
+        _cbox_doctor_row "hermes-delegate" ACTIVE "CBOX_HERMES_DELEGATE=on, hermes-local present in the rendered seed"
+      else
+        _cbox_doctor_row "hermes-delegate" CONFIG-ONLY "CBOX_HERMES_DELEGATE=on but hermes-local absent from the rendered seed - regenerate (cbox up or ./setup.sh update hermes-delegate)"
+      fi
+    fi
+  else
+    _cbox_doctor_row "hermes-delegate" OFF "CBOX_HERMES_DELEGATE unset or off (default)"
+  fi
+
   if [ -f "$claude_dir/settings.json" ] && [ -s "$claude_dir/settings.json" ] \
     && python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$claude_dir/settings.json" >/dev/null 2>&1; then
     _cbox_doctor_row "settings" ACTIVE "~/.claude/settings.json present and valid JSON"
@@ -2035,6 +2901,18 @@ doctor() {
     fi
   else
     _cbox_doctor_row "managed-dirs" HOST-CHECK "CBOX_MANAGED_DIRS ownership fixup runs in the entrypoint, not decidable on the host"
+  fi
+
+  if [ "$in_container" = 1 ]; then
+    _cbox_doctor_row "config-pending" HOST-CHECK "cbox config set is host-only - pending.apply lives outside the container"
+  else
+    local cfg_pf=""
+    cfg_pf="$(_cbox_config_pending_file 2>/dev/null)" || cfg_pf=""
+    if [ -n "$cfg_pf" ] && [ -s "$cfg_pf" ]; then
+      _cbox_doctor_row "config-pending" CONFIG-ONLY "$(tr '\n' ' ' < "$cfg_pf")"
+    else
+      _cbox_doctor_row "config-pending" OFF "no pending.apply - nothing staged by cbox config set"
+    fi
   fi
 
   local ss_ok=0
@@ -2085,29 +2963,1330 @@ sys.exit(0 if 'SessionStart' not in ('',) and hooks else 1)
     _cbox_doctor_row "context-manifest" MISSING "no generated/context-manifest.json - run ./setup.sh update"
   fi
 
+  local sess_root sess_dir
+  if sess_root="$(_cbox_workspace_root 2>/dev/null)" && [ -d "$(_cbox_session_root "$sess_root")" ]; then
+    sess_dir="$(_cbox_session_root "$sess_root")"
+    local sid open_n=0 idle_n=0 closed_n=0 total=0 st
+    while IFS= read -r sid; do
+      [ -n "$sid" ] || continue
+      total=$((total + 1))
+      st="$(_cbox_session_field_get "$sess_root" "$sid" state 2>/dev/null)" || st=""
+      st="${st%\"}"; st="${st#\"}"
+      case "$st" in
+        open) open_n=$((open_n + 1)) ;;
+        idle) idle_n=$((idle_n + 1)) ;;
+        closed) closed_n=$((closed_n + 1)) ;;
+      esac
+    done < <(_cbox_session_list_ids "$sess_root")
+    _cbox_doctor_row "sessions" ACTIVE "$total session(s): open=$open_n idle=$idle_n closed=$closed_n"
+  else
+    _cbox_doctor_row "sessions" OFF "no .cbox/sessions/ - no cbox session created yet in this scope"
+  fi
+
   echo
   echo "legend: ACTIVE=wired and operational here, CONFIG-ONLY=configured but not active in this container, OFF=disabled, MISSING=expected artifact absent, HOST-CHECK=needs docker/GPU/TTY, not decidable in-container"
 }
 
+_cbox_config_load_sections() {
+  [ -n "${SECTIONS[*]:-}" ] && return 0
+  local sec="$INSTALL_DIR/templates/sections.sh"
+  [ -f "$sec" ] || die "$sec missing"
+  . "$sec"
+}
+
+_cbox_config_in_container() {
+  _cbox_doctor_in_container
+}
+
+_cbox_config_whitelist() {
+  _cbox_config_load_sections
+  local s v
+  for s in "${SECTIONS[@]}"; do
+    for v in ${SEC_VARS[$s]:-}; do
+      printf '%s\n' "$v"
+    done
+  done
+}
+
+_cbox_config_is_whitelisted() {
+  local key="$1"
+  case "$key" in
+    ''|*[!A-Z0-9_]*) return 1 ;;
+  esac
+  case "$key" in
+    [A-Z]*) ;;
+    *) return 1 ;;
+  esac
+  local w
+  while IFS= read -r w; do
+    [ "$w" = "$key" ] && return 0
+  done < <(_cbox_config_whitelist)
+  return 1
+}
+
+_cbox_config_section_for_var() {
+  _cbox_config_load_sections
+  local key="$1" s v
+  for s in "${SECTIONS[@]}"; do
+    for v in ${SEC_VARS[$s]:-}; do
+      [ "$v" = "$key" ] && { printf '%s' "$s"; return 0; }
+    done
+  done
+  return 1
+}
+
+_cbox_config_no_ctrl() {
+  local val="$1" c i
+  case "$val" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  for ((i = 0; i < ${#val}; i++)); do
+    c="${val:i:1}"
+    case "$c" in
+      $'\x00'|$'\x01'|$'\x02'|$'\x03'|$'\x04'|$'\x05'|$'\x06'|$'\x07'|$'\x08'|\
+      $'\x0b'|$'\x0c'|$'\x0e'|$'\x0f'|$'\x10'|$'\x11'|$'\x12'|$'\x13'|$'\x14'|\
+      $'\x15'|$'\x16'|$'\x17'|$'\x18'|$'\x19'|$'\x1a'|$'\x1b'|$'\x1c'|$'\x1d'|\
+      $'\x1e'|$'\x1f')
+        return 1
+        ;;
+    esac
+  done
+  return 0
+}
+
+_cbox_config_validate_enum() {
+  local val="$1"; shift
+  local a
+  for a in "$@"; do
+    [ "$val" = "$a" ] && return 0
+  done
+  return 1
+}
+
+_cbox_config_validate_uint() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  return 0
+}
+
+_cbox_config_validate_path() {
+  case "$1" in
+    ''|*[!\ -~]*) return 1 ;;
+    *' '*) return 1 ;;
+    /*) return 0 ;;
+    '~'|'~/'*) return 0 ;;
+  esac
+  return 1
+}
+
+_cbox_config_validate_url() {
+  case "$1" in
+    http://*|https://*) return 0 ;;
+  esac
+  return 1
+}
+
+_cbox_config_validate_var() {
+  local key="$1" val="$2"
+  _cbox_config_no_ctrl "$val" || { printf 'contains a control character'; return 1; }
+  case "$key" in
+    CBOX_MODE)
+      _cbox_config_validate_enum "$val" global isolated || { printf 'expected one of: global isolated'; return 1; }
+      ;;
+    CBOX_SESSION_SCOPE)
+      _cbox_config_validate_enum "$val" isolated global || { printf 'expected one of: isolated global'; return 1; }
+      ;;
+    CBOX_BASE_DIGEST_TTL)
+      _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer (seconds)'; return 1; }
+      ;;
+    CBOX_CLAUDE_MODE|CBOX_CODEX_MODE)
+      _cbox_config_validate_enum "$val" mount volume || { printf 'expected one of: mount volume'; return 1; }
+      ;;
+    CBOX_CLAUDE_PATH|CBOX_CODEX_PATH|CBOX_VENV_PATH|CBOX_SSH_AGENT_DIR)
+      [ -z "$val" ] || _cbox_config_validate_path "$val" || { printf 'expected an absolute path (or empty)'; return 1; }
+      ;;
+    CBOX_CLAUDE_BACKUP|CBOX_CODEX_BACKUP)
+      _cbox_config_validate_enum "$val" y c n || { printf 'expected one of: y c n'; return 1; }
+      ;;
+    CBOX_WORKSPACES)
+      local w
+      for w in $val; do
+        _cbox_config_validate_path "$w" || { printf 'workspace entries must be absolute paths: %s' "$w"; return 1; }
+      done
+      ;;
+    CBOX_WORKDIR)
+      [ -z "$val" ] || _cbox_config_validate_path "$val" || { printf 'expected an absolute path (or empty)'; return 1; }
+      ;;
+    CBOX_VENV_MODE)
+      _cbox_config_validate_enum "$val" none host volume || { printf 'expected one of: none host volume'; return 1; }
+      ;;
+    CBOX_GPU)
+      _cbox_config_validate_enum "$val" 0 1 || { printf 'expected one of: 0 1'; return 1; }
+      ;;
+    CBOX_EGRESS_MODE)
+      _cbox_config_validate_enum "$val" off allowlist blocklist || { printf 'expected one of: off allowlist blocklist'; return 1; }
+      ;;
+    CBOX_EGRESS_APPLIED)
+      _cbox_config_validate_enum "$val" 0 1 || { printf 'expected one of: 0 1'; return 1; }
+      ;;
+    CBOX_NETACCESS_MODE)
+      _cbox_config_validate_enum "$val" off socks || { printf 'expected one of: off socks'; return 1; }
+      ;;
+    CBOX_NETACCESS_APPLIED)
+      _cbox_config_validate_enum "$val" 0 1 || { printf 'expected one of: 0 1'; return 1; }
+      ;;
+    CBOX_NETACCESS_NETWORKS)
+      local n
+      for n in $val; do
+        case "$n" in
+          [A-Za-z0-9]*) ;;
+          *) printf 'invalid network name: %s' "$n"; return 1 ;;
+        esac
+        case "$n" in
+          *[!A-Za-z0-9_.-]*) printf 'invalid network name: %s' "$n"; return 1 ;;
+        esac
+      done
+      ;;
+    CBOX_NETACCESS_CIDRS)
+      command -v _cbox_is_ipv4_cidr >/dev/null 2>&1 || . "$INSTALL_DIR/templates/generators.sh"
+      local c
+      for c in $val; do
+        if ! _cbox_is_ipv4_cidr "$c" || [ "${c%/*}" = "0.0.0.0" ]; then
+          printf 'invalid IPv4 CIDR: %s' "$c"; return 1
+        fi
+        if [ "${c#*/}" -lt 8 ]; then
+          printf 'prefix too broad (minimum /8): %s' "$c"; return 1
+        fi
+      done
+      ;;
+    CBOX_NETACCESS_SOCKS_PORT)
+      _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer (port)'; return 1; }
+      [ "$val" -ge 1 ] && [ "$val" -le 65535 ] || { printf 'expected port 1..65535'; return 1; }
+      ;;
+    CBOX_NETACCESS_EXEC_MODE)
+      _cbox_config_validate_enum "$val" off scoped || { printf 'expected one of: off scoped'; return 1; }
+      ;;
+    CBOX_NETACCESS_EXEC_WORKSPACE_GUARD)
+      _cbox_config_validate_enum "$val" off on || { printf 'expected one of: off on'; return 1; }
+      ;;
+    CBOX_NETACCESS_EXEC_TIMEOUT)
+      _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer'; return 1; }
+      [ "$val" -ge 1 ] && [ "$val" -le 3600 ] || { printf 'expected integer 1..3600'; return 1; }
+      ;;
+    CBOX_NETACCESS_EXEC_MAX_BYTES)
+      _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer'; return 1; }
+      [ "$val" -ge 1024 ] && [ "$val" -le 16777216 ] || { printf 'expected integer 1024..16777216'; return 1; }
+      ;;
+    CBOX_HOST_ROUTE_MODE)
+      _cbox_config_validate_enum "$val" off host-proxy || { printf 'expected one of: off host-proxy'; return 1; }
+      ;;
+    CBOX_HOST_ROUTE_APPLIED)
+      _cbox_config_validate_enum "$val" 0 1 || { printf 'expected one of: 0 1'; return 1; }
+      ;;
+    CBOX_HOST_PROXY_URL)
+      [ -z "$val" ] || _cbox_config_validate_url "$val" || { printf 'expected an http(s):// URL (or empty)'; return 1; }
+      ;;
+    CBOX_HOST_PROXY_ADDR_MODE)
+      _cbox_config_validate_enum "$val" host-gateway explicit || { printf 'expected one of: host-gateway explicit'; return 1; }
+      ;;
+    CBOX_SSH_MODE)
+      _cbox_config_validate_enum "$val" none host-agent container-keys mixed || { printf 'expected one of: none host-agent container-keys mixed'; return 1; }
+      ;;
+    CBOX_BASHRC)
+      _cbox_config_validate_enum "$val" 0 1 || { printf 'expected one of: 0 1'; return 1; }
+      ;;
+    CBOX_MCP_SERVERS|CBOX_AGENTS)
+      : ;;
+    CBOX_CODEX_PROGRESS_MODE)
+      _cbox_config_validate_enum "$val" off shim || { printf 'expected one of: off shim'; return 1; }
+      ;;
+    CBOX_LOCAL_MODEL)
+      _cbox_config_validate_enum "$val" off on || { printf 'expected one of: off on'; return 1; }
+      ;;
+    CBOX_LOCAL_MODEL_URL)
+      [ -z "$val" ] || _cbox_config_validate_url "$val" || { printf 'expected an http(s):// URL (or empty)'; return 1; }
+      ;;
+    CBOX_LOCAL_MODEL_NAME)
+      : ;;
+    CBOX_HERMES)
+      _cbox_config_validate_enum "$val" off on || { printf 'expected one of: off on'; return 1; }
+      ;;
+    CBOX_HERMES_VERSION)
+      printf '%s' "$val" | grep -Eq '^[0-9]+([.][0-9]+){1,3}$' || { printf 'expected a plain x.y[.z[.w]] version'; return 1; }
+      ;;
+    CBOX_HERMES_PROVIDER)
+      _cbox_config_validate_enum "$val" local nous openrouter openai anthropic || { printf 'expected one of: local nous openrouter openai anthropic'; return 1; }
+      ;;
+    CBOX_HERMES_MODEL_URL)
+      [ -z "$val" ] || _cbox_config_validate_url "$val" || { printf 'expected an http(s):// URL (or empty)'; return 1; }
+      ;;
+    CBOX_HERMES_MODEL_NAME)
+      : ;;
+    CBOX_HERMES_DELEGATE)
+      _cbox_config_validate_enum "$val" off on || { printf 'expected one of: off on'; return 1; }
+      ;;
+    CBOX_HERMES_DELEGATE_PROVIDER)
+      [ -z "$val" ] || _cbox_config_validate_enum "$val" local nous openrouter openai anthropic || { printf 'expected one of: local nous openrouter openai anthropic (or empty)'; return 1; }
+      ;;
+    CBOX_HERMES_DELEGATE_BASE_URL)
+      [ -z "$val" ] || _cbox_config_validate_url "$val" || { printf 'expected an http(s):// URL (or empty)'; return 1; }
+      ;;
+    CBOX_HERMES_DELEGATE_MODEL)
+      : ;;
+    CBOX_LIMIT_AUTORESUME)
+      _cbox_config_validate_enum "$val" off on || { printf 'expected one of: off on'; return 1; }
+      ;;
+    CBOX_LIMIT_RESUME_DELAY|CBOX_LIMIT_RESUME_STAGGER|CBOX_LIMIT_RESUME_MAX_PER_DAY)
+      _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer'; return 1; }
+      ;;
+    CBOX_LIMIT_RESUME_PROMPT)
+      [ -n "$val" ] || { printf 'must not be empty'; return 1; }
+      ;;
+    CBOX_CODEX_MCP)
+      _cbox_config_validate_enum "$val" 0 1 || { printf 'expected one of: 0 1'; return 1; }
+      ;;
+    CBOX_HISTORY|CBOX_GIT|CBOX_DIARY|CBOX_OPEN_QUESTIONS)
+      _cbox_config_validate_enum "$val" 0 1 || { printf 'expected one of: 0 1'; return 1; }
+      ;;
+    CBOX_CONTEXT_PROFILE)
+      _cbox_config_validate_enum "$val" full light || { printf 'expected one of: full light'; return 1; }
+      ;;
+    CBOX_GITCONFIG)
+      _cbox_config_validate_enum "$val" 0 1 || { printf 'expected one of: 0 1'; return 1; }
+      ;;
+    CBOX_APT_EXTRA)
+      local p
+      for p in $val; do
+        case "$p" in
+          *[!A-Za-z0-9.+-]*|[.+-]*) printf 'invalid package name: %s' "$p"; return 1 ;;
+        esac
+      done
+      ;;
+    CBOX_CLAUDE_TARGET)
+      printf '%s' "$val" | grep -Eq '^(stable|latest|[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?)$' || { printf 'expected stable, latest, or x.y.z'; return 1; }
+      ;;
+    CBOX_CODEX_VERSION)
+      printf '%s' "$val" | grep -Eq '^(latest|[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta)(\.[0-9]+)?)?)$' || { printf 'expected latest or x.y.z'; return 1; }
+      ;;
+    CBOX_CODEX_TARGET)
+      : ;;
+    CBOX_BINS_SCOPE)
+      _cbox_config_validate_enum "$val" global pinned || { printf 'expected one of: global pinned'; return 1; }
+      ;;
+    CBOX_RESTART_POLICY)
+      _cbox_config_validate_enum "$val" no unless-stopped || { printf 'expected one of: no unless-stopped'; return 1; }
+      ;;
+    *)
+      printf 'no validator registered for %s' "$key"; return 1
+      ;;
+  esac
+  return 0
+}
+
+_cbox_config_dep_gate() {
+  local key="$1" section
+  _cbox_config_load_sections
+  section="$(_cbox_config_section_for_var "$key")" || return 0
+  local tok mech cond met=1
+  for tok in ${SEC_DEPS[$section]:-}; do
+    mech="${tok%%:*}"
+    cond="${tok#*:}"
+    met=1
+    case "$cond" in
+      isolated-mode) [ "${CBOX_MODE:-global}" = isolated ] && met=0 ;;
+      no-cdi) command -v nvidia-ctk >/dev/null 2>&1 && [ -f /etc/cdi/nvidia.yaml ] && met=0 ;;
+      hermes-off) [ "${CBOX_HERMES:-off}" != on ] && met=0 ;;
+      hooks|continuity-hooks) met=0 ;;
+    esac
+    if [ "$mech" = disable ] && [ "$met" = 0 ]; then
+      printf '%s' "${SEC_DEP_TEXT[$tok]:-$tok}"
+      return 1
+    fi
+  done
+  return 0
+}
+
+_cbox_config_apply_cmd_for() {
+  local class="$1"
+  case "$class" in
+    none) printf 'none - takes effect on next cbox run' ;;
+    shell) printf 'source ~/.bashrc' ;;
+    restart) printf 'cbox down && cbox run <bin>' ;;
+    recreate|topology) printf 'cbox down && cbox run <bin> (compose recreates)' ;;
+    rebuild) printf 'next cbox run rebuilds the image automatically (image.inputs changed)' ;;
+    *) printf 'unknown apply class' ;;
+  esac
+}
+
+_cbox_config_get() {
+  local mode eff conf
+  mode="$(_cbox_effective_mode)"
+  case "$mode" in
+    isolated)
+      local root
+      root="$(_cbox_workspace_root)" || die "refusing to operate in $PWD (home, /, or a mount root)"
+      eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
+      conf="$eff/cbox.conf"
+      ;;
+    global)
+      conf="$INSTALL_DIR/cbox.conf"
+      ;;
+    *)
+      die_no_conf
+      ;;
+  esac
+  [ -f "$conf" ] || { echo "cbox: no configuration at $conf yet - run ./setup.sh first" >&2; return 1; }
+
+  _cbox_config_load_sections
+  local arg="${1:-}"
+  if [ "$arg" = "--all" ]; then
+    local s v val
+    for s in "${SECTIONS[@]}"; do
+      [ -n "${SEC_VARS[$s]:-}" ] || continue
+      printf '# %s\n' "$s"
+      for v in ${SEC_VARS[$s]}; do
+        val="$(unset "$v"; . "$conf" >/dev/null 2>&1; printf '%s' "${!v-}")"
+        printf '%s=%s\n' "$v" "$val"
+      done
+    done
+    return 0
+  fi
+  if [ "$arg" = "--section" ]; then
+    local sname="${2:-}" v val found=0
+    for s in "${SECTIONS[@]}"; do
+      [ "$s" = "$sname" ] && { found=1; break; }
+    done
+    if [ "$found" != 1 ]; then
+      echo "cbox: unknown section '$sname' - valid sections: ${SECTIONS[*]}" >&2
+      return 1
+    fi
+    for v in ${SEC_VARS[$sname]:-}; do
+      val="$(unset "$v"; . "$conf" >/dev/null 2>&1; printf '%s' "${!v-}")"
+      printf '%s=%s\n' "$v" "$val"
+    done
+    return 0
+  fi
+  local key="$arg"
+  if ! _cbox_config_is_whitelisted "$key"; then
+    echo "cbox: unknown key '$key' - valid sections: ${SECTIONS[*]}" >&2
+    return 1
+  fi
+  local val
+  val="$(unset "$key"; . "$conf" >/dev/null 2>&1; printf '%s' "${!key-}")"
+  printf '%s=%s\n' "$key" "$val"
+}
+
+_cbox_config_parse_pairs() {
+  local pair key val
+  CBOX_CONFIG_KEYS=()
+  CBOX_CONFIG_VALS=()
+  for pair in "$@"; do
+    case "$pair" in
+      *=*) key="${pair%%=*}"; val="${pair#*=}" ;;
+      *) echo "cbox: invalid assignment (expected KEY=VALUE): $pair" >&2; return 1 ;;
+    esac
+    if ! printf '%s' "$key" | grep -Eq '^[A-Z][A-Z0-9_]*$'; then
+      echo "cbox: invalid key '$key' - must match ^[A-Z][A-Z0-9_]*\$" >&2
+      return 1
+    fi
+    if ! _cbox_config_is_whitelisted "$key"; then
+      echo "cbox: key '$key' is not in the settable whitelist" >&2
+      return 1
+    fi
+    case "$val" in
+      *$'\n'*|*$'\r'*)
+        echo "cbox: value for $key contains a newline or carriage return - rejected" >&2
+        return 1
+        ;;
+    esac
+    if printf '%s' "$val" | LC_ALL=C grep -qP '\x00'; then
+      echo "cbox: value for $key contains a NUL byte - rejected" >&2
+      return 1
+    fi
+    CBOX_CONFIG_KEYS+=("$key")
+    CBOX_CONFIG_VALS+=("$val")
+  done
+  return 0
+}
+
+_cbox_config_set_var() {
+  local key="$1" val="$2"
+  printf -v "$key" '%s' "$val"
+}
+
+_cbox_config_touched_sections() {
+  local -n _keys="$1"
+  local k s out="" seen=""
+  for k in "${_keys[@]}"; do
+    s="$(_cbox_config_section_for_var "$k")" || continue
+    case " $seen " in
+      *" $s "*) continue ;;
+    esac
+    seen="$seen $s"
+    out="$out $s"
+  done
+  printf '%s' "${out# }"
+}
+
+_cbox_config_write_pending() {
+  local eff="$1"; shift
+  local -a sections=("$@")
+  local s tmp
+  tmp="$(mktemp "$eff/.cbox.XXXXXX")"
+  for s in "${sections[@]}"; do
+    printf '%s=%s\n' "$s" "${SEC_APPLY[$s]:-none}" >> "$tmp"
+  done
+  chmod 0644 "$tmp"
+  mv "$tmp" "$eff/pending.apply"
+}
+
+_cbox_config_section_has_dictate() {
+  local s="$1" tok
+  for tok in ${SEC_DEPS[$s]:-}; do
+    case "$tok" in dictate:*) return 0 ;; esac
+  done
+  return 1
+}
+
+_cbox_config_print_report() {
+  local -a sections=("$@")
+  local s
+  echo "cbox: config set staged - apply status:"
+  for s in "${sections[@]}"; do
+    printf '  %-16s %-10s %s\n' "$s" "${SEC_APPLY[$s]:-none}" "$(_cbox_config_apply_cmd_for "${SEC_APPLY[$s]:-none}")"
+    if _cbox_config_section_has_dictate "$s"; then
+      printf '    note: %s has wizard-only auto-deploy behavior (hook install/removal) that headless config set does not perform - run setup.sh to match wizard state if this section flipped on/off\n' "$s"
+    fi
+  done
+}
+
+_cbox_config_regen_isolated() {
+  local eff="$1" root="$2"
+  _gen_effective "$eff" "$root"
+}
+
+_cbox_config_regen_global() {
+  _global_prepare
+}
+
+_cbox_config_set() {
+  if _cbox_config_in_container; then
+    echo "cbox: config set is host-only - run it from a host shell, not inside the container (get is still allowed)" >&2
+    return 1
+  fi
+  [ "$#" -ge 1 ] || { echo "cbox: usage: $0 config set KEY=VALUE [KEY=VALUE...]" >&2; return 1; }
+
+  _cbox_config_load_sections
+  _cbox_config_parse_pairs "$@" || return 1
+
+  local i key val errmsg
+  for i in "${!CBOX_CONFIG_KEYS[@]}"; do
+    key="${CBOX_CONFIG_KEYS[$i]}"
+    val="${CBOX_CONFIG_VALS[$i]}"
+    if ! errmsg="$(_cbox_config_validate_var "$key" "$val")"; then
+      echo "cbox: invalid value for $key: '$val' - ${errmsg:-rejected}" >&2
+      return 1
+    fi
+  done
+
+  local mode
+  mode="$(_cbox_effective_mode)"
+  case "$mode" in
+    isolated) _cbox_config_set_isolated ;;
+    global) _cbox_config_set_global ;;
+    *) die_no_conf ;;
+  esac
+}
+
+_cbox_config_apply_staged_vars() {
+  local i
+  for i in "${!CBOX_CONFIG_KEYS[@]}"; do
+    _cbox_config_set_var "${CBOX_CONFIG_KEYS[$i]}" "${CBOX_CONFIG_VALS[$i]}"
+  done
+}
+
+_cbox_config_dep_gate_check() {
+  local i key reason
+  for i in "${!CBOX_CONFIG_KEYS[@]}"; do
+    key="${CBOX_CONFIG_KEYS[$i]}"
+    if ! reason="$(_cbox_config_dep_gate "$key")"; then
+      echo "cbox: rejecting set - dependency rule for $key would force it back: $reason" >&2
+      return 1
+    fi
+  done
+  return 0
+}
+
+_cbox_config_preserve_extra_lines() {
+  local conf="$1" key
+  [ -f "$conf" ] || return 0
+  while IFS= read -r line; do
+    case "$line" in
+      [A-Z]*=*)
+        key="${line%%=*}"
+        if ! _cbox_config_is_whitelisted "$key"; then
+          printf '%s\n' "$line"
+        fi
+        ;;
+    esac
+  done < "$conf"
+}
+
+_cbox_config_set_isolated() {
+  local root eff
+  root="$(_cbox_workspace_root)" || die "refusing to operate in $PWD (home, /, or a mount root)"
+  eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
+  [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run codex' or 'setup.sh --local $root' first"
+
+  local status
+  status="$(_cbox_manifest_status "$eff" "$root")"
+  case "$status" in
+    malformed|collision)
+      echo "cbox: refusing - effective config manifest is $status; re-derive with setup.sh --local --from-global $root" >&2
+      return 1
+      ;;
+    drifted)
+      echo "cbox: refusing - effective config has drifted; re-derive with setup.sh --local --from-global $root" >&2
+      return 1
+      ;;
+  esac
+
+  mkdir -p "$eff"
+  local lockfile="$eff/.regen.lock"
+  exec 6> "$lockfile"
+  flock -x 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+
+  local backup_conf backup_gen rc=0
+  backup_conf="$(mktemp)"
+  backup_gen="$(mktemp -d)"
+  cp "$eff/cbox.conf" "$backup_conf"
+  if [ -d "$eff/generated" ]; then
+    cp -a "$eff/generated" "$backup_gen/generated"
+  fi
+
+  (
+    set -e
+    unset CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL CBOX_CODEX_TARGET
+    . "$eff/cbox.conf"
+    _cbox_config_apply_staged_vars
+    _cbox_config_dep_gate_check
+    local tmp
+    tmp="$(mktemp "$eff/.cbox.XXXXXX")"
+    {
+      local v
+      for v in $(_cbox_config_whitelist); do
+        printf '%s=%q\n' "$v" "${!v-}"
+      done
+      _cbox_config_preserve_extra_lines "$eff/cbox.conf"
+    } > "$tmp"
+    chmod 0644 "$tmp"
+    mv "$tmp" "$eff/cbox.conf"
+    . "$eff/cbox.conf"
+    export CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
+    export CBOX_HERMES CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME
+    _cbox_config_regen_isolated "$eff" "$root"
+  ) || rc=$?
+
+  if [ "$rc" -ne 0 ]; then
+    local restore_tmp
+    restore_tmp="$(mktemp "$eff/.cbox.XXXXXX")"
+    cp "$backup_conf" "$restore_tmp"
+    chmod 0644 "$restore_tmp"
+    mv "$restore_tmp" "$eff/cbox.conf"
+    if [ -d "$backup_gen/generated" ]; then
+      local restore_gen_tmp
+      restore_gen_tmp="$(mktemp -d "$eff/.cbox-gen.XXXXXX")"
+      cp -a "$backup_gen/generated/." "$restore_gen_tmp/"
+      rm -rf "$eff/generated.stale.$$"
+      [ -d "$eff/generated" ] && mv "$eff/generated" "$eff/generated.stale.$$"
+      mv "$restore_gen_tmp" "$eff/generated"
+      rm -rf "$eff/generated.stale.$$"
+    fi
+    rm -f "$backup_conf"
+    rm -rf "$backup_gen"
+    exec 6>&-
+    echo "cbox: config set failed - previous configuration and generated artifacts restored" >&2
+    return 1
+  fi
+
+  rm -f "$backup_conf"
+  rm -rf "$backup_gen"
+
+  _cbox_manifest_write "$eff" "$root" "$eff/cbox.conf"
+  _cbox_manifest_write_generated "$eff"
+
+  local touched
+  touched="$(_cbox_config_touched_sections CBOX_CONFIG_KEYS)"
+  local -a touched_arr=()
+  read -r -a touched_arr <<< "$touched"
+  if [ "${#touched_arr[@]}" -gt 0 ]; then
+    _cbox_config_write_pending "$eff" "${touched_arr[@]}"
+    _cbox_config_print_report "${touched_arr[@]}"
+  fi
+
+  exec 6>&-
+  return 0
+}
+
+_cbox_config_set_global() {
+  require_global_conf
+  local conf="$INSTALL_DIR/cbox.conf"
+  local lockfile="$INSTALL_DIR/.regen.lock"
+  exec 6> "$lockfile"
+  flock -x 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+
+  local loaded_sha cur_sha
+  loaded_sha="$(sha256sum "$conf" | awk '{print $1}')"
+
+  local backup="$conf.bak"
+  cp "$conf" "$backup"
+
+  local rc=0
+  (
+    set -e
+    . "$conf"
+    _cbox_config_apply_staged_vars
+    _cbox_config_dep_gate_check
+    cur_sha="$(sha256sum "$conf" | awk '{print $1}')"
+    if [ "$cur_sha" != "$loaded_sha" ]; then
+      echo "cbox: refusing - global cbox.conf changed on disk since load (concurrent writer race) - re-run config set" >&2
+      exit 1
+    fi
+    local tmp
+    tmp="$(mktemp "$INSTALL_DIR/.cbox.XXXXXX")"
+    {
+      local v
+      for v in $(_cbox_config_whitelist); do
+        printf '%s=%q\n' "$v" "${!v-}"
+      done
+      _cbox_config_preserve_extra_lines "$conf"
+    } > "$tmp"
+    cur_sha="$(sha256sum "$conf" | awk '{print $1}')"
+    if [ "$cur_sha" != "$loaded_sha" ]; then
+      rm -f "$tmp"
+      echo "cbox: refusing - global cbox.conf changed on disk since load (concurrent writer race) - re-run config set" >&2
+      exit 1
+    fi
+    chmod 0644 "$tmp"
+    mv "$tmp" "$conf"
+    . "$conf"
+    export CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
+    export CBOX_HERMES CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME
+    _cbox_config_regen_global
+  ) || rc=$?
+
+  if [ "$rc" -ne 0 ]; then
+    cp "$backup" "$conf"
+    exec 6>&-
+    echo "cbox: config set failed - previous global cbox.conf restored (kept at $backup)" >&2
+    return 1
+  fi
+
+  local touched
+  touched="$(_cbox_config_touched_sections CBOX_CONFIG_KEYS)"
+  local -a touched_arr=()
+  read -r -a touched_arr <<< "$touched"
+  if [ "${#touched_arr[@]}" -gt 0 ]; then
+    _cbox_config_write_pending "$INSTALL_DIR" "${touched_arr[@]}"
+    _cbox_config_print_report "${touched_arr[@]}"
+  fi
+
+  echo "cbox: previous global cbox.conf kept at $backup"
+  exec 6>&-
+  return 0
+}
+
+_cbox_config_pending_file() {
+  local mode root eff
+  mode="$(_cbox_effective_mode)"
+  case "$mode" in
+    isolated)
+      root="$(_cbox_workspace_root)" || die "refusing to operate in $PWD (home, /, or a mount root)"
+      eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
+      printf '%s/pending.apply' "$eff"
+      ;;
+    global)
+      printf '%s/pending.apply' "$INSTALL_DIR"
+      ;;
+    *)
+      die_no_conf
+      ;;
+  esac
+}
+
+_cbox_config_pending() {
+  local pf
+  pf="$(_cbox_config_pending_file)" || return 1
+  case "${1:-}" in
+    --clear)
+      rm -f "$pf"
+      echo "cbox: pending apply info cleared"
+      return 0
+      ;;
+  esac
+  if [ -f "$pf" ] && [ -s "$pf" ]; then
+    cat "$pf"
+  else
+    echo "none"
+  fi
+}
+
+config_cmd() {
+  local sub="${1:-}"
+  case "$sub" in
+    get)
+      shift
+      _cbox_config_get "$@"
+      ;;
+    set)
+      shift
+      _cbox_config_set "$@"
+      ;;
+    pending)
+      shift
+      _cbox_config_pending "$@"
+      ;;
+    *)
+      echo "cbox: usage: $0 config {get [KEY|--section NAME|--all]|set KEY=VALUE...|pending [--clear]}" >&2
+      return 1
+      ;;
+  esac
+}
+
+_hub_engine_names() {
+  local reg="$INSTALL_DIR/etc/engines/engines.json"
+  local py="$INSTALL_DIR/etc/engines/engines_registry.py"
+  local names="" n enabled_var enabled_val
+  [ -f "$reg" ] && [ -f "$py" ] || { printf 'claude\ncodex\n'; return 0; }
+  names="$(python3 "$py" names "$reg" 2>/dev/null)" || { printf 'claude\ncodex\n'; return 0; }
+  for n in $names; do
+    enabled_var="$(python3 "$py" get "$reg" "$n" enabled_var 2>/dev/null)" || enabled_var=""
+    case "$enabled_var" in
+      ""|null) printf '%s\n' "$n" ;;
+      *)
+        case "$enabled_var" in
+          [A-Za-z_]*[A-Za-z0-9_])
+            enabled_val="${!enabled_var:-off}"
+            [ "$enabled_val" = on ] && printf '%s\n' "$n"
+            ;;
+        esac
+        ;;
+    esac
+  done
+}
+
+_hub_engine_probe_argv1() {
+  local reg="$INSTALL_DIR/etc/engines/engines.json"
+  local py="$INSTALL_DIR/etc/engines/engines_registry.py"
+  local name="$1" kind
+  kind="$(python3 "$py" get "$reg" "$name" probe.kind 2>/dev/null)" || kind=""
+  case "$kind" in
+    canonical-paths)
+      python3 "$py" get "$reg" "$name" probe.argv1 2>/dev/null \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)[0])' 2>/dev/null
+      ;;
+    *) printf '%s' "$name" ;;
+  esac
+}
+
+_hub_running_marker() {
+  local cid="$1" name="$2" argv1 out
+  [ -n "$cid" ] || { printf 'unknown'; return 0; }
+  argv1="$(_hub_engine_probe_argv1 "$name")" || argv1="$name"
+  [ -n "$argv1" ] || argv1="$name"
+  out="$(docker exec "$cid" sh -c '
+for p in /proc/[0-9]*/cmdline; do
+  [ -e "$p" ] || continue
+  a0="$(tr "\0" "\n" < "$p" 2>/dev/null | sed -n 1p)"
+  a1="$(tr "\0" "\n" < "$p" 2>/dev/null | sed -n 2p)"
+  case "$a0" in
+    */entrypoint.sh)
+      if [ "$a1" = "$1" ]; then
+        d="${p%/cmdline}"
+        printf "%s\n" "$d"
+        exit 0
+      fi
+      ;;
+    "$1")
+      d="${p%/cmdline}"
+      printf "%s\n" "$d"
+      exit 0
+      ;;
+  esac
+done
+exit 1
+' sh "$argv1" 2>/dev/null)" || { printf 'unknown'; return 0; }
+  [ -n "$out" ] || { printf 'unknown'; return 0; }
+  printf 'running'
+}
+
+_hub_container_state() {
+  local mode="$1" eff="$2" cid state
+  if [ "$mode" = global ]; then
+    cid="$("${COMPOSE[@]}" ps -q "$SERVICE" 2>/dev/null)" || { printf 'unknown'; return 0; }
+  else
+    cid="$(_compose_p "$eff" ps -q cbox 2>/dev/null)" || { printf 'unknown'; return 0; }
+  fi
+  if [ -z "$cid" ]; then
+    printf 'down'
+    return 0
+  fi
+  state="$(docker inspect -f '{{.State.StartedAt}}' "$cid" 2>/dev/null)" || { printf 'up (unknown start time)'; return 0; }
+  printf 'up (since %s)' "${state:0:19}"
+}
+
+_hub_image_freshness() {
+  local eff_or_install="$1" want="$2"
+  local have=""
+  have="$(_cbox_image_hash "$eff_or_install" 2>/dev/null)" || { printf 'unknown'; return 0; }
+  if [ "$have" = "$want" ]; then
+    printf '%s (fresh)' "${have:0:12}"
+  else
+    printf '%s (stale)' "${have:0:12}"
+  fi
+}
+
+_hub_status_line() {
+  local mode="$1" eff="$2" cid running_hash state img egress
+  state="$(_hub_container_state "$mode" "$eff" 2>/dev/null)" || state=unknown
+  if [ "$mode" = global ]; then
+    cid="$("${COMPOSE[@]}" ps -q "$SERVICE" 2>/dev/null)" || cid=""
+  else
+    cid="$(_compose_p "$eff" ps -q cbox 2>/dev/null)" || cid=""
+  fi
+  running_hash=""
+  if [ -n "$cid" ]; then
+    running_hash="$(docker inspect -f '{{ index .Config.Labels "cbox.inputs" }}' "$cid" 2>/dev/null)" || running_hash=""
+  fi
+  if [ -n "$running_hash" ]; then
+    img="$(_hub_image_freshness "$eff" "$running_hash" 2>/dev/null)" || img=unknown
+  elif [ -n "$cid" ]; then
+    img="$(docker inspect -f '{{.Image}}' "$cid" 2>/dev/null | cut -c1-19)" || img=unknown
+    [ -n "$img" ] || img=unknown
+  else
+    img=unknown
+  fi
+  egress="${CBOX_EGRESS_MODE:-off}"
+  printf 'container: %-24s  image: %-16s  egress: %s\n' "$state" "$img" "$egress" >&2
+}
+
+_hub_engines_line() {
+  local mode="$1" eff="$2" cid name argv1 out=""
+  if [ "$mode" = global ]; then
+    cid="$("${COMPOSE[@]}" ps -q "$SERVICE" 2>/dev/null)" || cid=""
+  else
+    cid="$(_compose_p "$eff" ps -q cbox 2>/dev/null)" || cid=""
+  fi
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    local mark
+    mark="$(_hub_running_marker "$cid" "$name" 2>/dev/null)" || mark=unknown
+    case "$mark" in
+      running) out="$out $name(running)" ;;
+      *) out="$out $name" ;;
+    esac
+  done < <(_hub_engine_names)
+  printf 'engines:%s\n' "$out" >&2
+}
+
+_hub_row_running() {
+  local mode="$1" eff="$2" name="$3" cid
+  if [ "$mode" = global ]; then
+    cid="$("${COMPOSE[@]}" ps -q "$SERVICE" 2>/dev/null)" || cid=""
+  else
+    cid="$(_compose_p "$eff" ps -q cbox 2>/dev/null)" || cid=""
+  fi
+  [ "$(_hub_running_marker "$cid" "$name" 2>/dev/null)" = running ]
+}
+
+_hub_render() {
+  local mode="$1" eff="$2" root="$3"
+  printf 'cbox - %s   mode: %s\n' "$root" "$mode" >&2
+  _hub_status_line "$mode" "$eff"
+  _hub_engines_line "$mode" "$eff"
+  echo >&2
+
+  local -a names=()
+  local n
+  while IFS= read -r n; do
+    [ -n "$n" ] && names+=("$n")
+  done < <(_hub_engine_names)
+
+  HUB_ROWS=()
+  local i=1 label end_note=""
+  [ "$mode" = global ] && end_note=" (ends hub)"
+  for n in "${names[@]}"; do
+    if _hub_row_running "$mode" "$eff" "$n"; then
+      label="attach - running${end_note}"
+    else
+      label="start${end_note}"
+    fi
+    printf '  %d) %-10s [%s]\n' "$i" "$n" "$label" >&2
+    HUB_ROWS+=("engine:$n")
+    i=$((i + 1))
+  done
+  if [ "$mode" = global ]; then
+    printf '  %d) shell (ends hub)\n' "$i" >&2
+  else
+    printf '  %d) shell\n' "$i" >&2
+  fi
+  HUB_ROWS+=("shell")
+  i=$((i + 1))
+  printf '  %d) logs\n' "$i" >&2
+  HUB_ROWS+=("logs")
+  i=$((i + 1))
+  printf '  %d) doctor\n' "$i" >&2
+  HUB_ROWS+=("doctor")
+  i=$((i + 1))
+  printf '  %d) config\n' "$i" >&2
+  HUB_ROWS+=("config")
+  i=$((i + 1))
+  if [ "$mode" != global ]; then
+    printf '  %d) sessions\n' "$i" >&2
+    HUB_ROWS+=("sessions")
+    i=$((i + 1))
+  fi
+  printf '  %d) down\n' "$i" >&2
+  HUB_ROWS+=("down")
+  i=$((i + 1))
+  printf '  q) quit\n' >&2
+  printf '> ' >&2
+}
+
+_hub_dispatch_engine() {
+  local mode="$1" name="$2" rc=0
+  if [ "$mode" = global ]; then
+    echo "cbox: attaching $name in global mode - this ends the hub (exec-replace); start a new 'cbox' for the crossroads again" >&2
+  fi
+  run "$name" || rc=$?
+  return "$rc"
+}
+
+_hub_dispatch_shell() {
+  local mode="$1" rc=0
+  case "$mode" in
+    global) shell || rc=$? ;;
+    *) shell_isolated || rc=$? ;;
+  esac
+  return "$rc"
+}
+
+_hub_dispatch_logs() {
+  local mode="$1" rc=0
+  case "$mode" in
+    global) logs || rc=$? ;;
+    *) logs_isolated || rc=$? ;;
+  esac
+  return "$rc"
+}
+
+_hub_config_submenu() {
+  local mode="$1"
+  while true; do
+    echo "cbox config:" >&2
+    echo "  1) show all" >&2
+    echo "  2) set one key" >&2
+    echo "  3) pending" >&2
+    echo "  b) back" >&2
+    printf '> ' >&2
+    local ans
+    IFS= read -r ans || return 0
+    case "$ans" in
+      1)
+        [ -f "$INSTALL_DIR/templates/sections.sh" ] && . "$INSTALL_DIR/templates/sections.sh"
+        _cbox_config_get --all 2>&1 | cat 1>&2 || true
+        ;;
+      2)
+        printf 'KEY=VALUE: ' >&2
+        local kv
+        IFS= read -r kv || continue
+        [ -n "$kv" ] || continue
+        [ -f "$INSTALL_DIR/templates/sections.sh" ] && . "$INSTALL_DIR/templates/sections.sh"
+        _cbox_config_set "$kv" 2>&1 | cat 1>&2 || true
+        ;;
+      3)
+        [ -f "$INSTALL_DIR/templates/sections.sh" ] && . "$INSTALL_DIR/templates/sections.sh"
+        _cbox_config_pending 2>&1 | cat 1>&2 || true
+        ;;
+      b|B) return 0 ;;
+      *) echo "cbox: unrecognized choice '$ans'" >&2 ;;
+    esac
+  done
+}
+
+_hub_sessions_render() {
+  local root="$1" sid row state active last legs mapped title updated kind i=1
+  HUB_SESSION_IDS=()
+  while IFS=$'\t' read -r sid state active last legs mapped title updated kind; do
+    [ -n "$sid" ] || continue
+    printf '  %d) %-24s %-11s %-8s %-24s %s\n' "$i" "$sid" "$kind" "$state" "$mapped" "$title" >&2
+    HUB_SESSION_IDS+=("$sid")
+    i=$((i + 1))
+  done < <(
+    while IFS= read -r sid; do
+      [ -n "$sid" ] || continue
+      _cbox_session_row_summary "$root" "$sid" 2>/dev/null || true
+    done < <(_cbox_session_list_ids "$root") | sort -t$'\t' -k8,8r
+  )
+  [ "${#HUB_SESSION_IDS[@]}" -gt 0 ] || echo "  <no sessions>" >&2
+}
+
+_hub_session_pick_id() {
+  local answer="$1"
+  if _cbox_session_id_valid "$answer"; then
+    printf '%s' "$answer"
+    return 0
+  fi
+  case "$answer" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$answer" -ge 1 ] && [ "$answer" -le "${#HUB_SESSION_IDS[@]}" ] || return 1
+  printf '%s' "${HUB_SESSION_IDS[$((answer - 1))]}"
+}
+
+_hub_session_pick_engine() {
+  local -a engines=()
+  local name answer i=1
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    engines+=("$name")
+    printf '  %d) %s\n' "$i" "$name" >&2
+    i=$((i + 1))
+  done < <(_hub_engine_names)
+  printf 'engine: ' >&2
+  IFS= read -r answer || return 1
+  case "$answer" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$answer" -ge 1 ] && [ "$answer" -le "${#engines[@]}" ] || return 1
+  printf '%s' "${engines[$((answer - 1))]}"
+}
+
+_hub_sessions_submenu() {
+  local root
+  root="$(_cbox_workspace_root 2>/dev/null)" || { echo "cbox: sessions unavailable outside a workspace root" >&2; return 0; }
+  echo "cbox: syncing project-native sessions..." >&2
+  _cbox_session_sync_native 2>&1 | cat 1>&2 || echo "cbox: session sync unavailable; showing the durable index" >&2
+  while true; do
+    echo "cbox sessions for $root:" >&2
+    _hub_sessions_render "$root"
+    echo "  c) continue a session" >&2
+    echo "  n) new shared session" >&2
+    echo "  s) sync/import native sessions" >&2
+    echo "  x) close a session" >&2
+    echo "  b) back" >&2
+    printf '> ' >&2
+    local ans
+    IFS= read -r ans || return 0
+    case "$ans" in
+      c|C)
+        printf 'session number or id: ' >&2
+        local choice sid engine rc=0
+        IFS= read -r choice || continue
+        sid="$(_hub_session_pick_id "$choice")" || { echo "cbox: invalid session selection" >&2; continue; }
+        engine="$(_hub_session_pick_engine)" || { echo "cbox: invalid engine selection" >&2; continue; }
+        trap - INT
+        _cbox_session_run_leg "$sid" "$engine" || { rc=$?; echo "cbox: session leg exited non-zero ($rc)" >&2; }
+        trap '_hub_on_int' INT
+        ;;
+      n|N)
+        local sid engine
+        sid="$(_cbox_session_cmd_new)" || continue
+        echo "cbox: new session $sid" >&2
+        engine="$(_hub_session_pick_engine)" || { echo "cbox: invalid engine selection" >&2; continue; }
+        trap - INT
+        _cbox_session_run_leg "$sid" "$engine" || echo "cbox: session leg exited non-zero" >&2
+        trap '_hub_on_int' INT
+        ;;
+      s|S)
+        _cbox_session_sync_native 2>&1 | cat 1>&2 || true
+        ;;
+      x|X)
+        printf 'session id to close: ' >&2
+        local csid
+        IFS= read -r csid || continue
+        [ -n "$csid" ] || continue
+        _cbox_session_id_valid "$csid" || { echo "cbox: refusing - invalid session id '$csid'" >&2; continue; }
+        _cbox_session_cmd_close "$csid" 2>&1 | cat 1>&2 || true
+        ;;
+      b|B) return 0 ;;
+      *) echo "cbox: unrecognized choice '$ans'" >&2 ;;
+    esac
+  done
+}
+
+_hub_dispatch_down() {
+  local mode="$1" rc=0
+  case "$mode" in
+    global) down 0 || rc=$? ;;
+    *) down_project 0 || rc=$? ;;
+  esac
+  if [ "$rc" -ne 0 ]; then
+    printf 'cbox: down refused - type FORCE to stop anyway, anything else to cancel: ' >&2
+    local ans
+    IFS= read -r ans || ans=""
+    if [ "$ans" = FORCE ]; then
+      case "$mode" in
+        global) down 1 || rc=$? ;;
+        *) down_project 1 || rc=$? ;;
+      esac
+    fi
+  fi
+  return "$rc"
+}
+
+_hub_loop_int_count=0
+
+_hub_on_int() {
+  _hub_loop_int_count=$((_hub_loop_int_count + 1))
+  if [ "$_hub_loop_int_count" -ge 2 ]; then
+    echo >&2
+    echo "cbox: interrupted twice - quitting" >&2
+    _hub_stty_restore
+    exit 130
+  fi
+  echo >&2
+  echo "cbox: press q then Enter to quit, or Ctrl-C again to force quit" >&2
+}
+
+_hub_dispatch_row() {
+  local mode="$1" row="$2" rc=0
+  case "$row" in
+    engine:*)
+      local ename="${row#engine:}"
+      trap - INT
+      _hub_dispatch_engine "$mode" "$ename" || { rc=$?; echo "cbox: $ename exited non-zero ($rc)" >&2; }
+      trap '_hub_on_int' INT
+      ;;
+    shell)
+      trap - INT
+      _hub_dispatch_shell "$mode" || { rc=$?; echo "cbox: shell exited non-zero ($rc)" >&2; }
+      trap '_hub_on_int' INT
+      ;;
+    logs)
+      trap - INT
+      _hub_dispatch_logs "$mode" || { rc=$?; echo "cbox: logs exited non-zero ($rc)" >&2; }
+      trap '_hub_on_int' INT
+      ;;
+    doctor) doctor || { rc=$?; echo "cbox: doctor exited non-zero ($rc)" >&2; } ;;
+    config) _hub_config_submenu "$mode" || true ;;
+    sessions) _hub_sessions_submenu || true ;;
+    down) _hub_dispatch_down "$mode" || echo "cbox: down did not proceed" >&2 ;;
+    *) echo "cbox: internal error - unknown row '$row'" >&2 ;;
+  esac
+  _hub_loop_int_count=0
+  return 0
+}
+
+_hub_stty_saved=""
+
+_hub_stty_restore() {
+  if [ -n "$_hub_stty_saved" ]; then
+    stty "$_hub_stty_saved" 2>/dev/null || stty sane 2>/dev/null || true
+  else
+    stty sane 2>/dev/null || true
+  fi
+}
+
+_hub_loop() {
+  local mode="$1" eff="$2" root="$3"
+  _hub_stty_saved="$(stty -g 2>/dev/null)" || _hub_stty_saved=""
+  trap '_hub_on_int' INT
+  while true; do
+    _hub_loop_int_count=0
+    _hub_render "$mode" "$eff" "$root"
+    local ans
+    if ! IFS= read -r ans; then
+      echo >&2
+      echo "cbox: EOF - quitting" >&2
+      _hub_stty_restore
+      trap - INT
+      return 0
+    fi
+    case "$ans" in
+      q|Q)
+        _hub_stty_restore
+        trap - INT
+        return 0
+        ;;
+      *[!0-9]*|'')
+        echo "cbox: unrecognized selection '$ans'" >&2
+        ;;
+      *)
+        if [ "$ans" -ge 1 ] && [ "$ans" -le "${#HUB_ROWS[@]}" ]; then
+          _hub_dispatch_row "$mode" "${HUB_ROWS[$((ans - 1))]}"
+        else
+          echo "cbox: unrecognized selection '$ans'" >&2
+        fi
+        ;;
+    esac
+    _hub_stty_restore
+  done
+}
+
+hub() {
+  local mode root eff
+  mode="$(_cbox_effective_mode)"
+  case "$mode" in
+    global)
+      root="$PWD"
+      eff="$INSTALL_DIR"
+      _hub_loop global "$INSTALL_DIR" "$root"
+      return 0
+      ;;
+    isolated)
+      if root="$(_cbox_workspace_root)"; then
+        eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
+        if [ ! -f "$eff/cbox.conf" ]; then
+          _first_run_init "$root" "$eff" || return 1
+        fi
+        . "$eff/cbox.conf"
+        _hub_loop isolated "$eff" "$root"
+        return 0
+      fi
+      usage
+      ;;
+    *)
+      usage
+      ;;
+  esac
+}
+
 usage() {
-  echo "usage: $0 {run <bin> [args]|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down|restart [--gpu]|shell|logs [args]|update|reinstall-bins [--fresh|--if-stale]|install-hooks|continuity migrate|verify [--gpu|--isolated]|doctor|backup|login [oauth-url]|login-codex|gc|ls|images [list|rm <hash>]}"
+  echo "usage: $0 {run [--session <id>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force]|restart [--gpu]|shell|logs [args]|update|reinstall-bins [--fresh|--if-stale]|install-hooks|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|pending}|backup|login [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}"
+  echo "cbox: with zero arguments and a TTY on stdin+stdout, bare '$0' opens the interactive hub instead of this usage text"
+  echo "cbox: 'cbox ls' lists RUNNING isolated projects only, not every configured project"
   exit 1
 }
 
 case "${1:-}" in
   run) shift; run "$@";;
+  session) shift; _cbox_session_cmd "$@";;
   ai) shift; ai "$@";;
   up) shift; up "$@";;
   down)
+    shift
+    _down_force=0
+    if [ "${1:-}" = "--force" ]; then _down_force=1; shift; fi
     case "$(_cbox_effective_mode)" in
-      isolated) down_project;;
-      global) down;;
+      isolated) down_project "$_down_force";;
+      global) down "$_down_force";;
       *) die_no_conf;;
     esac
     ;;
   restart) shift; restart "$@";;
-  shell) shell;;
-  logs) shift; logs "$@";;
+  shell)
+    case "$(_cbox_effective_mode)" in
+      isolated) shell_isolated;;
+      global) shell;;
+      *) die_no_conf;;
+    esac
+    ;;
+  logs)
+    shift
+    case "$(_cbox_effective_mode)" in
+      isolated) logs_isolated "$@";;
+      global) logs "$@";;
+      *) die_no_conf;;
+    esac
+    ;;
   update) shift; reinstall_bins "$@";;
   reinstall-bins) shift; reinstall_bins "$@";;
   install-hooks) install_hooks;;
@@ -2132,11 +4311,24 @@ case "${1:-}" in
     fi
     ;;
   doctor) shift; doctor "$@";;
+  config)
+    shift
+    [ -f "$INSTALL_DIR/templates/sections.sh" ] || die "$INSTALL_DIR/templates/sections.sh missing"
+    . "$INSTALL_DIR/templates/sections.sh"
+    config_cmd "$@"
+    ;;
   backup) backup;;
   login) shift; login_claude "$@";;
   login-codex) login_codex;;
   gc) gc;;
+  net-refresh) net_refresh;;
   ls) ls_projects;;
   images) shift; images_cmd "$@";;
-  *) usage;;
+  *)
+    if [ $# -eq 0 ] && [ -t 0 ] && [ -t 1 ]; then
+      hub
+    else
+      usage
+    fi
+    ;;
 esac

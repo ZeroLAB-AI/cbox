@@ -189,7 +189,7 @@ _install_one() {
     fi
   fi
 
-  if [ "$force" != "1" ] && _adopt_check "$name" "$want"; then
+  if [ "$force" != "1" ] && [ "$force" != "refresh" ] && _adopt_check "$name" "$want"; then
     local v3 v4
     v3="$(_stamp_field "$stamp" 3)"
     v4="$(_stamp_field "$stamp" 4)"

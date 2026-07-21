@@ -120,11 +120,14 @@ def render_claude_cli_entry(name, cbox, hooks_dir):
     return entry
 
 
+FALSY_GATE_VALUES = ("", "off", "0", "false", "no")
+
+
 def _env_gate_satisfied(cbox):
     gate = cbox.get("enabled_when_env")
     if not gate:
         return True
-    return bool(os.environ.get(gate, "").strip())
+    return os.environ.get(gate, "").strip().lower() not in FALSY_GATE_VALUES
 
 
 def render(delegates, selection, hooks_dir, shim_mode, target, explicit=None):

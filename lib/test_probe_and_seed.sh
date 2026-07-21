@@ -34,6 +34,13 @@ _mkproc() {
   { printf '%s' "$exe"; local a; for a in "$@"; do printf '\0%s' "$a"; done; printf '\0'; } > "$PROC/$pid/cmdline"
 }
 
+_mkproc_argv0() {
+  local pid="$1" exe="$2" argv0="$3"; shift 3
+  mkdir -p "$PROC/$pid"
+  ln -s "$exe" "$PROC/$pid/exe"
+  { printf '%s' "$argv0"; local a; for a in "$@"; do printf '\0%s' "$a"; done; printf '\0'; } > "$PROC/$pid/cmdline"
+}
+
 _mkproc 11 "$CLAUDE_BIN"
 _mkproc 12 "$CLAUDE_BIN" --session-id abc --fork-session --resume /x/y.jsonl
 _mkproc 13 "$CLAUDE_BIN" daemon run --origin transient
@@ -52,6 +59,29 @@ rm -f "$PROC/12/cmdline"
 n="$(HOST_HOME="$H" sh -c "${PROBE_SH//\/proc\//$PROC/}")"
 [ "$n" = 3 ] || _fail "probe: vanished cmdline should be skipped, got $n"
 _ok "probe filter: missing cmdline skipped"
+
+rm -rf "$PROC"
+_mkproc 11 "$CLAUDE_BIN"
+_mkproc 21 "$CODEX_BIN" exec do-something
+_mkproc_argv0 41 /usr/bin/python3.12 /opt/hermes/bin/python3 /opt/hermes/bin/hermes
+n="$(HOST_HOME="$H" sh -c "${PROBE_SH//\/proc\//$PROC/}")"
+[ "$n" = 3 ] || _fail "probe: expected 3 live (claude, codex exec, venv-shebang hermes), got $n"
+_ok "probe filter: venv-shebang hermes proc (exe /usr/bin/python3.12, argv0 /opt/hermes/bin/python3, argv1 /opt/hermes/bin/hermes) is counted"
+
+_mkproc_argv0 42 /usr/bin/python3.12 /opt/hermes/bin/python3 /opt/hermes/bin/hermes -z
+n="$(HOST_HOME="$H" sh -c "${PROBE_SH//\/proc\//$PROC/}")"
+[ "$n" = 4 ] || _fail "probe: expected 4 live (3 prior + hermes -z one-shot), got $n"
+_ok "probe filter: hermes -z one-shot invocation is also counted (no exclusions, bias toward counting)"
+
+_mkproc_argv0 43 /usr/bin/python3 /usr/bin/python3 /some/other/script.py
+n="$(HOST_HOME="$H" sh -c "${PROBE_SH//\/proc\//$PROC/}")"
+[ "$n" = 4 ] || _fail "probe: unrelated python3 process (argv0 /usr/bin/python3, not /opt/hermes/bin/*) must not be counted, got $n"
+_ok "probe filter: unrelated python3 process (argv0 /usr/bin/python3) is not counted as hermes"
+
+_mkproc_argv0 44 /opt/hermes/bin/python3 /opt/hermes/bin/python3 /opt/hermes/bin/hermes
+n="$(HOST_HOME="$H" sh -c "${PROBE_SH//\/proc\//$PROC/}")"
+[ "$n" = 5 ] || _fail "probe: expected 5 live (4 prior + --copies-venv hermes, exe resolves to /opt/hermes/bin/python3 itself), got $n"
+_ok "probe filter: --copies-venv hermes proc (exe /opt/hermes/bin/python3, argv0 /opt/hermes/bin/python3, argv1 /opt/hermes/bin/hermes) is counted"
 
 export CBOX_CODEX_PROGRESS_MODE=off CBOX_CLAUDE_MODE=mount CBOX_MCP_SERVERS=all
 export HOME="$H"

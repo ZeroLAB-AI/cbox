@@ -113,5 +113,30 @@
       ],
       "enabled_when_env": "CBOX_LOCAL_MODEL_URL"
     }
+  },
+  "hermes-local": {
+    "type": "stdio",
+    "command": "python3",
+    "args": [
+      "hermes_delegate_mcp.py"
+    ],
+    "env": {
+      "HERMES_BIN": "@CBOX_HERMES_DELEGATE_BIN@",
+      "CBOX_HERMES_DELEGATE_HOME_TEMPLATE": "@CBOX_HERMES_DELEGATE_HOME_TEMPLATE@",
+      "CBOX_HERMES_DELEGATE_PROVIDER": "@CBOX_HERMES_DELEGATE_PROVIDER@",
+      "CBOX_HERMES_DELEGATE_BASE_URL": "@CBOX_HERMES_DELEGATE_BASE_URL@",
+      "CBOX_HERMES_DELEGATE_MODEL": "@CBOX_HERMES_DELEGATE_MODEL@"
+    },
+    "_cbox": {
+      "adapter": "stdio-mcp",
+      "available_to": [
+        "claude"
+      ],
+      "backend": "hermes",
+      "side_effects": [
+        "spawns-hermes-subprocess"
+      ],
+      "enabled_when_env": "CBOX_HERMES_DELEGATE"
+    }
   }
 }

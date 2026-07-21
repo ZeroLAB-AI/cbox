@@ -168,6 +168,9 @@ _cbox_dep_condition() {
     no-cdi)
       _cbox_no_cdi
       ;;
+    hermes-off)
+      [ "${CBOX_HERMES:-off}" != on ]
+      ;;
     hooks)
       return 0
       ;;
@@ -289,9 +292,14 @@ conf_defaults() {
   : "${CBOX_EGRESS_APPLIED:=0}"
   : "${CBOX_NETACCESS_MODE:=off}"
   : "${CBOX_NETACCESS_APPLIED:=0}"
+  : "${CBOX_NETACCESS_SCOPE:=}"
   : "${CBOX_NETACCESS_NETWORKS:=}"
   : "${CBOX_NETACCESS_CIDRS:=}"
   : "${CBOX_NETACCESS_SOCKS_PORT:=1080}"
+  : "${CBOX_NETACCESS_EXEC_MODE:=off}"
+  : "${CBOX_NETACCESS_EXEC_WORKSPACE_GUARD:=off}"
+  : "${CBOX_NETACCESS_EXEC_TIMEOUT:=900}"
+  : "${CBOX_NETACCESS_EXEC_MAX_BYTES:=10485760}"
   : "${CBOX_HOST_ROUTE_MODE:=off}"
   : "${CBOX_HOST_ROUTE_APPLIED:=0}"
   : "${CBOX_HOST_PROXY_URL:=}"
@@ -305,6 +313,17 @@ conf_defaults() {
   : "${CBOX_LOCAL_MODEL_URL:=}"
   : "${CBOX_LOCAL_MODEL_NAME:=}"
   export CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
+  : "${CBOX_HERMES:=off}"
+  : "${CBOX_HERMES_VERSION:=0.19.0}"
+  : "${CBOX_HERMES_PROVIDER:=local}"
+  : "${CBOX_HERMES_MODEL_URL:=}"
+  : "${CBOX_HERMES_MODEL_NAME:=}"
+  export CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME
+  : "${CBOX_HERMES_DELEGATE:=off}"
+  : "${CBOX_HERMES_DELEGATE_PROVIDER:=}"
+  : "${CBOX_HERMES_DELEGATE_BASE_URL:=}"
+  : "${CBOX_HERMES_DELEGATE_MODEL:=}"
+  export CBOX_HERMES_DELEGATE_PROVIDER CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL
   : "${CBOX_LIMIT_AUTORESUME:=off}"
   : "${CBOX_LIMIT_RESUME_DELAY:=300}"
   : "${CBOX_LIMIT_RESUME_PROMPT:=pokracuj}"
@@ -318,6 +337,12 @@ conf_defaults() {
   : "${CBOX_CODEX_VERSION:=latest}"
   : "${CBOX_CODEX_TARGET:=}"
   : "${CBOX_BINS_SCOPE:=global}"
+  : "${CBOX_AUTOUPDATE:=on}"
+  : "${CBOX_AUTOUPDATE_TTL_HOURS:=24}"
+  : "${CBOX_DNS_MODE:=docker}"
+  : "${CBOX_DNS_SERVERS:=1.1.1.1 8.8.8.8}"
+  : "${CBOX_DNS_STUB_IP:=}"
+  : "${CBOX_CLIPBOARD_MODE:=off}"
   : "${CBOX_RESTART_POLICY:=no}"
   : "${CBOX_TPL_SHA:=}"
   : "${CBOX_MODE:=global}"
@@ -363,9 +388,14 @@ conf_save() {
     printf 'CBOX_EGRESS_APPLIED=%q\n' "$CBOX_EGRESS_APPLIED"
     printf 'CBOX_NETACCESS_MODE=%q\n' "$CBOX_NETACCESS_MODE"
     printf 'CBOX_NETACCESS_APPLIED=%q\n' "$CBOX_NETACCESS_APPLIED"
+    printf 'CBOX_NETACCESS_SCOPE=%q\n' "$CBOX_NETACCESS_SCOPE"
     printf 'CBOX_NETACCESS_NETWORKS=%q\n' "$CBOX_NETACCESS_NETWORKS"
     printf 'CBOX_NETACCESS_CIDRS=%q\n' "$CBOX_NETACCESS_CIDRS"
     printf 'CBOX_NETACCESS_SOCKS_PORT=%q\n' "$CBOX_NETACCESS_SOCKS_PORT"
+    printf 'CBOX_NETACCESS_EXEC_MODE=%q\n' "$CBOX_NETACCESS_EXEC_MODE"
+    printf 'CBOX_NETACCESS_EXEC_WORKSPACE_GUARD=%q\n' "$CBOX_NETACCESS_EXEC_WORKSPACE_GUARD"
+    printf 'CBOX_NETACCESS_EXEC_TIMEOUT=%q\n' "$CBOX_NETACCESS_EXEC_TIMEOUT"
+    printf 'CBOX_NETACCESS_EXEC_MAX_BYTES=%q\n' "$CBOX_NETACCESS_EXEC_MAX_BYTES"
     printf 'CBOX_HOST_ROUTE_MODE=%q\n' "$CBOX_HOST_ROUTE_MODE"
     printf 'CBOX_HOST_ROUTE_APPLIED=%q\n' "$CBOX_HOST_ROUTE_APPLIED"
     printf 'CBOX_HOST_PROXY_URL=%q\n' "$CBOX_HOST_PROXY_URL"
@@ -378,6 +408,15 @@ conf_save() {
     printf 'CBOX_LOCAL_MODEL=%q\n' "$CBOX_LOCAL_MODEL"
     printf 'CBOX_LOCAL_MODEL_URL=%q\n' "$CBOX_LOCAL_MODEL_URL"
     printf 'CBOX_LOCAL_MODEL_NAME=%q\n' "$CBOX_LOCAL_MODEL_NAME"
+    printf 'CBOX_HERMES=%q\n' "$CBOX_HERMES"
+    printf 'CBOX_HERMES_VERSION=%q\n' "$CBOX_HERMES_VERSION"
+    printf 'CBOX_HERMES_PROVIDER=%q\n' "$CBOX_HERMES_PROVIDER"
+    printf 'CBOX_HERMES_MODEL_URL=%q\n' "$CBOX_HERMES_MODEL_URL"
+    printf 'CBOX_HERMES_MODEL_NAME=%q\n' "$CBOX_HERMES_MODEL_NAME"
+    printf 'CBOX_HERMES_DELEGATE=%q\n' "$CBOX_HERMES_DELEGATE"
+    printf 'CBOX_HERMES_DELEGATE_PROVIDER=%q\n' "$CBOX_HERMES_DELEGATE_PROVIDER"
+    printf 'CBOX_HERMES_DELEGATE_BASE_URL=%q\n' "$CBOX_HERMES_DELEGATE_BASE_URL"
+    printf 'CBOX_HERMES_DELEGATE_MODEL=%q\n' "$CBOX_HERMES_DELEGATE_MODEL"
     printf 'CBOX_LIMIT_AUTORESUME=%q\n' "$CBOX_LIMIT_AUTORESUME"
     printf 'CBOX_LIMIT_RESUME_DELAY=%q\n' "$CBOX_LIMIT_RESUME_DELAY"
     printf 'CBOX_LIMIT_RESUME_PROMPT=%q\n' "$CBOX_LIMIT_RESUME_PROMPT"
@@ -391,6 +430,12 @@ conf_save() {
     printf 'CBOX_CODEX_VERSION=%q\n' "$CBOX_CODEX_VERSION"
     printf 'CBOX_CODEX_TARGET=%q\n' "$CBOX_CODEX_TARGET"
     printf 'CBOX_BINS_SCOPE=%q\n' "$CBOX_BINS_SCOPE"
+    printf 'CBOX_AUTOUPDATE=%q\n' "$CBOX_AUTOUPDATE"
+    printf 'CBOX_AUTOUPDATE_TTL_HOURS=%q\n' "$CBOX_AUTOUPDATE_TTL_HOURS"
+    printf 'CBOX_DNS_MODE=%q\n' "$CBOX_DNS_MODE"
+    printf 'CBOX_DNS_SERVERS=%q\n' "$CBOX_DNS_SERVERS"
+    printf 'CBOX_DNS_STUB_IP=%q\n' "$CBOX_DNS_STUB_IP"
+    printf 'CBOX_CLIPBOARD_MODE=%q\n' "$CBOX_CLIPBOARD_MODE"
     printf 'CBOX_RESTART_POLICY=%q\n' "$CBOX_RESTART_POLICY"
     printf 'CBOX_TPL_SHA=%q\n' "$CBOX_TPL_SHA"
     printf 'CBOX_MODE=%q\n' "$CBOX_MODE"
@@ -1348,44 +1393,63 @@ step_netaccess() {
   local prev_mode="$CBOX_NETACCESS_MODE"
   ask_choice "setup: netaccess mode" "$CBOX_NETACCESS_MODE" off socks
   CBOX_NETACCESS_MODE="$ASK_VALUE"
+  if [ "$CBOX_NETACCESS_MODE" = socks ]; then
+    note "netaccess socks is temporarily disabled (SOCKS proxy lifecycle pending live host verification) - keeping netaccess off"
+    CBOX_NETACCESS_MODE=off
+  fi
   if [ "$SETUP_MODE" = update ] && [ "$CBOX_NETACCESS_MODE" != off ]; then
     CBOX_NETACCESS_APPLIED=1
   elif [ "$CBOX_NETACCESS_MODE" != "$prev_mode" ]; then
     CBOX_NETACCESS_APPLIED=0
   fi
-  [ "$CBOX_NETACCESS_MODE" != off ] || return 0
-  note "phase-1 config only: the proxy is not wired to any network yet, and access is whole-network (all TCP on the joined networks)"
-  if [ -n "$CBOX_NETACCESS_NETWORKS" ]; then
-    note "current docker networks: $CBOX_NETACCESS_NETWORKS"
+  if [ "$CBOX_NETACCESS_MODE" = off ]; then
+    CBOX_NETACCESS_EXEC_MODE=off
+    return 0
   fi
-  note "add docker network names one per line; empty line finishes"
-  while :; do
-    ask "setup: docker network: " ""
-    [ -n "$ASK_VALUE" ] || break
-    case "$ASK_VALUE" in
-      [A-Za-z0-9]*) ;;
-      *) echo "setup: invalid network name: $ASK_VALUE"; continue ;;
-    esac
-    case "$ASK_VALUE" in
-      *[!A-Za-z0-9_.-]*) echo "setup: invalid network name: $ASK_VALUE"; continue ;;
-    esac
-    case " $CBOX_NETACCESS_NETWORKS " in
-      *" $ASK_VALUE "*) note "already listed: $ASK_VALUE" ;;
-      *)
-        if [ -z "$CBOX_NETACCESS_NETWORKS" ]; then
-          CBOX_NETACCESS_NETWORKS="$ASK_VALUE"
-        else
-          CBOX_NETACCESS_NETWORKS="$CBOX_NETACCESS_NETWORKS $ASK_VALUE"
-        fi
-        note "added $ASK_VALUE"
-        ;;
-    esac
-  done
-  command -v _cbox_is_ipv4_cidr >/dev/null 2>&1 || load_generators
+  command -v _cbox_netaccess_scope >/dev/null 2>&1 || load_generators
+  note "SOCKS controls TCP reachability; optional scoped exec uses a separate host bridge and never mounts docker.sock into cbox"
+  local prev_scope avail_nets=""
+  prev_scope="$(_cbox_netaccess_scope)"
+  avail_nets="$(_cbox_list_docker_networks | tr '\n' ' ')" || avail_nets=""
+  [ -z "$avail_nets" ] || note "docker networks on this host right now: $avail_nets"
+  note "scope all = the proxy joins every docker network present at apply time (autodetected; cbox doctor shows the current resolution); scope list = only networks named here; raw CIDRs (k3s etc.) are always listed manually either way"
+  ask_choice "setup: netaccess docker-network scope" "$prev_scope" all list
+  CBOX_NETACCESS_SCOPE="$ASK_VALUE"
+  [ "$CBOX_NETACCESS_SCOPE" = "$prev_scope" ] || CBOX_NETACCESS_APPLIED=0
+  if [ "$CBOX_NETACCESS_SCOPE" = list ]; then
+    if [ -n "$CBOX_NETACCESS_NETWORKS" ]; then
+      note "current docker networks: $CBOX_NETACCESS_NETWORKS"
+    fi
+    note "add docker network names one per line; empty line finishes; an empty list means the proxy reaches nothing beyond the raw CIDRs below"
+    while :; do
+      ask "setup: docker network: " ""
+      [ -n "$ASK_VALUE" ] || break
+      case "$ASK_VALUE" in
+        [A-Za-z0-9]*) ;;
+        *) echo "setup: invalid network name: $ASK_VALUE"; continue ;;
+      esac
+      case "$ASK_VALUE" in
+        *[!A-Za-z0-9_.-]*) echo "setup: invalid network name: $ASK_VALUE"; continue ;;
+      esac
+      case " $CBOX_NETACCESS_NETWORKS " in
+        *" $ASK_VALUE "*) note "already listed: $ASK_VALUE" ;;
+        *)
+          if [ -z "$CBOX_NETACCESS_NETWORKS" ]; then
+            CBOX_NETACCESS_NETWORKS="$ASK_VALUE"
+          else
+            CBOX_NETACCESS_NETWORKS="$CBOX_NETACCESS_NETWORKS $ASK_VALUE"
+          fi
+          note "added $ASK_VALUE"
+          ;;
+      esac
+    done
+  else
+    [ -z "$CBOX_NETACCESS_NETWORKS" ] || note "scope all selected: the saved network list ($CBOX_NETACCESS_NETWORKS) stays inert; switch back to list to use it again"
+  fi
   if [ -n "$CBOX_NETACCESS_CIDRS" ]; then
     note "current raw CIDR targets: $CBOX_NETACCESS_CIDRS"
   fi
-  note "add raw IPv4 CIDR targets outside docker networks (e.g. k3s pods 10.42.0.0/16, services 10.43.0.0/16); like the network list they stay inert until the lifecycle phase renders sockd.conf, and reachability from the proxy is host-routing dependent; empty line finishes"
+  note "add raw IPv4 CIDR targets outside docker networks (e.g. k3s pods 10.42.0.0/16, services 10.43.0.0/16); cbox renders them through the proxy egress interface and reachability remains host-routing dependent; empty line finishes"
   while :; do
     ask "setup: target CIDR: " ""
     [ -n "$ASK_VALUE" ] || break
@@ -1408,7 +1472,38 @@ step_netaccess() {
   ask "setup: SOCKS proxy port: " "$CBOX_NETACCESS_SOCKS_PORT"
   case "$ASK_VALUE" in
     ''|*[!0-9]*) warn "not a number; keeping $CBOX_NETACCESS_SOCKS_PORT" ;;
-    *) CBOX_NETACCESS_SOCKS_PORT="$ASK_VALUE" ;;
+    *)
+      if [ "$ASK_VALUE" -ge 1 ] && [ "$ASK_VALUE" -le 65535 ]; then
+        CBOX_NETACCESS_SOCKS_PORT="$ASK_VALUE"
+      else
+        warn "port must be 1..65535; keeping $CBOX_NETACCESS_SOCKS_PORT"
+      fi
+      ;;
+  esac
+  ask_choice "setup: direct test execution inside scoped containers" "$CBOX_NETACCESS_EXEC_MODE" off scoped
+  CBOX_NETACCESS_EXEC_MODE="$ASK_VALUE"
+  if [ "$CBOX_NETACCESS_EXEC_MODE" = scoped ] && [ "$CBOX_NETACCESS_SCOPE" != list ]; then
+    warn "scoped exec requires scope=list with explicit Docker networks; keeping exec off"
+    CBOX_NETACCESS_EXEC_MODE=off
+  fi
+  if [ "$CBOX_NETACCESS_EXEC_MODE" = scoped ] && [ -z "$CBOX_NETACCESS_NETWORKS" ]; then
+    warn "scoped exec requires at least one explicit Docker network; keeping exec off"
+    CBOX_NETACCESS_EXEC_MODE=off
+  fi
+  if [ "$CBOX_NETACCESS_EXEC_MODE" = scoped ]; then
+    ask_choice "setup: additionally require host bind mounts to stay inside the current workspace" "$CBOX_NETACCESS_EXEC_WORKSPACE_GUARD" off on
+    CBOX_NETACCESS_EXEC_WORKSPACE_GUARD="$ASK_VALUE"
+  fi
+  ask "setup: scoped exec timeout seconds: " "$CBOX_NETACCESS_EXEC_TIMEOUT"
+  case "$ASK_VALUE" in
+    ''|*[!0-9]*) warn "not a number; keeping $CBOX_NETACCESS_EXEC_TIMEOUT" ;;
+    *)
+      if [ "$ASK_VALUE" -ge 1 ] && [ "$ASK_VALUE" -le 3600 ]; then
+        CBOX_NETACCESS_EXEC_TIMEOUT="$ASK_VALUE"
+      else
+        warn "timeout must be 1..3600; keeping $CBOX_NETACCESS_EXEC_TIMEOUT"
+      fi
+      ;;
   esac
 }
 
@@ -1505,6 +1600,9 @@ mcp_apply_selection() {
   local expanded shim_mode="${CBOX_CODEX_PROGRESS_MODE:-off}"
   [ "${CBOX_CLAUDE_MODE:-mount}" = mount ] || shim_mode=off
   expanded="$(canonical_expand "$CBOX_MCP_SERVERS" "$(mcp_all_names)")"
+  : "${CBOX_HERMES_DELEGATE_BIN:=/opt/hermes/bin/hermes}"
+  : "${CBOX_HERMES_DELEGATE_HOME_TEMPLATE:=/etc/cbox/hermes-delegate-home}"
+  export CBOX_HERMES_DELEGATE_BIN CBOX_HERMES_DELEGATE_HOME_TEMPLATE
   if [ "$CBOX_CLAUDE_MODE" = mount ]; then
     local target="$HOME/.claude.json" stage
     stage="$(mktemp -d)"
@@ -1622,6 +1720,96 @@ step_local_model() {
     mcp_apply_selection
   fi
   note "host claude/codex pick the change up on next start; the container needs re-bless + restart"
+}
+
+step_hermes() {
+  echo "== section: hermes =="
+  note "off by default; third console engine (NousResearch Hermes Agent) installed as a pinned venv in the image; local OpenAI-compatible endpoint by default"
+  note "transitive pip deps stay unpinned in v1 - an explicit documented supply-chain exception"
+  local prev_on="$CBOX_HERMES" prev_ver="$CBOX_HERMES_VERSION" prev_provider="$CBOX_HERMES_PROVIDER" \
+    prev_url="$CBOX_HERMES_MODEL_URL" prev_name="$CBOX_HERMES_MODEL_NAME"
+  ask_choice "setup: enable the hermes console engine" "$CBOX_HERMES" off on
+  CBOX_HERMES="$ASK_VALUE"
+  if [ "$CBOX_HERMES" = on ]; then
+    ask "setup: hermes version pin (hermes-agent on PyPI)" "$CBOX_HERMES_VERSION"
+    CBOX_HERMES_VERSION="$ASK_VALUE"
+    case "$CBOX_HERMES_VERSION" in
+      *[!0-9.]*) CBOX_HERMES_VERSION="not-a-version" ;;
+    esac
+    if ! printf '%s' "$CBOX_HERMES_VERSION" | grep -Eq '^[0-9]+([.][0-9]+){1,3}$'; then
+      warn "hermes version pin '$CBOX_HERMES_VERSION' is not a plain x.y[.z[.w]] version - keeping hermes off until a valid pin is set"
+      CBOX_HERMES=off
+      CBOX_HERMES_VERSION="${prev_ver:-0.19.0}"
+    fi
+  fi
+  if [ "$CBOX_HERMES" = on ]; then
+    ask_choice "setup: hermes model provider" "$CBOX_HERMES_PROVIDER" local nous openrouter openai anthropic
+    CBOX_HERMES_PROVIDER="$ASK_VALUE"
+    if [ "$CBOX_HERMES_PROVIDER" = local ]; then
+      ask "setup: hermes local model endpoint url (OpenAI-compatible)" "${CBOX_HERMES_MODEL_URL:-$CBOX_LOCAL_MODEL_URL}"
+      CBOX_HERMES_MODEL_URL="$ASK_VALUE"
+    else
+      CBOX_HERMES_MODEL_URL=""
+    fi
+    ask "setup: hermes model name" "$CBOX_HERMES_MODEL_NAME"
+    CBOX_HERMES_MODEL_NAME="$ASK_VALUE"
+  else
+    CBOX_HERMES_VERSION="${CBOX_HERMES_VERSION:-0.19.0}"
+    CBOX_HERMES_PROVIDER="${CBOX_HERMES_PROVIDER:-local}"
+    CBOX_HERMES_MODEL_URL=""
+    CBOX_HERMES_MODEL_NAME=""
+  fi
+  export CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME
+  if [ "$CBOX_HERMES" = "$prev_on" ] && [ "$CBOX_HERMES_VERSION" = "$prev_ver" ] \
+      && [ "$CBOX_HERMES_PROVIDER" = "$prev_provider" ] && [ "$CBOX_HERMES_MODEL_URL" = "$prev_url" ] \
+      && [ "$CBOX_HERMES_MODEL_NAME" = "$prev_name" ]; then
+    return 0
+  fi
+  note "hermes is a rebuild-class change; the image needs a rebuild before the new pin/provider takes effect (cbox up or apply below)"
+}
+
+step_hermes_delegate() {
+  echo "== section: hermes-delegate =="
+  note "off by default; a zero-cost MCP delegate tool (hermes-local) that spawns one 'hermes -z' subprocess per call in a fresh ephemeral home - no skills, no auth, no retained memory, isolated from the hermes console engine's HERMES_HOME"
+  note "requires the hermes console engine (CBOX_HERMES=on); stays off until that is enabled"
+  local prev_on="$CBOX_HERMES_DELEGATE" prev_provider="$CBOX_HERMES_DELEGATE_PROVIDER" \
+    prev_url="$CBOX_HERMES_DELEGATE_BASE_URL" prev_model="$CBOX_HERMES_DELEGATE_MODEL"
+  section_dep_gate hermes-delegate
+  if [ "$DEP_ACTION" = disable ]; then
+    note "hermes-delegate dependency: $DEP_REASON"
+    CBOX_HERMES_DELEGATE=off
+    CBOX_HERMES_DELEGATE_PROVIDER=""
+    CBOX_HERMES_DELEGATE_BASE_URL=""
+    CBOX_HERMES_DELEGATE_MODEL=""
+  else
+    ask_choice "setup: enable the hermes MCP delegate" "$CBOX_HERMES_DELEGATE" off on
+    CBOX_HERMES_DELEGATE="$ASK_VALUE"
+    if [ "$CBOX_HERMES_DELEGATE" = on ]; then
+      ask_choice "setup: hermes delegate model provider" "${CBOX_HERMES_DELEGATE_PROVIDER:-$CBOX_HERMES_PROVIDER}" local nous openrouter openai anthropic
+      CBOX_HERMES_DELEGATE_PROVIDER="$ASK_VALUE"
+      if [ "$CBOX_HERMES_DELEGATE_PROVIDER" = local ]; then
+        ask "setup: hermes delegate local model endpoint url (OpenAI-compatible)" "${CBOX_HERMES_DELEGATE_BASE_URL:-$CBOX_HERMES_MODEL_URL}"
+        CBOX_HERMES_DELEGATE_BASE_URL="$ASK_VALUE"
+      else
+        CBOX_HERMES_DELEGATE_BASE_URL=""
+      fi
+      ask "setup: hermes delegate model name" "${CBOX_HERMES_DELEGATE_MODEL:-$CBOX_HERMES_MODEL_NAME}"
+      CBOX_HERMES_DELEGATE_MODEL="$ASK_VALUE"
+    else
+      CBOX_HERMES_DELEGATE_PROVIDER=""
+      CBOX_HERMES_DELEGATE_BASE_URL=""
+      CBOX_HERMES_DELEGATE_MODEL=""
+    fi
+  fi
+  export CBOX_HERMES_DELEGATE_PROVIDER CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL
+  if [ "$CBOX_HERMES_DELEGATE" = "$prev_on" ] && [ "$CBOX_HERMES_DELEGATE_PROVIDER" = "$prev_provider" ] \
+      && [ "$CBOX_HERMES_DELEGATE_BASE_URL" = "$prev_url" ] && [ "$CBOX_HERMES_DELEGATE_MODEL" = "$prev_model" ]; then
+    return 0
+  fi
+  if container_target_ok; then
+    mcp_apply_selection
+  fi
+  note "host claude picks the change up on next start; the container needs re-bless + restart"
 }
 
 autoresume_ensure_hooks() {
@@ -2357,14 +2545,21 @@ ssh_mixed_sync() {
 }
 
 egress_lockdown() {
-  [ "$CBOX_EGRESS_MODE" != off ] || return 0
-  CBOX_EGRESS_APPLIED=1
+  if [ "$CBOX_EGRESS_MODE" = off ] && [ "$CBOX_NETACCESS_MODE" = off ]; then
+    return 0
+  fi
+  if [ "$CBOX_EGRESS_MODE" != off ]; then
+    CBOX_EGRESS_APPLIED=1
+  fi
+  if [ "$CBOX_NETACCESS_MODE" != off ]; then
+    CBOX_NETACCESS_APPLIED=1
+  fi
   conf_save
   regen_all
   docker compose -f "$COMPOSE_FILE" down --remove-orphans
   docker compose -f "$COMPOSE_FILE" build
-  docker compose -f "$COMPOSE_FILE" up -d
-  note "egress lockdown applied ($CBOX_EGRESS_MODE)"
+  CBOX_NO_EXEC=1 "$INSTALL_DIR/cbox" up
+  note "network policy applied (egress=$CBOX_EGRESS_MODE, netaccess=$CBOX_NETACCESS_MODE)"
 }
 
 print_backup_cmds() {
@@ -2400,6 +2595,9 @@ print_host_sequence() {
   if [ "$CBOX_EGRESS_MODE" != off ] && [ "$CBOX_EGRESS_APPLIED" = 0 ]; then
     echo "  ./setup.sh update egress"
   fi
+  if [ "$CBOX_NETACCESS_MODE" != off ] && [ "$CBOX_NETACCESS_APPLIED" = 0 ]; then
+    echo "  ./setup.sh update netaccess"
+  fi
   if [ "$CBOX_CODEX_MCP" = 1 ] && [ "$CBOX_CODEX_MODE" = volume ]; then
     echo "  ./setup.sh update codex-mcp"
   fi
@@ -2423,10 +2621,10 @@ apply_change() {
   if ! have_docker; then
     note "docker cli is not available; run from $INSTALL_DIR:"
     case "$action" in
-      recreate) echo "  docker compose -f docker-compose.yml up -d" ;;
+      recreate) echo "  docker compose -f docker-compose.yml up -d --force-recreate" ;;
       restart) echo "  docker compose -f docker-compose.yml down && docker compose -f docker-compose.yml up -d" ;;
       topology) echo "  docker compose -f docker-compose.yml down --remove-orphans && docker compose -f docker-compose.yml build && docker compose -f docker-compose.yml up -d" ;;
-      rebuild) echo "  docker compose -f docker-compose.yml build && docker compose -f docker-compose.yml up -d" ;;
+      rebuild) echo "  docker compose -f docker-compose.yml build && docker compose -f docker-compose.yml up -d --force-recreate" ;;
     esac
     return 0
   fi
@@ -2436,7 +2634,7 @@ apply_change() {
   fi
   case "$action" in
     recreate)
-      docker compose -f "$COMPOSE_FILE" up -d
+      docker compose -f "$COMPOSE_FILE" up -d --force-recreate
       ;;
     restart)
       docker compose -f "$COMPOSE_FILE" down
@@ -2449,7 +2647,7 @@ apply_change() {
       ;;
     rebuild)
       docker compose -f "$COMPOSE_FILE" build
-      docker compose -f "$COMPOSE_FILE" up -d
+      docker compose -f "$COMPOSE_FILE" up -d --force-recreate
       ;;
   esac
   if [ "$section" = ssh ]; then
@@ -2463,9 +2661,9 @@ isolated_next_steps() {
   note "isolated mode: cbox run derives one container per project from the workspace root (git toplevel or cwd)"
   note "the image builds automatically on the first cbox run (reused when inputs are unchanged)"
   if [ -n "$root" ]; then
-    note "run from $root: cbox run claude   (or codex)"
+    note "run from $root: cbox run codex"
   else
-    note "cd into a project directory and run: cbox run claude   (or codex)"
+    note "cd into a project directory and run: cbox run codex"
   fi
 }
 
@@ -2484,14 +2682,14 @@ run_phase_isolated() {
   if reserved_path_conflict "$root" >/dev/null 2>&1; then
     warn "$root looks like the cbox tool directory or a reserved path, not a project to sandbox"
     reserved_path_conflict "$root" | sed 's/^setup: /  /'
-    note "cd into an actual project directory and run: cbox run claude"
+    note "cd into an actual project directory and run: cbox run codex"
     isolated_next_steps ""
     return 0
   fi
   note "no per-project container exists yet for this project"
-  if ask_yn "setup: start this project's container now for $root (cbox run claude)? [y/N]" n; then
-    note "starting cbox run claude for $root"
-    exec "$INSTALL_DIR/cbox" run claude
+  if ask_yn "setup: start this project's container now for $root (cbox run codex)? [y/N]" n; then
+    note "starting cbox run codex for $root"
+    exec "$INSTALL_DIR/cbox" run codex
   fi
   isolated_next_steps "$root"
   return 0
@@ -2499,6 +2697,9 @@ run_phase_isolated() {
 
 run_phase() {
   CBOX_EGRESS_APPLIED=0
+  if [ "${CBOX_MODE:-global}" = isolated ] && [ "$CBOX_NETACCESS_MODE" != off ]; then
+    CBOX_NETACCESS_APPLIED=1
+  fi
   conf_save
   regen_all
   conf_load
@@ -2878,6 +3079,9 @@ uninstall_volumes() {
   case "$CBOX_SSH_MODE" in
     container-keys|mixed) vols+=("${CBOX_NAME}-ssh") ;;
   esac
+  if [ "${CBOX_HERMES:-off}" = on ]; then
+    vols+=("${CBOX_NAME}-hermes-home")
+  fi
   for v in "${vols[@]}"; do
     if ask_yn "setup: remove volume $v (its data is lost)? [y/N]" n; then
       if have_docker; then
@@ -2993,6 +3197,10 @@ run_local() {
     run_local_wizard_subset "$root"
   fi
 
+  if [ "$CBOX_NETACCESS_MODE" != off ]; then
+    CBOX_NETACCESS_APPLIED=1
+  fi
+
   conf_save "$eff/cbox.conf"
   _cbox_conf_set_tpl_sha "$eff/cbox.conf"
   conf_load
@@ -3026,7 +3234,7 @@ run_local() {
   fi
   note "blessed effective config in $eff"
   note "the image builds automatically on the first cbox run (reused when inputs are unchanged)"
-  note "run from $root: cbox run claude   (or codex)"
+  note "run from $root: cbox run codex"
 }
 
 main() {

@@ -1,5 +1,0 @@
-services:
-  cbox:
-    environment:
-      - CBOX_WORKSPACE_READONLY=1
-    volumes:

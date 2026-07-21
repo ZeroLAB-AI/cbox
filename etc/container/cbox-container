@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import socket
+import sys
+
+
+def request(payload):
+    path = os.environ.get("CBOX_CONTAINER_EXEC_SOCKET", "/run/cbox-container-exec/bridge.sock")
+    default_timeout = int(os.environ.get("CBOX_CONTAINER_EXEC_TIMEOUT", "900"))
+    max_bytes = int(os.environ.get("CBOX_CONTAINER_EXEC_MAX_BYTES", "10485760"))
+    wait_timeout = payload.get("timeout", default_timeout) if payload.get("op") == "exec" else 10
+    wait_timeout = min(max(int(wait_timeout), 1), 3600) + 10
+    max_response = min(max(max_bytes, 1024), 16777216) * 4 + 1048576
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(wait_timeout)
+    client.connect(path)
+    client.sendall((json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii"))
+    client.shutdown(socket.SHUT_WR)
+    chunks = bytearray()
+    while len(chunks) <= max_response:
+        data = client.recv(65536)
+        if not data:
+            break
+        chunks.extend(data)
+    client.close()
+    if len(chunks) > max_response:
+        raise RuntimeError("bridge response exceeds limit")
+    value = json.loads(bytes(chunks).decode("utf-8"))
+    if not isinstance(value, dict):
+        raise RuntimeError("invalid bridge response")
+    return value
+
+
+def render_list(value):
+    print("%-24s %-14s %-24s %s" % ("NAME", "ID", "NETWORKS", "STATUS"))
+    for item in value.get("containers", []):
+        status = "blocked: " + item["blockedReason"] if item.get("blockedReason") else "exec-ready"
+        print("%-24s %-14s %-24s %s" % (
+            (item.get("name") or "?")[:24], (item.get("id") or "?")[:12],
+            ",".join(item.get("networks") or [])[:24], status,
+        ))
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="cbox-container")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("list")
+    p = sub.add_parser("exec")
+    p.add_argument("--cwd")
+    p.add_argument("--timeout", type=int)
+    p.add_argument("container")
+    p.add_argument("argv", nargs=argparse.REMAINDER)
+    args = parser.parse_args(argv)
+    if args.command == "list":
+        value = request({"op": "list"})
+        if not value.get("ok"):
+            raise RuntimeError(value.get("error") or "list failed")
+        render_list(value)
+        return 0
+    command = list(args.argv)
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        raise ValueError("command argv is required after --")
+    payload = {"op": "exec", "container": args.container, "argv": command}
+    if args.cwd:
+        payload["cwd"] = args.cwd
+    if args.timeout is not None:
+        payload["timeout"] = args.timeout
+    value = request(payload)
+    if value.get("stdout"):
+        sys.stdout.write(value["stdout"])
+    if value.get("stderr"):
+        sys.stderr.write(value["stderr"])
+    if not value.get("ok"):
+        if value.get("error"):
+            sys.stderr.write("cbox-container: %s\n" % value["error"])
+        return int(value.get("rc") or 125)
+    return int(value.get("rc") or 0)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        sys.stderr.write("cbox-container: %s\n" % exc)
+        sys.exit(125)

@@ -253,6 +253,50 @@ with open(sys.argv[1], "r", encoding="utf-8") as f:
   return 0
 }
 
+_hermes_validate_url() {
+  case "$1" in
+    *[$'\n\r']*) return 1 ;;
+  esac
+  printf '%s' "$1" | grep -Eq '^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~%/-]*)?$'
+}
+
+_hermes_validate_model() {
+  case "$1" in
+    *[$'\n\r']*) return 1 ;;
+  esac
+  printf '%s' "$1" | grep -Eq '^[A-Za-z0-9._:/-]+$'
+}
+
+_hermes_validate_provider() {
+  case "$1" in
+    local|nous|openrouter|openai|anthropic) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_hermes_apply_managed_env() {
+  local envfile="$1" key val
+  [ -f "$envfile" ] || return 0
+  while IFS='=' read -r key val || [ -n "$key" ]; do
+    if [ "$key" = HERMES_MANAGED_PROVIDER ]; then
+      _hermes_validate_provider "$val" \
+        || { echo "entrypoint: hermes-managed.env has an invalid HERMES_MANAGED_PROVIDER '$val' - refusing to apply" >&2; return 1; }
+      _as_user env HERMES_HOME="$HERMES_HOME" /opt/hermes/bin/hermes config set model.provider "$val" \
+        || { echo "entrypoint: 'hermes config set model.provider $val' failed" >&2; return 1; }
+    elif [ "$key" = HERMES_MANAGED_BASE_URL ]; then
+      _hermes_validate_url "$val" \
+        || { echo "entrypoint: hermes-managed.env has an invalid HERMES_MANAGED_BASE_URL '$val' - refusing to apply" >&2; return 1; }
+      _as_user env HERMES_HOME="$HERMES_HOME" /opt/hermes/bin/hermes config set model.base_url "$val" \
+        || { echo "entrypoint: 'hermes config set model.base_url $val' failed" >&2; return 1; }
+    elif [ "$key" = HERMES_MANAGED_MODEL ]; then
+      _hermes_validate_model "$val" \
+        || { echo "entrypoint: hermes-managed.env has an invalid HERMES_MANAGED_MODEL '$val' - refusing to apply" >&2; return 1; }
+      _as_user env HERMES_HOME="$HERMES_HOME" /opt/hermes/bin/hermes config set model.default "$val" \
+        || { echo "entrypoint: 'hermes config set model.default $val' failed" >&2; return 1; }
+    fi
+  done < "$envfile"
+}
+
 case "${1:-}" in
   claude|codex)
     _verb="$1"
@@ -291,6 +335,42 @@ case "${1:-}" in
       echo "entrypoint: CBOX_LIMIT_AUTORESUME=on but tmux is missing in this image - rebuild on the host (next 'cbox run' after re-bless); running without auto-resume" >&2
     fi
     _run_as_user "$_resolved" "$@"
+    ;;
+  hermes)
+    : "${CBOX_HERMES:?entrypoint: CBOX_HERMES is off - enable and rebuild first: ./setup.sh update hermes}"
+    [ "$CBOX_HERMES" = on ] \
+      || { echo "entrypoint: hermes is disabled (CBOX_HERMES=$CBOX_HERMES) - run './setup.sh update hermes' on the host, then rebuild" >&2; exit 1; }
+    : "${CBOX_HERMES_VERSION:?entrypoint: CBOX_HERMES_VERSION is unset - run ./setup.sh update hermes}"
+    if [ ! -x /opt/hermes/bin/hermes ]; then
+      echo "entrypoint: /opt/hermes/bin/hermes missing or not executable - this image predates enabling hermes, rebuild: ./setup.sh update hermes" >&2
+      exit 1
+    fi
+    shift
+    HERMES_HOME="${HERMES_HOME:-$HOST_HOME/.hermes-cbox}"
+    _ensure_owned "$HERMES_HOME"
+    if [ ! -f "$HERMES_HOME/config.yaml" ]; then
+      _as_user env HERMES_HOME="$HERMES_HOME" /opt/hermes/bin/hermes setup --non-interactive \
+        || { echo "entrypoint: 'hermes setup --non-interactive' failed - fix manually via 'cbox shell'" >&2; exit 1; }
+    fi
+    _hermes_apply_managed_env /etc/cbox/hermes-managed/managed.env || exit 1
+    _hermes_session_prompt="${HERMES_EPHEMERAL_SYSTEM_PROMPT:-}"
+    if [ -n "${CBOX_SESSION_MEMORY_FILE:-}" ] && [ -f "${CBOX_SESSION_MEMORY_FILE:-}" ] \
+        && [ -f /opt/cbox/cbox_session_bridge.py ]; then
+      _cbox_root="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" || _cbox_root=""
+      _cbox_ref="${CBOX_SESSION_MEMORY_FILE#"$_cbox_root"/}"
+      _cbox_memory=""
+      case "$_cbox_ref" in
+        ".cbox/sessions/${CBOX_SESSION_ID:-invalid}/distillates/"handoff-[0-9][0-9][0-9][0-9][0-9][0-9].json) _cbox_ref_ok=1 ;;
+        *) _cbox_ref_ok=0 ;;
+      esac
+      if [ -n "$_cbox_root" ] && [ "$_cbox_ref" != "$CBOX_SESSION_MEMORY_FILE" ] && [ "$_cbox_ref_ok" = 1 ]; then
+        _cbox_memory="$(_as_user python3 /opt/cbox/cbox_session_bridge.py render --root "$_cbox_root" --ref "$_cbox_ref" 2>/dev/null)" || _cbox_memory=""
+      fi
+      if [ -n "$_cbox_memory" ]; then
+        _hermes_session_prompt="${_hermes_session_prompt:+$_hermes_session_prompt$'\n\n'}$_cbox_memory"
+      fi
+    fi
+    _run_as_user env HERMES_HOME="$HERMES_HOME" HERMES_EPHEMERAL_SYSTEM_PROMPT="$_hermes_session_prompt" /opt/hermes/bin/hermes "$@"
     ;;
 esac
 

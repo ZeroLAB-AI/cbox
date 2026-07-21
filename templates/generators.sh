@@ -82,6 +82,32 @@ _cbox_netaccess_active() {
   [ "${CBOX_NETACCESS_MODE:-off}" != "off" ] && [ "${CBOX_NETACCESS_APPLIED:-0}" = "1" ]
 }
 
+_cbox_netaccess_scope() {
+  case "${CBOX_NETACCESS_SCOPE:-}" in
+    all|list) printf '%s' "$CBOX_NETACCESS_SCOPE" ;;
+    *)
+      if [ -n "${CBOX_NETACCESS_NETWORKS:-}" ] || [ -n "${CBOX_NETACCESS_CIDRS:-}" ]; then
+        printf 'list'
+      else
+        printf 'all'
+      fi
+      ;;
+  esac
+}
+
+_cbox_docker_bounded() {
+  command -v docker >/dev/null 2>&1 || return 1
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 5 docker "$@" 2>/dev/null
+  else
+    docker "$@" 2>/dev/null
+  fi
+}
+
+_cbox_list_docker_networks() {
+  _cbox_docker_bounded network ls --format '{{.Name}}'
+}
+
 _cbox_proxy_active() {
   _cbox_egress_active || _cbox_netaccess_active
 }
@@ -183,15 +209,28 @@ _cbox_validate_targets() {
     || die "invalid CBOX_CODEX_VERSION '$codex_version' (expected latest or x.y.z)"
 }
 
+_cbox_validate_hermes_version() {
+  local v="$1"
+  case "$v" in
+    *[!0-9.]*) die "invalid CBOX_HERMES_VERSION '$v' (expected x.y[.z[.w]])" ;;
+  esac
+  printf '%s' "$v" | grep -Eq '^[0-9]+([.][0-9]+){1,3}$' \
+    || die "invalid CBOX_HERMES_VERSION '$v' (expected x.y[.z[.w]])"
+}
+
 gen_dockerfile_into() {
   local effdir="$1" digest="$2"
-  local pkgs claude_target codex_version codex_target workdir tmp
+  local pkgs claude_target codex_version codex_target workdir tmp hermes_version
   pkgs="$(_cbox_final_pkgs)"
   _cbox_validate_targets
   claude_target="${CBOX_CLAUDE_TARGET:-stable}"
   codex_version="${CBOX_CODEX_VERSION:-latest}"
   codex_target="${CBOX_CODEX_TARGET:-}"
   workdir="$(_cbox_workdir)"
+  if [ "${CBOX_HERMES:-off}" = on ]; then
+    hermes_version="${CBOX_HERMES_VERSION:-0.19.0}"
+    _cbox_validate_hermes_version "$hermes_version"
+  fi
   tmp="$(mktemp "$effdir/.cbox.XXXXXX")"
   cat > "$tmp" <<EOF
 FROM ubuntu:24.04@$digest
@@ -210,6 +249,14 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod 755 /entrypoint.sh
 COPY install-bins.sh /opt/cbox/install-bins.sh
 RUN chmod 755 /opt/cbox/install-bins.sh
+EOF
+  if [ "${CBOX_HERMES:-off}" = on ]; then
+    cat >> "$tmp" <<EOF
+RUN python3 -m venv /opt/hermes && /opt/hermes/bin/pip install --no-cache-dir hermes-agent==$hermes_version && ln -s /opt/hermes/bin/hermes /usr/local/bin/hermes
+RUN mkdir -p /etc/cbox/hermes-delegate-home && HERMES_HOME=/etc/cbox/hermes-delegate-home /opt/hermes/bin/hermes setup --non-interactive && rm -rf /etc/cbox/hermes-delegate-home/.env /etc/cbox/hermes-delegate-home/skills /etc/cbox/hermes-delegate-home/*.db /etc/cbox/hermes-delegate-home/*.sqlite* && chown -R root:root /etc/cbox/hermes-delegate-home && find /etc/cbox/hermes-delegate-home -type d -exec chmod 0555 {} \\; && find /etc/cbox/hermes-delegate-home -type f -exec chmod 0444 {} \\;
+EOF
+  fi
+  cat >> "$tmp" <<EOF
 WORKDIR $workdir
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["sleep", "infinity"]
@@ -439,24 +486,36 @@ _cbox_final_pkgs() {
 
 gen_image_inputs() {
   local eff="$1" digest="$2"
-  local pkgs claude_target codex_version codex_target entrypoint_sha install_bins_sha tpl_sha
+  local pkgs claude_target codex_version codex_target entrypoint_sha install_bins_sha tpl_sha workdir
+  local hermes hermes_version
   pkgs="$(_cbox_final_pkgs)"
+  workdir="$(_cbox_workdir)"
   claude_target="${CBOX_CLAUDE_TARGET:-stable}"
   codex_version="${CBOX_CODEX_VERSION:-latest}"
   codex_target="${CBOX_CODEX_TARGET:-}"
   entrypoint_sha="$(sha256sum "$eff/entrypoint.sh" | awk '{print $1}')"
   install_bins_sha="$(sha256sum "$eff/install-bins.sh" | awk '{print $1}')"
   tpl_sha="$(_cbox_tpl_sha)"
+  if [ "${CBOX_HERMES:-off}" = on ]; then
+    hermes=1
+    hermes_version="${CBOX_HERMES_VERSION:-0.19.0}"
+  else
+    hermes=0
+    hermes_version=""
+  fi
   {
     printf 'schema=1\n'
     printf 'base=ubuntu:24.04@%s\n' "$digest"
     printf 'pkgs=%s\n' "$pkgs"
+    printf 'workdir=%s\n' "$workdir"
     printf 'python=1\n'
     printf 'gpu=%s\n' "${CBOX_GPU:-0}"
     printf 'egress=%s\n' "${CBOX_EGRESS_MODE:-off}"
     printf 'claude_target=%s\n' "$claude_target"
     printf 'codex_version=%s\n' "$codex_version"
     printf 'codex_target=%s\n' "$codex_target"
+    printf 'hermes=%s\n' "$hermes"
+    printf 'hermes_version=%s\n' "$hermes_version"
     printf 'copy.entrypoint.sh=%s\n' "$entrypoint_sha"
     printf 'copy.install-bins.sh=%s\n' "$install_bins_sha"
     printf 'tpl_sha=%s\n' "$tpl_sha"
@@ -471,6 +530,104 @@ _cbox_image_hash() {
 _cbox_image_tag() {
   local hash="$1"
   printf 'cbox-img:%s' "${hash:0:12}"
+}
+
+_cbox_clip_active() {
+  [ "${CBOX_CLIPBOARD_MODE:-off}" = bridge ]
+}
+
+_cbox_clip_dir() {
+  printf '%s/cbox-clip-%s' "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" "$1"
+}
+
+_cbox_clip_env_into() {
+  _cbox_clip_active || return 0
+  printf '      - CBOX_CLIP_SOCK=/run/cbox-clip/clip.sock\n' >> "$1"
+}
+
+_cbox_clip_mounts_into() {
+  local tmp="$1" suffix="$2"
+  _cbox_clip_active || return 0
+  printf '      - %s:/run/cbox-clip\n' "$(_cbox_clip_dir "$suffix")" >> "$tmp"
+  printf '      - %s/etc/clipboard/wl_paste_shim.py:/usr/local/bin/wl-paste:ro\n' "$INSTALL_DIR" >> "$tmp"
+}
+
+_cbox_netaccess_exec_active() {
+  _cbox_netaccess_active || return 1
+  [ "${CBOX_NETACCESS_EXEC_MODE:-off}" = scoped ] || return 1
+  [ "$(_cbox_netaccess_scope)" = list ] || return 1
+  [ -n "${CBOX_NETACCESS_NETWORKS:-}" ]
+}
+
+_cbox_container_exec_dir() {
+  printf '%s/cbox-container-exec-%s' "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" "$1"
+}
+
+_cbox_container_exec_env_into() {
+  local tmp="$1"
+  _cbox_netaccess_exec_active || return 0
+  printf '      - CBOX_CONTAINER_EXEC_TIMEOUT=%s\n' "${CBOX_NETACCESS_EXEC_TIMEOUT:-900}" >> "$tmp"
+  printf '      - CBOX_CONTAINER_EXEC_MAX_BYTES=%s\n' "${CBOX_NETACCESS_EXEC_MAX_BYTES:-10485760}" >> "$tmp"
+}
+
+_cbox_container_exec_mounts_into() {
+  local tmp="$1" suffix="$2"
+  _cbox_netaccess_exec_active || return 0
+  printf '      - %s/sockets:/run/cbox-container-exec:ro\n' "$(_cbox_container_exec_dir "$suffix")" >> "$tmp"
+  printf '      - %s/etc/container/cbox-container:/usr/local/bin/cbox-container:ro\n' "$INSTALL_DIR" >> "$tmp"
+}
+
+_cbox_netaccess_env_into() {
+  local tmp="$1" port="${CBOX_NETACCESS_SOCKS_PORT:-1080}"
+  _cbox_netaccess_active || return 0
+  case "$port" in
+    ''|*[!0-9]*) port=1080 ;;
+    *) [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || port=1080 ;;
+  esac
+  printf '      - CBOX_SOCKS_PROXY=socks5h://proxy:%s\n' "$port" >> "$tmp"
+  printf '      - ALL_PROXY=socks5h://proxy:%s\n' "$port" >> "$tmp"
+  printf '      - all_proxy=socks5h://proxy:%s\n' "$port" >> "$tmp"
+}
+
+_cbox_proxy_main_networks_into() {
+  local tmp="$1"
+  _cbox_proxy_active || return 0
+  printf '    networks:\n' >> "$tmp"
+  printf '      - internal\n' >> "$tmp"
+  if ! _cbox_egress_active; then
+    printf '      - egress\n' >> "$tmp"
+  fi
+}
+
+_cbox_dns_servers() {
+  case "${CBOX_DNS_MODE:-docker}" in
+    public) printf '%s' "${CBOX_DNS_SERVERS:-1.1.1.1 8.8.8.8}" ;;
+    stub) printf '%s' "${CBOX_DNS_STUB_IP:-}" ;;
+    *) printf '' ;;
+  esac
+}
+
+_cbox_dns_into() {
+  local tmp="$1" s emitted=0
+  if [ "${CBOX_DNS_MODE:-docker}" = stub ] && [ -z "${CBOX_DNS_STUB_IP:-}" ]; then
+    echo "cbox: warning: CBOX_DNS_MODE=stub but CBOX_DNS_STUB_IP is empty - no dns override emitted" >&2
+    return 0
+  fi
+  set -f
+  for s in $(_cbox_dns_servers); do
+    case "$s" in
+      ''|*[!0-9.]*)
+        echo "cbox: warning: ignoring invalid dns server '$s' (CBOX_DNS_MODE=${CBOX_DNS_MODE:-docker})" >&2
+        continue
+        ;;
+    esac
+    if [ "$emitted" = 0 ]; then
+      printf '    dns:\n' >> "$tmp"
+      emitted=1
+    fi
+    printf '      - %s\n' "$s" >> "$tmp"
+  done
+  set +f
 }
 
 gen_compose() {
@@ -505,6 +662,8 @@ services:
     tty: true
     restart: "$policy"
     working_dir: $workdir
+    labels:
+      cbox.kind: global
     environment:
       - HOST_USER=\${HOST_USER}
       - HOST_UID=\${HOST_UID}
@@ -522,6 +681,20 @@ EOF
     printf '      - CLAUDE_CONFIG_DIR=${HOST_HOME}/.claude-cbox\n' >> "$tmp"
     printf '      - CLAUDE_SECURESTORAGE_CONFIG_DIR=${HOST_HOME}/.claude\n' >> "$tmp"
   fi
+  if [ "${CBOX_HERMES:-off}" = on ]; then
+    _cbox_hermes_validate_compose_env
+    cat >> "$tmp" <<EOF
+      - CBOX_HERMES=${CBOX_HERMES}
+      - CBOX_HERMES_VERSION=${CBOX_HERMES_VERSION:-0.19.0}
+      - CBOX_HERMES_PROVIDER=${CBOX_HERMES_PROVIDER:-local}
+      - CBOX_HERMES_MODEL_URL=${CBOX_HERMES_MODEL_URL:-}
+      - CBOX_HERMES_MODEL_NAME=${CBOX_HERMES_MODEL_NAME:-}
+      - HERMES_HOME=\${HOST_HOME}/.hermes-cbox
+EOF
+  fi
+  _cbox_clip_env_into "$tmp"
+  _cbox_container_exec_env_into "$tmp"
+  _cbox_netaccess_env_into "$tmp"
   _cbox_tz_env_into "$tmp"
   case "$ssh_mode" in
     host-agent|mixed)
@@ -539,10 +712,13 @@ EOF
 EOF
   fi
   printf '    volumes:\n' >> "$tmp"
+  _cbox_clip_mounts_into "$tmp" "$name"
+  _cbox_container_exec_mounts_into "$tmp" "$name"
   _cbox_tz_mounts_into "$tmp"
   for w in "${ws[@]}"; do
     printf '      - %s:%s:rw\n' "$w" "$w" >> "$tmp"
   done
+  printf '      - %s:/opt/cbox/cbox_session_bridge.py:ro\n' "$INSTALL_DIR/lib/cbox_session_bridge.py" >> "$tmp"
   if [ "$claude_mode" = "mount" ]; then
     gen_claude_config_into "$INSTALL_DIR/generated/claude-config" "$claude_path"
     mkdir -p "$claude_path/hooks" "$claude_path/agents" "$claude_path/policies" "$claude_path/templates" "$claude_path/projects" "$claude_path/tasks" "$claude_path/session-env" "$claude_path/plugins" "$claude_path/file-history" "$claude_path/plans" "$claude_path/shell-snapshots" "$claude_path/agent-memory" "$claude_path/commands" "$claude_path/skills" "$claude_path/rules"
@@ -645,10 +821,19 @@ EOF
       - $HOME/.gitconfig:\${HOST_HOME}/.gitconfig:ro
 EOF
   fi
-  if _cbox_proxy_active; then
+  if [ "${CBOX_HERMES:-off}" = on ]; then
+    mkdir -p "$INSTALL_DIR/generated/hermes"
     cat >> "$tmp" <<EOF
-    networks:
-      - internal
+      - hermes-home:\${HOST_HOME}/.hermes-cbox
+      - $INSTALL_DIR/generated/hermes:/etc/cbox/hermes-managed:ro
+EOF
+  fi
+  if ! _cbox_proxy_active; then
+    _cbox_dns_into "$tmp"
+  fi
+  if _cbox_proxy_active; then
+    _cbox_proxy_main_networks_into "$tmp"
+    cat >> "$tmp" <<EOF
     depends_on:
       - proxy
   proxy:
@@ -663,12 +848,13 @@ EOF
     volumes:
       - $INSTALL_DIR/generated/proxy:/etc/cbox-generated:ro
     healthcheck:
-      test: ["CMD-SHELL", "ip=127.0.0.1; [ -f /etc/cbox-generated/internal-ip ] && ip=\$\$(cat /etc/cbox-generated/internal-ip); nc -z -w 2 \"\$\$ip\" 8888 || nc -z -w 2 \"\$\$ip\" 1080"]
+      test: ["CMD-SHELL", "ip=127.0.0.1; [ -f /etc/cbox-generated/internal-ip ] && ip=\$\$(cat /etc/cbox-generated/internal-ip); nc -z -w 2 \"\$\$ip\" 8888 || nc -z -w 2 \"\$\$ip\" ${CBOX_NETACCESS_SOCKS_PORT:-1080}"]
       interval: 10s
       timeout: 3s
       start_period: 10s
       retries: 3
 EOF
+    _cbox_dns_into "$tmp"
   fi
   cat >> "$tmp" <<EOF
 volumes:
@@ -705,6 +891,12 @@ EOF
 EOF
       ;;
   esac
+  if [ "${CBOX_HERMES:-off}" = on ]; then
+    cat >> "$tmp" <<EOF
+  hermes-home:
+    name: $name-hermes-home
+EOF
+  fi
   if _cbox_proxy_active; then
     cat >> "$tmp" <<'EOF'
 networks:
@@ -784,6 +976,17 @@ EOF
     printf '      - CLAUDE_CONFIG_DIR=${HOST_HOME}/.claude-cbox\n' >> "$tmp"
     printf '      - CLAUDE_SECURESTORAGE_CONFIG_DIR=${HOST_HOME}/.claude\n' >> "$tmp"
   fi
+  if [ "${CBOX_HERMES:-off}" = on ]; then
+    _cbox_hermes_validate_compose_env
+    cat >> "$tmp" <<EOF
+      - CBOX_HERMES=${CBOX_HERMES}
+      - CBOX_HERMES_VERSION=${CBOX_HERMES_VERSION:-0.19.0}
+      - CBOX_HERMES_PROVIDER=${CBOX_HERMES_PROVIDER:-local}
+      - CBOX_HERMES_MODEL_URL=${CBOX_HERMES_MODEL_URL:-}
+      - CBOX_HERMES_MODEL_NAME=${CBOX_HERMES_MODEL_NAME:-}
+      - HERMES_HOME=\${HOST_HOME}/.hermes-cbox
+EOF
+  fi
   if [ "$claude_mode" = "mount" ] && [ "$session_scope" = "isolated" ]; then
     local resume_prompt="${CBOX_LIMIT_RESUME_PROMPT:-pokracuj}"
     resume_prompt="${resume_prompt//$'\n'/ }"
@@ -796,6 +999,9 @@ EOF
     printf '      - CBOX_LIMIT_RESUME_STAGGER=%s\n' "${CBOX_LIMIT_RESUME_STAGGER:-30}" >> "$tmp"
     printf '      - CBOX_LIMIT_RESUME_MAX_PER_DAY=%s\n' "${CBOX_LIMIT_RESUME_MAX_PER_DAY:-10}" >> "$tmp"
   fi
+  _cbox_clip_env_into "$tmp"
+  _cbox_container_exec_env_into "$tmp"
+  _cbox_netaccess_env_into "$tmp"
   _cbox_tz_env_into "$tmp"
   case "$ssh_mode" in
     host-agent|mixed)
@@ -813,8 +1019,11 @@ EOF
 EOF
   fi
   printf '    volumes:\n' >> "$tmp"
+  _cbox_clip_mounts_into "$tmp" "p$p_hash"
+  _cbox_container_exec_mounts_into "$tmp" "p$p_hash"
   _cbox_tz_mounts_into "$tmp"
   printf '      - %s:%s:rw\n' "$root" "$root" >> "$tmp"
+  printf '      - %s:/opt/cbox/cbox_session_bridge.py:ro\n' "$INSTALL_DIR/lib/cbox_session_bridge.py" >> "$tmp"
 
   if [ "$claude_mode" = "mount" ]; then
     gen_claude_config_into "$eff/claude-config" "$claude_path"
@@ -946,10 +1155,19 @@ EOF
       - $HOME/.gitconfig:\${HOST_HOME}/.gitconfig:ro
 EOF
   fi
-  if _cbox_proxy_active; then
+  if [ "${CBOX_HERMES:-off}" = on ]; then
+    mkdir -p "$eff/hermes"
     cat >> "$tmp" <<EOF
-    networks:
-      - internal
+      - hermes-home:\${HOST_HOME}/.hermes-cbox
+      - $eff/hermes:/etc/cbox/hermes-managed:ro
+EOF
+  fi
+  if ! _cbox_proxy_active; then
+    _cbox_dns_into "$tmp"
+  fi
+  if _cbox_proxy_active; then
+    _cbox_proxy_main_networks_into "$tmp"
+    cat >> "$tmp" <<EOF
     depends_on:
       - proxy
   proxy:
@@ -964,12 +1182,13 @@ EOF
     volumes:
       - $eff/proxy:/etc/cbox-generated:ro
     healthcheck:
-      test: ["CMD-SHELL", "ip=127.0.0.1; [ -f /etc/cbox-generated/internal-ip ] && ip=\$\$(cat /etc/cbox-generated/internal-ip); nc -z -w 2 \"\$\$ip\" 8888 || nc -z -w 2 \"\$\$ip\" 1080"]
+      test: ["CMD-SHELL", "ip=127.0.0.1; [ -f /etc/cbox-generated/internal-ip ] && ip=\$\$(cat /etc/cbox-generated/internal-ip); nc -z -w 2 \"\$\$ip\" 8888 || nc -z -w 2 \"\$\$ip\" ${CBOX_NETACCESS_SOCKS_PORT:-1080}"]
       interval: 10s
       timeout: 3s
       start_period: 10s
       retries: 3
 EOF
+    _cbox_dns_into "$tmp"
   fi
   cat >> "$tmp" <<EOF
 volumes:
@@ -1006,6 +1225,12 @@ EOF
 EOF
       ;;
   esac
+  if [ "${CBOX_HERMES:-off}" = on ]; then
+    cat >> "$tmp" <<EOF
+  hermes-home:
+    name: cbox-p$p_hash-hermes-home
+EOF
+  fi
   if _cbox_proxy_active; then
     cat >> "$tmp" <<'EOF'
 networks:
@@ -1132,7 +1357,7 @@ gen_supervisord_conf() {
 }
 
 gen_tinyproxy_conf_into() {
-  local effdir="$1"
+  local effdir="$1" listen_ip="${2:-127.0.0.1}"
   if ! _cbox_egress_active; then
     rm -f "$effdir/tinyproxy.conf"
     return 0
@@ -1141,9 +1366,13 @@ gen_tinyproxy_conf_into() {
   if [ "${CBOX_EGRESS_MODE:-off}" = "allowlist" ]; then
     deny="Yes"
   fi
+  if ! _cbox_is_ipv4 "$listen_ip" || [ "$listen_ip" = "0.0.0.0" ]; then
+    echo "cbox: gen_tinyproxy_conf_into: invalid listen IP '$listen_ip'" >&2
+    return 1
+  fi
   {
     printf 'Port 8888\n'
-    printf 'Listen 0.0.0.0\n'
+    printf 'Listen %s\n' "$listen_ip"
     printf 'Timeout 3600\n'
     printf 'LogLevel Notice\n'
     printf 'MaxClients 64\n'
@@ -1155,6 +1384,7 @@ gen_tinyproxy_conf_into() {
       printf 'ConnectPort 22\n'
     fi
   } | _cbox_write "$effdir/tinyproxy.conf"
+  printf '%s\n' "$listen_ip" | _cbox_write "$effdir/internal-ip"
 }
 
 gen_tinyproxy_conf() {
@@ -1245,6 +1475,7 @@ gen_sockd_conf_into() {
     return 1
   fi
   local -a target_ips=() target_cidrs=()
+  local seen_ips=" "
   local entry ep cidr
   for entry in $targets_spec; do
     case "$entry" in
@@ -1255,7 +1486,10 @@ gen_sockd_conf_into() {
           echo "cbox: gen_sockd_conf_into: skipping malformed target '$entry'" >&2
           continue
         fi
-        target_ips+=("$ep")
+        case "$seen_ips" in
+          *" $ep "*) ;;
+          *) target_ips+=("$ep"); seen_ips="$seen_ips$ep " ;;
+        esac
         target_cidrs+=("$cidr")
         ;;
       *)
@@ -1340,6 +1574,67 @@ gen_ssh_config() {
     printf '  ServerAliveCountMax 3\n'
     printf '  StrictHostKeyChecking accept-new\n'
   } | _cbox_write "$INSTALL_DIR/generated/ssh/config"
+}
+
+_cbox_hermes_validate_url() {
+  case "$1" in
+    *[$'\n\r']*) return 1 ;;
+  esac
+  printf '%s' "$1" | grep -Eq '^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~%/-]*)?$'
+}
+
+_cbox_hermes_validate_model() {
+  case "$1" in
+    *[$'\n\r']*) return 1 ;;
+  esac
+  printf '%s' "$1" | grep -Eq '^[A-Za-z0-9._:/-]+$'
+}
+
+_cbox_hermes_validate_provider() {
+  case "$1" in
+    local|nous|openrouter|openai|anthropic) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_cbox_hermes_validate_compose_env() {
+  local provider="${CBOX_HERMES_PROVIDER:-local}"
+  local url="${CBOX_HERMES_MODEL_URL:-}"
+  local model="${CBOX_HERMES_MODEL_NAME:-}"
+  local version="${CBOX_HERMES_VERSION:-0.19.0}"
+  _cbox_validate_hermes_version "$version"
+  _cbox_hermes_validate_provider "$provider" \
+    || die "invalid CBOX_HERMES_PROVIDER '$provider' (expected local, nous, openrouter, openai, or anthropic)"
+  [ -z "$url" ] || _cbox_hermes_validate_url "$url" || die "invalid CBOX_HERMES_MODEL_URL '$url'"
+  [ -z "$model" ] || _cbox_hermes_validate_model "$model" || die "invalid CBOX_HERMES_MODEL_NAME '$model'"
+}
+
+gen_hermes_managed_into() {
+  local target="$1"
+  local provider="${CBOX_HERMES_PROVIDER:-local}"
+  local url="${CBOX_HERMES_MODEL_URL:-}"
+  local model="${CBOX_HERMES_MODEL_NAME:-}"
+  _cbox_hermes_validate_provider "$provider" \
+    || die "invalid CBOX_HERMES_PROVIDER '$provider' (expected local, nous, openrouter, openai, or anthropic)"
+  if [ "$provider" = local ] && [ -n "$url" ]; then
+    _cbox_hermes_validate_url "$url" || die "invalid CBOX_HERMES_MODEL_URL '$url'"
+    case "$url" in
+      */v1) ;;
+      *) url="$url/v1" ;;
+    esac
+  fi
+  if [ -n "$model" ]; then
+    _cbox_hermes_validate_model "$model" || die "invalid CBOX_HERMES_MODEL_NAME '$model'"
+  fi
+  {
+    printf 'HERMES_MANAGED_PROVIDER=%s\n' "$provider"
+    if [ "$provider" = local ] && [ -n "$url" ]; then
+      printf 'HERMES_MANAGED_BASE_URL=%s\n' "$url"
+    fi
+    if [ -n "$model" ]; then
+      printf 'HERMES_MANAGED_MODEL=%s\n' "$model"
+    fi
+  } | _cbox_write "$target"
 }
 
 gen_claude_json_seed() {
@@ -1768,6 +2063,7 @@ gen_hooks_dir() {
   _cbox_write "$INSTALL_DIR/generated/hooks/codex_notify.py" < "$INSTALL_DIR/etc/codex/codex_notify.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/codex_bump_probe.sh" < "$INSTALL_DIR/etc/codex/codex_bump_probe.sh"
   _cbox_write "$INSTALL_DIR/generated/hooks/codex_mcp_shim.py" < "$INSTALL_DIR/etc/mcp/codex_mcp_shim.py"
+  _cbox_write "$INSTALL_DIR/generated/hooks/hermes_delegate_mcp.py" < "$INSTALL_DIR/etc/mcp/hermes_delegate_mcp.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/session_scope_farm.py" < "$INSTALL_DIR/etc/hooks/session_scope_farm.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/limit_watchdog.py" < "$INSTALL_DIR/etc/hooks/limit_watchdog.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/session_pane_map.py" < "$INSTALL_DIR/etc/hooks/session_pane_map.py"
@@ -1793,7 +2089,19 @@ cbox-stop() {
 cbox-shell() {
   "$CBOX_DIR/cbox" run bash "$@"
 }
+
+cbox() {
+  "$CBOX_DIR/cbox" "$@"
+}
 EOF
+  if [ "${CBOX_HERMES:-off}" = on ]; then
+    cat <<'EOF'
+
+hermes() {
+  "$CBOX_DIR/cbox" run hermes "$@"
+}
+EOF
+  fi
 }
 
 CBOX_CONTEXT_MANIFEST_VERSION=1
@@ -1938,6 +2246,11 @@ regen_all() {
   if [ "${CBOX_CLAUDE_MODE:-mount}" = "volume" ]; then
     gen_claude_assets
     gen_claude_json_seed
+  fi
+  if [ "${CBOX_HERMES:-off}" = on ]; then
+    gen_hermes_managed_into "$INSTALL_DIR/generated/hermes/managed.env"
+  else
+    rm -f "$INSTALL_DIR/generated/hermes/managed.env"
   fi
   gen_context_manifest_into "$INSTALL_DIR/generated"
   _cbox_conf_set_tpl_sha

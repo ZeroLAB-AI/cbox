@@ -1,0 +1,15 @@
+#!/bin/sh
+case "${2:-}" in
+  up|connectivity-change|dhcp4-change|dhcp6-change) ;;
+  *) exit 0 ;;
+esac
+command -v docker >/dev/null 2>&1 || exit 0
+exec /usr/bin/flock -n /run/cbox-net-refresh.lock /bin/sh -c '
+  sleep 2
+  docker ps --filter label=com.docker.compose.service=proxy --format "{{.ID}} {{.Image}}" 2>/dev/null |
+  while read -r id img; do
+    case "$img" in
+      cbox-proxy:*|cbox-proxy-img:*) docker restart "$id" >/dev/null 2>&1 ;;
+    esac
+  done
+'

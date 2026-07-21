@@ -291,15 +291,24 @@ gated_multi = sorted(
     and s["_cbox"].get("available_to") == ["claude", "codex"]
     and s["_cbox"].get("enabled_when_env")
 )
+claude_only_gated = sorted(
+    n for n, s in data.items()
+    if isinstance(s, dict)
+    and isinstance(s.get("_cbox"), dict)
+    and s["_cbox"].get("available_to") == ["claude"]
+    and s["_cbox"].get("enabled_when_env")
+)
 expected_claude = ["codex-luna", "codex-sol", "codex-terra", "codex-terra-light"]
 expected_codex = ["ask-claude"]
 expected_gated_multi = ["local-qwen"]
-assert claude_only == expected_claude, claude_only
+expected_claude_only_gated = ["hermes-local"]
+assert claude_only == sorted(expected_claude + expected_claude_only_gated), claude_only
 assert codex_only == expected_codex, codex_only
 assert gated_multi == expected_gated_multi, gated_multi
-assert sorted(data.keys()) == sorted(expected_claude + expected_codex + expected_gated_multi), sorted(data.keys())
+assert claude_only_gated == expected_claude_only_gated, claude_only_gated
+assert sorted(data.keys()) == sorted(expected_claude + expected_codex + expected_gated_multi + expected_claude_only_gated), sorted(data.keys())
 ' "$INSTALL_DIR/etc/mcp/delegates.json"
-  echo "PASS: delegates.json reproduces the current default set exactly (4 claude-only tiers, ask-claude codex-only, local-qwen env-gated claude+codex, no other new entry)"
+  echo "PASS: delegates.json reproduces the current default set exactly (4 claude-only tiers, ask-claude codex-only, local-qwen env-gated claude+codex, hermes-local env-gated claude-only, no other new entry)"
 }
 
 test_render_refuses_codex_named_non_codex_mcp_adapter() {
