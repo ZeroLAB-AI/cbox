@@ -75,6 +75,13 @@ Guards enforce git-scope on every delegated call, cap delegation depth, and writ
 bytewise audit logs. Network access is gated, and no secrets are baked into the
 image.
 
+## Built with Codex
+
+cbox was built by driving OpenAI Codex on GPT-5.6 through its `codex mcp-server`,
+across four delegate tiers picked per task. Most of the implementation, review, and
+debugging was delegated to Codex over MCP - the same path the tool exposes at
+runtime. See the project's "About" and "How we built it" for details.
+
 ## Licensing
 
 cbox is MIT-licensed. Base images, packages, the Codex CLI, and other agent CLIs
