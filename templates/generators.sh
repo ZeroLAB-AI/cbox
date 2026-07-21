@@ -1810,7 +1810,21 @@ PY
 }
 
 gen_managed_settings() {
-  local src="$INSTALL_DIR/etc/claude/managed-settings.merge.json" out
+  local src="$INSTALL_DIR/etc/claude/managed-settings.merge.json" target out
+  target="$INSTALL_DIR/generated/managed-settings.json"
+  CBOX_MANAGED_SETTINGS_REPAIRED=0
+  if [ -d "$target" ]; then
+    rmdir "$target" || {
+      echo "gen_managed_settings: refusing to replace non-empty directory $target" >&2
+      return 1
+    }
+    CBOX_MANAGED_SETTINGS_REPAIRED=1
+  elif [ -e "$target" ] && [ ! -f "$target" ]; then
+    echo "gen_managed_settings: refusing to replace non-file target $target" >&2
+    return 1
+  elif [ ! -f "$target" ]; then
+    CBOX_MANAGED_SETTINGS_REPAIRED=1
+  fi
   if [ ! -f "$src" ]; then
     echo "gen_managed_settings: missing $src" >&2
     return 1
@@ -1827,7 +1841,7 @@ settings = json.loads(text)
 sys.stdout.write(json.dumps(settings, separators=(",", ":")))
 PY
 )"
-  printf '%s\n' "$out" | _cbox_write "$INSTALL_DIR/generated/managed-settings.json"
+  printf '%s\n' "$out" | _cbox_write "$target"
 }
 
 gen_scope_json() {

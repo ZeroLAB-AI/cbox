@@ -110,6 +110,9 @@ _cbox_compose_up() {
   new="$(_cbox_compose_files_digest "$@")"
   [ -n "$stamp" ] && [ -f "$stamp" ] && old="$(cat "$stamp" 2>/dev/null || true)"
   have="$("$@" ps -q cbox 2>/dev/null | head -n1)" || have=""
+  if [ "${CBOX_MANAGED_SETTINGS_REPAIRED:-0}" = 1 ]; then
+    force=1
+  fi
   if [ -n "$have" ] && [ "$old" != "$new" ]; then
     force=1
   fi
@@ -265,6 +268,7 @@ _first_run_init() {
 
 _gen_effective() {
   local eff="$1" root="$2" digest
+  gen_managed_settings
   digest="$(_cbox_resolve_base_digest ubuntu:24.04)" || die "cannot resolve base image digest and no local image - network required for first build"
   cp "$INSTALL_DIR/entrypoint.sh" "$eff/entrypoint.sh"
   cp "$INSTALL_DIR/install-bins.sh" "$eff/install-bins.sh"
@@ -1231,6 +1235,7 @@ images_cmd() {
 
 _global_prepare() {
   local digest
+  gen_managed_settings
   digest="$(_cbox_resolve_base_digest ubuntu:24.04)" || die "cannot resolve base image digest and no local image - network required for first build"
   gen_dockerfile_into "$INSTALL_DIR" "$digest"
   gen_image_inputs "$INSTALL_DIR" "$digest"
@@ -1256,6 +1261,7 @@ _cbox_global_prepare_locked() {
   exec 8> "$lockfile"
   flock -x 8 || { echo "cbox: cannot lock $lockfile" >&2; exec 8>&-; return 1; }
   local digest rc=0
+  gen_managed_settings
   digest="$(_cbox_resolve_base_digest ubuntu:24.04)" || { exec 8>&-; die "cannot resolve base image digest and no local image - network required for first build"; }
   gen_dockerfile_into "$INSTALL_DIR" "$digest"
   gen_image_inputs "$INSTALL_DIR" "$digest"

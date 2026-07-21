@@ -2,6 +2,7 @@
 set -euo pipefail
 
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_DIR="$INSTALL_DIR"
 TMPBASE="$(mktemp -d)"
 trap 'rm -rf "$TMPBASE"' EXIT
 
@@ -23,11 +24,15 @@ AUP_FN="$(_extract_fn "$INSTALL_DIR/cbox" _bins_autoupdate)"
 CHAN_FN="$(_extract_fn "$INSTALL_DIR/cbox" _bins_channel)"
 EOFF_FN="$(_extract_fn "$INSTALL_DIR/cbox" _engine_autoupdate_off)"
 INST_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _install_one)"
+CUP_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_compose_up)"
+CDIG_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_compose_files_digest)"
 [ -n "$REAP_FN" ] || _fail "cannot extract _reap"
 [ -n "$AUP_FN" ] || _fail "cannot extract _bins_autoupdate"
 [ -n "$CHAN_FN" ] || _fail "cannot extract _bins_channel"
 [ -n "$EOFF_FN" ] || _fail "cannot extract _engine_autoupdate_off"
 [ -n "$INST_FN" ] || _fail "cannot extract _install_one"
+[ -n "$CUP_FN" ] || _fail "cannot extract _cbox_compose_up"
+[ -n "$CDIG_FN" ] || _fail "cannot extract _cbox_compose_files_digest"
 
 run_reap() {
   local probe1="$1" probe2="$2" out
@@ -177,5 +182,37 @@ grep -qx '      - CBOX_CLIP_SOCK=/run/cbox-clip/clip.sock' "$DNSOUT" || _fail "c
 grep -qx '      - /run/user/7/cbox-clip-pXYZ:/run/cbox-clip' "$DNSOUT" || _fail "clip: sock dir mount missing"
 [ "$(grep -c 'wl_paste_shim.py' "$DNSOUT")" = 1 ] || _fail "clip: off mode must emit nothing"
 _ok "generators: dns and clipboard emission correct"
+
+MANAGED="$TMPBASE/managed"
+mkdir -p "$MANAGED/etc/claude" "$MANAGED/generated/managed-settings.json"
+cp "$INSTALL_DIR/etc/claude/managed-settings.merge.json" "$MANAGED/etc/claude/managed-settings.merge.json"
+(
+  INSTALL_DIR="$MANAGED"
+  HOME=/home/x
+  export INSTALL_DIR HOME
+  source "$PROJECT_DIR/templates/generators.sh"
+  gen_managed_settings
+  [ "$CBOX_MANAGED_SETTINGS_REPAIRED" = 1 ] || exit 1
+  [ -f "$INSTALL_DIR/generated/managed-settings.json" ]
+  python3 -m json.tool "$INSTALL_DIR/generated/managed-settings.json" >/dev/null
+) || _fail "managed settings: empty Docker-created directory must become valid JSON"
+_ok "managed settings: replaces empty Docker-created directory"
+
+FORCE_OUT="$TMPBASE/force.out"
+FORCE_OUT="$FORCE_OUT" TMPBASE="$TMPBASE" bash -c '
+  set -euo pipefail
+  '"$CDIG_FN"'
+  '"$CUP_FN"'
+  fake_compose() {
+    case "$1" in
+      ps) printf "cid\\n" ;;
+      up) printf "%s\\n" "$*" > "$FORCE_OUT" ;;
+    esac
+  }
+  CBOX_MANAGED_SETTINGS_REPAIRED=1
+  _cbox_compose_up "$TMPBASE/force.stamp" fake_compose
+' || _fail "compose: managed-settings repair must recreate"
+grep -qx 'up -d --force-recreate' "$FORCE_OUT" || _fail "compose: managed-settings repair must force recreate"
+_ok "compose: managed-settings repair forces recreation"
 
 echo "PASS: ops lifecycle"
