@@ -2,6 +2,8 @@
 Dockerfile
 docker-compose.yml
 docker-compose.gpu.yml
+docker-compose.readonly.yml
+docker-compose.mirror.yml
 Dockerfile.egress
 supervisord.conf
 .env
@@ -10,4 +12,6 @@ image.inputs
 generated/
 backups/
 *.log
+*.lock
+*.stamp
 __pycache__/

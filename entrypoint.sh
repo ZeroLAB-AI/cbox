@@ -110,6 +110,42 @@ _as_user() {
   fi
 }
 
+_socks_proxy_port() {
+  local p="${CBOX_SOCKS_PROXY##*:}"
+  case "$p" in
+    ''|*[!0-9]*) return 1 ;;
+    *) [ "$p" -ge 1 ] && [ "$p" -le 65535 ] || return 1 ;;
+  esac
+  printf '%s' "$p"
+}
+
+_socks_alive() {
+  local host="$1" port="$2" i=0
+  while [ "$i" -lt 3 ]; do
+    if timeout 1 bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null; then
+      exec 3>&- 3<&- 2>/dev/null || true
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 0.25
+  done
+  return 1
+}
+
+_guard_socks_proxy() {
+  [ -n "${CBOX_SOCKS_PROXY:-}${ALL_PROXY:-}${all_proxy:-}" ] || return 0
+  local port
+  if port="$(_socks_proxy_port)" && _socks_alive proxy "$port"; then
+    return 0
+  fi
+  if [ -z "${port:-}" ]; then
+    echo "entrypoint: CBOX_SOCKS_PROXY is malformed or unset while ALL_PROXY is set - dropping ALL_PROXY so the agent uses direct egress" >&2
+  else
+    echo "entrypoint: SOCKS proxy (proxy:$port) is unreachable - dropping ALL_PROXY so the agent uses direct egress instead of failing on a dead proxy" >&2
+  fi
+  unset CBOX_SOCKS_PROXY ALL_PROXY all_proxy
+}
+
 _ensure_scope_services() {
   [ -n "${CLAUDE_CONFIG_DIR:-}" ] || return 0
   [ -n "${CBOX_SCOPE_SLUG:-}" ] || return 0
@@ -296,6 +332,8 @@ _hermes_apply_managed_env() {
     fi
   done < "$envfile"
 }
+
+_guard_socks_proxy
 
 case "${1:-}" in
   claude|codex)
