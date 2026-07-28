@@ -1393,10 +1393,6 @@ step_netaccess() {
   local prev_mode="$CBOX_NETACCESS_MODE"
   ask_choice "setup: netaccess mode" "$CBOX_NETACCESS_MODE" off socks
   CBOX_NETACCESS_MODE="$ASK_VALUE"
-  if [ "$CBOX_NETACCESS_MODE" = socks ]; then
-    note "netaccess socks is temporarily disabled (SOCKS proxy lifecycle pending live host verification) - keeping netaccess off"
-    CBOX_NETACCESS_MODE=off
-  fi
   if [ "$SETUP_MODE" = update ] && [ "$CBOX_NETACCESS_MODE" != off ]; then
     CBOX_NETACCESS_APPLIED=1
   elif [ "$CBOX_NETACCESS_MODE" != "$prev_mode" ]; then
@@ -1408,6 +1404,7 @@ step_netaccess() {
   fi
   command -v _cbox_netaccess_scope >/dev/null 2>&1 || load_generators
   note "SOCKS controls TCP reachability; optional scoped exec uses a separate host bridge and never mounts docker.sock into cbox"
+  note "the allow-set changes at runtime without recreating the container: cbox netaccess {status|allow|deny} <docker-network|container|IPv4/CIDR>"
   local prev_scope avail_nets=""
   prev_scope="$(_cbox_netaccess_scope)"
   avail_nets="$(_cbox_list_docker_networks | tr '\n' ' ')" || avail_nets=""
