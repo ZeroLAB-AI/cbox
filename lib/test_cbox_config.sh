@@ -17,6 +17,7 @@ _ok() {
 source "$INSTALL_DIR/_common.sh"
 source "$INSTALL_DIR/templates/generators.sh"
 source "$INSTALL_DIR/templates/sections.sh"
+source "$INSTALL_DIR/templates/conf_lib.sh"
 
 _load_cbox_functions() {
   local extracted="$TMPBASE/cbox_functions.sh"
@@ -260,14 +261,92 @@ if _cbox_config_validate_var CBOX_OLLAMA_NUM_PARALLEL "abc" >/dev/null 2>&1; the
 fi
 _ok "validator: CBOX_OLLAMA_NUM_PARALLEL"
 
+_cbox_config_validate_var CBOX_WG_MODE off || _fail "wg mode: off should be valid"
+_cbox_config_validate_var CBOX_WG_MODE server || _fail "wg mode: server should be valid"
+_cbox_config_validate_var CBOX_WG_MODE client || _fail "wg mode: client should be valid"
+_cbox_config_validate_var CBOX_WG_MODE both || _fail "wg mode: both should be valid"
+if _cbox_config_validate_var CBOX_WG_MODE bogus >/dev/null 2>&1; then
+  _fail "wg mode: bogus should be rejected"
+fi
+_ok "validator: CBOX_WG_MODE enum"
+
+_cbox_config_validate_var CBOX_WG_IMPL auto || _fail "wg impl: auto should be valid"
+_cbox_config_validate_var CBOX_WG_IMPL kernel || _fail "wg impl: kernel should be valid"
+_cbox_config_validate_var CBOX_WG_IMPL userspace || _fail "wg impl: userspace should be valid"
+if _cbox_config_validate_var CBOX_WG_IMPL bogus >/dev/null 2>&1; then
+  _fail "wg impl: bogus should be rejected"
+fi
+_ok "validator: CBOX_WG_IMPL enum"
+
+_cbox_config_validate_var CBOX_WG_ADDRESS "" || _fail "wg address: empty should be valid"
+_cbox_config_validate_var CBOX_WG_ADDRESS "10.90.0.1/24" || _fail "wg address: CIDR should be valid"
+if _cbox_config_validate_var CBOX_WG_ADDRESS "10.90.0.1" >/dev/null 2>&1; then
+  _fail "wg address: missing prefix length should be rejected"
+fi
+_ok "validator: CBOX_WG_ADDRESS"
+
+_cbox_config_validate_var CBOX_WG_LISTEN_PORT 51820 || _fail "wg listen port: 51820 should be valid"
+if _cbox_config_validate_var CBOX_WG_LISTEN_PORT 0 >/dev/null 2>&1; then
+  _fail "wg listen port: 0 should be rejected"
+fi
+if _cbox_config_validate_var CBOX_WG_LISTEN_PORT 99999 >/dev/null 2>&1; then
+  _fail "wg listen port: out-of-range should be rejected"
+fi
+_ok "validator: CBOX_WG_LISTEN_PORT"
+
+_cbox_config_validate_var CBOX_WG_PUBLISH_ADDR "" || _fail "wg publish addr: empty should be valid"
+_cbox_config_validate_var CBOX_WG_PUBLISH_ADDR "203.0.113.5" || _fail "wg publish addr: literal IPv4 should be valid"
+if _cbox_config_validate_var CBOX_WG_PUBLISH_ADDR "not-an-ip" >/dev/null 2>&1; then
+  _fail "wg publish addr: non-IPv4 should be rejected"
+fi
+_ok "validator: CBOX_WG_PUBLISH_ADDR"
+
+_cbox_config_validate_var CBOX_WG_PEER_ENDPOINT "" || _fail "wg peer endpoint: empty should be valid"
+_cbox_config_validate_var CBOX_WG_PEER_ENDPOINT "example.com:51820" || _fail "wg peer endpoint: host:port should be valid"
+if _cbox_config_validate_var CBOX_WG_PEER_ENDPOINT "example.com" >/dev/null 2>&1; then
+  _fail "wg peer endpoint: missing port should be rejected"
+fi
+_ok "validator: CBOX_WG_PEER_ENDPOINT"
+
+_WG_VALID_PUBKEY="aRcYqQIm9uH5B9V0IEQKddz3nO2FnHOEcYcQ0YQnMBs="
+_cbox_config_validate_var CBOX_WG_PEER_PUBKEY "" || _fail "wg peer pubkey: empty should be valid"
+_cbox_config_validate_var CBOX_WG_PEER_PUBKEY "$_WG_VALID_PUBKEY" || _fail "wg peer pubkey: canonical key shape should be valid"
+if _cbox_config_validate_var CBOX_WG_PEER_PUBKEY "short" >/dev/null 2>&1; then
+  _fail "wg peer pubkey: too-short key should be rejected"
+fi
+_ok "validator: CBOX_WG_PEER_PUBKEY"
+
+_cbox_config_validate_var CBOX_WG_PEER_ADDRESS "" || _fail "wg peer address: empty should be valid"
+_cbox_config_validate_var CBOX_WG_PEER_ADDRESS "10.90.0.2/32" || _fail "wg peer address: CIDR should be valid"
+if _cbox_config_validate_var CBOX_WG_PEER_ADDRESS "not-an-ip" >/dev/null 2>&1; then
+  _fail "wg peer address: garbage should be rejected"
+fi
+_ok "validator: CBOX_WG_PEER_ADDRESS"
+
+_cbox_config_validate_var CBOX_WG_KEEPALIVE 25 || _fail "wg keepalive: 25 should be valid"
+_cbox_config_validate_var CBOX_WG_KEEPALIVE 0 || _fail "wg keepalive: 0 should be valid"
+if _cbox_config_validate_var CBOX_WG_KEEPALIVE -1 >/dev/null 2>&1; then
+  _fail "wg keepalive: negative should be rejected"
+fi
+_ok "validator: CBOX_WG_KEEPALIVE"
+
 for _v in CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL; do
   _cbox_config_is_whitelisted "$_v" || _fail "whitelist: $_v should be whitelisted (SEC_VARS[ollama])"
 done
 unset _v
 _ok "whitelist: all ollama vars are whitelisted via SEC_VARS[ollama]"
 
+for _v in CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE; do
+  _cbox_config_is_whitelisted "$_v" || _fail "whitelist: $_v should be whitelisted (SEC_VARS[wireguard])"
+done
+unset _v
+_ok "whitelist: all wireguard vars are whitelisted via SEC_VARS[wireguard]"
+
 [ "${SEC_SCOPE[ollama]:-project}" = machine ] || _fail "SEC_SCOPE[ollama] should be machine"
 _ok "SEC_SCOPE[ollama]=machine"
+
+[ "${SEC_SCOPE[wireguard]:-project}" = machine ] || _fail "SEC_SCOPE[wireguard] should be machine"
+_ok "SEC_SCOPE[wireguard]=machine"
 
 for _s in mode mounts workspaces python gpu egress netaccess hostroute ssh bashrc mcp-servers \
   codex-progress local-model hermes hermes-delegate autoresume agents codex-mcp continuity \
@@ -280,6 +359,9 @@ _ok "SEC_SCOPE defaults to project for every pre-existing section"
 [ "${SEC_APPLY[ollama]:-}" = infra-reconcile ] || _fail "SEC_APPLY[ollama] should be infra-reconcile"
 _ok "SEC_APPLY[ollama]=infra-reconcile"
 
+[ "${SEC_APPLY[wireguard]:-}" = infra-reconcile ] || _fail "SEC_APPLY[wireguard] should be infra-reconcile"
+_ok "SEC_APPLY[wireguard]=infra-reconcile"
+
 apply_report="$(_cbox_config_apply_cmd_for infra-reconcile)"
 case "$apply_report" in
   *"cbox ollama reconcile"*) ;;
@@ -289,9 +371,9 @@ _ok "apply-cmd: infra-reconcile class names cbox ollama reconcile"
 
 declare -f _cbox_machine_scoped_vars >/dev/null || _fail "extraction failed: _cbox_machine_scoped_vars not defined"
 machine_vars="$(_cbox_machine_scoped_vars | sort)"
-expected_machine_vars="$(printf '%s\n' CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL | sort)"
-[ "$machine_vars" = "$expected_machine_vars" ] || _fail "_cbox_machine_scoped_vars: expected exactly the ollama vars, got: $machine_vars"
-_ok "_cbox_machine_scoped_vars: enumerates exactly SEC_VARS[ollama] (the only machine-scoped section)"
+expected_machine_vars="$(printf '%s\n' CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE | sort)"
+[ "$machine_vars" = "$expected_machine_vars" ] || _fail "_cbox_machine_scoped_vars: expected exactly the ollama+wireguard vars, got: $machine_vars"
+_ok "_cbox_machine_scoped_vars: enumerates exactly SEC_VARS[ollama] + SEC_VARS[wireguard] (the two machine-scoped sections)"
 
 CBOX_MODE=global
 _cbox_config_dep_gate CBOX_RESTART_POLICY >/dev/null 2>&1 || _fail "dep-gate: global mode should be unaffected (condition is isolated-mode)"

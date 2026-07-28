@@ -7,16 +7,17 @@ CONF="$INSTALL_DIR/cbox.conf"
 
 [ -f "$INSTALL_DIR/_common.sh" ] && . "$INSTALL_DIR/_common.sh"
 [ -f "$INSTALL_DIR/templates/generators.sh" ] && . "$INSTALL_DIR/templates/generators.sh"
-[ -f "$INSTALL_DIR/templates/conf_lib.sh" ] && . "$INSTALL_DIR/templates/conf_lib.sh"
-[ -f "$INSTALL_DIR/templates/validator_lib.sh" ] && . "$INSTALL_DIR/templates/validator_lib.sh"
-[ -f "$INSTALL_DIR/templates/validator_dispatch.sh" ] && . "$INSTALL_DIR/templates/validator_dispatch.sh"
 [ -f "$INSTALL_DIR/lib/cbox-ai.sh" ] && . "$INSTALL_DIR/lib/cbox-ai.sh"
 [ -f "$INSTALL_DIR/lib/cbox-session.sh" ] && . "$INSTALL_DIR/lib/cbox-session.sh"
 
 HAVE_GLOBAL_CONF=0
 if [ -f "$CONF" ]; then
   source "$CONF"
-  _cbox_reg_export_vars
+  export CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
+  export CBOX_HERMES CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME
+  export CBOX_HERMES_DELEGATE CBOX_HERMES_DELEGATE_PROVIDER CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL
+  export CBOX_HERMES_DELEGATE_MAX_CONCURRENCY CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC CBOX_HERMES_DELEGATE_LOCK_DIR OLLAMA_NUM_PARALLEL CBOX_HERMES_DELEGATE_MODE CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS
+  export CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL
   HAVE_GLOBAL_CONF=1
 fi
 
@@ -615,21 +616,19 @@ _cbox_ollama_reconcile_cmd() {
   local dir
   dir="$(_cbox_ollama_owner_dir)"
   mkdir -p "$dir"
-  if [ "${CBOX_OLLAMA_MODE:-off}" != on ] && ! _cbox_wg_active; then
+  if [ "${CBOX_OLLAMA_MODE:-off}" != on ]; then
     if [ -f "$dir/docker-compose.yml" ]; then
       _cbox_ollama_owner_compose down >/dev/null 2>&1 || true
     fi
-    gen_ollama_owner_compose_into "$dir"
+    CBOX_WG_MODE=off gen_ollama_owner_compose_into "$dir"
     gen_wireguard_conf
     rm -f "$dir/ownership.manifest"
     _cbox_ollama_gc_scope_networks_impl
     echo "cbox: ollama reconcile: mode is off - owner project torn down and de-rendered"
     return 0
   fi
-  if [ "${CBOX_OLLAMA_MODE:-off}" = on ]; then
-    _cbox_ollama_shared_store_guard || return 1
-    _cbox_ollama_adopt_or_refuse "$dir" || return 1
-  fi
+  _cbox_ollama_shared_store_guard || return 1
+  _cbox_ollama_adopt_or_refuse "$dir" || return 1
   if _cbox_wg_active; then
     [ -n "${CBOX_WG_ADDRESS:-}" ] || { echo "cbox: refusing - CBOX_WG_MODE=${CBOX_WG_MODE} but CBOX_WG_ADDRESS is empty; set it (this node's tunnel address in CIDR form) before bringing the sidecar up" >&2; return 1; }
     _cbox_wg_ensure_keys || return 1
@@ -643,11 +642,7 @@ _cbox_ollama_reconcile_cmd() {
   _cbox_ollama_manifest_write "$dir"
   _cbox_ollama_owner_compose up -d --remove-orphans
   _cbox_ollama_reconcile_networks_impl || echo "cbox: ollama reconcile: owner project is up but per-scope network reconciliation reported an error - run 'cbox ollama reconcile' again" >&2
-  if [ "${CBOX_OLLAMA_MODE:-off}" = on ]; then
-    echo "cbox: ollama reconcile: owner project $(_cbox_ollama_owner_name) applied at $dir"
-  else
-    echo "cbox: ollama reconcile: owner project $(_cbox_ollama_owner_name) applied at $dir (ollama off, wireguard sidecar only)"
-  fi
+  echo "cbox: ollama reconcile: owner project $(_cbox_ollama_owner_name) applied at $dir"
 }
 
 _cbox_ollama_up_cmd() {
@@ -686,13 +681,11 @@ _cbox_ollama_pull_cmd() {
   dir="$(_cbox_ollama_owner_dir)"
   [ -f "$dir/docker-compose.yml" ] || { echo "cbox: ollama owner project not rendered - run 'cbox ollama reconcile' first" >&2; return 1; }
   _cbox_ollama_shared_store_guard || return 1
-  local net container
+  local net
   net="cbox-ollama-pull-$(id -u)-$$-$(date +%s%N 2>/dev/null || echo 0)"
-  container="cbox-ollama-pull-$(id -u)-$$"
   echo "cbox: ollama pull: stopping the serving container for the duration of the pull (no permanent egress on the running server)" >&2
   _cbox_ollama_owner_compose stop ollama >/dev/null 2>&1 || true
   _restore_ollama() {
-    docker rm -f -- "$container" >/dev/null 2>&1 || true
     docker network rm -- "$net" >/dev/null 2>&1 || true
     _cbox_ollama_owner_compose up -d ollama >/dev/null 2>&1 || true
     _cbox_ollama_reconcile_networks_impl >/dev/null 2>&1 || true
@@ -704,21 +697,8 @@ _cbox_ollama_pull_cmd() {
     _restore_ollama
     return 1
   fi
-  if ! _cbox_ollama_owner_compose run -d --rm --no-deps --name "$container" -e OLLAMA_HOST=127.0.0.1:11434 --entrypoint sh ollama -c \
-    'ollama serve >/tmp/ollama-pull.log 2>&1; sleep infinity' >/dev/null 2>&1; then
-    echo "cbox: failed to start the temporary pull container" >&2
-    trap - EXIT INT TERM
-    _restore_ollama
-    return 1
-  fi
-  if ! docker network connect -- "$net" "$container" >/dev/null 2>&1; then
-    echo "cbox: failed to attach the temporary pull network to the pull container" >&2
-    trap - EXIT INT TERM
-    _restore_ollama
-    return 1
-  fi
-  docker exec -- "$container" sh -c \
-    'for i in $(seq 1 30); do curl -sf http://127.0.0.1:11434/ >/dev/null 2>&1 && break; sleep 1; done; ollama pull "$1"' \
+  _cbox_ollama_owner_compose run --rm --network "$net" -e OLLAMA_HOST=127.0.0.1:11434 --entrypoint sh ollama -c \
+    'ollama serve >/tmp/ollama-pull.log 2>&1 & for i in $(seq 1 30); do curl -sf http://127.0.0.1:11434/ >/dev/null 2>&1 && break; sleep 1; done; ollama pull "$1"' \
     cbox-pull "$model" || rc=$?
   trap - EXIT INT TERM
   _restore_ollama
@@ -815,7 +795,7 @@ _cbox_ollama_reconcile_one_scope() {
 }
 
 _cbox_ollama_disconnect_stale_scope_networks() {
-  local owner="$1" name endpoint_count endpoint_name
+  local owner="$1" name endpoint_count
   docker network ls --filter label=cbox.component=ollama-net --filter "label=cbox.owner=$owner" --format '{{.Name}}' 2>/dev/null | while IFS= read -r name; do
     [ -n "$name" ] || continue
     case "$name" in
@@ -823,9 +803,8 @@ _cbox_ollama_disconnect_stale_scope_networks() {
     esac
     endpoint_count="$(docker network inspect --format '{{len .Containers}}' -- "$name" 2>/dev/null)" || continue
     [ "${endpoint_count:-0}" = 1 ] || continue
-    endpoint_name="$(docker network inspect --format '{{range $k, $v := .Containers}}{{$v.Name}}{{"\n"}}{{end}}' -- "$name" 2>/dev/null | grep 'ollama' | head -n1)"
-    if [ -n "$endpoint_name" ]; then
-      docker network disconnect -- "$name" "$endpoint_name" >/dev/null 2>&1 || true
+    if docker network inspect --format '{{range $k, $v := .Containers}}{{$v.Name}}{{"\n"}}{{end}}' -- "$name" 2>/dev/null | grep -q 'ollama'; then
+      docker network disconnect -- "$name" ollama >/dev/null 2>&1 || true
     fi
   done
 }
@@ -2041,7 +2020,10 @@ _run_isolated() {
     exec 6> "$lockfile"
     flock -x 6 || { echo "cbox: cannot lock $lockfile" >&2; exit 1; }
     . "$eff/cbox.conf"
-    _cbox_reg_export_vars
+    export CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
+    export CBOX_HERMES CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME
+    export CBOX_HERMES_DELEGATE CBOX_HERMES_DELEGATE_PROVIDER CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL
+    export CBOX_HERMES_DELEGATE_MAX_CONCURRENCY CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC CBOX_HERMES_DELEGATE_LOCK_DIR OLLAMA_NUM_PARALLEL CBOX_HERMES_DELEGATE_MODE CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS
     _cbox_load_machine_scoped_vars
     _gen_effective "$eff" "$root"
     local slug
@@ -3105,107 +3087,10 @@ case "$("$p" --version 2>&1)" in *"$v"*) exit 0;; *) exit 1;; esac
 
   _cbox_verify_doc_coverage
   _cbox_verify_engines_registry
-  _cbox_verify_settings_registry
   _cbox_verify_netaccess_scope
 
   echo "== cbox verify: $VN tests, $VOK ok, $VFAIL failed, $VSKIP skipped =="
   [ "$VFAIL" -eq 0 ] || exit 1
-}
-
-_cbox_verify_settings_registry() {
-  local reg="$INSTALL_DIR/etc/registry/settings.json"
-  local py="$INSTALL_DIR/etc/registry/settings_registry.py"
-  local gen="$INSTALL_DIR/etc/registry/gen_sections_sh.py"
-  local sec="$INSTALL_DIR/templates/sections.sh"
-  v_t "settings registry: schema valid"
-  if [ ! -f "$reg" ]; then
-    v_fail "etc/registry/settings.json missing from an installed tree"
-    return 0
-  fi
-  if [ ! -f "$py" ]; then
-    v_skip "settings_registry.py not present (host-side check)"
-    return 0
-  fi
-  local msg
-  if msg="$(python3 "$py" validate "$reg" 2>&1)"; then
-    v_ok
-  else
-    v_fail "$msg"
-    return 0
-  fi
-
-  v_t "settings registry: templates/sections.sh is current (regenerating produces no diff)"
-  if [ ! -f "$sec" ]; then
-    v_fail "templates/sections.sh missing from an installed tree"
-    return 0
-  fi
-  if [ ! -f "$gen" ]; then
-    v_skip "gen_sections_sh.py not present (host-side check)"
-    return 0
-  fi
-  local gen_out gen_diff
-  gen_out="$(mktemp)"
-  if ! python3 "$gen" "$reg" "$gen_out" 2>&1; then
-    v_fail "generator crashed"
-    rm -f "$gen_out"
-    return 0
-  fi
-  if gen_diff="$(diff -u "$sec" "$gen_out" 2>&1)"; then
-    v_ok
-  else
-    v_fail "templates/sections.sh is stale relative to etc/registry/settings.json - regenerate it"
-  fi
-  rm -f "$gen_out"
-
-  local gen_conf="$INSTALL_DIR/etc/registry/gen_conf_lib.py"
-  local conf_lib="$INSTALL_DIR/templates/conf_lib.sh"
-  v_t "settings registry: templates/conf_lib.sh is current (regenerating produces no diff)"
-  if [ ! -f "$conf_lib" ]; then
-    v_fail "templates/conf_lib.sh missing from an installed tree"
-    return 0
-  fi
-  if [ ! -f "$gen_conf" ]; then
-    v_skip "gen_conf_lib.py not present (host-side check)"
-    return 0
-  fi
-  local gen_conf_out
-  gen_conf_out="$(mktemp)"
-  if ! python3 "$gen_conf" "$reg" "$gen_conf_out" 2>&1; then
-    v_fail "generator crashed"
-    rm -f "$gen_conf_out"
-    return 0
-  fi
-  if diff -u "$conf_lib" "$gen_conf_out" >/dev/null 2>&1; then
-    v_ok
-  else
-    v_fail "templates/conf_lib.sh is stale relative to etc/registry/settings.json - regenerate it"
-  fi
-  rm -f "$gen_conf_out"
-
-  local gen_val="$INSTALL_DIR/etc/registry/gen_validators.py"
-  local val_dispatch="$INSTALL_DIR/templates/validator_dispatch.sh"
-  v_t "settings registry: templates/validator_dispatch.sh is current (regenerating produces no diff)"
-  if [ ! -f "$val_dispatch" ]; then
-    v_fail "templates/validator_dispatch.sh missing from an installed tree"
-    return 0
-  fi
-  if [ ! -f "$gen_val" ]; then
-    v_skip "gen_validators.py not present (host-side check)"
-    return 0
-  fi
-  local gen_val_out
-  gen_val_out="$(mktemp)"
-  if ! python3 "$gen_val" "$reg" "$gen_val_out" 2>&1; then
-    v_fail "generator crashed"
-    rm -f "$gen_val_out"
-    return 0
-  fi
-  if diff -u "$val_dispatch" "$gen_val_out" >/dev/null 2>&1; then
-    v_ok
-  else
-    v_fail "templates/validator_dispatch.sh is stale relative to etc/registry/settings.json - regenerate it"
-  fi
-  rm -f "$gen_val_out"
 }
 
 _cbox_verify_engines_registry() {
@@ -3780,7 +3665,6 @@ done
   fi
 
   _cbox_verify_engines_registry
-  _cbox_verify_settings_registry
 
   echo "== cbox verify: $VN tests, $VOK ok, $VFAIL failed, $VSKIP skipped =="
   [ "$VFAIL" -eq 0 ] || exit 1
@@ -4237,13 +4121,6 @@ _cbox_config_load_sections() {
   . "$sec"
 }
 
-_cbox_config_load_conf_lib() {
-  declare -f _cbox_reg_conf_write_whitelist >/dev/null 2>&1 && return 0
-  local lib="$INSTALL_DIR/templates/conf_lib.sh"
-  [ -f "$lib" ] || die "$lib missing"
-  . "$lib"
-}
-
 _cbox_config_in_container() {
   _cbox_doctor_in_container
 }
@@ -4285,14 +4162,332 @@ _cbox_config_section_for_var() {
   return 1
 }
 
-_cbox_config_load_validators() {
-  declare -f _cbox_val_no_ctrl >/dev/null 2>&1 || . "$INSTALL_DIR/templates/validator_lib.sh"
-  declare -f _cbox_reg_validate_var >/dev/null 2>&1 || . "$INSTALL_DIR/templates/validator_dispatch.sh"
+_cbox_config_no_ctrl() {
+  local val="$1" c i
+  case "$val" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  for ((i = 0; i < ${#val}; i++)); do
+    c="${val:i:1}"
+    case "$c" in
+      $'\x00'|$'\x01'|$'\x02'|$'\x03'|$'\x04'|$'\x05'|$'\x06'|$'\x07'|$'\x08'|\
+      $'\x0b'|$'\x0c'|$'\x0e'|$'\x0f'|$'\x10'|$'\x11'|$'\x12'|$'\x13'|$'\x14'|\
+      $'\x15'|$'\x16'|$'\x17'|$'\x18'|$'\x19'|$'\x1a'|$'\x1b'|$'\x1c'|$'\x1d'|\
+      $'\x1e'|$'\x1f')
+        return 1
+        ;;
+    esac
+  done
+  return 0
+}
+
+_cbox_config_validate_enum() {
+  local val="$1"; shift
+  local a
+  for a in "$@"; do
+    [ "$val" = "$a" ] && return 0
+  done
+  return 1
+}
+
+_cbox_config_validate_uint() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  return 0
+}
+
+_cbox_config_validate_path() {
+  case "$1" in
+    ''|*[!\ -~]*) return 1 ;;
+    *' '*) return 1 ;;
+    /*) return 0 ;;
+    '~'|'~/'*) return 0 ;;
+  esac
+  return 1
+}
+
+_cbox_config_validate_url() {
+  case "$1" in
+    http://*|https://*) return 0 ;;
+  esac
+  return 1
 }
 
 _cbox_config_validate_var() {
-  _cbox_config_load_validators
-  _cbox_reg_validate_var "$1" "$2"
+  local key="$1" val="$2"
+  _cbox_config_no_ctrl "$val" || { printf 'contains a control character'; return 1; }
+  case "$key" in
+    CBOX_MODE)
+      _cbox_config_validate_enum "$val" global isolated || { printf 'expected one of: global isolated'; return 1; }
+      ;;
+    CBOX_SESSION_SCOPE)
+      _cbox_config_validate_enum "$val" isolated global || { printf 'expected one of: isolated global'; return 1; }
+      ;;
+    CBOX_BASE_DIGEST_TTL)
+      _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer (seconds)'; return 1; }
+      ;;
+    CBOX_CLAUDE_MODE|CBOX_CODEX_MODE)
+      _cbox_config_validate_enum "$val" mount volume || { printf 'expected one of: mount volume'; return 1; }
+      ;;
+    CBOX_CLAUDE_PATH|CBOX_CODEX_PATH|CBOX_VENV_PATH|CBOX_SSH_AGENT_DIR)
+      [ -z "$val" ] || _cbox_config_validate_path "$val" || { printf 'expected an absolute path (or empty)'; return 1; }
+      ;;
+    CBOX_CLAUDE_BACKUP|CBOX_CODEX_BACKUP)
+      _cbox_config_validate_enum "$val" y c n || { printf 'expected one of: y c n'; return 1; }
+      ;;
+    CBOX_WORKSPACES)
+      local w
+      for w in $val; do
+        _cbox_config_validate_path "$w" || { printf 'workspace entries must be absolute paths: %s' "$w"; return 1; }
+      done
+      ;;
+    CBOX_WORKDIR)
+      [ -z "$val" ] || _cbox_config_validate_path "$val" || { printf 'expected an absolute path (or empty)'; return 1; }
+      ;;
+    CBOX_VENV_MODE)
+      _cbox_config_validate_enum "$val" none host volume || { printf 'expected one of: none host volume'; return 1; }
+      ;;
+    CBOX_GPU)
+      _cbox_config_validate_enum "$val" 0 1 || { printf 'expected one of: 0 1'; return 1; }
+      ;;
+    CBOX_EGRESS_MODE)
+      _cbox_config_validate_enum "$val" off allowlist blocklist || { printf 'expected one of: off allowlist blocklist'; return 1; }
+      ;;
+    CBOX_EGRESS_APPLIED)
+      _cbox_config_validate_enum "$val" 0 1 || { printf 'expected one of: 0 1'; return 1; }
+      ;;
+    CBOX_NETACCESS_MODE)
+      _cbox_config_validate_enum "$val" off socks || { printf 'expected one of: off socks'; return 1; }
+      ;;
+    CBOX_NETACCESS_APPLIED)
+      _cbox_config_validate_enum "$val" 0 1 || { printf 'expected one of: 0 1'; return 1; }
+      ;;
+    CBOX_NETACCESS_NETWORKS)
+      local n
+      for n in $val; do
+        case "$n" in
+          [A-Za-z0-9]*) ;;
+          *) printf 'invalid network name: %s' "$n"; return 1 ;;
+        esac
+        case "$n" in
+          *[!A-Za-z0-9_.-]*) printf 'invalid network name: %s' "$n"; return 1 ;;
+        esac
+      done
+      ;;
+    CBOX_NETACCESS_CIDRS)
+      command -v _cbox_is_ipv4_cidr >/dev/null 2>&1 || . "$INSTALL_DIR/templates/generators.sh"
+      local c
+      for c in $val; do
+        if ! _cbox_is_ipv4_cidr "$c" || [ "${c%/*}" = "0.0.0.0" ]; then
+          printf 'invalid IPv4 CIDR: %s' "$c"; return 1
+        fi
+        if [ "${c#*/}" -lt 8 ]; then
+          printf 'prefix too broad (minimum /8): %s' "$c"; return 1
+        fi
+      done
+      ;;
+    CBOX_NETACCESS_SOCKS_PORT)
+      _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer (port)'; return 1; }
+      [ "$val" -ge 1 ] && [ "$val" -le 65535 ] || { printf 'expected port 1..65535'; return 1; }
+      ;;
+    CBOX_NETACCESS_EXEC_MODE)
+      _cbox_config_validate_enum "$val" off scoped || { printf 'expected one of: off scoped'; return 1; }
+      ;;
+    CBOX_NETACCESS_EXEC_WORKSPACE_GUARD)
+      _cbox_config_validate_enum "$val" off on || { printf 'expected one of: off on'; return 1; }
+      ;;
+    CBOX_NETACCESS_EXEC_TIMEOUT)
+      _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer'; return 1; }
+      [ "$val" -ge 1 ] && [ "$val" -le 3600 ] || { printf 'expected integer 1..3600'; return 1; }
+      ;;
+    CBOX_NETACCESS_EXEC_MAX_BYTES)
+      _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer'; return 1; }
+      [ "$val" -ge 1024 ] && [ "$val" -le 16777216 ] || { printf 'expected integer 1024..16777216'; return 1; }
+      ;;
+    CBOX_HOST_ROUTE_MODE)
+      _cbox_config_validate_enum "$val" off host-proxy || { printf 'expected one of: off host-proxy'; return 1; }
+      ;;
+    CBOX_HOST_ROUTE_APPLIED)
+      _cbox_config_validate_enum "$val" 0 1 || { printf 'expected one of: 0 1'; return 1; }
+      ;;
+    CBOX_HOST_PROXY_URL)
+      [ -z "$val" ] || _cbox_config_validate_url "$val" || { printf 'expected an http(s):// URL (or empty)'; return 1; }
+      ;;
+    CBOX_HOST_PROXY_ADDR_MODE)
+      _cbox_config_validate_enum "$val" host-gateway explicit || { printf 'expected one of: host-gateway explicit'; return 1; }
+      ;;
+    CBOX_HOST_GATEWAY_ALIAS)
+      _cbox_config_validate_enum "$val" off on || { printf 'expected one of: off on'; return 1; }
+      ;;
+    CBOX_SSH_MODE)
+      _cbox_config_validate_enum "$val" none host-agent container-keys mixed || { printf 'expected one of: none host-agent container-keys mixed'; return 1; }
+      ;;
+    CBOX_BASHRC)
+      _cbox_config_validate_enum "$val" 0 1 || { printf 'expected one of: 0 1'; return 1; }
+      ;;
+    CBOX_MCP_SERVERS|CBOX_AGENTS)
+      : ;;
+    CBOX_CODEX_PROGRESS_MODE)
+      _cbox_config_validate_enum "$val" off shim || { printf 'expected one of: off shim'; return 1; }
+      ;;
+    CBOX_LOCAL_MODEL)
+      _cbox_config_validate_enum "$val" off on || { printf 'expected one of: off on'; return 1; }
+      ;;
+    CBOX_LOCAL_MODEL_URL)
+      [ -z "$val" ] || _cbox_config_validate_url "$val" || { printf 'expected an http(s):// URL (or empty)'; return 1; }
+      ;;
+    CBOX_LOCAL_MODEL_NAME)
+      : ;;
+    CBOX_HERMES)
+      _cbox_config_validate_enum "$val" off on || { printf 'expected one of: off on'; return 1; }
+      ;;
+    CBOX_HERMES_VERSION)
+      [ "$val" = latest ] || printf '%s' "$val" | grep -Eq '^[0-9]+([.][0-9]+){1,3}$' \
+        || { printf 'expected latest or a plain x.y[.z[.w]] version'; return 1; }
+      ;;
+    CBOX_HERMES_PROVIDER)
+      _cbox_config_validate_enum "$val" local nous openrouter openai anthropic || { printf 'expected one of: local nous openrouter openai anthropic'; return 1; }
+      ;;
+    CBOX_HERMES_MODEL_URL)
+      [ -z "$val" ] || _cbox_config_validate_url "$val" || { printf 'expected an http(s):// URL (or empty)'; return 1; }
+      ;;
+    CBOX_HERMES_MODEL_NAME)
+      : ;;
+    CBOX_HERMES_DELEGATE)
+      _cbox_config_validate_enum "$val" off on || { printf 'expected one of: off on'; return 1; }
+      ;;
+    CBOX_HERMES_DELEGATE_PROVIDER)
+      [ -z "$val" ] || _cbox_config_validate_enum "$val" local nous openrouter openai anthropic || { printf 'expected one of: local nous openrouter openai anthropic (or empty)'; return 1; }
+      ;;
+    CBOX_HERMES_DELEGATE_BASE_URL)
+      [ -z "$val" ] || _cbox_config_validate_url "$val" || { printf 'expected an http(s):// URL (or empty)'; return 1; }
+      ;;
+    CBOX_HERMES_DELEGATE_MODEL)
+      : ;;
+    CBOX_HERMES_DELEGATE_MAX_CONCURRENCY)
+      _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer'; return 1; }
+      [ "$val" -ge 0 ] && [ "$val" -le 16 ] || { printf 'expected integer 0..16'; return 1; }
+      ;;
+    CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC)
+      [ -z "$val" ] || _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer (or empty)'; return 1; }
+      ;;
+    CBOX_HERMES_DELEGATE_LOCK_DIR)
+      [ -z "$val" ] || case "$val" in
+        /*) : ;;
+        *) printf 'expected an absolute path (or empty)'; return 1 ;;
+      esac
+      ;;
+    OLLAMA_NUM_PARALLEL)
+      [ -z "$val" ] || _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer (or empty)'; return 1; }
+      ;;
+    CBOX_HERMES_DELEGATE_MODE)
+      [ -z "$val" ] || _cbox_config_validate_enum "$val" qa || { printf 'expected one of: qa (or empty)'; return 1; }
+      ;;
+    CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS)
+      : ;;
+    CBOX_LIMIT_AUTORESUME)
+      _cbox_config_validate_enum "$val" off on || { printf 'expected one of: off on'; return 1; }
+      ;;
+    CBOX_LIMIT_RESUME_DELAY|CBOX_LIMIT_RESUME_STAGGER|CBOX_LIMIT_RESUME_MAX_PER_DAY)
+      _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer'; return 1; }
+      ;;
+    CBOX_LIMIT_RESUME_PROMPT)
+      [ -n "$val" ] || { printf 'must not be empty'; return 1; }
+      ;;
+    CBOX_CODEX_MCP)
+      _cbox_config_validate_enum "$val" 0 1 || { printf 'expected one of: 0 1'; return 1; }
+      ;;
+    CBOX_HISTORY|CBOX_GIT|CBOX_DIARY|CBOX_OPEN_QUESTIONS)
+      _cbox_config_validate_enum "$val" 0 1 || { printf 'expected one of: 0 1'; return 1; }
+      ;;
+    CBOX_CONTEXT_PROFILE)
+      _cbox_config_validate_enum "$val" full light || { printf 'expected one of: full light'; return 1; }
+      ;;
+    CBOX_GITCONFIG)
+      _cbox_config_validate_enum "$val" 0 1 || { printf 'expected one of: 0 1'; return 1; }
+      ;;
+    CBOX_APT_EXTRA)
+      local p
+      for p in $val; do
+        case "$p" in
+          *[!A-Za-z0-9.+-]*|[.+-]*) printf 'invalid package name: %s' "$p"; return 1 ;;
+        esac
+      done
+      ;;
+    CBOX_CLAUDE_TARGET)
+      printf '%s' "$val" | grep -Eq '^(stable|latest|[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?)$' || { printf 'expected stable, latest, or x.y.z'; return 1; }
+      ;;
+    CBOX_CODEX_VERSION)
+      printf '%s' "$val" | grep -Eq '^(latest|[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta)(\.[0-9]+)?)?)$' || { printf 'expected latest or x.y.z'; return 1; }
+      ;;
+    CBOX_CODEX_TARGET)
+      : ;;
+    CBOX_BINS_SCOPE)
+      _cbox_config_validate_enum "$val" global pinned || { printf 'expected one of: global pinned'; return 1; }
+      ;;
+    CBOX_RESTART_POLICY)
+      _cbox_config_validate_enum "$val" no unless-stopped || { printf 'expected one of: no unless-stopped'; return 1; }
+      ;;
+    CBOX_OLLAMA_MODE)
+      _cbox_config_validate_enum "$val" off on || { printf 'expected one of: off on'; return 1; }
+      ;;
+    CBOX_OLLAMA_IMAGE)
+      [ -n "$val" ] || { printf 'must not be empty'; return 1; }
+      printf '%s' "$val" | grep -Eq '^[A-Za-z0-9._:/@-]+$' || { printf 'expected an image reference matching [A-Za-z0-9._:/@-]+'; return 1; }
+      ;;
+    CBOX_OLLAMA_GPU)
+      _cbox_config_validate_enum "$val" off cdi || { printf 'expected one of: off cdi'; return 1; }
+      ;;
+    CBOX_OLLAMA_STORE)
+      _cbox_config_validate_enum "$val" dedicated shared || { printf 'expected one of: dedicated shared'; return 1; }
+      ;;
+    CBOX_OLLAMA_STORE_PATH)
+      [ -z "$val" ] || _cbox_config_validate_path "$val" || { printf 'expected an absolute path (or empty)'; return 1; }
+      ;;
+    CBOX_OLLAMA_PORT)
+      _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer (port)'; return 1; }
+      [ "$val" -ge 1 ] && [ "$val" -le 65535 ] || { printf 'expected port 1..65535'; return 1; }
+      ;;
+    CBOX_OLLAMA_NUM_PARALLEL)
+      _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer'; return 1; }
+      [ "$val" -ge 1 ] || { printf 'expected an integer of at least 1'; return 1; }
+      ;;
+    CBOX_WG_MODE)
+      _cbox_config_validate_enum "$val" off server client both || { printf 'expected one of: off server client both'; return 1; }
+      ;;
+    CBOX_WG_IMPL)
+      _cbox_config_validate_enum "$val" auto kernel userspace || { printf 'expected one of: auto kernel userspace'; return 1; }
+      ;;
+    CBOX_WG_ADDRESS)
+      [ -z "$val" ] || _cbox_is_ipv4_cidr "$val" || { printf 'expected an IPv4 address with a prefix length (e.g. 10.90.0.1/24), or empty'; return 1; }
+      [ -z "$val" ] || [ "${val#*/}" -ge 8 ] || { printf 'expected a prefix length of /8 or narrower - a wider prefix would install a broad or default route on the tunnel interface'; return 1; }
+      ;;
+    CBOX_WG_LISTEN_PORT)
+      _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer (port)'; return 1; }
+      [ "$val" -ge 1 ] && [ "$val" -le 65535 ] || { printf 'expected port 1..65535'; return 1; }
+      ;;
+    CBOX_WG_PUBLISH_ADDR)
+      [ -z "$val" ] || _cbox_is_ipv4 "$val" || { printf 'expected a literal IPv4 address, or empty for all addresses'; return 1; }
+      ;;
+    CBOX_WG_PEER_ENDPOINT)
+      [ -z "$val" ] || _cbox_wg_hostport_ok "$val" || { printf 'expected host:port'; return 1; }
+      ;;
+    CBOX_WG_PEER_PUBKEY)
+      [ -z "$val" ] || _cbox_wg_pubkey_ok "$val" || { printf 'expected a 44-character base64 WireGuard public key, or empty'; return 1; }
+      ;;
+    CBOX_WG_PEER_ADDRESS)
+      [ -z "$val" ] || _cbox_is_ipv4_cidr "$val" || { printf 'expected an IPv4 address with a prefix length, or empty'; return 1; }
+      [ -z "$val" ] || [ "${val#*/}" -eq 32 ] || { printf 'expected a single host address (/32) - a wider AllowedIPs would route more than the remote endpoint over the tunnel'; return 1; }
+      ;;
+    CBOX_WG_KEEPALIVE)
+      _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer (seconds, 0 disables)'; return 1; }
+      ;;
+    *)
+      printf 'no validator registered for %s' "$key"; return 1
+      ;;
+  esac
+  return 0
 }
 
 _cbox_config_dep_gate() {
@@ -4506,7 +4701,6 @@ _cbox_config_set() {
   [ "$#" -ge 1 ] || { echo "cbox: usage: $0 config set KEY=VALUE [KEY=VALUE...]" >&2; return 1; }
 
   _cbox_config_load_sections
-  _cbox_config_load_conf_lib
   _cbox_config_parse_pairs "$@" || return 1
 
   local i key val errmsg
@@ -4611,9 +4805,26 @@ _cbox_config_set_isolated() {
     . "$eff/cbox.conf"
     _cbox_config_apply_staged_vars
     _cbox_config_dep_gate_check
-    _cbox_reg_conf_write_whitelist "$eff/cbox.conf" 1 "$eff/cbox.conf"
+    local tmp
+    tmp="$(mktemp "$eff/.cbox.XXXXXX")"
+    {
+      local v machine_scoped
+      machine_scoped=" $(_cbox_machine_scoped_vars | tr '\n' ' ') "
+      for v in $(_cbox_config_whitelist); do
+        case "$machine_scoped" in
+          *" $v "*) continue ;;
+        esac
+        printf '%s=%q\n' "$v" "${!v-}"
+      done
+      _cbox_config_preserve_extra_lines "$eff/cbox.conf"
+    } > "$tmp"
+    chmod 0644 "$tmp"
+    mv "$tmp" "$eff/cbox.conf"
     . "$eff/cbox.conf"
-    _cbox_reg_export_vars
+    export CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
+    export CBOX_HERMES CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME
+    export CBOX_HERMES_DELEGATE CBOX_HERMES_DELEGATE_PROVIDER CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL
+    export CBOX_HERMES_DELEGATE_MAX_CONCURRENCY CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC CBOX_HERMES_DELEGATE_LOCK_DIR OLLAMA_NUM_PARALLEL CBOX_HERMES_DELEGATE_MODE CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS
     _cbox_load_machine_scoped_vars
     _cbox_config_regen_isolated "$eff" "$root"
   ) || rc=$?
@@ -4685,7 +4896,13 @@ _cbox_config_set_global() {
     fi
     local tmp
     tmp="$(mktemp "$INSTALL_DIR/.cbox.XXXXXX")"
-    _cbox_reg_conf_write_whitelist "$tmp" 0 "$conf"
+    {
+      local v
+      for v in $(_cbox_config_whitelist); do
+        printf '%s=%q\n' "$v" "${!v-}"
+      done
+      _cbox_config_preserve_extra_lines "$conf"
+    } > "$tmp"
     cur_sha="$(sha256sum "$conf" | awk '{print $1}')"
     if [ "$cur_sha" != "$loaded_sha" ]; then
       rm -f "$tmp"
@@ -4695,7 +4912,10 @@ _cbox_config_set_global() {
     chmod 0644 "$tmp"
     mv "$tmp" "$conf"
     . "$conf"
-    _cbox_reg_export_vars
+    export CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
+    export CBOX_HERMES CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME
+    export CBOX_HERMES_DELEGATE CBOX_HERMES_DELEGATE_PROVIDER CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL
+    export CBOX_HERMES_DELEGATE_MAX_CONCURRENCY CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC CBOX_HERMES_DELEGATE_LOCK_DIR OLLAMA_NUM_PARALLEL CBOX_HERMES_DELEGATE_MODE CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS
     _cbox_config_regen_global
   ) || rc=$?
 

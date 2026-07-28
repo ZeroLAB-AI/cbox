@@ -561,14 +561,34 @@ gates = sorted({
 print(" ".join(gates))
 ' "$INSTALL_DIR/etc/mcp/delegates.json")"
   [ -n "$gates" ] || _fail "no enabled_when_env gates found in delegates.json - test fixture assumption broken"
+  local conf_lib="$INSTALL_DIR/templates/conf_lib.sh"
+  [ -f "$conf_lib" ] || _fail "templates/conf_lib.sh not found"
+  local reg_export_vars
+  reg_export_vars="$(awk '
+    /^_cbox_reg_export_vars\(\) \{/ { infunc=1; next }
+    infunc && /^\}/ { infunc=0 }
+    infunc { print }
+  ' "$conf_lib" | grep -Eo '^[[:space:]]*export[[:space:]]+.*' | sed -E 's/^[[:space:]]*export[[:space:]]+//')"
   local gate f
   for gate in $gates; do
+    local reachable_via_reg=0
+    case " $reg_export_vars " in
+      *" $gate "*) reachable_via_reg=1 ;;
+    esac
     for f in "$INSTALL_DIR/setup.sh" "$INSTALL_DIR/cbox"; do
-      grep -Eq "^[[:space:]]*export[[:space:]]+([A-Z0-9_]+[[:space:]]+)*${gate}([[:space:]]|\$)" "$f" \
-        || _fail "gate var $gate (from delegates.json enabled_when_env) is never exported in $f - it will be silently absent from os.environ when render_mcp.py runs, and the delegate it gates will be silently dead in every real flow"
+      local direct=0 calls_reg=0
+      grep -Eq "^[[:space:]]*export[[:space:]]+([A-Z0-9_]+[[:space:]]+)*${gate}([[:space:]]|\$)" "$f" && direct=1
+      grep -Eq "_cbox_reg_export_vars" "$f" && calls_reg=1
+      if [ "$direct" = 1 ]; then
+        continue
+      fi
+      if [ "$calls_reg" = 1 ] && [ "$reachable_via_reg" = 1 ]; then
+        continue
+      fi
+      _fail "gate var $gate (from delegates.json enabled_when_env): $f neither exports it directly nor calls _cbox_reg_export_vars while templates/conf_lib.sh's _cbox_reg_export_vars actually exports it"
     done
   done
-  echo "PASS: every enabled_when_env gate in delegates.json is exported at least once in both setup.sh and cbox"
+  echo "PASS: every enabled_when_env gate in delegates.json is exported at least once (directly, or via a _cbox_reg_export_vars call whose generated export list actually contains the gate) reachable from both setup.sh and cbox"
 }
 
 test_render_byte_identity_progress_off

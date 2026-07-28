@@ -623,6 +623,9 @@ _cbox_no_proxy_hosts() {
   if [ "${CBOX_OLLAMA_MODE:-off}" = on ]; then
     hosts+=("ollama")
   fi
+  if _cbox_wg_active && _cbox_wg_client_role; then
+    hosts+=("$(_cbox_wg_client_alias)")
+  fi
   if ! _cbox_egress_active; then
     for u in "${CBOX_LOCAL_MODEL_URL:-}" "${CBOX_HERMES_MODEL_URL:-}" "${CBOX_HERMES_DELEGATE_BASE_URL:-}"; do
       h="$(_cbox_url_host "$u")"
@@ -1553,6 +1556,42 @@ _cbox_is_ipv4_cidr() {
   [ "$prefix" -ge 0 ] && [ "$prefix" -le 32 ]
 }
 
+_cbox_wg_hostport_ok() {
+  local hp="$1" host port
+  case "$hp" in
+    *:*) ;;
+    *) return 1 ;;
+  esac
+  port="${hp##*:}"
+  host="${hp%:*}"
+  [ -n "$host" ] || return 1
+  case "$port" in
+    ""|*[!0-9]*) return 1 ;;
+  esac
+  [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
+  case "$host" in
+    *[!A-Za-z0-9.-]*) return 1 ;;
+    ""|.*|*.|*..*) return 1 ;;
+  esac
+  return 0
+}
+
+_cbox_wg_pubkey_ok() {
+  local key="$1"
+  [ "${#key}" -eq 44 ] || return 1
+  case "$key" in
+    *[!A-Za-z0-9+/=]*) return 1 ;;
+  esac
+  case "$key" in
+    *=) ;;
+    *) return 1 ;;
+  esac
+  case "${key%=}" in
+    *=*) return 1 ;;
+  esac
+  return 0
+}
+
 gen_sockd_conf_into() {
   local effdir="$1" internal_ip="$2" internal_cidr="$3" targets_spec="${4:-}"
   local port="${CBOX_NETACCESS_SOCKS_PORT:-1080}"
@@ -2401,8 +2440,9 @@ _cbox_ollama_store_path() {
 gen_ollama_owner_compose_into() {
   local dir="$1"
   local mode="${CBOX_OLLAMA_MODE:-off}"
-  if [ "$mode" != on ]; then
+  if [ "$mode" != on ] && ! _cbox_wg_active; then
     rm -f "$dir/docker-compose.yml" "$dir/docker-compose.gpu.yml"
+    rm -rf "$dir/wireguard-build"
     return 0
   fi
   local image="${CBOX_OLLAMA_IMAGE:-ollama/ollama:0.32.5}"
@@ -2421,6 +2461,9 @@ gen_ollama_owner_compose_into() {
   cat > "$tmp" <<EOF
 name: "$name"
 services:
+EOF
+  if [ "$mode" = on ]; then
+    cat >> "$tmp" <<EOF
   ollama:
     image: "$image"
     restart: "$restart_policy"
@@ -2437,19 +2480,21 @@ services:
       start_period: 15s
       retries: 5
 EOF
-  if [ "$store" = shared ]; then
-    store_path="${CBOX_OLLAMA_STORE_PATH:-}/models"
-    cat >> "$tmp" <<EOF
+    if [ "$store" = shared ]; then
+      store_path="${CBOX_OLLAMA_STORE_PATH:-}/models"
+      cat >> "$tmp" <<EOF
     user: "$(id -u):$(id -g)"
     volumes:
       - "$store_path:/root/.ollama/models"
 EOF
-  else
-    cat >> "$tmp" <<EOF
+    else
+      cat >> "$tmp" <<EOF
     volumes:
       - cbox-ollama-u$(id -u)-store:/root/.ollama
 EOF
+    fi
   fi
+  _cbox_wg_owner_service_into "$tmp" "$name" "$owner_dir" || { rm -f "$tmp"; return 1; }
   cat >> "$tmp" <<EOF
 networks:
   default:
@@ -2459,7 +2504,17 @@ networks:
       cbox.component: ollama-net
       cbox.owner: $name
 EOF
-  if [ "$store" != shared ]; then
+  if _cbox_wg_active; then
+    cat >> "$tmp" <<EOF
+  wg-egress:
+    internal: false
+    labels:
+      cbox.kind: infra
+      cbox.component: wireguard-net
+      cbox.owner: $name
+EOF
+  fi
+  if [ "$mode" = on ] && [ "$store" != shared ]; then
     cat >> "$tmp" <<EOF
 volumes:
   cbox-ollama-u$(id -u)-store: {}
@@ -2468,6 +2523,78 @@ EOF
   chmod 0644 "$tmp"
   mv "$tmp" "$owner_dir/docker-compose.yml"
   gen_ollama_owner_gpu_into "$owner_dir"
+}
+
+_cbox_wg_owner_service_into() {
+  local tmp="$1" name="$2" owner_dir="$3"
+  if ! _cbox_wg_active; then
+    rm -rf "$owner_dir/wireguard-build"
+    return 0
+  fi
+  if command -v _cbox_config_validate_var >/dev/null 2>&1; then
+    local _wg_var _wg_err
+    for _wg_var in CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE; do
+      _wg_err="$(_cbox_config_validate_var "$_wg_var" "$(eval "printf '%s' \"\${$_wg_var:-}\"")" 2>&1)" || {
+        echo "cbox: refusing to render the wireguard sidecar - $_wg_var is invalid: $_wg_err" >&2
+        return 1
+      }
+    done
+  fi
+  local wg_dir wg_hash publish_addr listen_port alias
+  wg_dir="$owner_dir/wireguard-build"
+  mkdir -p "$wg_dir"
+  gen_dockerfile_wireguard_into "$wg_dir"
+  gen_supervisord_wireguard_conf_into "$wg_dir"
+  gen_wireguard_up_script_into "$wg_dir"
+  wg_hash="$(cat "$wg_dir/Dockerfile.wireguard" "$wg_dir/supervisord.wireguard.conf" "$wg_dir/wg-up.sh" 2>/dev/null | sha256sum | awk '{print substr($1,1,12)}')"
+  publish_addr="${CBOX_WG_PUBLISH_ADDR:-}"
+  if _cbox_wg_server_role && [ -z "$publish_addr" ]; then
+    echo "cbox: refusing to render the wireguard sidecar - CBOX_WG_MODE is '${CBOX_WG_MODE:-off}' but CBOX_WG_PUBLISH_ADDR is empty, and this feature never picks the bind address for you. Set it to the address peers reach this machine on (for example a tunnel or LAN address), or set it to 0.0.0.0 if you really mean every interface." >&2
+    return 1
+  fi
+  listen_port="${CBOX_WG_LISTEN_PORT:-51820}"
+  alias="$(_cbox_wg_client_alias)"
+  cat >> "$tmp" <<EOF
+  wireguard:
+    build:
+      context: $wg_dir
+      dockerfile: Dockerfile.wireguard
+    image: cbox-wg-img:$wg_hash
+    restart: "unless-stopped"
+    labels:
+      cbox.kind: infra
+      cbox.component: wireguard
+      cbox.owner: $name
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - CBOX_WG_IMPL=${CBOX_WG_IMPL:-auto}
+    volumes:
+      - $HOME/.config/cbox/infra/wireguard:/etc/cbox-generated/wireguard:ro
+    networks:
+EOF
+  if _cbox_wg_client_role; then
+    cat >> "$tmp" <<EOF
+      default:
+        aliases:
+          - $alias
+EOF
+  else
+    cat >> "$tmp" <<EOF
+      default: {}
+EOF
+  fi
+  cat >> "$tmp" <<EOF
+      wg-egress: {}
+EOF
+  if _cbox_wg_server_role; then
+    cat >> "$tmp" <<EOF
+    ports:
+      - "$publish_addr:$listen_port:$listen_port/udp"
+EOF
+  fi
 }
 
 gen_ollama_owner_gpu_into() {
@@ -2489,6 +2616,12 @@ services:
 EOF
 }
 
+_cbox_ollama_manifest_peers_hash() {
+  local out
+  out="$(_cbox_wg_peer_list 2>/dev/null | sort | sha256sum | awk '{print $1}')" || return 1
+  printf '%s' "$out"
+}
+
 _cbox_ollama_manifest_write() {
   local dir="$1" name image store store_path gpu port
   name="$(_cbox_ollama_owner_name)"
@@ -2506,6 +2639,16 @@ _cbox_ollama_manifest_write() {
     printf 'store_path=%s\n' "$store_path"
     printf 'gpu=%s\n' "$gpu"
     printf 'port=%s\n' "$port"
+    printf 'wg_mode=%s\n' "${CBOX_WG_MODE:-off}"
+    printf 'wg_impl=%s\n' "${CBOX_WG_IMPL:-auto}"
+    printf 'wg_address=%s\n' "${CBOX_WG_ADDRESS:-}"
+    printf 'wg_listen_port=%s\n' "${CBOX_WG_LISTEN_PORT:-51820}"
+    printf 'wg_publish_addr=%s\n' "${CBOX_WG_PUBLISH_ADDR:-}"
+    printf 'wg_peer_endpoint=%s\n' "${CBOX_WG_PEER_ENDPOINT:-}"
+    printf 'wg_peer_pubkey=%s\n' "${CBOX_WG_PEER_PUBKEY:-}"
+    printf 'wg_peer_address=%s\n' "${CBOX_WG_PEER_ADDRESS:-}"
+    printf 'wg_keepalive=%s\n' "${CBOX_WG_KEEPALIVE:-25}"
+    printf 'wg_peers_hash=%s\n' "$(_cbox_ollama_manifest_peers_hash)"
   } | _cbox_write "$dir/ownership.manifest"
 }
 
@@ -2523,17 +2666,487 @@ _cbox_ollama_manifest_matches_current() {
   local dir="$1" want have
   [ -f "$dir/ownership.manifest" ] || return 1
   local name image store store_path gpu port
+  local wg_mode wg_impl wg_address wg_listen_port wg_publish_addr
+  local wg_peer_endpoint wg_peer_pubkey wg_peer_address wg_keepalive wg_peers_hash
   name="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" owner)" || return 1
   image="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" image)" || return 1
   store="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" store)" || return 1
   store_path="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" store_path)" || return 1
   gpu="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" gpu)" || return 1
   port="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" port)" || return 1
+  wg_mode="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" wg_mode)" || wg_mode=off
+  wg_impl="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" wg_impl)" || wg_impl=auto
+  wg_address="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" wg_address)" || wg_address=
+  wg_listen_port="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" wg_listen_port)" || wg_listen_port=51820
+  wg_publish_addr="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" wg_publish_addr)" || wg_publish_addr=
+  wg_peer_endpoint="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" wg_peer_endpoint)" || wg_peer_endpoint=
+  wg_peer_pubkey="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" wg_peer_pubkey)" || wg_peer_pubkey=
+  wg_peer_address="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" wg_peer_address)" || wg_peer_address=
+  wg_keepalive="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" wg_keepalive)" || wg_keepalive=25
+  wg_peers_hash="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" wg_peers_hash)" || wg_peers_hash=
   [ "$name" = "$(_cbox_ollama_owner_name)" ] || return 1
   [ "$image" = "${CBOX_OLLAMA_IMAGE:-ollama/ollama:0.32.5}" ] || return 1
   [ "$store" = "${CBOX_OLLAMA_STORE:-dedicated}" ] || return 1
   [ "$store_path" = "$(_cbox_ollama_store_path)" ] || return 1
   [ "$gpu" = "${CBOX_OLLAMA_GPU:-off}" ] || return 1
   [ "$port" = "${CBOX_OLLAMA_PORT:-11434}" ] || return 1
+  [ "$wg_mode" = "${CBOX_WG_MODE:-off}" ] || return 1
+  [ "$wg_impl" = "${CBOX_WG_IMPL:-auto}" ] || return 1
+  [ "$wg_address" = "${CBOX_WG_ADDRESS:-}" ] || return 1
+  [ "$wg_listen_port" = "${CBOX_WG_LISTEN_PORT:-51820}" ] || return 1
+  [ "$wg_publish_addr" = "${CBOX_WG_PUBLISH_ADDR:-}" ] || return 1
+  [ "$wg_peer_endpoint" = "${CBOX_WG_PEER_ENDPOINT:-}" ] || return 1
+  [ "$wg_peer_pubkey" = "${CBOX_WG_PEER_PUBKEY:-}" ] || return 1
+  [ "$wg_peer_address" = "${CBOX_WG_PEER_ADDRESS:-}" ] || return 1
+  [ "$wg_keepalive" = "${CBOX_WG_KEEPALIVE:-25}" ] || return 1
+  [ "$wg_peers_hash" = "$(_cbox_ollama_manifest_peers_hash)" ] || return 1
   return 0
+}
+
+_cbox_wg_dir() {
+  printf '%s/.config/cbox/infra/wireguard' "$HOME"
+}
+
+_cbox_wg_privkey_file() {
+  printf '%s/privatekey' "$(_cbox_wg_dir)"
+}
+
+_cbox_wg_pubkey_file() {
+  printf '%s/publickey' "$(_cbox_wg_dir)"
+}
+
+_cbox_wg_peers_file() {
+  printf '%s/peers' "$(_cbox_wg_dir)"
+}
+
+_cbox_wg_tools_available() {
+  command -v wg >/dev/null 2>&1
+}
+
+_cbox_wg_write_secret() {
+  local target="$1" dir tmp
+  dir="$(dirname "$target")"
+  mkdir -p -m 0700 "$dir"
+  tmp="$(mktemp "$dir/.cbox.XXXXXX")"
+  chmod 0600 "$tmp"
+  cat > "$tmp"
+  mv -f "$tmp" "$target"
+  chmod 0600 "$target"
+}
+
+_cbox_wg_keygen() {
+  local dir priv pub
+  dir="$(_cbox_wg_dir)"
+  priv="$(_cbox_wg_privkey_file)"
+  pub="$(_cbox_wg_pubkey_file)"
+  _cbox_wg_tools_available || { echo "cbox: wireguard-tools (the 'wg' binary) not found on this host - install the wireguard-tools package before generating keys" >&2; return 1; }
+  mkdir -p -m 0700 "$dir"
+  chmod 0700 "$dir"
+  if [ -e "$priv" ] && [ ! -L "$priv" ]; then
+    local owner_uid
+    owner_uid="$(stat -c '%u' -- "$priv" 2>/dev/null)" || owner_uid=""
+    if [ -z "$owner_uid" ] || [ "$owner_uid" != "$(id -u)" ]; then
+      echo "cbox: refusing - $priv is not owned by the invoking user (uid $(id -u))" >&2
+      return 1
+    fi
+    chmod 0600 "$priv"
+  elif [ -L "$priv" ]; then
+    echo "cbox: refusing - $priv is a symlink, not a regular file" >&2
+    return 1
+  else
+    wg genkey | _cbox_wg_write_secret "$priv"
+  fi
+  if [ ! -f "$priv" ]; then
+    echo "cbox: wireguard private key was not created at $priv" >&2
+    return 1
+  fi
+  wg pubkey < "$priv" | _cbox_write "$pub"
+  chmod 0644 "$pub"
+}
+
+_cbox_wg_ensure_keys() {
+  local priv
+  priv="$(_cbox_wg_privkey_file)"
+  [ -f "$priv" ] || _cbox_wg_keygen
+}
+
+_cbox_wg_pubkey() {
+  local pub
+  pub="$(_cbox_wg_pubkey_file)"
+  [ -f "$pub" ] || return 1
+  cat "$pub"
+}
+
+_cbox_wg_peer_line_ok() {
+  local line="$1"
+  local name pubkey addr rest
+  IFS='|' read -r name pubkey addr rest <<<"$line"
+  [ -n "$name" ] && [ -n "$pubkey" ] && [ -n "$addr" ] && [ -z "${rest:-}" ]
+}
+
+_cbox_wg_peer_field() {
+  local line="$1" idx="$2"
+  IFS='|' read -r -a _cbox_wg_peer_fields <<<"$line"
+  printf '%s' "${_cbox_wg_peer_fields[$idx]:-}"
+}
+
+_cbox_wg_peer_name_ok() {
+  case "$1" in
+    ''|*[!A-Za-z0-9_-]*) return 1 ;;
+  esac
+  return 0
+}
+
+_cbox_wg_peer_allowed_is_single_host() {
+  local addr="$1"
+  _cbox_is_ipv4_cidr "$addr" || return 1
+  [ "${addr#*/}" -eq 32 ]
+}
+
+_cbox_wg_peer_list() {
+  local file
+  file="$(_cbox_wg_peers_file)"
+  [ -f "$file" ] || return 0
+  local line pname ppub paddr
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      \#*) continue ;;
+    esac
+    if ! _cbox_wg_peer_line_ok "$line"; then
+      echo "cbox: warning - skipping malformed peers file line: $line" >&2
+      continue
+    fi
+    pname="$(_cbox_wg_peer_field "$line" 0)"
+    ppub="$(_cbox_wg_peer_field "$line" 1)"
+    paddr="$(_cbox_wg_peer_field "$line" 2)"
+    if ! _cbox_wg_peer_name_ok "$pname"; then
+      echo "cbox: warning - skipping peers file line with an invalid name: $line" >&2
+      continue
+    fi
+    if ! _cbox_wg_pubkey_ok "$ppub"; then
+      echo "cbox: warning - skipping peers file line with an invalid public key: $line" >&2
+      continue
+    fi
+    if ! _cbox_wg_peer_allowed_is_single_host "$paddr"; then
+      echo "cbox: warning - skipping peers file line with a non-/32 allowed address: $line" >&2
+      continue
+    fi
+    printf '%s\n' "$line"
+  done < "$file"
+}
+
+_cbox_wg_peer_add() {
+  local name="$1" pubkey="$2" addr="$3"
+  _cbox_wg_peer_name_ok "$name" || { echo "cbox: refusing - peer name '$name' must match [A-Za-z0-9_-]+" >&2; return 1; }
+  _cbox_wg_pubkey_ok "$pubkey" || { echo "cbox: refusing - peer public key is not a valid WireGuard key" >&2; return 1; }
+  if ! _cbox_wg_peer_allowed_is_single_host "$addr"; then
+    echo "cbox: refusing - peer allowed address '$addr' must be a single host (/32) - a wider AllowedIPs would let one peer claim other peers' addresses" >&2
+    return 1
+  fi
+  if [ -n "${CBOX_WG_ADDRESS:-}" ] && [ "${addr%/*}" = "${CBOX_WG_ADDRESS%%/*}" ]; then
+    echo "cbox: refusing - peer allowed address '$addr' is this node's own tunnel address (CBOX_WG_ADDRESS) - a peer holding it would hijack traffic addressed to this node" >&2
+    return 1
+  fi
+  local dir file line pname ppub paddr
+  dir="$(_cbox_wg_dir)"
+  file="$(_cbox_wg_peers_file)"
+  mkdir -p -m 0700 "$dir"
+  if [ -f "$file" ]; then
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      case "$line" in \#*) continue ;; esac
+      pname="$(_cbox_wg_peer_field "$line" 0)"
+      ppub="$(_cbox_wg_peer_field "$line" 1)"
+      paddr="$(_cbox_wg_peer_field "$line" 2)"
+      if [ "$pname" = "$name" ]; then
+        echo "cbox: refusing - a peer named '$name' already exists" >&2
+        return 1
+      fi
+      if [ "$ppub" = "$pubkey" ]; then
+        echo "cbox: refusing - this public key is already registered under peer '$pname'" >&2
+        return 1
+      fi
+      if [ "$paddr" = "$addr" ]; then
+        echo "cbox: refusing - peer allowed address '$addr' is already registered under peer '$pname' - a duplicate /32 would let this peer hijack '$pname''s traffic" >&2
+        return 1
+      fi
+    done < "$file"
+  fi
+  {
+    [ -f "$file" ] && cat "$file"
+    printf '%s|%s|%s\n' "$name" "$pubkey" "$addr"
+  } | _cbox_write "$file"
+  chmod 0600 "$file"
+}
+
+_cbox_wg_peer_remove() {
+  local name="$1" dir file tmp line pname found=0
+  dir="$(_cbox_wg_dir)"
+  file="$(_cbox_wg_peers_file)"
+  [ -f "$file" ] || { echo "cbox: no peers file at $file" >&2; return 1; }
+  mkdir -p -m 0700 "$dir"
+  tmp="$(mktemp "$dir/.cbox.XXXXXX")"
+  chmod 0600 "$tmp"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in \#*) continue ;; esac
+    pname="$(_cbox_wg_peer_field "$line" 0)"
+    if [ "$pname" = "$name" ]; then
+      found=1
+      continue
+    fi
+    printf '%s\n' "$line" >> "$tmp"
+  done < "$file"
+  if [ "$found" != 1 ]; then
+    rm -f "$tmp"
+    echo "cbox: no peer named '$name' found" >&2
+    return 1
+  fi
+  mv -f "$tmp" "$file"
+  chmod 0600 "$file"
+}
+
+_cbox_wg_active() {
+  [ "${CBOX_WG_MODE:-off}" != off ]
+}
+
+_cbox_wg_server_role() {
+  case "${CBOX_WG_MODE:-off}" in
+    server|both) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_cbox_wg_client_role() {
+  case "${CBOX_WG_MODE:-off}" in
+    client|both) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_cbox_wg_client_alias() {
+  printf 'wg-remote-ollama'
+}
+
+_cbox_wg_iface() {
+  printf 'cbox0'
+}
+
+_cbox_wg_runtime_conf_path() {
+  printf '/run/cbox-wg/%s.conf' "$(_cbox_wg_iface)"
+}
+
+_cbox_wg_client_forward_port() {
+  printf '%s' "${CBOX_OLLAMA_PORT:-11434}"
+}
+
+gen_dockerfile_wireguard_into() {
+  local effdir="$1"
+  if ! _cbox_wg_active; then
+    rm -f "$effdir/Dockerfile.wireguard"
+    return 0
+  fi
+  _cbox_write "$effdir/Dockerfile.wireguard" <<'EOF'
+FROM alpine:3.20
+RUN apk add --no-cache wireguard-tools wireguard-go socat supervisor iproute2
+RUN mkdir -p /etc/cbox-generated /run/cbox-wg
+COPY supervisord.wireguard.conf /etc/supervisord.conf
+COPY wg-up.sh /usr/local/bin/cbox-wg-up.sh
+RUN chmod 0755 /usr/local/bin/cbox-wg-up.sh
+ENTRYPOINT ["supervisord","-n","-c","/etc/supervisord.conf"]
+EOF
+}
+
+gen_dockerfile_wireguard() {
+  gen_dockerfile_wireguard_into "$INSTALL_DIR"
+}
+
+_cbox_wg_up_script_body() {
+  local iface runtime_conf
+  iface="$(_cbox_wg_iface)"
+  runtime_conf="$(_cbox_wg_runtime_conf_path)"
+  printf '#!/bin/sh\n'
+  printf 'set -e\n'
+  printf '\n'
+  printf '# structural no-routing assertion: IP forwarding must stay off in this namespace\n'
+  printf 'fwd="$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo 0)"\n'
+  printf 'if [ "$fwd" != "0" ]; then\n'
+  printf '  echo "cbox-wg: refusing to start - net.ipv4.ip_forward is enabled in this network namespace (must stay 0, this sidecar never routes)" >&2\n'
+  printf '  exit 1\n'
+  printf 'fi\n'
+  printf '\n'
+  printf '# structural no-routing assertion: every AllowedIPs entry must be a single host address\n'
+  printf 'for prefix in $(grep -i "^AllowedIPs" /etc/cbox-generated/wireguard/%s.conf.tpl | sed "s/.*= *//" | tr -d " " | tr "," "\\n"); do\n' "$iface"
+  printf '  case "$prefix" in\n'
+  printf '    */32) ;;\n'
+  printf '    *) echo "cbox-wg: refusing to start - AllowedIPs entry '"'"'$prefix'"'"' is wider than a single host (/32); this sidecar forwards one service, it does not route a subnet" >&2; exit 1 ;;\n'
+  printf '  esac\n'
+  printf 'done\n'
+  printf '\n'
+  printf '# structural no-routing assertion: this node'"'"'s own Address must not be a broad or default route\n'
+  printf 'addr_line="$(grep -i "^Address" /etc/cbox-generated/wireguard/%s.conf.tpl | head -n1 | sed "s/.*= *//" | tr -d " ")"\n' "$iface"
+  printf 'if [ -n "$addr_line" ]; then\n'
+  printf '  addr_prefix="${addr_line#*/}"\n'
+  printf '  case "$addr_prefix" in\n'
+  printf '    ""|*[!0-9]*) echo "cbox-wg: refusing to start - Address '"'"'$addr_line'"'"' has no valid prefix length" >&2; exit 1 ;;\n'
+  printf '  esac\n'
+  printf '  if [ "$addr_prefix" -lt 8 ]; then\n'
+  printf '    echo "cbox-wg: refusing to start - Address '"'"'$addr_line'"'"' prefix is wider than /8; this would install a broad or default route on the tunnel interface" >&2\n'
+  printf '    exit 1\n'
+  printf '  fi\n'
+  printf 'fi\n'
+  printf '\n'
+  printf 'mkdir -p "$(dirname %s)"\n' "$runtime_conf"
+  printf 'umask 0077\n'
+  printf 'priv="$(cat /etc/cbox-generated/wireguard/privatekey)"\n'
+  printf 'sed "s#__CBOX_WG_PRIVATE_KEY__#$priv#" /etc/cbox-generated/wireguard/%s.conf.tpl > %s\n' "$iface" "$runtime_conf"
+  printf 'chmod 0600 %s\n' "$runtime_conf"
+  printf '\n'
+  printf 'impl="${CBOX_WG_IMPL:-auto}"\n'
+  printf 'case "$impl" in\n'
+  printf '  kernel) unset WG_QUICK_USERSPACE_IMPLEMENTATION ;;\n'
+  printf '  userspace) export WG_QUICK_USERSPACE_IMPLEMENTATION=wireguard-go ;;\n'
+  printf '  *)\n'
+  printf '    if [ -d /sys/module/wireguard ] || ip link add cbox-wg-probe type wireguard 2>/dev/null; then\n'
+  printf '      ip link del cbox-wg-probe 2>/dev/null || true\n'
+  printf '      unset WG_QUICK_USERSPACE_IMPLEMENTATION\n'
+  printf '    else\n'
+  printf '      export WG_QUICK_USERSPACE_IMPLEMENTATION=wireguard-go\n'
+  printf '    fi\n'
+  printf '    ;;\n'
+  printf 'esac\n'
+  printf '\n'
+  printf 'mkdir -p /run/cbox-wg\n'
+  printf 'if [ -n "$WG_QUICK_USERSPACE_IMPLEMENTATION" ]; then\n'
+  printf '  echo userspace > /run/cbox-wg/impl\n'
+  printf 'else\n'
+  printf '  echo kernel > /run/cbox-wg/impl\n'
+  printf 'fi\n'
+  printf '\n'
+  printf 'wg-quick down %s >/dev/null 2>&1 || true\n' "$iface"
+  printf 'exec wg-quick up %s\n' "$runtime_conf"
+}
+
+gen_wireguard_up_script_into() {
+  local effdir="$1"
+  if ! _cbox_wg_active; then
+    rm -f "$effdir/wg-up.sh"
+    return 0
+  fi
+  _cbox_wg_up_script_body | _cbox_write "$effdir/wg-up.sh"
+  chmod 0755 "$effdir/wg-up.sh"
+}
+
+gen_wireguard_up_script() {
+  gen_wireguard_up_script_into "$INSTALL_DIR"
+}
+
+gen_supervisord_wireguard_conf_into() {
+  local effdir="$1"
+  if ! _cbox_wg_active; then
+    rm -f "$effdir/supervisord.wireguard.conf"
+    return 0
+  fi
+  local iface fwd_port alias
+  iface="$(_cbox_wg_iface)"
+  fwd_port="$(_cbox_wg_client_forward_port)"
+  alias="$(_cbox_wg_client_alias)"
+  {
+    printf '[supervisord]\n'
+    printf 'nodaemon=true\n'
+    printf 'logfile=/dev/null\n'
+    printf 'logfile_maxbytes=0\n'
+    printf 'pidfile=/run/supervisord.pid\n'
+    printf '\n[program:wg-up]\n'
+    printf 'command=/usr/local/bin/cbox-wg-up.sh\n'
+    printf 'autorestart=false\n'
+    printf 'startsecs=0\n'
+    printf 'startretries=0\n'
+    printf 'stdout_logfile=/dev/stdout\n'
+    printf 'stdout_logfile_maxbytes=0\n'
+    printf 'stderr_logfile=/dev/stderr\n'
+    printf 'stderr_logfile_maxbytes=0\n'
+    if _cbox_wg_server_role; then
+      printf '\n[program:wg-forward-server]\n'
+      printf 'command=/bin/sh -c "while ! ip addr show dev %s >/dev/null 2>&1; do sleep 1; done; exec socat TCP-LISTEN:%s,bind=%s,fork,reuseaddr TCP:ollama:11434"\n' \
+        "$iface" "$fwd_port" "${CBOX_WG_ADDRESS%%/*}"
+      printf 'autorestart=true\n'
+      printf 'startretries=1000\n'
+      printf 'stdout_logfile=/dev/stdout\n'
+      printf 'stdout_logfile_maxbytes=0\n'
+      printf 'stderr_logfile=/dev/stderr\n'
+      printf 'stderr_logfile_maxbytes=0\n'
+    fi
+    if _cbox_wg_client_role; then
+      printf '\n[program:wg-forward-client]\n'
+      printf 'command=/bin/sh -c "while ! ip addr show dev %s >/dev/null 2>&1; do sleep 1; done; exec socat TCP-LISTEN:%s,bind=%s,fork,reuseaddr TCP:%s:%s"\n' \
+        "$iface" "$fwd_port" "$alias" "${CBOX_WG_PEER_ADDRESS%%/*}" "$fwd_port"
+      printf 'autorestart=true\n'
+      printf 'startretries=1000\n'
+      printf 'stdout_logfile=/dev/stdout\n'
+      printf 'stdout_logfile_maxbytes=0\n'
+      printf 'stderr_logfile=/dev/stderr\n'
+      printf 'stderr_logfile_maxbytes=0\n'
+    fi
+  } | _cbox_write "$effdir/supervisord.wireguard.conf"
+}
+
+gen_supervisord_wireguard_conf() {
+  gen_supervisord_wireguard_conf_into "$INSTALL_DIR"
+}
+
+gen_wireguard_conf_into() {
+  local dir="$1"
+  if ! _cbox_wg_active; then
+    rm -f "$dir/$(_cbox_wg_iface).conf.tpl"
+    return 0
+  fi
+  mkdir -p -m 0700 "$dir"
+  chmod 0700 "$dir"
+  local iface addr listen_port keepalive
+  iface="$(_cbox_wg_iface)"
+  addr="${CBOX_WG_ADDRESS:-}"
+  listen_port="${CBOX_WG_LISTEN_PORT:-51820}"
+  keepalive="${CBOX_WG_KEEPALIVE:-25}"
+  local tmp
+  tmp="$dir/.cbox.XXXXXX"
+  {
+    printf '[Interface]\n'
+    if [ -n "$addr" ]; then
+      printf 'Address = %s\n' "$addr"
+    fi
+    printf 'PrivateKey = __CBOX_WG_PRIVATE_KEY__\n'
+    if _cbox_wg_server_role; then
+      printf 'ListenPort = %s\n' "$listen_port"
+    fi
+    if _cbox_wg_server_role; then
+      local line pname ppub paddr
+      while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        pname="$(_cbox_wg_peer_field "$line" 0)"
+        ppub="$(_cbox_wg_peer_field "$line" 1)"
+        paddr="$(_cbox_wg_peer_field "$line" 2)"
+        printf '\n[Peer]\n'
+        printf '# %s\n' "$pname"
+        printf 'PublicKey = %s\n' "$ppub"
+        printf 'AllowedIPs = %s\n' "$paddr"
+      done < <(_cbox_wg_peer_list)
+    fi
+    if _cbox_wg_client_role; then
+      printf '\n[Peer]\n'
+      printf '# remote\n'
+      printf 'PublicKey = %s\n' "${CBOX_WG_PEER_PUBKEY:-}"
+      printf 'AllowedIPs = %s\n' "${CBOX_WG_PEER_ADDRESS:-}"
+      printf 'Endpoint = %s\n' "${CBOX_WG_PEER_ENDPOINT:-}"
+      if [ "$keepalive" -gt 0 ] 2>/dev/null; then
+        printf 'PersistentKeepalive = %s\n' "$keepalive"
+      fi
+    fi
+  } | _cbox_write "$dir/$iface.conf.tpl"
+  chmod 0644 "$dir/$iface.conf.tpl"
+}
+
+gen_wireguard_conf() {
+  gen_wireguard_conf_into "$(_cbox_wg_dir)"
 }

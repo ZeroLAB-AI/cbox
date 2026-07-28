@@ -1,0 +1,1842 @@
+{
+  "schema_version": 1,
+  "sections": [
+    {
+      "id": "mode",
+      "title": "Mode",
+      "description": "Container mode: one shared global container, or one container per project.",
+      "apply_class": "none",
+      "profile": "ask",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": null
+    },
+    {
+      "id": "mounts",
+      "title": "Mounts",
+      "description": "How ~/.claude and ~/.codex reach the container: bind mount a host dir, or use a volume.",
+      "apply_class": "recreate",
+      "profile": "ask",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": []
+    },
+    {
+      "id": "workspaces",
+      "title": "Workspaces",
+      "description": "Project directories mounted 1:1 read-write; defines the codex guard scope roots.",
+      "apply_class": "recreate",
+      "profile": "ask",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": []
+    },
+    {
+      "id": "python",
+      "title": "Python venv",
+      "description": "Python venv source: none (only python3 in image), a read-only host mount, or a volume.",
+      "apply_class": "recreate",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": []
+    },
+    {
+      "id": "gpu",
+      "title": "GPU",
+      "description": "Enable GPU support via CDI; checks for nvidia-ctk and the CDI spec on the host.",
+      "apply_class": "none",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [
+        {
+          "kind": "disable",
+          "reason": "no-cdi"
+        }
+      ],
+      "doctor_rows": null
+    },
+    {
+      "id": "egress",
+      "title": "Egress",
+      "description": "Network egress policy: off, allowlist, or blocklist of domains; applied after login.",
+      "apply_class": "topology",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": null
+    },
+    {
+      "id": "netaccess",
+      "title": "Container network access",
+      "description": "Reach Docker networks through Dante SOCKS; optional host-side exec bridge runs tests only in containers on explicit scope=list networks and never mounts docker.sock into cbox.",
+      "apply_class": "topology",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": [
+        "netaccess",
+        "container-exec"
+      ]
+    },
+    {
+      "id": "hostroute",
+      "title": "Host route",
+      "description": "Route container egress through a host-managed forward proxy so host /etc/hosts and host DNS resolution are honored; optional host-gateway alias maps host.docker.internal for direct host-side endpoints.",
+      "apply_class": "topology",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": null
+    },
+    {
+      "id": "ssh",
+      "title": "SSH",
+      "description": "SSH access mode: none, forwarded host agent, container-generated keys, or both.",
+      "apply_class": "recreate",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": null
+    },
+    {
+      "id": "bashrc",
+      "title": "Shell functions",
+      "description": "Install shell functions (~/.bashrc-cbox) plus a marker block in ~/.bashrc.",
+      "apply_class": "shell",
+      "profile": "auto",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": []
+    },
+    {
+      "id": "mcp-servers",
+      "title": "MCP servers",
+      "description": "Select which MCP delegates from delegates.json are available in the container.",
+      "apply_class": "restart",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": []
+    },
+    {
+      "id": "codex-progress",
+      "title": "Codex progress relay",
+      "description": "Wrap codex-* MCP servers in a shim that translates codex events into MCP progress notifications - codex output shows live in the Claude UI.",
+      "apply_class": "restart",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [
+        {
+          "kind": "dictate",
+          "reason": "shim-hook"
+        }
+      ],
+      "doctor_rows": null
+    },
+    {
+      "id": "local-model",
+      "title": "Local model",
+      "description": "Off by default. A text-only MCP delegate (local-qwen) backed by a local OpenAI-compatible endpoint such as ollama - see etc/docs/LOCAL_MODEL_RUNBOOK.md.",
+      "apply_class": "restart",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": null
+    },
+    {
+      "id": "hermes",
+      "title": "Hermes engine",
+      "description": "Off by default; third console engine (NousResearch Hermes Agent) installed at runtime into the shared bins volume; local OpenAI-compatible endpoint by default.",
+      "apply_class": "recreate",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": null
+    },
+    {
+      "id": "hermes-delegate",
+      "title": "Hermes MCP delegate",
+      "description": "Off by default. A zero-cost MCP delegate tool (hermes-local) that shells out to a one-shot hermes -z call per invocation, in an ephemeral per-call home isolated from the hermes console engine; requires the hermes console engine.",
+      "apply_class": "restart",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [
+        {
+          "kind": "disable",
+          "reason": "hermes-off"
+        }
+      ],
+      "doctor_rows": null
+    },
+    {
+      "id": "ollama",
+      "title": "Ollama (machine-scoped)",
+      "description": "Off by default. Machine-scoped infra service: ollama runs in its own owner compose project (cbox-infra-u<uid>), never inside a generated cbox project, so it survives per-project compose down. One value applies to every project on this machine; the isolated per-project wizard never asks about it.",
+      "apply_class": "infra-reconcile",
+      "profile": "skip",
+      "scope": "machine",
+      "dependencies": [],
+      "doctor_rows": [
+        "ollama"
+      ]
+    },
+    {
+      "id": "wireguard",
+      "title": "WireGuard (machine-scoped)",
+      "description": "Off by default. Machine-scoped WireGuard sidecar in the same owner project as ollama: server mode shares this machine ollama over one authenticated UDP port (no routing, no NAT, no IP forwarding - a single-service TCP forwarder only); client mode dials a remote peer and exposes it under a stable internal alias. One value applies to every project on this machine; the isolated per-project wizard never asks about it.",
+      "apply_class": "infra-reconcile",
+      "profile": "skip",
+      "scope": "machine",
+      "dependencies": [],
+      "doctor_rows": [
+        "wireguard"
+      ]
+    },
+    {
+      "id": "autoresume",
+      "title": "Session-limit auto-resume",
+      "description": "Wrap interactive sessions in tmux and let a per-container watchdog type the resume prompt after a usage-limit window resets (isolated session scope + claude mount only).",
+      "apply_class": "recreate",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": []
+    },
+    {
+      "id": "agents",
+      "title": "Agents",
+      "description": "Select which agents from etc/agents are installed; codex-* need their MCP server.",
+      "apply_class": "none",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": []
+    },
+    {
+      "id": "codex-mcp",
+      "title": "Codex MCP",
+      "description": "Register claude as an MCP tool inside codex for reverse orchestration.",
+      "apply_class": "none",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [
+        {
+          "kind": "dictate",
+          "reason": "hooks"
+        }
+      ],
+      "doctor_rows": null
+    },
+    {
+      "id": "continuity",
+      "title": "Continuity",
+      "description": "Durable-continuity toggles: history, git changelog, diary, open questions.",
+      "apply_class": "none",
+      "profile": "auto",
+      "scope": "project",
+      "dependencies": [
+        {
+          "kind": "dictate",
+          "reason": "continuity-hooks"
+        }
+      ],
+      "doctor_rows": [
+        "continuity-brain",
+        "history",
+        "git-changelog",
+        "diary",
+        "open-questions",
+        "context-profile"
+      ]
+    },
+    {
+      "id": "claude-md",
+      "title": "CLAUDE.md",
+      "description": "Deploy CLAUDE.md plus policies and templates; skipped when history is disabled.",
+      "apply_class": "none",
+      "profile": "auto",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": []
+    },
+    {
+      "id": "settings",
+      "title": "Settings",
+      "description": "Merge etc/claude/settings.merge.json into the effective ~/.claude/settings.json.",
+      "apply_class": "restart",
+      "profile": "auto",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": null
+    },
+    {
+      "id": "hooks",
+      "title": "Hooks",
+      "description": "Install hook scripts (codex guard, ask-claude MCP bridge) into ~/.claude/hooks.",
+      "apply_class": "restart",
+      "profile": "auto",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": [
+        "sessionstart-hooks"
+      ]
+    },
+    {
+      "id": "git-identity",
+      "title": "Git identity",
+      "description": "Mount the host ~/.gitconfig read-only into the container.",
+      "apply_class": "recreate",
+      "profile": "auto",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": null
+    },
+    {
+      "id": "apt-extra",
+      "title": "APT packages",
+      "description": "Extra apt packages installed into the image at build time.",
+      "apply_class": "rebuild",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": []
+    },
+    {
+      "id": "binaries",
+      "title": "Binaries",
+      "description": "Claude/codex version pins and the shared binary volumes; installs run host-side, runtime mounts are read-only.",
+      "apply_class": "rebuild",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": []
+    },
+    {
+      "id": "restart-policy",
+      "title": "Restart policy",
+      "description": "Docker restart policy applied to the container.",
+      "apply_class": "recreate",
+      "profile": "auto",
+      "scope": "project",
+      "dependencies": [
+        {
+          "kind": "disable",
+          "reason": "isolated-mode"
+        }
+      ],
+      "doctor_rows": []
+    }
+  ],
+  "dependency_text": {
+    "dictate:hooks": "auto-deploys the ask-claude hook when enabled",
+    "dictate:shim-hook": "auto-deploys the codex_mcp_shim hook when enabled",
+    "dictate:continuity-hooks": "history=1 auto-deploys the continuity hooks (commit log, ledger sweep, session digest)",
+    "disable:isolated-mode": "disabled in isolated mode - container lifecycle managed per-project",
+    "disable:no-cdi": "disabled until nvidia-ctk and /etc/cdi/nvidia.yaml are present",
+    "disable:hermes-off": "disabled until the hermes console engine (CBOX_HERMES=on) is enabled"
+  },
+  "doctor_extra_rows": [
+    "codex-profile",
+    "context-manifest",
+    "local-model",
+    "local-model-egress",
+    "managed-dirs",
+    "config-pending",
+    "sessions"
+  ],
+  "variables": [
+    {
+      "key": "CBOX_MODE",
+      "section": "mode",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "global",
+          "isolated"
+        ]
+      },
+      "default": "global",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: container mode",
+      "help": "Container mode (CBOX_MODE): one shared global container for all workspaces, or one container per project (isolated).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_SESSION_SCOPE",
+      "section": "mode",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "isolated",
+          "global"
+        ]
+      },
+      "default": "isolated",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: session scope (which slice of ~/.claude/projects a container mounts)",
+      "help": "Which slice of ~/.claude/projects a container mounts: isolated (only its own project slug) or global (the whole tree).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_BASE_DIGEST_TTL",
+      "section": "mode",
+      "type": {
+        "kind": "uint"
+      },
+      "default": 3600,
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: base image digest cache TTL in seconds (0 = re-check every launch): ",
+      "help": "Base image digest cache TTL in seconds (0 = re-check every launch).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_NAME",
+      "section": "mode",
+      "type": {
+        "kind": "nonempty-string"
+      },
+      "default": "cbox",
+      "role": "internal",
+      "export": false,
+      "prompt": null,
+      "help": "Internal: instance/profile name, prefixes container and volume names (<CBOX_NAME>-claude, -codex, -venv, -ssh, -hermes-home).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_CLAUDE_MODE",
+      "section": "mounts",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "mount",
+          "volume"
+        ]
+      },
+      "default": "mount",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: ~/.claude mode",
+      "help": "mount - host directory bind-mounted into container. volume - Docker named volume.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_CLAUDE_PATH",
+      "section": "mounts",
+      "type": {
+        "kind": "path-or-empty"
+      },
+      "default": {
+        "kind": "literal",
+        "value": "$HOME/.claude"
+      },
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: host directory for ~/.claude (empty = switch to volume): ",
+      "help": "Host directory for ~/.claude when CBOX_CLAUDE_MODE=mount (empty switches to volume mode).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_CLAUDE_BACKUP",
+      "section": "mounts",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "y",
+          "c",
+          "n"
+        ]
+      },
+      "default": "n",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: back up $CBOX_CLAUDE_PATH before first run (y=copy c=tar.gz n=no)",
+      "help": "Back up the existing ~/.claude directory before first run: y=copy c=tar.gz n=no.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_CODEX_MODE",
+      "section": "mounts",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "mount",
+          "volume"
+        ]
+      },
+      "default": "mount",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: ~/.codex mode",
+      "help": "mount - host directory bind-mounted into container. volume - Docker named volume.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_CODEX_PATH",
+      "section": "mounts",
+      "type": {
+        "kind": "path-or-empty"
+      },
+      "default": {
+        "kind": "literal",
+        "value": "$HOME/.codex"
+      },
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: host directory for ~/.codex (empty = switch to volume): ",
+      "help": "Host directory for ~/.codex when CBOX_CODEX_MODE=mount (empty switches to volume mode).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_CODEX_BACKUP",
+      "section": "mounts",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "y",
+          "c",
+          "n"
+        ]
+      },
+      "default": "n",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: back up $CBOX_CODEX_PATH before first run (y=copy c=tar.gz n=no)",
+      "help": "Back up the existing ~/.codex directory before first run: y=copy c=tar.gz n=no.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_WORKSPACES",
+      "section": "workspaces",
+      "type": {
+        "kind": "path-list"
+      },
+      "default": "",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: workspace path: ",
+      "help": "Workspace directories mounted 1:1 read-write; enter one per line, empty line finishes.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_WORKDIR",
+      "section": "workspaces",
+      "type": {
+        "kind": "path-or-empty"
+      },
+      "default": {
+        "kind": "resolver",
+        "name": "workdir_from_first_workspace"
+      },
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Default working directory: derived from the first workspace, falling back to the home directory.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_VENV_MODE",
+      "section": "python",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "none",
+          "host",
+          "volume"
+        ]
+      },
+      "default": "none",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: venv mode",
+      "help": "none - python3 from the base image. host - host venv directory mounted read-only. volume - persistent venv on a named Docker volume.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_VENV_PATH",
+      "section": "python",
+      "type": {
+        "kind": "path-or-empty"
+      },
+      "default": {
+        "kind": "literal",
+        "value": "$HOME/.venvs/cuda-py312"
+      },
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: host venv path (mounted read-only at the same path): ",
+      "help": "Host venv directory mounted read-only at the same path in the container (CBOX_VENV_MODE=host).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_GPU",
+      "section": "gpu",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "0",
+          "1"
+        ]
+      },
+      "default": "0",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: enable gpu support (CDI)",
+      "help": "Enable GPU support via CDI; checks for nvidia-ctk and the CDI spec on the host.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_EGRESS_MODE",
+      "section": "egress",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "allowlist",
+          "blocklist"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: egress mode",
+      "help": "Optional domain-filtered egress proxy (tinyproxy sidecar on an internal network): off, allowlist, or blocklist.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_EGRESS_APPLIED",
+      "section": "egress",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "0",
+          "1"
+        ]
+      },
+      "default": "0",
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Internal marker: whether the egress topology has been applied.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_NETACCESS_MODE",
+      "section": "netaccess",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "socks"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: netaccess mode",
+      "help": "Optional Dante SOCKS proxy on the egress container for reaching other Docker networks and raw IP ranges.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_NETACCESS_APPLIED",
+      "section": "netaccess",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "0",
+          "1"
+        ]
+      },
+      "default": "0",
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Internal marker: whether the netaccess topology has been applied.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_NETACCESS_SCOPE",
+      "section": "netaccess",
+      "type": {
+        "kind": "enum-or-empty",
+        "values": [
+          "all",
+          "list"
+        ],
+        "escape_hatch": "unvalidated-legacy-gap"
+      },
+      "default": "",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: netaccess docker-network scope",
+      "help": "all - the proxy joins every eligible Docker network at apply time. list - the proxy joins only the networks named in the wizard.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_NETACCESS_NETWORKS",
+      "section": "netaccess",
+      "type": {
+        "kind": "network-name-list"
+      },
+      "default": "",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: docker network: ",
+      "help": "Docker networks the proxy joins under scope=list.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_NETACCESS_CIDRS",
+      "section": "netaccess",
+      "type": {
+        "kind": "cidr-list",
+        "min_prefix": 8
+      },
+      "default": "",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: target CIDR: ",
+      "help": "Raw IPv4 CIDR ranges (minimum /8 prefix) the proxy passes, listed manually under both scopes.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_NETACCESS_SOCKS_PORT",
+      "section": "netaccess",
+      "type": {
+        "kind": "port"
+      },
+      "default": 1080,
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: SOCKS proxy port: ",
+      "help": "SOCKS proxy port.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_NETACCESS_EXEC_MODE",
+      "section": "netaccess",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "scoped"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: direct test execution inside scoped containers",
+      "help": "Optional direct test execution (CBOX_NETACCESS_EXEC_MODE=scoped) is available only with scope=list and at least one explicit Docker network.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_NETACCESS_EXEC_WORKSPACE_GUARD",
+      "section": "netaccess",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: additionally require host bind mounts to stay inside the current workspace",
+      "help": "CBOX_NETACCESS_EXEC_WORKSPACE_GUARD=on additionally denies target containers whose host bind mounts leave the current isolated project.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_NETACCESS_EXEC_TIMEOUT",
+      "section": "netaccess",
+      "type": {
+        "kind": "uint-range",
+        "min": 1,
+        "max": 3600
+      },
+      "default": 900,
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: scoped exec timeout seconds: ",
+      "help": "Wall-clock timeout in seconds for a scoped exec call.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_NETACCESS_EXEC_MAX_BYTES",
+      "section": "netaccess",
+      "type": {
+        "kind": "uint-range",
+        "min": 1024,
+        "max": 16777216
+      },
+      "default": 10485760,
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Output byte cap for a scoped exec call.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HOST_ROUTE_MODE",
+      "section": "hostroute",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "host-proxy"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: hostroute mode",
+      "help": "Route container egress through a host-managed forward proxy so host /etc/hosts and host DNS resolution are honored.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HOST_ROUTE_APPLIED",
+      "section": "hostroute",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "0",
+          "1"
+        ]
+      },
+      "default": "0",
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Internal marker: whether the hostroute topology has been applied.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HOST_PROXY_URL",
+      "section": "hostroute",
+      "type": {
+        "kind": "url-or-empty"
+      },
+      "default": "",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: host proxy URL (e.g. http://host.docker.internal:3128): ",
+      "help": "Host proxy URL used when CBOX_HOST_ROUTE_MODE=host-proxy.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HOST_PROXY_ADDR_MODE",
+      "section": "hostroute",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "host-gateway",
+          "explicit"
+        ]
+      },
+      "default": "host-gateway",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: host proxy address mode",
+      "help": "How the container reaches the proxy endpoint: host-gateway or explicit.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HOST_GATEWAY_ALIAS",
+      "section": "hostroute",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: host-gateway alias (host.docker.internal)",
+      "help": "Optional host-gateway alias (off|on, default off) renders extra_hosts: host.docker.internal mapped to host-gateway on the cbox service.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_SSH_MODE",
+      "section": "ssh",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "none",
+          "host-agent",
+          "container-keys",
+          "mixed"
+        ]
+      },
+      "default": "none",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: ssh mode",
+      "help": "none - no SSH in the container. host-agent - host SSH agent socket bind-mounted read-only. container-keys - keys generated on a persistent volume. mixed - both.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_SSH_AGENT_DIR",
+      "section": "ssh",
+      "type": {
+        "kind": "path-or-empty"
+      },
+      "default": {
+        "kind": "resolver",
+        "name": "ssh_agent_dir_default"
+      },
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: host agent socket directory: ",
+      "help": "Host SSH agent socket directory.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_BASHRC",
+      "section": "bashrc",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "0",
+          "1"
+        ]
+      },
+      "default": "1",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: install shell functions (~/.bashrc-cbox + marker block in ~/.bashrc)",
+      "help": "Install shell functions (~/.bashrc-cbox) plus a marker block in ~/.bashrc.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_MCP_SERVERS",
+      "section": "mcp-servers",
+      "type": {
+        "kind": "canonical-name-list",
+        "escape_hatch": "no-validator"
+      },
+      "default": "all",
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Select which MCP delegates from delegates.json are available in the container.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_CODEX_PROGRESS_MODE",
+      "section": "codex-progress",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "shim"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: codex progress relay",
+      "help": "Wrap codex-* MCP servers in a shim that translates codex events into MCP progress notifications.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_LOCAL_MODEL",
+      "section": "local-model",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: enable the local model delegate",
+      "help": "A text-only MCP delegate (local-qwen) backed by a local OpenAI-compatible endpoint such as ollama.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_LOCAL_MODEL_URL",
+      "section": "local-model",
+      "type": {
+        "kind": "url-or-empty"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: local model endpoint url (OpenAI-compatible)",
+      "help": "Local model endpoint URL (OpenAI-compatible).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_LOCAL_MODEL_NAME",
+      "section": "local-model",
+      "type": {
+        "kind": "string",
+        "escape_hatch": "no-validator"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: local model name (as known to the endpoint, e.g. qwen2.5:7b)",
+      "help": "Local model name as known to the endpoint (e.g. qwen2.5:7b).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HERMES",
+      "section": "hermes",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: enable the hermes console engine",
+      "help": "Off by default; third console engine (NousResearch Hermes Agent) installed at runtime into the shared bins volume.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HERMES_VERSION",
+      "section": "hermes",
+      "type": {
+        "kind": "hermes-version",
+        "escape_hatch": "hermes-version"
+      },
+      "default": "latest",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: hermes version target (latest, or an x.y[.z[.w]] pin of hermes-agent on PyPI)",
+      "help": "latest or a plain x.y[.z[.w]] version pin of hermes-agent on PyPI.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HERMES_PROVIDER",
+      "section": "hermes",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "local",
+          "nous",
+          "openrouter",
+          "openai",
+          "anthropic"
+        ]
+      },
+      "default": "local",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: hermes model provider",
+      "help": "Hermes model provider: local, nous, openrouter, openai, or anthropic.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HERMES_MODEL_URL",
+      "section": "hermes",
+      "type": {
+        "kind": "url-or-empty"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: hermes local model endpoint url (OpenAI-compatible)",
+      "help": "Hermes local model endpoint url (OpenAI-compatible), local provider only.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HERMES_MODEL_NAME",
+      "section": "hermes",
+      "type": {
+        "kind": "string",
+        "escape_hatch": "no-validator"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: hermes model name",
+      "help": "Hermes model name.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HERMES_DELEGATE",
+      "section": "hermes-delegate",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: enable the hermes MCP delegate",
+      "help": "A zero-cost MCP delegate tool (hermes-local) that shells out to a one-shot hermes -z call per invocation.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HERMES_DELEGATE_PROVIDER",
+      "section": "hermes-delegate",
+      "type": {
+        "kind": "enum-or-empty",
+        "values": [
+          "local",
+          "nous",
+          "openrouter",
+          "openai",
+          "anthropic"
+        ]
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: hermes delegate model provider",
+      "help": "Hermes delegate model provider (default-inherited from the console engine's CBOX_HERMES_PROVIDER at ask-time).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HERMES_DELEGATE_BASE_URL",
+      "section": "hermes-delegate",
+      "type": {
+        "kind": "url-or-empty"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: hermes delegate local model endpoint url (OpenAI-compatible)",
+      "help": "Hermes delegate local model endpoint url (OpenAI-compatible).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HERMES_DELEGATE_MODEL",
+      "section": "hermes-delegate",
+      "type": {
+        "kind": "string",
+        "escape_hatch": "no-validator"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: hermes delegate model name",
+      "help": "Hermes delegate model name.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HERMES_DELEGATE_MAX_CONCURRENCY",
+      "section": "hermes-delegate",
+      "type": {
+        "kind": "uint-range",
+        "min": 0,
+        "max": 16
+      },
+      "default": 1,
+      "role": "setting",
+      "export": true,
+      "prompt": null,
+      "help": "Concurrency slot count for the hermes delegate; falls back to OLLAMA_NUM_PARALLEL, else 1, capped at 16.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC",
+      "section": "hermes-delegate",
+      "type": {
+        "kind": "uint-or-empty"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": null,
+      "help": "Max seconds a call blocks for a concurrency slot before returning a busy error (default 1500s).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HERMES_DELEGATE_LOCK_DIR",
+      "section": "hermes-delegate",
+      "type": {
+        "kind": "path-or-empty",
+        "escape_hatch": "path-slash-or-empty"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": null,
+      "help": "Directory holding the hermes delegate concurrency slot files (default /tmp/cbox-hermes-delegate-locks).",
+      "validator": null
+    },
+    {
+      "key": "OLLAMA_NUM_PARALLEL",
+      "section": "hermes-delegate",
+      "type": {
+        "kind": "uint-or-empty"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": null,
+      "help": "Fallback concurrency slot count for the hermes delegate when CBOX_HERMES_DELEGATE_MAX_CONCURRENCY is unset.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HERMES_DELEGATE_MODE",
+      "section": "hermes-delegate",
+      "type": {
+        "kind": "enum-or-empty",
+        "values": [
+          "qa"
+        ]
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": null,
+      "help": "qa mode (the only mode implemented) pins the hermes child's terminal/file/web toolsets off per call.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS",
+      "section": "hermes-delegate",
+      "type": {
+        "kind": "string",
+        "escape_hatch": "no-validator"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": null,
+      "help": "Overrides the default disabled toolset list (terminal,file,web).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_OLLAMA_MODE",
+      "section": "ollama",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: enable the ollama machine service",
+      "help": "Machine-scoped infra service: ollama runs in its own owner compose project, never inside a generated cbox project.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_OLLAMA_IMAGE",
+      "section": "ollama",
+      "type": {
+        "kind": "ollama-image",
+        "escape_hatch": "ollama-image"
+      },
+      "default": "ollama/ollama:0.32.5",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: ollama image reference (pinned tag or digest)",
+      "help": "Pinned ollama image reference.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_OLLAMA_GPU",
+      "section": "ollama",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "cdi"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: ollama GPU (separate from CBOX_GPU; only the ollama service gets the reservation)",
+      "help": "A separate GPU reservation from CBOX_GPU, targeting only the ollama service.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_OLLAMA_STORE",
+      "section": "ollama",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "dedicated",
+          "shared"
+        ]
+      },
+      "default": "dedicated",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: ollama model store",
+      "help": "dedicated - a cbox-owned named volume/directory. shared - mounts only the models/ subdirectory of a host ollama directory read-write.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_OLLAMA_STORE_PATH",
+      "section": "ollama",
+      "type": {
+        "kind": "path-or-empty"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: host ollama directory (parent of models/): ",
+      "help": "Host ollama directory (parent of models/), shared mode only.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_OLLAMA_PORT",
+      "section": "ollama",
+      "type": {
+        "kind": "port"
+      },
+      "default": 11434,
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: host ollama port to probe for a conflicting daemon",
+      "help": "Informational only - the port the shared-store host-daemon probe checks; never published on the host.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_OLLAMA_NUM_PARALLEL",
+      "section": "ollama",
+      "type": {
+        "kind": "uint-min",
+        "min": 1
+      },
+      "default": 1,
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: ollama OLLAMA_NUM_PARALLEL (concurrent request slots)",
+      "help": "Ollama concurrent request slots.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_WG_MODE",
+      "section": "wireguard",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "server",
+          "client",
+          "both"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: wireguard mode (off, server = share this machine's ollama, client = consume a remote ollama, both)",
+      "help": "Machine-scoped WireGuard sidecar mode.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_WG_IMPL",
+      "section": "wireguard",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "auto",
+          "kernel",
+          "userspace"
+        ]
+      },
+      "default": "auto",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: wireguard implementation (auto picks kernel when available, else userspace)",
+      "help": "auto picks kernel WireGuard when available, else userspace (wireguard-go).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_WG_ADDRESS",
+      "section": "wireguard",
+      "type": {
+        "kind": "wg-address-cidr",
+        "escape_hatch": "wg-address-cidr",
+        "min_prefix": 8
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: this node's tunnel address in CIDR form (e.g. 10.90.0.1/24)",
+      "help": "This node's tunnel address in CIDR form; prefix must be /8 or narrower.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_WG_LISTEN_PORT",
+      "section": "wireguard",
+      "type": {
+        "kind": "port"
+      },
+      "default": 51820,
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: wireguard UDP listen port (server role)",
+      "help": "WireGuard UDP listen port (server role).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_WG_PUBLISH_ADDR",
+      "section": "wireguard",
+      "type": {
+        "kind": "ipv4-or-empty",
+        "escape_hatch": "ipv4-or-empty"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: host address the UDP port is published on (required; 0.0.0.0 means every interface)",
+      "help": "Host address the UDP port is published on; empty means all addresses.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_WG_PEER_ENDPOINT",
+      "section": "wireguard",
+      "type": {
+        "kind": "wg-hostport-or-empty",
+        "escape_hatch": "wg-hostport-or-empty"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: remote peer endpoint (host:port)",
+      "help": "Remote peer endpoint (client role), host:port.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_WG_PEER_PUBKEY",
+      "section": "wireguard",
+      "type": {
+        "kind": "wg-pubkey-or-empty",
+        "escape_hatch": "wg-pubkey-or-empty"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: remote peer public key",
+      "help": "Remote peer public key (client role), a 44-character base64 WireGuard public key.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_WG_PEER_ADDRESS",
+      "section": "wireguard",
+      "type": {
+        "kind": "wg-peer-address-cidr",
+        "escape_hatch": "wg-peer-address-cidr"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: remote peer's own tunnel address in CIDR form (e.g. 10.90.0.1/32)",
+      "help": "Remote peer's own tunnel address in CIDR form (client role); must be a single host (/32).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_WG_KEEPALIVE",
+      "section": "wireguard",
+      "type": {
+        "kind": "uint"
+      },
+      "default": 25,
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: wireguard persistent keepalive seconds (0 disables)",
+      "help": "WireGuard persistent keepalive seconds (0 disables).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_LIMIT_AUTORESUME",
+      "section": "autoresume",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: session-limit auto-resume (tmux-wrapped sessions, watchdog continues them after the limit resets)",
+      "help": "Wrap interactive sessions in tmux; a per-container watchdog types the resume prompt after a usage-limit window resets.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_LIMIT_RESUME_DELAY",
+      "section": "autoresume",
+      "type": {
+        "kind": "uint"
+      },
+      "default": 300,
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Seconds to wait after a detected reset before typing the resume prompt (default 300s).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_LIMIT_RESUME_PROMPT",
+      "section": "autoresume",
+      "type": {
+        "kind": "nonempty-string"
+      },
+      "default": "pokracuj",
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "The resume prompt text typed by the watchdog (default \"pokracuj\").",
+      "validator": null
+    },
+    {
+      "key": "CBOX_LIMIT_RESUME_STAGGER",
+      "section": "autoresume",
+      "type": {
+        "kind": "uint"
+      },
+      "default": 30,
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Stagger seconds between multiple auto-resumes (default 30s).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_LIMIT_RESUME_MAX_PER_DAY",
+      "section": "autoresume",
+      "type": {
+        "kind": "uint"
+      },
+      "default": 10,
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Maximum auto-resumes per day (default 10).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_AGENTS",
+      "section": "agents",
+      "type": {
+        "kind": "canonical-name-list",
+        "escape_hatch": "no-validator"
+      },
+      "default": "all",
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Select which agents from etc/agents are installed; codex-* need their MCP server.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_CODEX_MCP",
+      "section": "codex-mcp",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "0",
+          "1"
+        ]
+      },
+      "default": "0",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: register claude as a codex mcp tool (reverse orchestration via ask-claude)",
+      "help": "Register claude as an MCP tool inside codex for reverse orchestration.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HISTORY",
+      "section": "continuity",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "0",
+          "1"
+        ]
+      },
+      "default": "1",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: history y/n (track project state in ./.cbox/ LEDGER + daily PROGRESS - mandatory pair)",
+      "help": "Mandatory pair: LEDGER.md + PROGRESS_YYYY_MM_DD.md (state + queue). Turning this off disables the whole continuity system.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_GIT",
+      "section": "continuity",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "0",
+          "1"
+        ]
+      },
+      "default": "1",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: git y/n (project uses git - enables CHANGELOG)",
+      "help": "CHANGELOG.md (git projects only; what landed on master, newest on top).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_DIARY",
+      "section": "continuity",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "0",
+          "1"
+        ]
+      },
+      "default": "1",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: diary y/n",
+      "help": "DIARY.md (Claude's private space for exceptional moments).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_OPEN_QUESTIONS",
+      "section": "continuity",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "0",
+          "1"
+        ]
+      },
+      "default": "1",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: open-questions y/n",
+      "help": "OPEN_QUESTIONS.md (always-current list; resolved ones deleted).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_CONTEXT_PROFILE",
+      "section": "continuity",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "full",
+          "light"
+        ]
+      },
+      "default": "full",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: session context profile (full = complete driver core + progress history each startup; light = conduct kernel + one-writer + ledger RESUME + digest only, no orchestration detail, no progress)",
+      "help": "full = complete driver core + progress history each startup. light = conduct kernel + one-writer + ledger RESUME + digest only.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_GITCONFIG",
+      "section": "git-identity",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "0",
+          "1"
+        ]
+      },
+      "default": "0",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: mount host ~/.gitconfig read-only",
+      "help": "Mount the host ~/.gitconfig read-only into the container.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_APT_EXTRA",
+      "section": "apt-extra",
+      "type": {
+        "kind": "apt-package-list"
+      },
+      "default": "",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: extra apt packages (space-separated, empty for none): ",
+      "help": "Optional extra apt packages to install in the container image, one per line; rendered at Docker build time.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_CLAUDE_TARGET",
+      "section": "binaries",
+      "type": {
+        "kind": "claude-target",
+        "escape_hatch": "claude-target"
+      },
+      "default": "stable",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: claude version target (stable, latest, or x.y.z): ",
+      "help": "Claude version target: stable, latest, or x.y.z.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_CODEX_VERSION",
+      "section": "binaries",
+      "type": {
+        "kind": "codex-version",
+        "escape_hatch": "codex-version"
+      },
+      "default": "latest",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: codex version (latest or x.y.z): ",
+      "help": "Codex version: latest or x.y.z.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_CODEX_TARGET",
+      "section": "binaries",
+      "type": {
+        "kind": "string",
+        "escape_hatch": "no-validator"
+      },
+      "default": "",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: codex install target override (empty = default for the version): ",
+      "help": "Codex install target override (empty = default for the version).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_BINS_SCOPE",
+      "section": "binaries",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "global",
+          "pinned"
+        ]
+      },
+      "default": "global",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: binaries scope",
+      "help": "Binaries scope: global or pinned.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_RESTART_POLICY",
+      "section": "restart-policy",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "no",
+          "unless-stopped"
+        ]
+      },
+      "default": "no",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: container restart policy",
+      "help": "Docker restart policy applied to the container: no or unless-stopped. Isolated containers are always no.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_AUTOUPDATE",
+      "section": "mode",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "on",
+          "off"
+        ]
+      },
+      "default": "on",
+      "role": "internal",
+      "export": false,
+      "prompt": "setup: engine autoupdate",
+      "help": "Engine autoupdate: when the engine target is a channel (claude stable/latest, codex latest, hermes latest), re-run the host-side vendor installer in the background at session start once the TTL elapses. Pinned versions never autoupdate.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_AUTOUPDATE_TTL_HOURS",
+      "section": "mode",
+      "type": {
+        "kind": "uint-min",
+        "min": 0
+      },
+      "default": 24,
+      "role": "internal",
+      "export": false,
+      "prompt": "setup: autoupdate check interval in hours: ",
+      "help": "How many hours since the last autoupdate check before the next one runs.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_DNS_MODE",
+      "section": "mode",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "docker",
+          "public",
+          "stub"
+        ]
+      },
+      "default": "docker",
+      "role": "internal",
+      "export": false,
+      "prompt": "setup: DNS resolution mode (applied only when egress is enabled)",
+      "help": "docker (default) - Docker embedded DNS. public - CBOX_DNS_SERVERS. stub - CBOX_DNS_STUB_IP, a host-stable resolver.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_DNS_SERVERS",
+      "section": "mode",
+      "type": {
+        "kind": "string",
+        "escape_hatch": "ipv4-list"
+      },
+      "default": "1.1.1.1 8.8.8.8",
+      "role": "internal",
+      "export": false,
+      "prompt": "setup: DNS servers for public mode (space-separated IPv4 addresses): ",
+      "help": "Space-separated IPv4 resolver addresses used when CBOX_DNS_MODE=public.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_DNS_STUB_IP",
+      "section": "mode",
+      "type": {
+        "kind": "string",
+        "escape_hatch": "ipv4-or-empty"
+      },
+      "default": "",
+      "role": "internal",
+      "export": false,
+      "prompt": "setup: DNS stub resolver IP for stub mode (empty = none): ",
+      "help": "Host-stable resolver IPv4 address used when CBOX_DNS_MODE=stub (for example a systemd-resolved DNSStubListenerExtra address or dnsmasq on the docker bridge).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_CLIPBOARD_MODE",
+      "section": "mode",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "bridge"
+        ]
+      },
+      "default": "off",
+      "role": "internal",
+      "export": false,
+      "prompt": "setup: clipboard image bridge",
+      "help": "bridge - a per-session host helper serves the host clipboard's image content read-only over a unix socket, answering Claude Code's Ctrl+V image paste inside the container. off (default) - no bridge.",
+      "validator": null
+    }
+  ]
+}

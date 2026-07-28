@@ -263,6 +263,12 @@ echo "$PULL_FN" | grep -q 'up -d ollama' \
   || _fail "pull does not restore the serving container after the pull"
 _ok "pull: stops the server, grants egress only for the pull's duration, tears the egress network down, restarts the server"
 
+echo "$PULL_FN" | grep -Eq -- 'run .*--network' \
+  && _fail "pull passes --network to 'docker compose run' - that flag does not exist on 'docker compose run' (docker CLI reference), every pull would fail with an unknown-flag error"
+echo "$PULL_FN" | grep -Eq 'network connect' \
+  || _fail "pull does not attach the temporary pull network via 'docker network connect' - 'docker compose run' has no --network flag, so the temp network must be connected to an already-started container"
+_ok "pull: never passes the nonexistent 'docker compose run --network' flag, attaches the temporary pull network via 'docker network connect' instead"
+
 echo "$PULL_FN" | grep -q "ollama pull '\$model'" \
   && _fail "pull still interpolates the raw model string into a single-quoted sh -c string (command injection)"
 echo "$PULL_FN" | grep -Fq 'ollama pull "$1"' \

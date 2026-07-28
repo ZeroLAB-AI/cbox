@@ -15,6 +15,7 @@ _ok() {
 }
 
 source "$INSTALL_DIR/templates/sections.sh"
+source "$INSTALL_DIR/templates/conf_lib.sh"
 
 OLLAMA_VARS="CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL"
 
@@ -58,12 +59,14 @@ _ok "registry: SEC_SCOPE[ollama]=machine"
 
 other_bad=""
 for s in "${SECTIONS[@]}"; do
-  [ "$s" = ollama ] && continue
+  case "$s" in
+    ollama|wireguard) continue ;;
+  esac
   [ -n "${SEC_SCOPE[$s]:-}" ] || { other_bad="$other_bad missing:$s"; continue; }
   [ "${SEC_SCOPE[$s]}" = project ] || other_bad="$other_bad wrong:$s=${SEC_SCOPE[$s]}"
 done
-[ -z "$other_bad" ] || _fail "registry: SEC_SCOPE should default to project for every section except ollama:$other_bad"
-_ok "registry: SEC_SCOPE defaults to project for every existing section"
+[ -z "$other_bad" ] || _fail "registry: SEC_SCOPE should default to project for every section except the machine-scoped ones (ollama, wireguard):$other_bad"
+_ok "registry: SEC_SCOPE defaults to project for every non-machine-scoped section"
 
 _load_cbox_config_block() {
   awk '/^_cbox_config_load_sections\(\) \{/{f=1} f{print} f && /^config_cmd\(\) \{/{exit}' "$INSTALL_DIR/cbox" > "$TMPBASE/cbox_config_block.sh"
@@ -125,9 +128,12 @@ _cbox_config_validate_var CBOX_OLLAMA_NUM_PARALLEL abc >/dev/null 2>&1 && _fail 
 _ok "validator: CBOX_OLLAMA_NUM_PARALLEL"
 
 machine_vars="$(_cbox_machine_scoped_vars | sort)"
-expected_vars="$(printf '%s\n' $OLLAMA_VARS | sort)"
-[ "$machine_vars" = "$expected_vars" ] || _fail "cbox's _cbox_machine_scoped_vars mismatch: got [$machine_vars] want [$expected_vars]"
-_ok "cbox: _cbox_machine_scoped_vars enumerates exactly the ollama vars"
+missing_ollama_vars=""
+for v in $OLLAMA_VARS; do
+  printf '%s\n' "$machine_vars" | grep -qxF "$v" || missing_ollama_vars="$missing_ollama_vars $v"
+done
+[ -z "$missing_ollama_vars" ] || _fail "cbox's _cbox_machine_scoped_vars is missing ollama vars:$missing_ollama_vars (got [$machine_vars])"
+_ok "cbox: _cbox_machine_scoped_vars includes every ollama var (other machine-scoped sections may contribute more)"
 
 _load_setup_functions() {
   awk '

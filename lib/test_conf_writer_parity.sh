@@ -1,0 +1,341 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMPBASE="$(mktemp -d)"
+trap 'rm -rf "$TMPBASE"' EXIT
+
+_fail() { echo "FAIL: $*" >&2; exit 1; }
+_ok() { echo "ok: $*"; }
+
+OLD_SETUP="$INSTALL_DIR/lib/fixtures/setup.sh.pre_conf_writer_snapshot"
+OLD_CBOX="$INSTALL_DIR/lib/fixtures/cbox.pre_conf_writer_snapshot"
+OLD_SECTIONS_SH="$INSTALL_DIR/lib/fixtures/sections.sh.pre_registry_snapshot"
+[ -f "$OLD_SETUP" ] || _fail "pre-conf-writer setup.sh snapshot fixture not found at $OLD_SETUP"
+[ -f "$OLD_CBOX" ] || _fail "pre-conf-writer cbox snapshot fixture not found at $OLD_CBOX"
+[ -f "$OLD_SECTIONS_SH" ] || _fail "pre-registry sections.sh snapshot fixture not found at $OLD_SECTIONS_SH"
+
+NEW_SETUP="$INSTALL_DIR/setup.sh"
+SECTIONS_SH="$INSTALL_DIR/templates/sections.sh"
+CONF_LIB="$INSTALL_DIR/templates/conf_lib.sh"
+[ -f "$SECTIONS_SH" ] || _fail "templates/sections.sh missing"
+[ -f "$CONF_LIB" ] || _fail "templates/conf_lib.sh missing"
+
+FIXDIR="$TMPBASE/fixtures"
+mkdir -p "$FIXDIR"
+
+: > "$FIXDIR/default.sh"
+
+cat > "$FIXDIR/full.sh" << 'EOF'
+CBOX_NAME='myprofile'
+CBOX_CLAUDE_MODE='volume'
+CBOX_CLAUDE_PATH='/home/user/.claude'
+CBOX_CLAUDE_BACKUP='y'
+CBOX_CODEX_MODE='volume'
+CBOX_CODEX_PATH='/home/user/.codex'
+CBOX_CODEX_BACKUP='c'
+CBOX_WORKSPACES='/home/user/proj1 /home/user/proj2'
+CBOX_VENV_MODE='volume'
+CBOX_VENV_PATH='/home/user/.venvs/custom'
+CBOX_GPU='1'
+CBOX_EGRESS_MODE='allowlist'
+CBOX_EGRESS_APPLIED='1'
+CBOX_NETACCESS_MODE='socks'
+CBOX_NETACCESS_APPLIED='1'
+CBOX_NETACCESS_SCOPE='list'
+CBOX_NETACCESS_NETWORKS='net-a net-b'
+CBOX_NETACCESS_CIDRS='10.0.0.0/8'
+CBOX_NETACCESS_SOCKS_PORT='1090'
+CBOX_NETACCESS_EXEC_MODE='scoped'
+CBOX_NETACCESS_EXEC_WORKSPACE_GUARD='on'
+CBOX_NETACCESS_EXEC_TIMEOUT='600'
+CBOX_NETACCESS_EXEC_MAX_BYTES='2048000'
+CBOX_HOST_ROUTE_MODE='host-proxy'
+CBOX_HOST_ROUTE_APPLIED='1'
+CBOX_HOST_PROXY_URL='http://host.docker.internal:3128'
+CBOX_HOST_PROXY_ADDR_MODE='explicit'
+CBOX_HOST_GATEWAY_ALIAS='on'
+CBOX_SSH_MODE='mixed'
+CBOX_SSH_AGENT_DIR='/run/user/1000/cbox-ssh'
+CBOX_BASHRC='0'
+CBOX_MCP_SERVERS='alpha beta'
+CBOX_CODEX_PROGRESS_MODE='shim'
+CBOX_LOCAL_MODEL='on'
+CBOX_LOCAL_MODEL_URL='http://localhost:11434/v1'
+CBOX_LOCAL_MODEL_NAME='qwen2.5:7b'
+CBOX_HERMES='on'
+CBOX_HERMES_VERSION='0.20.0'
+CBOX_HERMES_PROVIDER='openai'
+CBOX_HERMES_MODEL_URL='http://localhost:8000'
+CBOX_HERMES_MODEL_NAME='hermes-4'
+CBOX_HERMES_DELEGATE='on'
+CBOX_HERMES_DELEGATE_PROVIDER='local'
+CBOX_HERMES_DELEGATE_BASE_URL='http://localhost:11434'
+CBOX_HERMES_DELEGATE_MODEL='qwen2.5:7b'
+CBOX_HERMES_DELEGATE_MAX_CONCURRENCY='4'
+CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC='600'
+CBOX_HERMES_DELEGATE_LOCK_DIR='/tmp/locks'
+OLLAMA_NUM_PARALLEL='4'
+CBOX_HERMES_DELEGATE_MODE='qa'
+CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS='terminal,file,web'
+CBOX_OLLAMA_MODE='on'
+CBOX_OLLAMA_IMAGE='ollama/ollama:0.33.0'
+CBOX_OLLAMA_GPU='cdi'
+CBOX_OLLAMA_STORE='shared'
+CBOX_OLLAMA_STORE_PATH='/home/user/.ollama'
+CBOX_OLLAMA_PORT='11500'
+CBOX_OLLAMA_NUM_PARALLEL='2'
+CBOX_WG_MODE='both'
+CBOX_WG_IMPL='kernel'
+CBOX_WG_ADDRESS='10.90.0.1/24'
+CBOX_WG_LISTEN_PORT='51821'
+CBOX_WG_PUBLISH_ADDR='192.168.1.5'
+CBOX_WG_PEER_ENDPOINT='example.com:51820'
+CBOX_WG_PEER_PUBKEY='AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
+CBOX_WG_PEER_ADDRESS='10.90.0.2/32'
+CBOX_WG_KEEPALIVE='15'
+CBOX_LIMIT_AUTORESUME='on'
+CBOX_LIMIT_RESUME_DELAY='120'
+CBOX_LIMIT_RESUME_PROMPT='pokracuj prosim'
+CBOX_LIMIT_RESUME_STAGGER='10'
+CBOX_LIMIT_RESUME_MAX_PER_DAY='20'
+CBOX_AGENTS='worker debugger'
+CBOX_CODEX_MCP='1'
+CBOX_GITCONFIG='1'
+CBOX_APT_EXTRA='jq ripgrep'
+CBOX_CLAUDE_TARGET='1.2.3'
+CBOX_CODEX_VERSION='1.0.0'
+CBOX_CODEX_TARGET='custom-target'
+CBOX_BINS_SCOPE='pinned'
+CBOX_AUTOUPDATE='off'
+CBOX_AUTOUPDATE_TTL_HOURS='48'
+CBOX_DNS_MODE='host'
+CBOX_DNS_SERVERS='9.9.9.9'
+CBOX_DNS_STUB_IP='127.0.0.53'
+CBOX_CLIPBOARD_MODE='bridge'
+CBOX_RESTART_POLICY='unless-stopped'
+CBOX_TPL_SHA='deadbeefcafe'
+CBOX_MODE='isolated'
+CBOX_SESSION_SCOPE='global'
+CBOX_BASE_DIGEST_TTL='7200'
+CBOX_HISTORY='0'
+CBOX_GIT='0'
+CBOX_DIARY='0'
+CBOX_OPEN_QUESTIONS='0'
+CBOX_CONTEXT_PROFILE='light'
+CBOX_WORKDIR='/home/user/proj1'
+EOF
+
+cat > "$FIXDIR/isolated.sh" << 'EOF'
+CBOX_MODE='isolated'
+CBOX_SESSION_SCOPE='isolated'
+CBOX_WORKSPACES='/home/user/only-project'
+CBOX_WORKDIR='/home/user/only-project'
+CBOX_RESTART_POLICY='no'
+CBOX_GPU='0'
+CBOX_HERMES='off'
+EOF
+
+python3 - "$FIXDIR/special_chars.sh" << 'PYEOF'
+import sys
+out = sys.argv[1]
+rows = {
+    "CBOX_NAME": "my profile with spaces",
+    "CBOX_WORKSPACES": "/home/user/my proj/sub dir",
+    "CBOX_LIMIT_RESUME_PROMPT": "pokracuj \"now\" $HOME `echo hi` \\ back'quote'",
+    "CBOX_APT_EXTRA": "pkg1 pkg2",
+    "CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS": "terminal,file",
+}
+with open(out, "w") as f:
+    for k, v in rows.items():
+        f.write("%s=%s\n" % (k, "'" + v.replace("'", "'\\''") + "'"))
+PYEOF
+
+_run_old_conf_save() {
+  local fixture="$1" out="$2" fixedhome="$3"
+  local work="$TMPBASE/old_work_$$_$RANDOM"
+  mkdir -p "$work"
+  awk '/^conf_defaults\(\) \{/,/^}$/' "$OLD_SETUP" > "$work/defaults.sh"
+  awk '/^conf_save\(\) \{/,/^}$/' "$OLD_SETUP" > "$work/save.sh"
+  [ -s "$work/defaults.sh" ] || _fail "extract old conf_defaults failed"
+  [ -s "$work/save.sh" ] || _fail "extract old conf_save failed"
+  (
+    export HOME="$fixedhome"
+    mkdir -p "$HOME"
+    if [ -s "$fixture" ]; then . "$fixture"; fi
+    . "$work/defaults.sh"
+    . "$work/save.sh"
+    conf_defaults
+    conf_save "$out"
+  )
+}
+
+_run_new_conf_save() {
+  local fixture="$1" out="$2" fixedhome="$3"
+  local work="$TMPBASE/new_work_$$_$RANDOM"
+  mkdir -p "$work"
+  awk '/^conf_defaults\(\) \{/,/^}$/' "$NEW_SETUP" > "$work/defaults.sh"
+  awk '/^conf_save\(\) \{/,/^}$/' "$NEW_SETUP" > "$work/save.sh"
+  [ -s "$work/defaults.sh" ] || _fail "extract new conf_defaults failed"
+  [ -s "$work/save.sh" ] || _fail "extract new conf_save failed"
+  (
+    export HOME="$fixedhome"
+    mkdir -p "$HOME"
+    . "$SECTIONS_SH"
+    . "$CONF_LIB"
+    if [ -s "$fixture" ]; then . "$fixture"; fi
+    . "$work/defaults.sh"
+    . "$work/save.sh"
+    conf_defaults
+    conf_save "$out"
+  )
+}
+
+for fx in default full isolated special_chars; do
+  fixedhome="$TMPBASE/home_$fx"
+  mkdir -p "$fixedhome"
+  _run_old_conf_save "$FIXDIR/$fx.sh" "$TMPBASE/old_$fx.conf" "$fixedhome"
+  _run_new_conf_save "$FIXDIR/$fx.sh" "$TMPBASE/new_$fx.conf" "$fixedhome"
+  cmp -s "$TMPBASE/old_$fx.conf" "$TMPBASE/new_$fx.conf" \
+    || _fail "conf_save output diverged for fixture '$fx':
+$(diff -u "$TMPBASE/old_$fx.conf" "$TMPBASE/new_$fx.conf" || true)"
+  _ok "conf_save (setup.sh, legacy key order): byte-identical to pre-registry output for fixture '$fx'"
+done
+
+_run_old_whitelist_writer() {
+  local fixture="$1" out="$2" skip_machine="$3" preserve_from="$4"
+  local work="$TMPBASE/oldw_$$_$RANDOM"
+  mkdir -p "$work"
+  awk '
+    /^_cbox_config_load_sections\(\) \{/ { infunc=1 }
+    /^_cbox_config_whitelist\(\) \{/ { infunc=1 }
+    /^_cbox_config_is_whitelisted\(\) \{/ { infunc=1 }
+    /^_cbox_config_preserve_extra_lines\(\) \{/ { infunc=1 }
+    /^_cbox_machine_scoped_vars\(\) \{/ { infunc=1 }
+    infunc { print }
+    infunc && /^\}/ { infunc=0 }
+  ' "$OLD_CBOX" > "$work/funcs.sh"
+  [ -s "$work/funcs.sh" ] || _fail "extract old whitelist writer helpers failed"
+  (
+    INSTALL_DIR="$INSTALL_DIR"
+    die() { echo "die: $*" >&2; exit 1; }
+    . "$OLD_SECTIONS_SH"
+    . "$work/funcs.sh"
+    if [ -s "$fixture" ]; then . "$fixture"; fi
+    {
+      local v machine_scoped=""
+      if [ "$skip_machine" = 1 ]; then
+        machine_scoped=" $(_cbox_machine_scoped_vars | tr '\n' ' ') "
+      fi
+      for v in $(_cbox_config_whitelist); do
+        if [ "$skip_machine" = 1 ]; then
+          case "$machine_scoped" in
+            *" $v "*) continue ;;
+          esac
+        fi
+        printf '%s=%q\n' "$v" "${!v-}"
+      done
+      if [ -n "$preserve_from" ]; then
+        _cbox_config_preserve_extra_lines "$preserve_from"
+      fi
+    } > "$out"
+  )
+}
+
+_run_new_whitelist_writer() {
+  local fixture="$1" out="$2" skip_machine="$3" preserve_from="$4"
+  local work="$TMPBASE/neww_$$_$RANDOM"
+  mkdir -p "$work"
+  (
+    . "$SECTIONS_SH"
+    . "$CONF_LIB"
+    _cbox_config_preserve_extra_lines() {
+      local conf="$1" key
+      [ -f "$conf" ] || return 0
+      while IFS= read -r line; do
+        case "$line" in
+          [A-Z]*=*)
+            key="${line%%=*}"
+            local w found=0
+            while IFS= read -r w; do
+              [ "$w" = "$key" ] && { found=1; break; }
+            done < <(_cbox_config_whitelist 2>/dev/null || true)
+            [ "$found" = 1 ] || printf '%s\n' "$line"
+            ;;
+        esac
+      done < "$conf"
+    }
+    _cbox_config_whitelist() {
+      local s v
+      for s in "${SECTIONS[@]}"; do
+        for v in ${SEC_VARS[$s]:-}; do
+          printf '%s\n' "$v"
+        done
+      done
+    }
+    if [ -s "$fixture" ]; then . "$fixture"; fi
+    _cbox_reg_conf_write_whitelist "$out" "$skip_machine" "$preserve_from"
+  )
+}
+
+for fx in default full isolated special_chars; do
+  for skip in 0 1; do
+    _run_old_whitelist_writer "$FIXDIR/$fx.sh" "$TMPBASE/oldw_${fx}_${skip}.conf" "$skip" ""
+    _run_new_whitelist_writer "$FIXDIR/$fx.sh" "$TMPBASE/neww_${fx}_${skip}.conf" "$skip" ""
+    cmp -s "$TMPBASE/oldw_${fx}_${skip}.conf" "$TMPBASE/neww_${fx}_${skip}.conf" \
+      || _fail "whitelist writer output diverged for fixture '$fx' skip_machine=$skip:
+$(diff -u "$TMPBASE/oldw_${fx}_${skip}.conf" "$TMPBASE/neww_${fx}_${skip}.conf" || true)"
+    _ok "cbox config-set whitelist writer: byte-identical to pre-registry output for fixture '$fx' skip_machine=$skip"
+  done
+done
+
+UNKNOWN_SRC="$TMPBASE/with_unknown.conf"
+{
+  printf 'CBOX_NAME=myprofile\n'
+  printf 'CBOX_TPL_SHA=deadbeef\n'
+  printf 'SOME_FUTURE_KEY=future-value\n'
+  printf 'CBOX_MODE=global\n'
+} > "$UNKNOWN_SRC"
+
+_run_old_whitelist_writer "$FIXDIR/default.sh" "$TMPBASE/oldw_preserve.conf" "0" "$UNKNOWN_SRC"
+_run_new_whitelist_writer "$FIXDIR/default.sh" "$TMPBASE/neww_preserve.conf" "0" "$UNKNOWN_SRC"
+cmp -s "$TMPBASE/oldw_preserve.conf" "$TMPBASE/neww_preserve.conf" \
+  || _fail "unknown-line preservation diverged:
+$(diff -u "$TMPBASE/oldw_preserve.conf" "$TMPBASE/neww_preserve.conf" || true)"
+grep -qx 'SOME_FUTURE_KEY=future-value' "$TMPBASE/neww_preserve.conf" \
+  || _fail "new whitelist writer dropped an unknown line it should have preserved"
+_ok "cbox config-set whitelist writer: unknown/newer-version lines are preserved verbatim, byte-identical to pre-registry behavior"
+
+ROUNDTRIP_SRC="$FIXDIR/full.sh"
+fixedhome="$TMPBASE/home_roundtrip"
+mkdir -p "$fixedhome"
+_run_new_conf_save "$ROUNDTRIP_SRC" "$TMPBASE/roundtrip1.conf" "$fixedhome"
+(
+  export HOME="$fixedhome"
+  . "$SECTIONS_SH"
+  . "$CONF_LIB"
+  . "$TMPBASE/roundtrip1.conf"
+  awk '/^conf_defaults\(\) \{/,/^}$/' "$NEW_SETUP" > "$TMPBASE/rt_defaults.sh"
+  awk '/^conf_save\(\) \{/,/^}$/' "$NEW_SETUP" > "$TMPBASE/rt_save.sh"
+  . "$TMPBASE/rt_defaults.sh"
+  . "$TMPBASE/rt_save.sh"
+  conf_defaults
+  conf_save "$TMPBASE/roundtrip2.conf"
+)
+cmp -s "$TMPBASE/roundtrip1.conf" "$TMPBASE/roundtrip2.conf" \
+  || _fail "load-save-load round trip lost or changed data:
+$(diff -u "$TMPBASE/roundtrip1.conf" "$TMPBASE/roundtrip2.conf" || true)"
+_ok "round trip: load(full fixture)+save -> load+save again is byte-identical (no loss)"
+
+BYTELAYOUT_SRC="$FIXDIR/isolated.sh"
+fixedhome2="$TMPBASE/home_bytelayout"
+mkdir -p "$fixedhome2"
+_run_old_conf_save "$BYTELAYOUT_SRC" "$TMPBASE/bytelayout_old.conf" "$fixedhome2"
+_run_new_conf_save "$BYTELAYOUT_SRC" "$TMPBASE/bytelayout_new.conf" "$fixedhome2"
+old_hash="$(sha256sum "$TMPBASE/bytelayout_old.conf" | awk '{print $1}')"
+new_hash="$(sha256sum "$TMPBASE/bytelayout_new.conf" | awk '{print $1}')"
+[ "$old_hash" = "$new_hash" ] \
+  || _fail "byte layout of an isolated-project cbox.conf changed (this would be hashed into the manifest and would make existing isolated projects report drift): old=$old_hash new=$new_hash"
+_ok "manifest-hash safety: isolated-project cbox.conf sha256 unchanged ($old_hash) for a realistic isolated fixture"
+
+echo "PASS: all conf_writer parity tests"

@@ -264,11 +264,11 @@ run_disconnect_stale() {
   ' disconnecttest 2>&1
 }
 
-run_disconnect_stale 1 ollama
-grep -q 'network disconnect -- cbox-ollama-u1000-pabc ollama' "$DISCONNECT_CALLS" || _fail "a per-scope network whose only member is ollama must be disconnected: $(cat "$DISCONNECT_CALLS")"
-_ok "disconnect_stale_scope_networks: a per-scope network with only ollama attached (cbox side gone) is disconnected from ollama"
+run_disconnect_stale 1 cbox-infra-u1000-ollama-1
+grep -q 'network disconnect -- cbox-ollama-u1000-pabc cbox-infra-u1000-ollama-1' "$DISCONNECT_CALLS" || _fail "a per-scope network whose only member is the real compose-generated ollama container name must be disconnected by that name, not the literal string 'ollama': $(cat "$DISCONNECT_CALLS")"
+_ok "disconnect_stale_scope_networks: a per-scope network with only ollama attached (cbox side gone) is disconnected from ollama by its real container name"
 
-run_disconnect_stale 2 ollama
+run_disconnect_stale 2 cbox-infra-u1000-ollama-1
 ! grep -q 'network disconnect' "$DISCONNECT_CALLS" || _fail "a per-scope network with both endpoints still attached must not be disconnected: $(cat "$DISCONNECT_CALLS")"
 _ok "disconnect_stale_scope_networks: a per-scope network still holding both endpoints is left alone"
 
