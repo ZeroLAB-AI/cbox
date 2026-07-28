@@ -102,9 +102,12 @@ class HermesDelegateUnitTests(unittest.TestCase):
         self.env_backup = dict(os.environ)
         os.environ["HERMES_BIN"] = self.stub
         os.environ["CBOX_HERMES_DELEGATE_HOME_TEMPLATE"] = self.template_home
-        os.environ.pop("CBOX_HERMES_DELEGATE_PROVIDER", None)
-        os.environ.pop("CBOX_HERMES_DELEGATE_BASE_URL", None)
+        os.environ["CBOX_HERMES_DELEGATE_PROVIDER"] = "local"
+        os.environ["CBOX_HERMES_DELEGATE_BASE_URL"] = "http://127.0.0.1:11434"
         os.environ.pop("CBOX_HERMES_DELEGATE_MODEL", None)
+        os.environ.pop("CBOX_HERMES_PROVIDER", None)
+        os.environ.pop("CBOX_HERMES_MODEL_URL", None)
+        os.environ.pop("CBOX_HERMES_MODEL_NAME", None)
         os.environ.pop("CBOX_HERMES_DELEGATE_TIMEOUT_SEC", None)
         os.environ.pop("CBOX_HERMES_DELEGATE_MAX_PROMPT_BYTES", None)
         os.environ.pop("CBOX_HERMES_DELEGATE_MAX_RESPONSE_BYTES", None)
@@ -208,6 +211,33 @@ class HermesDelegateUnitTests(unittest.TestCase):
             "config set model.base_url http://127.0.0.1:11434", calls)
         self.assertIn("config set model.default qwen2.5:7b", calls)
 
+    def test_no_provider_refuses_to_trust_the_seeded_template(self):
+        os.environ.pop("CBOX_HERMES_DELEGATE_PROVIDER", None)
+        os.environ.pop("CBOX_HERMES_DELEGATE_BASE_URL", None)
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertTrue(result["isError"], result)
+        self.assertIn("refusing to delegate", result["content"][0]["text"])
+
+    def test_local_provider_without_base_url_refused(self):
+        os.environ["CBOX_HERMES_DELEGATE_PROVIDER"] = "local"
+        os.environ.pop("CBOX_HERMES_DELEGATE_BASE_URL", None)
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertTrue(result["isError"], result)
+        self.assertIn("refusing to delegate", result["content"][0]["text"])
+
+    def test_console_vars_are_the_fallback_endpoint(self):
+        marker = os.path.join(self.tmpdir, "marker_fallback.txt")
+        write_control(self.control_file, marker=marker)
+        os.environ.pop("CBOX_HERMES_DELEGATE_PROVIDER", None)
+        os.environ.pop("CBOX_HERMES_DELEGATE_BASE_URL", None)
+        os.environ["CBOX_HERMES_PROVIDER"] = "local"
+        os.environ["CBOX_HERMES_MODEL_URL"] = "http://127.0.0.1:12345"
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertFalse(result["isError"], result)
+        with open(marker) as fh:
+            calls = fh.read()
+        self.assertIn("config set model.base_url http://127.0.0.1:12345", calls)
+
     def test_invalid_provider_config_refused(self):
         os.environ["CBOX_HERMES_DELEGATE_PROVIDER"] = "not-a-real-provider"
         result = MOD.run_hermes_delegate({"prompt": "hi"})
@@ -298,9 +328,12 @@ class HermesDelegateStdioTests(unittest.TestCase):
         self.env = dict(os.environ)
         self.env["HERMES_BIN"] = self.stub
         self.env["CBOX_HERMES_DELEGATE_HOME_TEMPLATE"] = self.template_home
-        self.env.pop("CBOX_HERMES_DELEGATE_PROVIDER", None)
-        self.env.pop("CBOX_HERMES_DELEGATE_BASE_URL", None)
+        self.env["CBOX_HERMES_DELEGATE_PROVIDER"] = "local"
+        self.env["CBOX_HERMES_DELEGATE_BASE_URL"] = "http://127.0.0.1:11434"
         self.env.pop("CBOX_HERMES_DELEGATE_MODEL", None)
+        self.env.pop("CBOX_HERMES_PROVIDER", None)
+        self.env.pop("CBOX_HERMES_MODEL_URL", None)
+        self.env.pop("CBOX_HERMES_MODEL_NAME", None)
         self.env.pop("CBOX_DELEGATION_DEPTH", None)
         self.env.pop("CBOX_MCP_DEPTH", None)
 
@@ -403,9 +436,12 @@ class HermesDelegateTemplateContentTests(unittest.TestCase):
         self.stub = make_stub(self.tmpdir, self.control_file)
         self.env_backup = dict(os.environ)
         os.environ["HERMES_BIN"] = self.stub
-        os.environ.pop("CBOX_HERMES_DELEGATE_PROVIDER", None)
-        os.environ.pop("CBOX_HERMES_DELEGATE_BASE_URL", None)
+        os.environ["CBOX_HERMES_DELEGATE_PROVIDER"] = "local"
+        os.environ["CBOX_HERMES_DELEGATE_BASE_URL"] = "http://127.0.0.1:11434"
         os.environ.pop("CBOX_HERMES_DELEGATE_MODEL", None)
+        os.environ.pop("CBOX_HERMES_PROVIDER", None)
+        os.environ.pop("CBOX_HERMES_MODEL_URL", None)
+        os.environ.pop("CBOX_HERMES_MODEL_NAME", None)
         os.environ.pop(MOD.DEPTH_VAR, None)
         os.environ.pop(MOD.LEGACY_DEPTH_VAR, None)
 

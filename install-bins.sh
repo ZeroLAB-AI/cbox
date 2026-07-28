@@ -6,11 +6,22 @@ CBOX_CODEX_TARGET="${CBOX_CODEX_TARGET:-}"
 case "$CBOX_CODEX_TARGET" in
   *[!A-Za-z0-9._-]*) echo "install-bins: CBOX_CODEX_TARGET has invalid characters" >&2; exit 1 ;;
 esac
+CBOX_HERMES_VERSION="${CBOX_HERMES_VERSION:-latest}"
 CBOX_INSTALL_TOOLS="${CBOX_INSTALL_TOOLS:-claude codex}"
+case " $CBOX_INSTALL_TOOLS " in
+  *" hermes "*)
+    if [ "$CBOX_HERMES_VERSION" != latest ]; then
+      printf '%s' "$CBOX_HERMES_VERSION" | grep -Eq '^[0-9]+([.][0-9]+){1,3}$' \
+        || { echo "install-bins: CBOX_HERMES_VERSION must be latest or x.y[.z[.w]]" >&2; exit 1; }
+    fi
+    ;;
+esac
 CBOX_INSTALL_FORCE="${CBOX_INSTALL_FORCE:-0}"
 
 CLROOT="$HOST_HOME/.local"
 CXPKG="$HOST_HOME/.codex/packages"
+HXROOT="/opt/hermes"
+HXSEED="$HXROOT/delegate-home"
 
 getent group "$HOST_GID" >/dev/null || groupadd -g "$HOST_GID" "$HOST_USER"
 id -u "$HOST_USER" >/dev/null 2>&1 || useradd -o -u "$HOST_UID" -g "$HOST_GID" -d "$HOST_HOME" -s /bin/bash "$HOST_USER"
@@ -36,11 +47,48 @@ _resolve_bin() {
   printf '%s' "$p"
 }
 
+_resolve_hermes_bin() {
+  local p
+  p="$(readlink -f "$HXROOT/bin/hermes" 2>/dev/null)" || return 1
+  [ -n "$p" ] && [ -f "$p" ] && [ -x "$p" ] || return 1
+  case "$p" in
+    "$HXROOT"/*) ;;
+    *) return 1 ;;
+  esac
+  [ -x "$HXROOT/bin/python" ] || return 1
+  printf '%s' "$p"
+}
+
+_resolve_tool_bin() {
+  case "$1" in
+    hermes) _resolve_hermes_bin ;;
+    *) _resolve_bin "$(_link_for "$1")" ;;
+  esac
+}
+
 _bin_hash() {
   local h
   h="$(timeout 120 sha256sum "$1" 2>/dev/null | awk '{print $1}')" || return 1
   [ -n "$h" ] || return 1
   printf '%s' "$h"
+}
+
+_hermes_hash() {
+  local h
+  h="$( { timeout 600 find "$HXROOT" -mindepth 1 ! -path "$HXROOT/.cbox-stamp" -type f -print0 2>/dev/null \
+           | LC_ALL=C sort -z | xargs -0 -r sha256sum
+         timeout 60 find "$HXROOT" -mindepth 1 -type l -printf '%p -> %l\n' 2>/dev/null \
+           | LC_ALL=C sort
+       } | sha256sum | awk '{print $1}')" || return 1
+  [ -n "$h" ] && [ "$h" != "$(printf '' | sha256sum | awk '{print $1}')" ] || return 1
+  printf '%s' "$h"
+}
+
+_tool_hash() {
+  case "$1" in
+    hermes) _hermes_hash "$2" ;;
+    *) _bin_hash "$2" ;;
+  esac
 }
 
 _user_version_raw() {
@@ -55,6 +103,9 @@ _parsed_version() {
       ;;
     codex)
       v="$(_user_version_raw "$path" | awk '{print $NF; exit}')" || v=""
+      ;;
+    hermes)
+      v="$(timeout 60 "$HXROOT/bin/python" -c 'import importlib.metadata as m; print(m.version("hermes-agent"))' 2>/dev/null)" || v=""
       ;;
     *)
       v=""
@@ -78,6 +129,7 @@ _want_string() {
   case "$name" in
     claude) printf '%s' "$CBOX_CLAUDE_TARGET" ;;
     codex) printf '%s|%s' "$CBOX_CODEX_VERSION" "$CBOX_CODEX_TARGET" ;;
+    hermes) printf '%s' "$CBOX_HERMES_VERSION" ;;
   esac
 }
 
@@ -86,6 +138,7 @@ _stamp_path() {
   case "$name" in
     claude) printf '%s/.cbox-stamp' "$CLROOT" ;;
     codex) printf '%s/.cbox-stamp' "$CXPKG" ;;
+    hermes) printf '%s/.cbox-stamp' "$HXROOT" ;;
   esac
 }
 
@@ -94,6 +147,7 @@ _link_for() {
   case "$name" in
     claude) printf '%s/bin/claude' "$CLROOT" ;;
     codex) printf '%s/bin/codex' "$CLROOT" ;;
+    hermes) printf '%s/bin/hermes' "$HXROOT" ;;
   esac
 }
 
@@ -106,9 +160,19 @@ _stamp_field() {
 _stamp_write() {
   local file="$1" want="$2" path="$3" hash="$4" ver="$5" dir tmp
   dir="$(dirname "$file")"
-  tmp="$(_gosu mktemp "$dir/.cbox-stamp.XXXXXX")"
-  printf '%s\n%s\n%s\n%s\n' "$want" "$path" "$hash" "$ver" | _gosu tee "$tmp" >/dev/null
-  _gosu mv "$tmp" "$file"
+  case "$file" in
+    "$HXROOT"/*)
+      tmp="$(mktemp "$dir/.cbox-stamp.XXXXXX")"
+      printf '%s\n%s\n%s\n%s\n' "$want" "$path" "$hash" "$ver" > "$tmp"
+      chmod 0644 "$tmp"
+      mv "$tmp" "$file"
+      ;;
+    *)
+      tmp="$(_gosu mktemp "$dir/.cbox-stamp.XXXXXX")"
+      printf '%s\n%s\n%s\n%s\n' "$want" "$path" "$hash" "$ver" | _gosu tee "$tmp" >/dev/null
+      _gosu mv "$tmp" "$file"
+      ;;
+  esac
 }
 
 _adopt_check() {
@@ -119,11 +183,11 @@ _adopt_check() {
   [ "$cur_want" = "$want" ] || return 1
   p="$(_stamp_field "$stamp" 2)" || return 1
   [ -n "$p" ] || return 1
-  resolved="$(_resolve_bin "$(_link_for "$name")")" || return 1
+  resolved="$(_resolve_tool_bin "$name")" || return 1
   [ "$resolved" = "$p" ] || return 1
   local cur_hash want_hash
   want_hash="$(_stamp_field "$stamp" 3)" || return 1
-  cur_hash="$(_bin_hash "$resolved")" || return 1
+  cur_hash="$(_tool_hash "$name" "$resolved")" || return 1
   [ "$cur_hash" = "$want_hash" ]
 }
 
@@ -148,15 +212,74 @@ _run_codex_install() {
   '
 }
 
+_hermes_seed_delegate_home() {
+  _hxgosu rm -rf "$HXSEED" || return 1
+  _hxgosu mkdir -p "$HXSEED" || return 1
+  _hxgosu env HERMES_HOME="$HXSEED" "$HXROOT/bin/hermes" setup --non-interactive || return 1
+  _hxgosu rm -rf "$HXSEED/.env" "$HXSEED/skills"
+  _hxgosu find "$HXSEED" -maxdepth 1 \( -name '*.db' -o -name '*.sqlite*' \) -exec rm -rf {} +
+  _hermes_strip_seed_endpoints || return 1
+  chown -R root:root "$HXSEED"
+  find "$HXSEED" -type d -exec chmod 0555 {} \;
+  find "$HXSEED" -type f -exec chmod 0444 {} \;
+}
+
+_hxgosu() {
+  /usr/sbin/gosu "$HOST_UID:$HOST_GID" env HOME="$HXROOT" "$@"
+}
+
+_hermes_strip_seed_endpoints() {
+  local cfg tmp rc
+  for cfg in "$HXSEED"/*.yaml "$HXSEED"/*.yml; do
+    [ -f "$cfg" ] || continue
+    tmp="$(_hxgosu mktemp "$HXSEED/.cbox-cfg.XXXXXX")" || return 1
+    rc=0
+    grep -Ev '^[[:space:]-]*(base_url|endpoint|api_base|api_base_url|url)[[:space:]]*:' "$cfg" > "$tmp" || rc=$?
+    if [ "$rc" -gt 1 ]; then
+      _hxgosu rm -f "$tmp"
+      return 1
+    fi
+    _hxgosu mv "$tmp" "$cfg" || return 1
+  done
+}
+
+_hermes_venv_reset() {
+  find "$HXROOT" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || return 1
+  chown "$HOST_UID:$HOST_GID" "$HXROOT" || return 1
+  _hxgosu python3 -m venv "$HXROOT"
+}
+
+_run_hermes_install() {
+  local spec rc=0
+  if [ "$CBOX_HERMES_VERSION" = latest ]; then
+    spec="hermes-agent"
+  else
+    printf '%s' "$CBOX_HERMES_VERSION" | grep -Eq '^[0-9]+([.][0-9]+){1,3}$' \
+      || { echo "install-bins: CBOX_HERMES_VERSION must be latest or x.y[.z[.w]]" >&2; return 1; }
+    spec="hermes-agent==$CBOX_HERMES_VERSION"
+  fi
+  mkdir -p "$HXROOT"
+  exec 7< "$HXROOT"
+  flock -w 900 7 || { echo "install-bins: timed out waiting for the hermes install lock" >&2; exec 7<&-; return 1; }
+  if _hermes_venv_reset; then
+    _hxgosu "$HXROOT/bin/pip" install --no-cache-dir "$spec" && _hermes_seed_delegate_home || rc=1
+  else
+    rc=1
+  fi
+  exec 7<&-
+  return "$rc"
+}
+
 _verify_tool() {
   local name="$1" want_ver path hash ver
   case "$name" in
     claude) want_ver="$CBOX_CLAUDE_TARGET" ;;
     codex) want_ver="$CBOX_CODEX_VERSION" ;;
+    hermes) want_ver="$CBOX_HERMES_VERSION" ;;
   esac
-  path="$(_resolve_bin "$(_link_for "$name")")" || return 1
+  path="$(_resolve_tool_bin "$name")" || return 1
   _version_ok "$name" "$want_ver" "$path" || return 1
-  hash="$(_bin_hash "$path")" || return 1
+  hash="$(_tool_hash "$name" "$path")" || return 1
   ver="$(_parsed_version "$name" "$path")" || return 1
   printf '%s\n%s\n%s\n' "$path" "$hash" "$ver"
 }
@@ -177,6 +300,7 @@ _install_one() {
     case "$name" in
       claude) _wipe_volume "$CLROOT" ;;
       codex) _wipe_volume "$CXPKG" ;;
+      hermes) _wipe_volume "$HXROOT" ;;
     esac
   fi
 
@@ -200,6 +324,7 @@ _install_one() {
   case "$name" in
     claude) runfn=_run_claude_install ;;
     codex) runfn=_run_codex_install ;;
+    hermes) runfn=_run_hermes_install ;;
   esac
 
   if ! "$runfn"; then
@@ -232,7 +357,7 @@ main() {
   for name in "${tools[@]}"; do
     [ -n "$name" ] || continue
     case "$name" in
-      claude|codex) ;;
+      claude|codex|hermes) ;;
       *)
         echo "install-bins: unknown tool $name" >&2
         status=1

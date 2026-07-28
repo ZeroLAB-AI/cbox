@@ -27,7 +27,7 @@
     },
     "hermes": {
       "bin": "hermes",
-      "install": "image",
+      "install": "bins-volume",
       "probe": {"kind": "canonical-paths", "exe_realpath_prefix": "/usr/bin/python3", "argv0_prefix": "/opt/hermes/bin/", "argv1": ["/opt/hermes/bin/hermes", "/usr/local/bin/hermes"]},
       "version_vars": ["CBOX_HERMES_VERSION"],
       "enabled_var": "CBOX_HERMES",

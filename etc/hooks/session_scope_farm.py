@@ -212,6 +212,104 @@ def prune_dangling(farm):
                 pass
 
 
+MIRROR_MARK = ".cbox-mirror"
+JOB_MIRROR_FILES = ("state.json", "order", "stateOrder", "group", "pinned")
+
+
+def is_mirror(path):
+    return os.path.isfile(os.path.join(path, MIRROR_MARK))
+
+
+def mirror_source(path):
+    try:
+        with open(os.path.join(path, MIRROR_MARK)) as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+MIRROR_COMPARE_MAX = 262144
+
+
+def files_differ(a, b):
+    try:
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            return fa.read() != fb.read()
+    except OSError:
+        return True
+
+
+def copy_if_newer(src, dst):
+    try:
+        s = os.stat(src)
+    except OSError:
+        return False
+    if not stat.S_ISREG(s.st_mode):
+        return False
+    try:
+        d = os.lstat(dst)
+        if stat.S_ISREG(d.st_mode) and d.st_mtime >= s.st_mtime and d.st_size == s.st_size:
+            if s.st_size > MIRROR_COMPARE_MAX or not files_differ(src, dst):
+                return False
+        elif not stat.S_ISREG(d.st_mode):
+            os.unlink(dst)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+    tmp = dst + ".cbox-tmp"
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dst)
+        return True
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def mirror_job_dir(farm_dir, host_dir):
+    try:
+        os.makedirs(farm_dir, exist_ok=True)
+    except OSError:
+        return
+    mark = os.path.join(farm_dir, MIRROR_MARK)
+    if not os.path.isfile(mark):
+        try:
+            with open(mark, "w") as fh:
+                fh.write(host_dir + "\n")
+        except OSError:
+            return
+    for name in JOB_MIRROR_FILES:
+        src = os.path.join(host_dir, name)
+        dst = os.path.join(farm_dir, name)
+        if os.path.exists(src):
+            copy_if_newer(src, dst)
+        elif os.path.lexists(dst):
+            try:
+                os.unlink(dst)
+            except OSError:
+                pass
+
+
+def prune_mirrors(farm):
+    for name in entries(farm):
+        path = os.path.join(farm, name)
+        if not os.path.isdir(path) or os.path.islink(path):
+            continue
+        if not is_mirror(path):
+            continue
+        src = mirror_source(path)
+        if src and os.path.isdir(src):
+            continue
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            pass
+
+
 def file_has_open_fd(path):
     real = os.path.realpath(path)
     for pid in os.listdir("/proc"):
@@ -454,17 +552,27 @@ def jobs_sync(host, farm, relbase, allow_convert, scoped):
             continue
         link = os.path.join(farm, name)
         target = relbase + "/" + name
-        if os.path.isdir(link) and not os.path.islink(link):
-            if job_terminal(link):
+        if os.path.islink(link):
+            try:
+                os.unlink(link)
+            except OSError:
+                continue
+            mirror_job_dir(link, full)
+        elif os.path.isdir(link):
+            if is_mirror(link):
+                mirror_job_dir(link, full)
+            elif job_terminal(link):
                 absorb_dir(link, full, target, allow_convert, True)
         else:
-            make_link(link, target)
+            mirror_job_dir(link, full)
     if allow_convert:
         for name in entries(farm):
             if name == "settled":
                 continue
             link = os.path.join(farm, name)
             if os.path.islink(link) or not os.path.isdir(link):
+                continue
+            if is_mirror(link):
                 continue
             if not job_in_scope(link, scoped):
                 continue
@@ -473,6 +581,7 @@ def jobs_sync(host, farm, relbase, allow_convert, scoped):
             absorb_dir(link, os.path.join(host, name),
                        relbase + "/" + name, True, True)
     prune_dangling(farm)
+    prune_mirrors(farm)
 
 
 def refresh_jobs(allow_convert, scoped):
@@ -493,7 +602,13 @@ def refresh_jobs_files(host, farm):
         full = os.path.join(host, name)
         if os.path.isdir(full) or name.endswith(".tmp"):
             continue
-        make_link(os.path.join(farm, name), "../.host-jobs/" + name)
+        dst = os.path.join(farm, name)
+        if os.path.islink(dst):
+            try:
+                os.unlink(dst)
+            except OSError:
+                continue
+        copy_if_newer(full, dst)
 
 
 def refresh_all():

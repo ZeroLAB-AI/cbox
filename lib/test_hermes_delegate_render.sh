@@ -71,10 +71,13 @@ _ok "hermes-local is absent from selection=all render when CBOX_HERMES_DELEGATE=
 RENDERED_PRESENT="$TMPBASE/present.json"
 CBOX_HERMES_DELEGATE=on \
 CBOX_HERMES_DELEGATE_BIN=/opt/hermes/bin/hermes \
-CBOX_HERMES_DELEGATE_HOME_TEMPLATE=/etc/cbox/hermes-delegate-home \
+CBOX_HERMES_DELEGATE_HOME_TEMPLATE=/opt/hermes/delegate-home \
 CBOX_HERMES_DELEGATE_PROVIDER=local \
 CBOX_HERMES_DELEGATE_BASE_URL=http://127.0.0.1:11434 \
 CBOX_HERMES_DELEGATE_MODEL=qwen2.5:7b \
+CBOX_HERMES_PROVIDER=local \
+CBOX_HERMES_MODEL_URL=http://127.0.0.1:11434 \
+CBOX_HERMES_MODEL_NAME=qwen2.5:7b \
   python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
   "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$RENDERED_PRESENT"
 python3 -c "
@@ -86,18 +89,22 @@ assert spec['command'] == 'python3', spec
 assert spec['args'] == ['hermes_delegate_mcp.py'], spec
 assert spec['env'] == {
     'HERMES_BIN': '/opt/hermes/bin/hermes',
-    'CBOX_HERMES_DELEGATE_HOME_TEMPLATE': '/etc/cbox/hermes-delegate-home',
+    'CBOX_HERMES_DELEGATE_HOME_TEMPLATE': '/opt/hermes/delegate-home',
     'CBOX_HERMES_DELEGATE_PROVIDER': 'local',
     'CBOX_HERMES_DELEGATE_BASE_URL': 'http://127.0.0.1:11434',
     'CBOX_HERMES_DELEGATE_MODEL': 'qwen2.5:7b',
+    'CBOX_HERMES_PROVIDER': 'local',
+    'CBOX_HERMES_MODEL_URL': 'http://127.0.0.1:11434',
+    'CBOX_HERMES_MODEL_NAME': 'qwen2.5:7b',
 }, spec
+assert 'CBOX_HERMES_PROVIDER' in spec['env'], 'console vars must reach the server, else the fallback is dead code'
 "
 _ok "hermes-local renders with substituted env when CBOX_HERMES_DELEGATE and inputs are set"
 
 RENDERED_CODEX="$TMPBASE/codex.json"
 CBOX_HERMES_DELEGATE=on \
 CBOX_HERMES_DELEGATE_BIN=/opt/hermes/bin/hermes \
-CBOX_HERMES_DELEGATE_HOME_TEMPLATE=/etc/cbox/hermes-delegate-home \
+CBOX_HERMES_DELEGATE_HOME_TEMPLATE=/opt/hermes/delegate-home \
   python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
   "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off codex > "$RENDERED_CODEX"
 python3 -c "
@@ -111,7 +118,7 @@ _ok "hermes-local is not available_to codex (claude only in v1)"
 RENDERED_GATE="$TMPBASE/gate.json"
 CBOX_HERMES_DELEGATE=on \
 CBOX_HERMES_DELEGATE_BIN=/opt/hermes/bin/hermes \
-CBOX_HERMES_DELEGATE_HOME_TEMPLATE=/etc/cbox/hermes-delegate-home \
+CBOX_HERMES_DELEGATE_HOME_TEMPLATE=/opt/hermes/delegate-home \
   python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
   "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$RENDERED_GATE"
 HOSTHOME="$TMPBASE/hosthome_hermes_delegate"

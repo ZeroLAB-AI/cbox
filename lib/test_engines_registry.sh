@@ -208,9 +208,9 @@ done
 bin="$(python3 "$PY" get "$REG" hermes bin)"
 [ "$bin" = "hermes" ] || _fail "registry bin for hermes is $bin, expected hermes"
 install="$(python3 "$PY" get "$REG" hermes install)"
-[ "$install" = "image" ] || _fail "registry install for hermes is $install, expected image"
-case "|$ib_allow|" in *"|hermes|"*) _fail "hermes must not be in install-bins.sh allowlist (install=image, not bins-volume)" ;; esac
-_ok "claude+codex registry bin/install fields agree with install-bins/entrypoint reality"
+[ "$install" = "bins-volume" ] || _fail "registry install for hermes is $install, expected bins-volume"
+case "|$ib_allow|" in *"|hermes|"*) ;; *) _fail "hermes must be in install-bins.sh allowlist (install=bins-volume): $ib_allow" ;; esac
+_ok "claude+codex+hermes registry bin/install fields agree with install-bins/entrypoint reality"
 
 sec_binaries="$(grep -oE "^SEC_VARS\[binaries\]='[^']*'" "$v_sections" | sed -E "s/^SEC_VARS\[binaries\]='//; s/'\$//")"
 for eng in claude codex; do

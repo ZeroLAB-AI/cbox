@@ -177,9 +177,9 @@ gen_env_file() {
 }
 
 _cbox_bins_volume() {
-  local tool="$1" scope="${CBOX_BINS_SCOPE:-global}" claude_target codex_version codex_target h8
+  local tool="$1" scope="${CBOX_BINS_SCOPE:-global}" claude_target codex_version codex_target hermes_version h8
   case "$tool" in
-    claude|codex) ;;
+    claude|codex|hermes) ;;
     *) die "_cbox_bins_volume: unknown tool $tool" ;;
   esac
   if [ "$scope" != "pinned" ]; then
@@ -189,12 +189,16 @@ _cbox_bins_volume() {
   claude_target="${CBOX_CLAUDE_TARGET:-stable}"
   codex_version="${CBOX_CODEX_VERSION:-latest}"
   codex_target="${CBOX_CODEX_TARGET:-}"
+  hermes_version="${CBOX_HERMES_VERSION:-latest}"
   case "$tool" in
     claude)
       h8="$(printf 'claude|%s' "$claude_target" | sha256sum | awk '{print substr($1,1,8)}')"
       ;;
     codex)
       h8="$(printf 'codex|%s|%s' "$codex_version" "$codex_target" | sha256sum | awk '{print substr($1,1,8)}')"
+      ;;
+    hermes)
+      h8="$(printf 'hermes|%s' "$hermes_version" | sha256sum | awk '{print substr($1,1,8)}')"
       ;;
   esac
   printf 'cbox-bins-%s-%s' "$tool" "$h8"
@@ -209,28 +213,31 @@ _cbox_validate_targets() {
     || die "invalid CBOX_CODEX_VERSION '$codex_version' (expected latest or x.y.z)"
 }
 
+_cbox_hermes_delegate_defaults() {
+  : "${CBOX_HERMES_DELEGATE_BIN:=/opt/hermes/bin/hermes}"
+  : "${CBOX_HERMES_DELEGATE_HOME_TEMPLATE:=/opt/hermes/delegate-home}"
+  export CBOX_HERMES_DELEGATE_BIN CBOX_HERMES_DELEGATE_HOME_TEMPLATE
+}
+
 _cbox_validate_hermes_version() {
   local v="$1"
+  [ "$v" = latest ] && return 0
   case "$v" in
-    *[!0-9.]*) die "invalid CBOX_HERMES_VERSION '$v' (expected x.y[.z[.w]])" ;;
+    *[!0-9.]*) die "invalid CBOX_HERMES_VERSION '$v' (expected latest or x.y[.z[.w]])" ;;
   esac
   printf '%s' "$v" | grep -Eq '^[0-9]+([.][0-9]+){1,3}$' \
-    || die "invalid CBOX_HERMES_VERSION '$v' (expected x.y[.z[.w]])"
+    || die "invalid CBOX_HERMES_VERSION '$v' (expected latest or x.y[.z[.w]])"
 }
 
 gen_dockerfile_into() {
   local effdir="$1" digest="$2"
-  local pkgs claude_target codex_version codex_target workdir tmp hermes_version
+  local pkgs claude_target codex_version codex_target workdir tmp
   pkgs="$(_cbox_final_pkgs)"
   _cbox_validate_targets
   claude_target="${CBOX_CLAUDE_TARGET:-stable}"
   codex_version="${CBOX_CODEX_VERSION:-latest}"
   codex_target="${CBOX_CODEX_TARGET:-}"
   workdir="$(_cbox_workdir)"
-  if [ "${CBOX_HERMES:-off}" = on ]; then
-    hermes_version="${CBOX_HERMES_VERSION:-0.19.0}"
-    _cbox_validate_hermes_version "$hermes_version"
-  fi
   tmp="$(mktemp "$effdir/.cbox.XXXXXX")"
   cat > "$tmp" <<EOF
 FROM ubuntu:24.04@$digest
@@ -249,14 +256,7 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod 755 /entrypoint.sh
 COPY install-bins.sh /opt/cbox/install-bins.sh
 RUN chmod 755 /opt/cbox/install-bins.sh
-EOF
-  if [ "${CBOX_HERMES:-off}" = on ]; then
-    cat >> "$tmp" <<EOF
-RUN python3 -m venv /opt/hermes && /opt/hermes/bin/pip install --no-cache-dir hermes-agent==$hermes_version && ln -s /opt/hermes/bin/hermes /usr/local/bin/hermes
-RUN mkdir -p /etc/cbox/hermes-delegate-home && HERMES_HOME=/etc/cbox/hermes-delegate-home /opt/hermes/bin/hermes setup --non-interactive && rm -rf /etc/cbox/hermes-delegate-home/.env /etc/cbox/hermes-delegate-home/skills /etc/cbox/hermes-delegate-home/*.db /etc/cbox/hermes-delegate-home/*.sqlite* && chown -R root:root /etc/cbox/hermes-delegate-home && find /etc/cbox/hermes-delegate-home -type d -exec chmod 0555 {} \\; && find /etc/cbox/hermes-delegate-home -type f -exec chmod 0444 {} \\;
-EOF
-  fi
-  cat >> "$tmp" <<EOF
+RUN mkdir -p /opt/hermes && ln -sf /opt/hermes/bin/hermes /usr/local/bin/hermes
 WORKDIR $workdir
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["sleep", "infinity"]
@@ -487,7 +487,6 @@ _cbox_final_pkgs() {
 gen_image_inputs() {
   local eff="$1" digest="$2"
   local pkgs claude_target codex_version codex_target entrypoint_sha install_bins_sha tpl_sha workdir
-  local hermes hermes_version
   pkgs="$(_cbox_final_pkgs)"
   workdir="$(_cbox_workdir)"
   claude_target="${CBOX_CLAUDE_TARGET:-stable}"
@@ -496,13 +495,6 @@ gen_image_inputs() {
   entrypoint_sha="$(sha256sum "$eff/entrypoint.sh" | awk '{print $1}')"
   install_bins_sha="$(sha256sum "$eff/install-bins.sh" | awk '{print $1}')"
   tpl_sha="$(_cbox_tpl_sha)"
-  if [ "${CBOX_HERMES:-off}" = on ]; then
-    hermes=1
-    hermes_version="${CBOX_HERMES_VERSION:-0.19.0}"
-  else
-    hermes=0
-    hermes_version=""
-  fi
   {
     printf 'schema=1\n'
     printf 'base=ubuntu:24.04@%s\n' "$digest"
@@ -514,8 +506,6 @@ gen_image_inputs() {
     printf 'claude_target=%s\n' "$claude_target"
     printf 'codex_version=%s\n' "$codex_version"
     printf 'codex_target=%s\n' "$codex_target"
-    printf 'hermes=%s\n' "$hermes"
-    printf 'hermes_version=%s\n' "$hermes_version"
     printf 'copy.entrypoint.sh=%s\n' "$entrypoint_sha"
     printf 'copy.install-bins.sh=%s\n' "$install_bins_sha"
     printf 'tpl_sha=%s\n' "$tpl_sha"
@@ -685,7 +675,7 @@ EOF
     _cbox_hermes_validate_compose_env
     cat >> "$tmp" <<EOF
       - CBOX_HERMES=${CBOX_HERMES}
-      - CBOX_HERMES_VERSION=${CBOX_HERMES_VERSION:-0.19.0}
+      - CBOX_HERMES_VERSION=${CBOX_HERMES_VERSION:-latest}
       - CBOX_HERMES_PROVIDER=${CBOX_HERMES_PROVIDER:-local}
       - CBOX_HERMES_MODEL_URL=${CBOX_HERMES_MODEL_URL:-}
       - CBOX_HERMES_MODEL_NAME=${CBOX_HERMES_MODEL_NAME:-}
@@ -824,6 +814,7 @@ EOF
   if [ "${CBOX_HERMES:-off}" = on ]; then
     mkdir -p "$INSTALL_DIR/generated/hermes"
     cat >> "$tmp" <<EOF
+      - hermes-bins:/opt/hermes:ro
       - hermes-home:\${HOST_HOME}/.hermes-cbox
       - $INSTALL_DIR/generated/hermes:/etc/cbox/hermes-managed:ro
 EOF
@@ -893,6 +884,9 @@ EOF
   esac
   if [ "${CBOX_HERMES:-off}" = on ]; then
     cat >> "$tmp" <<EOF
+  hermes-bins:
+    external: true
+    name: $(_cbox_bins_volume hermes)
   hermes-home:
     name: $name-hermes-home
 EOF
@@ -980,7 +974,7 @@ EOF
     _cbox_hermes_validate_compose_env
     cat >> "$tmp" <<EOF
       - CBOX_HERMES=${CBOX_HERMES}
-      - CBOX_HERMES_VERSION=${CBOX_HERMES_VERSION:-0.19.0}
+      - CBOX_HERMES_VERSION=${CBOX_HERMES_VERSION:-latest}
       - CBOX_HERMES_PROVIDER=${CBOX_HERMES_PROVIDER:-local}
       - CBOX_HERMES_MODEL_URL=${CBOX_HERMES_MODEL_URL:-}
       - CBOX_HERMES_MODEL_NAME=${CBOX_HERMES_MODEL_NAME:-}
@@ -1158,6 +1152,7 @@ EOF
   if [ "${CBOX_HERMES:-off}" = on ]; then
     mkdir -p "$eff/hermes"
     cat >> "$tmp" <<EOF
+      - hermes-bins:/opt/hermes:ro
       - hermes-home:\${HOST_HOME}/.hermes-cbox
       - $eff/hermes:/etc/cbox/hermes-managed:ro
 EOF
@@ -1227,6 +1222,9 @@ EOF
   esac
   if [ "${CBOX_HERMES:-off}" = on ]; then
     cat >> "$tmp" <<EOF
+  hermes-bins:
+    external: true
+    name: $(_cbox_bins_volume hermes)
   hermes-home:
     name: cbox-p$p_hash-hermes-home
 EOF
@@ -1601,7 +1599,7 @@ _cbox_hermes_validate_compose_env() {
   local provider="${CBOX_HERMES_PROVIDER:-local}"
   local url="${CBOX_HERMES_MODEL_URL:-}"
   local model="${CBOX_HERMES_MODEL_NAME:-}"
-  local version="${CBOX_HERMES_VERSION:-0.19.0}"
+  local version="${CBOX_HERMES_VERSION:-latest}"
   _cbox_validate_hermes_version "$version"
   _cbox_hermes_validate_provider "$provider" \
     || die "invalid CBOX_HERMES_PROVIDER '$provider' (expected local, nous, openrouter, openai, or anthropic)"
@@ -1648,6 +1646,7 @@ gen_claude_json_seed() {
   [ "$shim_mode" = shim ] && progress_flag="on"
   local servers_file="$INSTALL_DIR/etc/mcp/delegates.json"
   local expanded hooks_dir="$HOME/.claude/hooks" mcp_json
+  _cbox_hermes_delegate_defaults
   expanded="$(canonical_expand "${CBOX_MCP_SERVERS:-all}" "$(mcp_all_names)")"
   mcp_json="$(python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$servers_file" "$expanded" "$hooks_dir" "$progress_flag" claude)"
   out="$(python3 - "$mcp_json" <<'PY'
@@ -1723,6 +1722,7 @@ _gen_claude_cbox_json_seed_render() {
   [ "$shim_mode" = shim ] && progress_flag="on"
   local servers_file="$INSTALL_DIR/etc/mcp/delegates.json"
   local expanded hooks_dir="$HOME/.claude/hooks" mcp_json
+  _cbox_hermes_delegate_defaults
   expanded="$(canonical_expand "${CBOX_MCP_SERVERS:-all}" "$(mcp_all_names)")"
   mcp_json="$(python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$servers_file" "$expanded" "$hooks_dir" "$progress_flag" claude)"
   out="$(python3 - "$mcp_json" "$target" <<'PY'

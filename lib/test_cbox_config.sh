@@ -183,14 +183,14 @@ PENDIR="$TMPBASE/pending-eff"
 mkdir -p "$PENDIR"
 _cbox_config_write_pending "$PENDIR" hermes mode
 [ -f "$PENDIR/pending.apply" ] || _fail "pending: pending.apply not written"
-grep -qx 'hermes=rebuild' "$PENDIR/pending.apply" || _fail "pending: hermes=rebuild line missing"
+grep -qx 'hermes=recreate' "$PENDIR/pending.apply" || _fail "pending: hermes=recreate line missing"
 grep -qx 'mode=none' "$PENDIR/pending.apply" || _fail "pending: mode=none line missing"
 _ok "pending: pending.apply renders section=apply-class lines"
 
 report="$(_cbox_config_print_report hermes mode)"
 case "$report" in
-  *"rebuild"*"next cbox run rebuilds"*) ;;
-  *) _fail "report: hermes rebuild command text missing from report: $report" ;;
+  *"recreate"*"compose recreates"*) ;;
+  *) _fail "report: hermes recreate command text missing from report: $report" ;;
 esac
 case "$report" in
   *"none"*"takes effect on next cbox run"*) ;;
@@ -260,7 +260,7 @@ grep -q '^CBOX_HERMES_VERSION=0.20.0$' "$EFF/cbox.conf" || _fail "e2e success: C
 [ "$(cat "$EFF/generated/marker.txt")" = "regenerated-marker" ] || _fail "e2e success: regen did not run (marker not updated)"
 grep -q "regen-called eff=$EFF root=$ROOT" "$REGEN_LOG" || _fail "e2e success: regen was not called with the expected eff/root"
 [ -f "$EFF/pending.apply" ] || _fail "e2e success: pending.apply not written"
-grep -qx 'hermes=rebuild' "$EFF/pending.apply" || _fail "e2e success: pending.apply missing hermes=rebuild"
+grep -qx 'hermes=recreate' "$EFF/pending.apply" || _fail "e2e success: pending.apply missing hermes=recreate"
 
 conf_sha_now="$(sha256sum "$EFF/cbox.conf" | awk '{print $1}')"
 manifest_conf_sha="$(_cbox_manifest_field "$EFF/manifest.sha256" conf)"

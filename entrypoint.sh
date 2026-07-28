@@ -380,7 +380,13 @@ case "${1:-}" in
       || { echo "entrypoint: hermes is disabled (CBOX_HERMES=$CBOX_HERMES) - run './setup.sh update hermes' on the host, then rebuild" >&2; exit 1; }
     : "${CBOX_HERMES_VERSION:?entrypoint: CBOX_HERMES_VERSION is unset - run ./setup.sh update hermes}"
     if [ ! -x /opt/hermes/bin/hermes ]; then
-      echo "entrypoint: /opt/hermes/bin/hermes missing or not executable - this image predates enabling hermes, rebuild: ./setup.sh update hermes" >&2
+      echo "entrypoint: /opt/hermes/bin/hermes missing or not executable - the hermes bins volume is empty, run 'cbox reinstall-bins' on the host" >&2
+      exit 1
+    fi
+    _hermes_want="$(_stamp_field /opt/hermes/.cbox-stamp 1)" || _hermes_want=""
+    _hermes_have="$(_stamp_field /opt/hermes/.cbox-stamp 4)" || _hermes_have=""
+    if [ "$_hermes_want" != "$CBOX_HERMES_VERSION" ] || [ -z "$_hermes_have" ]; then
+      echo "entrypoint: the hermes volume is stale - it was installed for target ${_hermes_want:-none} (installed version ${_hermes_have:-none}) but this container wants $CBOX_HERMES_VERSION; run 'cbox reinstall-bins' on the host. This is a staleness check, not an integrity check - the volume content is trusted." >&2
       exit 1
     fi
     shift

@@ -22,13 +22,16 @@ TEMPLATE_HOME_VAR = "CBOX_HERMES_DELEGATE_HOME_TEMPLATE"
 PROVIDER_VAR = "CBOX_HERMES_DELEGATE_PROVIDER"
 BASE_URL_VAR = "CBOX_HERMES_DELEGATE_BASE_URL"
 MODEL_VAR = "CBOX_HERMES_DELEGATE_MODEL"
+CONSOLE_PROVIDER_VAR = "CBOX_HERMES_PROVIDER"
+CONSOLE_BASE_URL_VAR = "CBOX_HERMES_MODEL_URL"
+CONSOLE_MODEL_VAR = "CBOX_HERMES_MODEL_NAME"
 TIMEOUT_VAR = "CBOX_HERMES_DELEGATE_TIMEOUT_SEC"
 MAX_PROMPT_VAR = "CBOX_HERMES_DELEGATE_MAX_PROMPT_BYTES"
 MAX_RESPONSE_VAR = "CBOX_HERMES_DELEGATE_MAX_RESPONSE_BYTES"
 AUDIT_VAR = "CBOX_HERMES_DELEGATE_AUDIT"
 
 DEFAULT_BIN = "/opt/hermes/bin/hermes"
-DEFAULT_TEMPLATE_HOME = "/etc/cbox/hermes-delegate-home"
+DEFAULT_TEMPLATE_HOME = "/opt/hermes/delegate-home"
 DEFAULT_TIMEOUT_SEC = 300
 DEFAULT_MAX_PROMPT_BYTES = 32000
 DEFAULT_MAX_RESPONSE_BYTES = 1000000
@@ -314,12 +317,25 @@ def _kill_group(proc):
 
 
 def _apply_config(ephemeral_home, env_base):
-    provider = os.environ.get(PROVIDER_VAR, "").strip()
-    base_url = os.environ.get(BASE_URL_VAR, "").strip()
-    model = os.environ.get(MODEL_VAR, "").strip()
+    provider = (os.environ.get(PROVIDER_VAR, "").strip()
+                or os.environ.get(CONSOLE_PROVIDER_VAR, "").strip())
+    base_url = (os.environ.get(BASE_URL_VAR, "").strip()
+                or os.environ.get(CONSOLE_BASE_URL_VAR, "").strip())
+    model = (os.environ.get(MODEL_VAR, "").strip()
+             or os.environ.get(CONSOLE_MODEL_VAR, "").strip())
 
-    if provider and not _validate_provider(provider):
+    if not provider:
+        return ("refusing to delegate: neither " + PROVIDER_VAR + " nor " + CONSOLE_PROVIDER_VAR
+                + " is set, so the endpoint would come from the template home that the hermes"
+                " package seeds for itself - set one on the host with"
+                " './setup.sh update hermes-delegate' or"
+                " 'cbox config set " + PROVIDER_VAR + "=<provider>'")
+    if not _validate_provider(provider):
         return "invalid " + PROVIDER_VAR + " %r" % provider
+    if provider == "local" and not base_url:
+        return ("refusing to delegate: the local provider needs " + BASE_URL_VAR + " or "
+                + CONSOLE_BASE_URL_VAR + ", otherwise the endpoint would come from the template"
+                " home that the hermes package seeds for itself")
     if base_url and not _validate_url(base_url):
         return "invalid " + BASE_URL_VAR + " %r" % base_url
     if model and not _validate_model(model):

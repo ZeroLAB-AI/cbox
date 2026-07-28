@@ -314,7 +314,7 @@ conf_defaults() {
   : "${CBOX_LOCAL_MODEL_NAME:=}"
   export CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
   : "${CBOX_HERMES:=off}"
-  : "${CBOX_HERMES_VERSION:=0.19.0}"
+  : "${CBOX_HERMES_VERSION:=latest}"
   : "${CBOX_HERMES_PROVIDER:=local}"
   : "${CBOX_HERMES_MODEL_URL:=}"
   : "${CBOX_HERMES_MODEL_NAME:=}"
@@ -1601,7 +1601,7 @@ mcp_apply_selection() {
   [ "${CBOX_CLAUDE_MODE:-mount}" = mount ] || shim_mode=off
   expanded="$(canonical_expand "$CBOX_MCP_SERVERS" "$(mcp_all_names)")"
   : "${CBOX_HERMES_DELEGATE_BIN:=/opt/hermes/bin/hermes}"
-  : "${CBOX_HERMES_DELEGATE_HOME_TEMPLATE:=/etc/cbox/hermes-delegate-home}"
+  : "${CBOX_HERMES_DELEGATE_HOME_TEMPLATE:=/opt/hermes/delegate-home}"
   export CBOX_HERMES_DELEGATE_BIN CBOX_HERMES_DELEGATE_HOME_TEMPLATE
   if [ "$CBOX_CLAUDE_MODE" = mount ]; then
     local target="$HOME/.claude.json" stage
@@ -1724,22 +1724,25 @@ step_local_model() {
 
 step_hermes() {
   echo "== section: hermes =="
-  note "off by default; third console engine (NousResearch Hermes Agent) installed as a pinned venv in the image; local OpenAI-compatible endpoint by default"
+  note "off by default; third console engine (NousResearch Hermes Agent) installed as a venv in the shared cbox-bins-hermes volume; local OpenAI-compatible endpoint by default"
   note "transitive pip deps stay unpinned in v1 - an explicit documented supply-chain exception"
+  note "'latest' tracks the newest PyPI release and is refreshed by the bins autoupdate; an x.y.z pin never moves on its own"
   local prev_on="$CBOX_HERMES" prev_ver="$CBOX_HERMES_VERSION" prev_provider="$CBOX_HERMES_PROVIDER" \
     prev_url="$CBOX_HERMES_MODEL_URL" prev_name="$CBOX_HERMES_MODEL_NAME"
   ask_choice "setup: enable the hermes console engine" "$CBOX_HERMES" off on
   CBOX_HERMES="$ASK_VALUE"
   if [ "$CBOX_HERMES" = on ]; then
-    ask "setup: hermes version pin (hermes-agent on PyPI)" "$CBOX_HERMES_VERSION"
+    ask "setup: hermes version target (latest, or an x.y[.z[.w]] pin of hermes-agent on PyPI)" "$CBOX_HERMES_VERSION"
     CBOX_HERMES_VERSION="$ASK_VALUE"
-    case "$CBOX_HERMES_VERSION" in
-      *[!0-9.]*) CBOX_HERMES_VERSION="not-a-version" ;;
-    esac
-    if ! printf '%s' "$CBOX_HERMES_VERSION" | grep -Eq '^[0-9]+([.][0-9]+){1,3}$'; then
-      warn "hermes version pin '$CBOX_HERMES_VERSION' is not a plain x.y[.z[.w]] version - keeping hermes off until a valid pin is set"
-      CBOX_HERMES=off
-      CBOX_HERMES_VERSION="${prev_ver:-0.19.0}"
+    if [ "$CBOX_HERMES_VERSION" != latest ]; then
+      case "$CBOX_HERMES_VERSION" in
+        *[!0-9.]*) CBOX_HERMES_VERSION="not-a-version" ;;
+      esac
+      if ! printf '%s' "$CBOX_HERMES_VERSION" | grep -Eq '^[0-9]+([.][0-9]+){1,3}$'; then
+        warn "hermes version target '$CBOX_HERMES_VERSION' is neither latest nor a plain x.y[.z[.w]] version - keeping hermes off until a valid target is set"
+        CBOX_HERMES=off
+        CBOX_HERMES_VERSION="${prev_ver:-latest}"
+      fi
     fi
   fi
   if [ "$CBOX_HERMES" = on ]; then
@@ -1754,7 +1757,7 @@ step_hermes() {
     ask "setup: hermes model name" "$CBOX_HERMES_MODEL_NAME"
     CBOX_HERMES_MODEL_NAME="$ASK_VALUE"
   else
-    CBOX_HERMES_VERSION="${CBOX_HERMES_VERSION:-0.19.0}"
+    CBOX_HERMES_VERSION="${CBOX_HERMES_VERSION:-latest}"
     CBOX_HERMES_PROVIDER="${CBOX_HERMES_PROVIDER:-local}"
     CBOX_HERMES_MODEL_URL=""
     CBOX_HERMES_MODEL_NAME=""
@@ -1765,7 +1768,7 @@ step_hermes() {
       && [ "$CBOX_HERMES_MODEL_NAME" = "$prev_name" ]; then
     return 0
   fi
-  note "hermes is a rebuild-class change; the image needs a rebuild before the new pin/provider takes effect (cbox up or apply below)"
+  note "hermes is a recreate-class change; compose recreates the container, and the binary lands via 'cbox reinstall-bins' or the next autoupdate pass"
 }
 
 step_hermes_delegate() {
