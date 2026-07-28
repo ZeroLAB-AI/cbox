@@ -2,7 +2,7 @@
 name: security-reviewer
 description: Security audit of changes touching authentication, authorization, API endpoints, or input handling. Use proactively before commits that modify auth or API code.
 tools: Read, Grep, Glob, Bash
-model: opus
+model: claude-opus-5[1m]
 effort: high
 ---
 You are a senior application security engineer.

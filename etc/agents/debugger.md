@@ -2,7 +2,7 @@
 name: debugger
 description: Root cause analysis and minimal fixes for errors, stack traces, failing behavior, or regressions. Use when something is broken and the cause is unclear.
 tools: Read, Edit, Bash, Grep, Glob
-model: opus
+model: claude-opus-5[1m]
 effort: max
 ---
 You are an expert debugger specializing in root cause analysis.

@@ -76,6 +76,29 @@ hr() { printf '%s%s%s\n' "$C_MUTE" "$HR_LINE" "$C_RESET"; }
 [ -f "$INSTALL_DIR/templates/sections.sh" ] || die "templates/sections.sh missing"
 . "$INSTALL_DIR/templates/sections.sh"
 
+_cbox_machine_scoped_vars() {
+  local s v
+  for s in "${SECTIONS[@]}"; do
+    [ "${SEC_SCOPE[$s]:-project}" = machine ] || continue
+    for v in ${SEC_VARS[$s]:-}; do
+      printf '%s\n' "$v"
+    done
+  done
+}
+
+_cbox_strip_machine_scoped_vars() {
+  local conf="$1" tmp v
+  [ -f "$conf" ] || return 0
+  tmp="$(mktemp "$(dirname "$conf")/.cbox.XXXXXX")"
+  cp "$conf" "$tmp"
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    sed -i "/^${v}=/d" "$tmp"
+  done < <(_cbox_machine_scoped_vars)
+  chmod 0644 "$tmp"
+  mv "$tmp" "$conf"
+}
+
 header() {
   local title="$1" step="${2:-}" total="${3:-}"
   printf '\n'
@@ -304,6 +327,7 @@ conf_defaults() {
   : "${CBOX_HOST_ROUTE_APPLIED:=0}"
   : "${CBOX_HOST_PROXY_URL:=}"
   : "${CBOX_HOST_PROXY_ADDR_MODE:=host-gateway}"
+  : "${CBOX_HOST_GATEWAY_ALIAS:=off}"
   : "${CBOX_SSH_MODE:=none}"
   : "${CBOX_SSH_AGENT_DIR:=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/cbox-ssh}"
   : "${CBOX_BASHRC:=1}"
@@ -323,7 +347,22 @@ conf_defaults() {
   : "${CBOX_HERMES_DELEGATE_PROVIDER:=}"
   : "${CBOX_HERMES_DELEGATE_BASE_URL:=}"
   : "${CBOX_HERMES_DELEGATE_MODEL:=}"
-  export CBOX_HERMES_DELEGATE_PROVIDER CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL
+  : "${CBOX_HERMES_DELEGATE_MAX_CONCURRENCY:=1}"
+  : "${CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC:=}"
+  : "${CBOX_HERMES_DELEGATE_LOCK_DIR:=}"
+  : "${OLLAMA_NUM_PARALLEL:=}"
+  : "${CBOX_HERMES_DELEGATE_MODE:=}"
+  : "${CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS:=}"
+  export CBOX_HERMES_DELEGATE CBOX_HERMES_DELEGATE_PROVIDER CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL CBOX_HERMES_DELEGATE_MAX_CONCURRENCY
+  export CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC CBOX_HERMES_DELEGATE_LOCK_DIR OLLAMA_NUM_PARALLEL CBOX_HERMES_DELEGATE_MODE CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS
+  : "${CBOX_OLLAMA_MODE:=off}"
+  : "${CBOX_OLLAMA_IMAGE:=ollama/ollama:0.32.5}"
+  : "${CBOX_OLLAMA_GPU:=off}"
+  : "${CBOX_OLLAMA_STORE:=dedicated}"
+  : "${CBOX_OLLAMA_STORE_PATH:=}"
+  : "${CBOX_OLLAMA_PORT:=11434}"
+  : "${CBOX_OLLAMA_NUM_PARALLEL:=1}"
+  export CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL
   : "${CBOX_LIMIT_AUTORESUME:=off}"
   : "${CBOX_LIMIT_RESUME_DELAY:=300}"
   : "${CBOX_LIMIT_RESUME_PROMPT:=pokracuj}"
@@ -400,6 +439,7 @@ conf_save() {
     printf 'CBOX_HOST_ROUTE_APPLIED=%q\n' "$CBOX_HOST_ROUTE_APPLIED"
     printf 'CBOX_HOST_PROXY_URL=%q\n' "$CBOX_HOST_PROXY_URL"
     printf 'CBOX_HOST_PROXY_ADDR_MODE=%q\n' "$CBOX_HOST_PROXY_ADDR_MODE"
+    printf 'CBOX_HOST_GATEWAY_ALIAS=%q\n' "$CBOX_HOST_GATEWAY_ALIAS"
     printf 'CBOX_SSH_MODE=%q\n' "$CBOX_SSH_MODE"
     printf 'CBOX_SSH_AGENT_DIR=%q\n' "$CBOX_SSH_AGENT_DIR"
     printf 'CBOX_BASHRC=%q\n' "$CBOX_BASHRC"
@@ -417,6 +457,14 @@ conf_save() {
     printf 'CBOX_HERMES_DELEGATE_PROVIDER=%q\n' "$CBOX_HERMES_DELEGATE_PROVIDER"
     printf 'CBOX_HERMES_DELEGATE_BASE_URL=%q\n' "$CBOX_HERMES_DELEGATE_BASE_URL"
     printf 'CBOX_HERMES_DELEGATE_MODEL=%q\n' "$CBOX_HERMES_DELEGATE_MODEL"
+    printf 'CBOX_HERMES_DELEGATE_MAX_CONCURRENCY=%q\n' "$CBOX_HERMES_DELEGATE_MAX_CONCURRENCY"
+    printf 'CBOX_OLLAMA_MODE=%q\n' "$CBOX_OLLAMA_MODE"
+    printf 'CBOX_OLLAMA_IMAGE=%q\n' "$CBOX_OLLAMA_IMAGE"
+    printf 'CBOX_OLLAMA_GPU=%q\n' "$CBOX_OLLAMA_GPU"
+    printf 'CBOX_OLLAMA_STORE=%q\n' "$CBOX_OLLAMA_STORE"
+    printf 'CBOX_OLLAMA_STORE_PATH=%q\n' "$CBOX_OLLAMA_STORE_PATH"
+    printf 'CBOX_OLLAMA_PORT=%q\n' "$CBOX_OLLAMA_PORT"
+    printf 'CBOX_OLLAMA_NUM_PARALLEL=%q\n' "$CBOX_OLLAMA_NUM_PARALLEL"
     printf 'CBOX_LIMIT_AUTORESUME=%q\n' "$CBOX_LIMIT_AUTORESUME"
     printf 'CBOX_LIMIT_RESUME_DELAY=%q\n' "$CBOX_LIMIT_RESUME_DELAY"
     printf 'CBOX_LIMIT_RESUME_PROMPT=%q\n' "$CBOX_LIMIT_RESUME_PROMPT"
@@ -1507,12 +1555,23 @@ step_netaccess() {
 step_hostroute() {
   echo "== section: hostroute =="
   local prev_mode="$CBOX_HOST_ROUTE_MODE"
+  local prev_gw_alias="$CBOX_HOST_GATEWAY_ALIAS"
   ask_choice "setup: hostroute mode" "$CBOX_HOST_ROUTE_MODE" off host-proxy
   CBOX_HOST_ROUTE_MODE="$ASK_VALUE"
   if [ "$SETUP_MODE" = update ] && [ "$CBOX_HOST_ROUTE_MODE" != off ]; then
     CBOX_HOST_ROUTE_APPLIED=1
   elif [ "$CBOX_HOST_ROUTE_MODE" != "$prev_mode" ]; then
     CBOX_HOST_ROUTE_APPLIED=0
+  fi
+  note "host-gateway alias maps host.docker.internal in the container, for reaching host-side services such as a local ollama/llama.cpp endpoint directly"
+  ask_choice "setup: host-gateway alias (host.docker.internal)" "$CBOX_HOST_GATEWAY_ALIAS" off on
+  CBOX_HOST_GATEWAY_ALIAS="$ASK_VALUE"
+  if [ "$CBOX_HOST_GATEWAY_ALIAS" != "$prev_gw_alias" ]; then
+    CBOX_HOST_ROUTE_APPLIED=0
+  fi
+  if [ "$CBOX_HOST_GATEWAY_ALIAS" = on ] && _cbox_is_rootless_docker; then
+    warn "rootless docker detected: host.docker.internal resolves to the rootlesskit bridge, not the real host (disable-host-loopback blocks it, moby #47684) - the alias will not reach a host-side server here"
+    note "working alternative: bind the host model server to a non-loopback host address (for example the host WireGuard interface IP) and point the URL at that address directly"
   fi
   [ "$CBOX_HOST_ROUTE_MODE" != off ] || return 0
   note "host-route requires filtered egress (enforced in a later phase); the host proxy itself is user-managed"
@@ -1696,13 +1755,19 @@ step_local_model() {
   ask_choice "setup: enable the local model delegate" "$CBOX_LOCAL_MODEL" off on
   CBOX_LOCAL_MODEL="$ASK_VALUE"
   if [ "$CBOX_LOCAL_MODEL" = on ]; then
-    ask "setup: local model endpoint url (OpenAI-compatible, e.g. http://ollama:11434 or http://host-gateway:11434)" "$CBOX_LOCAL_MODEL_URL"
+    note "endpoint must be OpenAI-compatible (ollama, llama.cpp, vllm); pick the pattern that matches where it runs:"
+    note "  sibling container:      http://ollama:11434"
+    note "  host-side server:       http://host.docker.internal:11434 (needs hostroute gateway-alias=on)"
+    note "  remote over wireguard:  http://TUNNEL-IP:11434"
+    ask "setup: local model endpoint url (OpenAI-compatible)" "$CBOX_LOCAL_MODEL_URL"
     CBOX_LOCAL_MODEL_URL="$ASK_VALUE"
     ask "setup: local model name (as known to the endpoint, e.g. qwen2.5:7b)" "$CBOX_LOCAL_MODEL_NAME"
     CBOX_LOCAL_MODEL_NAME="$ASK_VALUE"
     if [ -z "$CBOX_LOCAL_MODEL_URL" ] || [ -z "$CBOX_LOCAL_MODEL_NAME" ]; then
       warn "local model url or name left empty - keeping the delegate off (CBOX_LOCAL_MODEL=off) until both are set"
       CBOX_LOCAL_MODEL=off
+    elif [ "${CBOX_EGRESS_MODE:-off}" != off ]; then
+      warn "egress lockdown is on (CBOX_EGRESS_MODE=$CBOX_EGRESS_MODE): the endpoint is not exempted from the proxy under lockdown - either allowlist the endpoint host in the egress filter, or turn egress lockdown off (CBOX_EGRESS_MODE=off) to reach it directly"
     fi
   else
     CBOX_LOCAL_MODEL_URL=""
@@ -1746,6 +1811,7 @@ step_hermes() {
     ask_choice "setup: hermes model provider" "$CBOX_HERMES_PROVIDER" local nous openrouter openai anthropic
     CBOX_HERMES_PROVIDER="$ASK_VALUE"
     if [ "$CBOX_HERMES_PROVIDER" = local ]; then
+      note "endpoint must be OpenAI-compatible (ollama, llama.cpp, vllm): http://ollama:11434 (sibling container), http://host.docker.internal:11434 (host-side, needs hostroute gateway-alias=on), or http://TUNNEL-IP:11434 (remote over wireguard)"
       ask "setup: hermes local model endpoint url (OpenAI-compatible)" "${CBOX_HERMES_MODEL_URL:-$CBOX_LOCAL_MODEL_URL}"
       CBOX_HERMES_MODEL_URL="$ASK_VALUE"
     else
@@ -1788,6 +1854,7 @@ step_hermes_delegate() {
       ask_choice "setup: hermes delegate model provider" "${CBOX_HERMES_DELEGATE_PROVIDER:-$CBOX_HERMES_PROVIDER}" local nous openrouter openai anthropic
       CBOX_HERMES_DELEGATE_PROVIDER="$ASK_VALUE"
       if [ "$CBOX_HERMES_DELEGATE_PROVIDER" = local ]; then
+        note "endpoint must be OpenAI-compatible (ollama, llama.cpp, vllm): http://ollama:11434 (sibling container), http://host.docker.internal:11434 (host-side, needs hostroute gateway-alias=on), or http://TUNNEL-IP:11434 (remote over wireguard)"
         ask "setup: hermes delegate local model endpoint url (OpenAI-compatible)" "${CBOX_HERMES_DELEGATE_BASE_URL:-$CBOX_HERMES_MODEL_URL}"
         CBOX_HERMES_DELEGATE_BASE_URL="$ASK_VALUE"
       else
@@ -1801,7 +1868,7 @@ step_hermes_delegate() {
       CBOX_HERMES_DELEGATE_MODEL=""
     fi
   fi
-  export CBOX_HERMES_DELEGATE_PROVIDER CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL
+  export CBOX_HERMES_DELEGATE CBOX_HERMES_DELEGATE_PROVIDER CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL
   if [ "$CBOX_HERMES_DELEGATE" = "$prev_on" ] && [ "$CBOX_HERMES_DELEGATE_PROVIDER" = "$prev_provider" ] \
       && [ "$CBOX_HERMES_DELEGATE_BASE_URL" = "$prev_url" ] && [ "$CBOX_HERMES_DELEGATE_MODEL" = "$prev_model" ]; then
     return 0
@@ -1810,6 +1877,61 @@ step_hermes_delegate() {
     mcp_apply_selection
   fi
   note "host claude picks the change up on next start; the container needs re-bless + restart"
+}
+
+step_ollama() {
+  echo "== section: ollama =="
+  note "machine-scoped: this section applies once per machine, never per project - the isolated per-project wizard never asks about it, and 'cbox config set' from inside an isolated project refuses these keys"
+  note "off by default; ollama runs as its own owner compose project (cbox-infra-u<uid>), outside any generated cbox project, so it survives 'cbox down' and per-project compose teardown"
+  local prev_mode="$CBOX_OLLAMA_MODE" prev_image="$CBOX_OLLAMA_IMAGE" prev_gpu="$CBOX_OLLAMA_GPU" \
+    prev_store="$CBOX_OLLAMA_STORE" prev_store_path="$CBOX_OLLAMA_STORE_PATH" \
+    prev_port="$CBOX_OLLAMA_PORT" prev_parallel="$CBOX_OLLAMA_NUM_PARALLEL"
+  ask_choice "setup: enable the ollama machine service" "$CBOX_OLLAMA_MODE" off on
+  CBOX_OLLAMA_MODE="$ASK_VALUE"
+  if [ "$CBOX_OLLAMA_MODE" = on ]; then
+    ask "setup: ollama image reference (pinned tag or digest)" "$CBOX_OLLAMA_IMAGE"
+    CBOX_OLLAMA_IMAGE="$ASK_VALUE"
+    ask_choice "setup: ollama GPU (separate from CBOX_GPU; only the ollama service gets the reservation)" "$CBOX_OLLAMA_GPU" off cdi
+    CBOX_OLLAMA_GPU="$ASK_VALUE"
+    if [ "$CBOX_OLLAMA_GPU" = cdi ] && _cbox_no_cdi; then
+      warn "nvidia-ctk or /etc/cdi/nvidia.yaml not found - the reservation will fail until CDI is set up on this host"
+    fi
+    ask_choice "setup: ollama model store" "$CBOX_OLLAMA_STORE" dedicated shared
+    CBOX_OLLAMA_STORE="$ASK_VALUE"
+    if [ "$CBOX_OLLAMA_STORE" = shared ]; then
+      note "shared mode mounts ONLY the models/ subdirectory of the host ollama directory, read-write, and refuses to start while a host ollama daemon is detected"
+      if path_input "setup: host ollama directory (parent of models/): " "$CBOX_OLLAMA_STORE_PATH" 0; then
+        CBOX_OLLAMA_STORE_PATH="$PATH_VALUE"
+      fi
+      if [ -z "$CBOX_OLLAMA_STORE_PATH" ]; then
+        warn "shared mode needs a host ollama directory - keeping CBOX_OLLAMA_STORE=dedicated until one is set"
+        CBOX_OLLAMA_STORE=dedicated
+      fi
+    else
+      CBOX_OLLAMA_STORE_PATH=""
+    fi
+    note "this port is never published on the host - it is only used to probe for a conflicting host ollama daemon before shared-store mode starts"
+    ask "setup: host ollama port to probe for a conflicting daemon" "$CBOX_OLLAMA_PORT"
+    case "$ASK_VALUE" in
+      ''|*[!0-9]*) warn "not a number; keeping $CBOX_OLLAMA_PORT" ;;
+      *) CBOX_OLLAMA_PORT="$ASK_VALUE" ;;
+    esac
+    note "OLLAMA_NUM_PARALLEL feeds the hermes-delegate semaphore fallback (CBOX_HERMES_DELEGATE_MAX_CONCURRENCY falls back to OLLAMA_NUM_PARALLEL, then 1) - keep CBOX_OLLAMA_NUM_PARALLEL in step with the server's actual OLLAMA_NUM_PARALLEL if the delegate and this owner ollama share one endpoint"
+    ask "setup: ollama OLLAMA_NUM_PARALLEL (concurrent request slots)" "$CBOX_OLLAMA_NUM_PARALLEL"
+    case "$ASK_VALUE" in
+      ''|*[!0-9]*|0) warn "expected a positive integer; keeping $CBOX_OLLAMA_NUM_PARALLEL" ;;
+      *) CBOX_OLLAMA_NUM_PARALLEL="$ASK_VALUE" ;;
+    esac
+  else
+    CBOX_OLLAMA_STORE_PATH=""
+  fi
+  if [ "$CBOX_OLLAMA_MODE" = "$prev_mode" ] && [ "$CBOX_OLLAMA_IMAGE" = "$prev_image" ] \
+      && [ "$CBOX_OLLAMA_GPU" = "$prev_gpu" ] && [ "$CBOX_OLLAMA_STORE" = "$prev_store" ] \
+      && [ "$CBOX_OLLAMA_STORE_PATH" = "$prev_store_path" ] && [ "$CBOX_OLLAMA_PORT" = "$prev_port" ] \
+      && [ "$CBOX_OLLAMA_NUM_PARALLEL" = "$prev_parallel" ]; then
+    return 0
+  fi
+  note "ollama is an infra-reconcile change (SEC_APPLY[ollama]=infra-reconcile): run 'cbox ollama reconcile' to create/update/tear down the owner project - a plain 'cbox down && cbox run' does not touch it"
 }
 
 autoresume_ensure_hooks() {
@@ -1916,6 +2038,12 @@ step_agents() {
         if [[ " $mcp_expanded " != *" $name "* ]]; then
           dis=1
           reason="mcp server $name not selected"
+        fi
+        ;;
+      hermes-local)
+        if [ "${CBOX_HERMES_DELEGATE:-off}" != on ]; then
+          dis=1
+          reason="CBOX_HERMES_DELEGATE=off"
         fi
         ;;
     esac
@@ -3202,6 +3330,7 @@ run_local() {
   fi
 
   conf_save "$eff/cbox.conf"
+  _cbox_strip_machine_scoped_vars "$eff/cbox.conf"
   _cbox_conf_set_tpl_sha "$eff/cbox.conf"
   conf_load
 

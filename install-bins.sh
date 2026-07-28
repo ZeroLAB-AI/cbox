@@ -75,9 +75,9 @@ _bin_hash() {
 
 _hermes_hash() {
   local h
-  h="$( { timeout 600 find "$HXROOT" -mindepth 1 ! -path "$HXROOT/.cbox-stamp" -type f -print0 2>/dev/null \
+  h="$( { timeout 600 find "$HXROOT" -mindepth 1 ! -path "$HXROOT/.cbox-stamp" ! -path "$HXROOT/.prev" ! -path "$HXROOT/.prev/*" -type f -print0 2>/dev/null \
            | LC_ALL=C sort -z | xargs -0 -r sha256sum
-         timeout 60 find "$HXROOT" -mindepth 1 -type l -printf '%p -> %l\n' 2>/dev/null \
+         timeout 60 find "$HXROOT" -mindepth 1 ! -path "$HXROOT/.prev" ! -path "$HXROOT/.prev/*" -type l -printf '%p -> %l\n' 2>/dev/null \
            | LC_ALL=C sort
        } | sha256sum | awk '{print $1}')" || return 1
   [ -n "$h" ] && [ "$h" != "$(printf '' | sha256sum | awk '{print $1}')" ] || return 1
@@ -244,13 +244,146 @@ _hermes_strip_seed_endpoints() {
 }
 
 _hermes_venv_reset() {
-  find "$HXROOT" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || return 1
+  find "$HXROOT" -mindepth 1 -maxdepth 1 ! -name '.prev' -exec rm -rf {} + || return 1
   chown "$HOST_UID:$HOST_GID" "$HXROOT" || return 1
   _hxgosu python3 -m venv "$HXROOT"
 }
 
+_hermes_backup_dir() {
+  printf '%s/.prev' "$HXROOT"
+}
+
+_hermes_tree_complete() {
+  [ -x "$HXROOT/bin/python" ] && [ -e "$HXROOT/bin/hermes" ]
+}
+
+_hermes_backup_marker() {
+  printf '%s/.cbox-backup-complete' "$(_hermes_backup_dir)"
+}
+
+_hermes_prev_is_real_dir() {
+  local prev="$1"
+  [ -e "$prev" ] || return 1
+  [ -L "$prev" ] && return 1
+  [ -d "$prev" ]
+}
+
+_hermes_backup_is_complete() {
+  local prev
+  prev="$(_hermes_backup_dir)"
+  _hermes_prev_is_real_dir "$prev" && [ -f "$(_hermes_backup_marker)" ] && [ ! -L "$(_hermes_backup_marker)" ]
+}
+
+_hermes_backup_take_unwind() {
+  local prev="$1" entry base
+  while IFS= read -r -d '' entry; do
+    base="$(basename "$entry")"
+    [ "$base" = ".cbox-backup-complete" ] && continue
+    mv "$entry" "$HXROOT/$base" 2>/dev/null || true
+  done < <(find "$prev" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+  rm -rf "$prev" 2>/dev/null || true
+}
+
+_hermes_recover_stale_backup() {
+  local prev entry
+  prev="$(_hermes_backup_dir)"
+  [ -e "$prev" ] || return 0
+  if [ -L "$prev" ]; then
+    echo "install-bins: $prev is a symlink, not a real directory - refusing to follow it; remove it manually" >&2
+    return 1
+  fi
+  [ -d "$prev" ] || return 0
+  if _hermes_tree_complete; then
+    rm -rf "$prev" || return 1
+    return 0
+  fi
+  if ! _hermes_backup_is_complete; then
+    echo "install-bins: $prev is present but incomplete (missing completion marker) and the live hermes tree is also incomplete - refusing to combine fragments; remove $prev manually after inspecting it if the loss is acceptable" >&2
+    return 1
+  fi
+  find "$HXROOT" -mindepth 1 -maxdepth 1 ! -name '.prev' -exec rm -rf {} + || return 1
+  while IFS= read -r -d '' entry; do
+    local base
+    base="$(basename "$entry")"
+    [ "$base" = ".cbox-backup-complete" ] && continue
+    mv "$entry" "$HXROOT/$base" || {
+      echo "install-bins: recovery mv failed for $base - $prev left in place, HXROOT may be incomplete" >&2
+      return 1
+    }
+  done < <(find "$prev" -mindepth 1 -maxdepth 1 -print0)
+  rm -rf "$prev"
+}
+
+_hermes_backup_take() {
+  local prev entry base found=0
+  prev="$(_hermes_backup_dir)"
+  rm -rf "$prev" || return 1
+  local entries=()
+  while IFS= read -r -d '' entry; do
+    entries+=("$entry")
+  done < <(find "$HXROOT" -mindepth 1 -maxdepth 1 -print0)
+  for entry in "${entries[@]-}"; do
+    [ -n "$entry" ] || continue
+    base="$(basename "$entry")"
+    [ "$base" = ".prev" ] && continue
+    if [ "$found" = 0 ]; then
+      mkdir -p "$prev" || return 1
+      found=1
+    fi
+    mv "$entry" "$prev/$base" || {
+      _hermes_backup_take_unwind "$prev"
+      return 1
+    }
+  done
+  if [ "$found" = 1 ]; then
+    : > "$(_hermes_backup_marker)" || {
+      _hermes_backup_take_unwind "$prev"
+      return 1
+    }
+  fi
+  return 0
+}
+
+_hermes_backup_commit() {
+  local prev
+  prev="$(_hermes_backup_dir)"
+  rm -rf "$prev"
+}
+
+_hermes_backup_restore() {
+  local prev entry base
+  prev="$(_hermes_backup_dir)"
+  [ -e "$prev" ] || return 0
+  if [ -L "$prev" ]; then
+    echo "install-bins: $prev is a symlink, not a real directory - refusing to follow it; remove it manually" >&2
+    return 1
+  fi
+  [ -d "$prev" ] || return 0
+  while IFS= read -r -d '' entry; do
+    base="$(basename "$entry")"
+    [ "$base" = ".prev" ] && continue
+    rm -rf "$entry"
+  done < <(find "$HXROOT" -mindepth 1 -maxdepth 1 -print0)
+  while IFS= read -r -d '' entry; do
+    base="$(basename "$entry")"
+    [ "$base" = ".cbox-backup-complete" ] && continue
+    mv "$entry" "$HXROOT/$base" || {
+      echo "install-bins: restore mv failed for $base - $prev left in place, HXROOT may be incomplete" >&2
+      return 1
+    }
+  done < <(find "$prev" -mindepth 1 -maxdepth 1 -print0)
+  rm -rf "$prev"
+}
+
+_HERMES_INSTALL_VERIFIED=""
+_HERMES_INSTALL_HASH=""
+_HERMES_INSTALL_VER=""
+
 _run_hermes_install() {
-  local spec rc=0
+  local spec rc=0 backed_up=0 take_rc=0
+  _HERMES_INSTALL_VERIFIED=""
+  _HERMES_INSTALL_HASH=""
+  _HERMES_INSTALL_VER=""
   if [ "$CBOX_HERMES_VERSION" = latest ]; then
     spec="hermes-agent"
   else
@@ -261,10 +394,47 @@ _run_hermes_install() {
   mkdir -p "$HXROOT"
   exec 7< "$HXROOT"
   flock -w 900 7 || { echo "install-bins: timed out waiting for the hermes install lock" >&2; exec 7<&-; return 1; }
-  if _hermes_venv_reset; then
-    _hxgosu "$HXROOT/bin/pip" install --no-cache-dir "$spec" && _hermes_seed_delegate_home || rc=1
+  if ! _hermes_recover_stale_backup; then
+    exec 7<&-
+    return 1
+  fi
+  if _hermes_backup_take; then
+    take_rc=0
+  else
+    take_rc=1
+  fi
+  if [ -d "$(_hermes_backup_dir)" ]; then backed_up=1; fi
+  if [ "$take_rc" = 0 ]; then
+    if _hermes_venv_reset; then
+      _hxgosu "$HXROOT/bin/pip" install --no-cache-dir "$spec" && _hermes_seed_delegate_home || rc=1
+    else
+      rc=1
+    fi
   else
     rc=1
+  fi
+  if [ "$rc" = 0 ]; then
+    local verified path hash ver stamp
+    stamp="$(_stamp_path hermes)"
+    if verified="$(_verify_tool hermes)"; then
+      path="$(printf '%s' "$verified" | sed -n '1p')"
+      hash="$(printf '%s' "$verified" | sed -n '2p')"
+      ver="$(printf '%s' "$verified" | sed -n '3p')"
+      if _stamp_write "$stamp" "$(_want_string hermes)" "$path" "$hash" "$ver"; then
+        _HERMES_INSTALL_VERIFIED="$path"
+        _HERMES_INSTALL_HASH="$hash"
+        _HERMES_INSTALL_VER="$ver"
+      else
+        rc=1
+      fi
+    else
+      rc=1
+    fi
+  fi
+  if [ "$rc" = 0 ]; then
+    if [ "$backed_up" = 1 ]; then _hermes_backup_commit; fi
+  else
+    if [ "$backed_up" = 1 ]; then _hermes_backup_restore; fi
   fi
   exec 7<&-
   return "$rc"
@@ -286,6 +456,14 @@ _verify_tool() {
 
 _wipe_volume() {
   local dir="$1"
+  if [ "$dir" = "$HXROOT" ]; then
+    mkdir -p "$dir"
+    exec 8< "$dir"
+    flock -w 900 8 || { echo "install-bins: timed out waiting for the hermes install lock" >&2; exec 8<&-; return 1; }
+    find "$dir" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+    exec 8<&-
+    return 0
+  fi
   find "$dir" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 }
 
@@ -331,6 +509,16 @@ _install_one() {
     echo "install-bins: $name installer failed - no stamp written, $name unavailable" >&2
     printf 'cbox-bins: %s - - fail\n' "$name"
     return 1
+  fi
+
+  if [ "$name" = hermes ]; then
+    if [ -z "${_HERMES_INSTALL_VERIFIED:-}" ]; then
+      echo "install-bins: hermes post-install verification failed - no stamp written, hermes unavailable" >&2
+      printf 'cbox-bins: %s - - fail\n' "$name"
+      return 1
+    fi
+    printf 'cbox-bins: %s %s %s ok\n' "$name" "${_HERMES_INSTALL_VER:-}" "${_HERMES_INSTALL_HASH:-}"
+    return 0
   fi
 
   if ! verified="$(_verify_tool "$name")"; then

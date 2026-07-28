@@ -201,4 +201,70 @@ grep -q 'HUB_ROWS+=("netaccess")' "$INSTALL_DIR/cbox" || _fail "netaccess row mi
 grep -q 'netaccess) _hub_netaccess_submenu' "$INSTALL_DIR/cbox" || _fail "netaccess row not dispatched in the hub"
 _ok "wiring: dispatcher, usage, hub row and hub dispatch all present"
 
+FAKE_DOCKER="$TMPBASE/docker"
+CONNECTED_FILE="$TMPBASE/connected-networks"
+: > "$CONNECTED_FILE"
+cat > "$FAKE_DOCKER" <<FAKEDOCKER
+#!/usr/bin/env bash
+set -euo pipefail
+CONNECTED_FILE="$CONNECTED_FILE"
+FAKEDOCKER
+cat >> "$FAKE_DOCKER" <<'FAKEDOCKER'
+case "$1" in
+  network)
+    case "$2" in
+      ls)
+        printf 'cbox-p1_internal\ncbox-p1_egress\nproject_a\ncbox-ollama-u1000-global\ncbox-ollama-u1000-p1\n'
+        ;;
+      inspect)
+        name="$3"
+        case "$name" in
+          cbox-p1_internal)
+            printf '[{"Driver":"bridge","Labels":{"com.docker.compose.project":"cbox-p1","com.docker.compose.network":"internal"},"IPAM":{"Config":[{"Subnet":"172.20.0.0/24"}]}}]'
+            ;;
+          cbox-p1_egress)
+            printf '[{"Driver":"bridge","Labels":{"com.docker.compose.project":"cbox-p1","com.docker.compose.network":"egress"},"IPAM":{"Config":[{"Subnet":"172.21.0.0/24"}]}}]'
+            ;;
+          project_a)
+            printf '[{"Driver":"bridge","Labels":{},"IPAM":{"Config":[{"Subnet":"10.10.0.0/24"}]}}]'
+            ;;
+          cbox-ollama-u1000-global|cbox-ollama-u1000-p1)
+            printf '[{"Driver":"bridge","Labels":{"cbox.kind":"infra","cbox.component":"ollama-net"},"IPAM":{"Config":[{"Subnet":"10.55.0.0/24"}]}}]'
+            ;;
+          *)
+            exit 1
+            ;;
+        esac
+        ;;
+      connect)
+        echo "$3" >> "$CONNECTED_FILE"
+        exit 0
+        ;;
+      disconnect)
+        exit 0
+        ;;
+    esac
+    ;;
+  inspect)
+    extra=""
+    if grep -qxF "project_a" "$CONNECTED_FILE" 2>/dev/null; then
+      extra=',"project_a":{"IPAddress":"10.10.0.2"}'
+    fi
+    printf '[{"Config":{"Labels":{"com.docker.compose.project":"cbox-p1"}},"NetworkSettings":{"Networks":{"cbox-p1_internal":{"IPAddress":"172.20.0.2"},"cbox-p1_egress":{"IPAddress":"172.21.0.2"}%s}}}]' "$extra"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+FAKEDOCKER
+chmod +x "$FAKE_DOCKER"
+
+STATE_DIR="$TMPBASE/netaccess-state"
+mkdir -p "$STATE_DIR"
+out="$(python3 "$INSTALL_DIR/lib/cbox_netaccess.py" --docker-bin "$FAKE_DOCKER" --container proxy-cid --state-dir "$STATE_DIR" --scope all)"
+printf '%s\n' "$out" | grep -qF '"appliedNetworks":["project_a"]' || _fail "scope=all CLI must select only the eligible project network: $out"
+printf '%s\n' "$out" | grep -qF '"cbox-ollama-u1000-global"' || _fail "scope=all CLI must name the rejected global ollama network in skipped[]: $out"
+printf '%s\n' "$out" | grep -qF '"cbox-ollama-u1000-p1"' || _fail "scope=all CLI must name the rejected per-project ollama network in skipped[]: $out"
+_ok "scope=all end-to-end (real cbox_netaccess.py CLI, stubbed docker): per-scope ollama model networks are rejected alongside the compose internal/egress networks, never joined"
+
 echo "PASS: all netaccess verb checks"

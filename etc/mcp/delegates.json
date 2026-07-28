@@ -101,6 +101,8 @@
       "CBOX_LOCAL_MODEL_URL": "@CBOX_LOCAL_MODEL_URL@",
       "CBOX_LOCAL_MODEL_NAME": "@CBOX_LOCAL_MODEL_NAME@"
     },
+    "startup_timeout_sec": 30,
+    "tool_timeout_sec": 180,
     "_cbox": {
       "adapter": "stdio-mcp",
       "available_to": [
@@ -126,14 +128,25 @@
       "CBOX_HERMES_DELEGATE_PROVIDER": "@CBOX_HERMES_DELEGATE_PROVIDER@",
       "CBOX_HERMES_DELEGATE_BASE_URL": "@CBOX_HERMES_DELEGATE_BASE_URL@",
       "CBOX_HERMES_DELEGATE_MODEL": "@CBOX_HERMES_DELEGATE_MODEL@",
+      "CBOX_HERMES_DELEGATE_MODE": "@CBOX_HERMES_DELEGATE_MODE@",
+      "CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS": "@CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS@",
       "CBOX_HERMES_PROVIDER": "@CBOX_HERMES_PROVIDER@",
       "CBOX_HERMES_MODEL_URL": "@CBOX_HERMES_MODEL_URL@",
-      "CBOX_HERMES_MODEL_NAME": "@CBOX_HERMES_MODEL_NAME@"
+      "CBOX_HERMES_MODEL_NAME": "@CBOX_HERMES_MODEL_NAME@",
+      "CBOX_HERMES_DELEGATE_MAX_CONCURRENCY": "@CBOX_HERMES_DELEGATE_MAX_CONCURRENCY@",
+      "CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC": "@CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC@",
+      "CBOX_HERMES_DELEGATE_LOCK_DIR": "@CBOX_HERMES_DELEGATE_LOCK_DIR@",
+      "OLLAMA_NUM_PARALLEL": "@OLLAMA_NUM_PARALLEL@",
+      "CBOX_DELEGATION_DEPTH": "@CBOX_DELEGATION_DEPTH_FOR_CODEX_CHILD@",
+      "CBOX_MCP_DEPTH": "@CBOX_DELEGATION_DEPTH_FOR_CODEX_CHILD@"
     },
+    "startup_timeout_sec": 30,
+    "tool_timeout_sec": 3600,
     "_cbox": {
       "adapter": "stdio-mcp",
       "available_to": [
-        "claude"
+        "claude",
+        "codex"
       ],
       "backend": "hermes",
       "side_effects": [

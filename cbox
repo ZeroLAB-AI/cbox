@@ -15,6 +15,9 @@ if [ -f "$CONF" ]; then
   source "$CONF"
   export CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
   export CBOX_HERMES CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME
+  export CBOX_HERMES_DELEGATE CBOX_HERMES_DELEGATE_PROVIDER CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL
+  export CBOX_HERMES_DELEGATE_MAX_CONCURRENCY CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC CBOX_HERMES_DELEGATE_LOCK_DIR OLLAMA_NUM_PARALLEL CBOX_HERMES_DELEGATE_MODE CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS
+  export CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL
   HAVE_GLOBAL_CONF=1
 fi
 
@@ -43,6 +46,27 @@ _cbox_local_effdir_for() {
   local root="$1" p
   p="$(_cbox_path_hash "$root")"
   printf '%s/.config/cbox/projects/%s' "$HOME" "$p"
+}
+
+_cbox_machine_scoped_vars() {
+  _cbox_config_load_sections
+  local s v
+  for s in "${SECTIONS[@]}"; do
+    [ "${SEC_SCOPE[$s]:-project}" = machine ] || continue
+    for v in ${SEC_VARS[$s]:-}; do
+      printf '%s\n' "$v"
+    done
+  done
+}
+
+_cbox_load_machine_scoped_vars() {
+  local conf="$INSTALL_DIR/cbox.conf" v
+  [ -f "$conf" ] || return 0
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    printf -v "$v" '%s' "$(unset "$v"; . "$conf" >/dev/null 2>&1; printf '%s' "${!v-}")"
+    export "$v"
+  done < <(_cbox_machine_scoped_vars)
 }
 
 _cbox_root_in_global_scope() {
@@ -459,6 +483,413 @@ netaccess_cmd() {
       die_no_conf
       ;;
   esac
+}
+
+_cbox_ollama_lock_file() {
+  printf '%s/.config/cbox/infra/ollama.lock' "$HOME"
+}
+
+_cbox_ollama_lock_fd_open() {
+  local fd="$1" lockfile="$2"
+  if [ -L "$lockfile" ]; then
+    echo "cbox: refusing - $lockfile is a symlink, not a plain lock file" >&2
+    return 1
+  fi
+  eval "exec $fd>> \"\$lockfile\""
+}
+
+_cbox_ollama_owner_compose() {
+  local dir
+  dir="$(_cbox_ollama_owner_dir)"
+  local -a cmd=(docker compose --project-directory "$dir" -f "$dir/docker-compose.yml")
+  if [ -f "$dir/docker-compose.gpu.yml" ]; then
+    cmd+=(-f "$dir/docker-compose.gpu.yml")
+  fi
+  "${cmd[@]}" "$@"
+}
+
+_cbox_ollama_guard() {
+  if [ "${CBOX_OLLAMA_MODE:-off}" != on ]; then
+    echo "cbox: ollama is off (CBOX_OLLAMA_MODE=${CBOX_OLLAMA_MODE:-off}) - turn it on first: $0 config set CBOX_OLLAMA_MODE=on" >&2
+    return 1
+  fi
+  return 0
+}
+
+_cbox_ollama_host_daemon_detected() {
+  if command -v curl >/dev/null 2>&1 && curl -s -o /dev/null --connect-timeout 1 "http://127.0.0.1:${CBOX_OLLAMA_PORT:-11434}/" 2>/dev/null; then
+    return 0
+  fi
+  if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ":${CBOX_OLLAMA_PORT:-11434} "; then
+    return 0
+  fi
+  if command -v pgrep >/dev/null 2>&1 && pgrep -x ollama >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet ollama 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+_cbox_ollama_adopt_or_refuse() {
+  local dir="$1" name cid labels project image want_image
+  name="$(_cbox_ollama_owner_name)"
+  cid="$(docker ps -a --filter "name=^/${name}-ollama-" --format '{{.ID}}' 2>/dev/null | head -n1)"
+  if [ -z "$cid" ]; then
+    cid="$(docker ps -a --filter "label=cbox.owner=$name" --format '{{.ID}}' 2>/dev/null | head -n1)"
+  fi
+  [ -n "$cid" ] || return 0
+  labels="$(docker inspect --format '{{index .Config.Labels "cbox.kind"}}|{{index .Config.Labels "cbox.component"}}|{{index .Config.Labels "cbox.owner"}}' "$cid" 2>/dev/null)" || labels=""
+  case "$labels" in
+    infra\|ollama\|"$name")
+      project="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$cid" 2>/dev/null)" || project=""
+      if [ -n "$project" ] && [ "$project" != "$name" ]; then
+        echo "cbox: refusing - a container ($cid) carries cbox ollama labels for $name but belongs to compose project '$project', not '$name'; remove it before running cbox ollama up" >&2
+        return 1
+      fi
+      image="$(docker inspect --format '{{.Config.Image}}' "$cid" 2>/dev/null)" || image=""
+      want_image="${CBOX_OLLAMA_IMAGE:-ollama/ollama:0.32.5}"
+      if [ -n "$image" ] && [ "$image" != "$want_image" ]; then
+        echo "cbox: found an existing container ($cid) owned by $name but its image ($image) does not match the configured CBOX_OLLAMA_IMAGE ($want_image) - run 'cbox ollama reconcile' to recreate it" >&2
+        return 0
+      fi
+      if _cbox_ollama_manifest_matches_current "$dir"; then
+        return 0
+      fi
+      echo "cbox: found an existing container ($cid) owned by $name but the ownership manifest does not match the current config - run 'cbox ollama reconcile' to update it" >&2
+      return 0
+      ;;
+    *)
+      echo "cbox: refusing - a container ($cid) already uses the name/labels cbox expects for $name but is not cbox-owned (labels: ${labels:-none}); remove it or rename it before running cbox ollama up" >&2
+      return 1
+      ;;
+  esac
+}
+
+_cbox_ollama_status_cmd() {
+  local dir cid state
+  dir="$(_cbox_ollama_owner_dir)"
+  if [ "${CBOX_OLLAMA_MODE:-off}" != on ]; then
+    echo "ollama: OFF (CBOX_OLLAMA_MODE=off)"
+    return 0
+  fi
+  if [ ! -f "$dir/docker-compose.yml" ]; then
+    echo "ollama: CONFIG-ONLY (CBOX_OLLAMA_MODE=on, owner project not yet rendered - run 'cbox ollama reconcile')"
+    return 0
+  fi
+  cid="$(_cbox_ollama_owner_compose ps -q ollama 2>/dev/null)" || cid=""
+  if [ -z "$cid" ]; then
+    echo "ollama: CONFIG-ONLY (CBOX_OLLAMA_MODE=on, owner project rendered but not running - run 'cbox ollama up')"
+    return 0
+  fi
+  state="$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null)" || state=unknown
+  echo "ollama: ACTIVE (container $cid, state=$state, owner=$(_cbox_ollama_owner_name), store=${CBOX_OLLAMA_STORE:-dedicated}, gpu=${CBOX_OLLAMA_GPU:-off}, port=${CBOX_OLLAMA_PORT:-11434})"
+}
+
+_cbox_ollama_shared_store_guard() {
+  [ "${CBOX_OLLAMA_STORE:-dedicated}" = shared ] || return 0
+  [ -n "${CBOX_OLLAMA_STORE_PATH:-}" ] || { echo "cbox: CBOX_OLLAMA_STORE=shared needs CBOX_OLLAMA_STORE_PATH set" >&2; return 1; }
+  local models_dir="${CBOX_OLLAMA_STORE_PATH}/models"
+  if [ -L "$models_dir" ]; then
+    echo "cbox: refusing - $models_dir is a symlink, not a real directory" >&2
+    return 1
+  fi
+  if [ ! -d "$models_dir" ]; then
+    echo "cbox: refusing - $models_dir does not exist yet; create it (owned by you) before using CBOX_OLLAMA_STORE=shared" >&2
+    return 1
+  fi
+  local owner_uid
+  owner_uid="$(stat -c '%u' -- "$models_dir" 2>/dev/null)" || owner_uid=""
+  if [ -z "$owner_uid" ] || [ "$owner_uid" != "$(id -u)" ]; then
+    echo "cbox: refusing - $models_dir is not owned by the invoking user (uid $(id -u))" >&2
+    return 1
+  fi
+  if _cbox_ollama_host_daemon_detected; then
+    echo "cbox: refusing - a host ollama daemon appears to be running (port ${CBOX_OLLAMA_PORT:-11434}, process, or systemd unit) and CBOX_OLLAMA_STORE=shared would race it on the same model directory - stop the host daemon first" >&2
+    return 1
+  fi
+  return 0
+}
+
+_cbox_ollama_reconcile_cmd() {
+  local dir
+  dir="$(_cbox_ollama_owner_dir)"
+  mkdir -p "$dir"
+  if [ "${CBOX_OLLAMA_MODE:-off}" != on ]; then
+    if [ -f "$dir/docker-compose.yml" ]; then
+      _cbox_ollama_owner_compose down >/dev/null 2>&1 || true
+    fi
+    gen_ollama_owner_compose_into "$dir"
+    rm -f "$dir/ownership.manifest"
+    _cbox_ollama_gc_scope_networks_impl
+    echo "cbox: ollama reconcile: mode is off - owner project torn down and de-rendered"
+    return 0
+  fi
+  _cbox_ollama_shared_store_guard || return 1
+  _cbox_ollama_adopt_or_refuse "$dir" || return 1
+  gen_ollama_owner_compose_into "$dir"
+  _cbox_ollama_manifest_write "$dir"
+  _cbox_ollama_owner_compose up -d
+  _cbox_ollama_reconcile_networks_impl || echo "cbox: ollama reconcile: owner project is up but per-scope network reconciliation reported an error - run 'cbox ollama reconcile' again" >&2
+  echo "cbox: ollama reconcile: owner project $(_cbox_ollama_owner_name) applied at $dir"
+}
+
+_cbox_ollama_up_cmd() {
+  local dir
+  dir="$(_cbox_ollama_owner_dir)"
+  if [ ! -f "$dir/docker-compose.yml" ] || ! _cbox_ollama_manifest_matches_current "$dir"; then
+    _cbox_ollama_reconcile_cmd || return 1
+    return 0
+  fi
+  _cbox_ollama_shared_store_guard || return 1
+  _cbox_ollama_adopt_or_refuse "$dir" || return 1
+  _cbox_ollama_owner_compose up -d
+  _cbox_ollama_reconcile_networks_impl || echo "cbox: ollama up: per-scope network reconciliation reported an error - run 'cbox ollama reconcile' again" >&2
+}
+
+_cbox_ollama_down_cmd() {
+  local dir
+  dir="$(_cbox_ollama_owner_dir)"
+  [ -f "$dir/docker-compose.yml" ] || { echo "cbox: ollama owner project not rendered - nothing to stop" >&2; return 0; }
+  _cbox_ollama_owner_compose down
+  _cbox_ollama_gc_scope_networks_impl
+}
+
+_cbox_ollama_model_ref_ok() {
+  case "$1" in
+    ''|*[!A-Za-z0-9._:/@-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+_cbox_ollama_pull_cmd() {
+  local dir model rc=0
+  model="${1:-}"
+  [ -n "$model" ] || { echo "cbox: usage: $0 ollama pull <model>" >&2; return 1; }
+  _cbox_ollama_model_ref_ok "$model" || { echo "cbox: refusing - model reference '$model' contains characters other than [A-Za-z0-9._:/@-]" >&2; return 1; }
+  dir="$(_cbox_ollama_owner_dir)"
+  [ -f "$dir/docker-compose.yml" ] || { echo "cbox: ollama owner project not rendered - run 'cbox ollama reconcile' first" >&2; return 1; }
+  _cbox_ollama_shared_store_guard || return 1
+  local net
+  net="cbox-ollama-pull-$(id -u)-$$-$(date +%s%N 2>/dev/null || echo 0)"
+  echo "cbox: ollama pull: stopping the serving container for the duration of the pull (no permanent egress on the running server)" >&2
+  _cbox_ollama_owner_compose stop ollama >/dev/null 2>&1 || true
+  _restore_ollama() {
+    docker network rm -- "$net" >/dev/null 2>&1 || true
+    _cbox_ollama_owner_compose up -d ollama >/dev/null 2>&1 || true
+    _cbox_ollama_reconcile_networks_impl >/dev/null 2>&1 || true
+  }
+  trap _restore_ollama EXIT INT TERM
+  if ! docker network create --label cbox.kind=infra --label cbox.component=ollama-pull -- "$net" >/dev/null 2>&1; then
+    echo "cbox: failed to create the temporary pull network $net" >&2
+    trap - EXIT INT TERM
+    _restore_ollama
+    return 1
+  fi
+  _cbox_ollama_owner_compose run --rm --network "$net" -e OLLAMA_HOST=127.0.0.1:11434 --entrypoint sh ollama -c \
+    'ollama serve >/tmp/ollama-pull.log 2>&1 & for i in $(seq 1 30); do curl -sf http://127.0.0.1:11434/ >/dev/null 2>&1 && break; sleep 1; done; ollama pull "$1"' \
+    cbox-pull "$model" || rc=$?
+  trap - EXIT INT TERM
+  _restore_ollama
+  return "$rc"
+}
+
+_cbox_ollama_scope_network_name() {
+  local scope="$1" p_hash="${2:-}"
+  if [ "$scope" = global ]; then
+    printf 'cbox-ollama-u%s-global' "$(id -u)"
+  else
+    printf 'cbox-ollama-u%s-p%s' "$(id -u)" "$p_hash"
+  fi
+}
+
+_cbox_ollama_network_labels_ok() {
+  local name="$1" labels want_owner
+  want_owner="$(_cbox_ollama_owner_name)"
+  labels="$(docker network inspect --format '{{.Internal}}|{{index .Labels "cbox.kind"}}|{{index .Labels "cbox.component"}}|{{index .Labels "cbox.owner"}}' "$name" 2>/dev/null)" || return 1
+  [ "$labels" = "true|infra|ollama-net|$want_owner" ]
+}
+
+_cbox_ollama_ensure_scope_network() {
+  local name="$1"
+  if docker network inspect -- "$name" >/dev/null 2>&1; then
+    if ! _cbox_ollama_network_labels_ok "$name"; then
+      echo "cbox: refusing - a docker network named $name already exists but is not cbox-owned ollama infrastructure" >&2
+      return 1
+    fi
+    return 0
+  fi
+  docker network create --internal \
+    --label cbox.kind=infra \
+    --label cbox.component=ollama-net \
+    --label cbox.owner="$(_cbox_ollama_owner_name)" \
+    -- "$name" >/dev/null
+}
+
+_cbox_ollama_endpoint_networks() {
+  docker inspect --type container --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' -- "$1" 2>/dev/null | sed '/^$/d'
+}
+
+_cbox_ollama_connect_scope_network() {
+  local netname="$1" ollama_cid="$2" cbox_cid="$3"
+  local ollama_nets cbox_nets connected_ollama=0 connected_cbox=0
+  ollama_nets="$(_cbox_ollama_endpoint_networks "$ollama_cid")"
+  cbox_nets="$(_cbox_ollama_endpoint_networks "$cbox_cid")"
+  if ! printf '%s\n' "$ollama_nets" | grep -qxF "$netname"; then
+    if docker network connect --alias ollama -- "$netname" "$ollama_cid" >/dev/null 2>&1; then
+      connected_ollama=1
+    else
+      echo "cbox: failed to attach ollama to $netname" >&2
+      return 1
+    fi
+  fi
+  if ! printf '%s\n' "$cbox_nets" | grep -qxF "$netname"; then
+    if ! docker network connect -- "$netname" "$cbox_cid" >/dev/null 2>&1; then
+      echo "cbox: failed to attach $cbox_cid to $netname" >&2
+      if [ "$connected_ollama" = 1 ]; then
+        docker network disconnect -f -- "$netname" "$ollama_cid" >/dev/null 2>&1 || true
+      fi
+      return 1
+    fi
+    connected_cbox=1
+  fi
+  return 0
+}
+
+_cbox_ollama_reconcile_one_scope() {
+  local scope="$1" cbox_cid="$2" p_hash="${3:-}" ollama_cid="$4" netname
+  netname="$(_cbox_ollama_scope_network_name "$scope" "$p_hash")"
+  _cbox_ollama_ensure_scope_network "$netname" || return 1
+  _cbox_ollama_connect_scope_network "$netname" "$ollama_cid" "$cbox_cid"
+}
+
+_cbox_ollama_disconnect_stale_scope_networks() {
+  local owner="$1" name endpoint_count
+  docker network ls --filter label=cbox.component=ollama-net --filter "label=cbox.owner=$owner" --format '{{.Name}}' 2>/dev/null | while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    case "$name" in
+      *-global) continue ;;
+    esac
+    endpoint_count="$(docker network inspect --format '{{len .Containers}}' -- "$name" 2>/dev/null)" || continue
+    [ "${endpoint_count:-0}" = 1 ] || continue
+    if docker network inspect --format '{{range $k, $v := .Containers}}{{$v.Name}}{{"\n"}}{{end}}' -- "$name" 2>/dev/null | grep -q 'ollama'; then
+      docker network disconnect -- "$name" ollama >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+_cbox_ollama_reconcile_networks_impl() {
+  [ "${CBOX_OLLAMA_MODE:-off}" = on ] || return 0
+  local dir ollama_cid rc=0
+  dir="$(_cbox_ollama_owner_dir)"
+  [ -f "$dir/docker-compose.yml" ] || return 0
+  ollama_cid="$(_cbox_ollama_owner_compose ps -q ollama 2>/dev/null)" || ollama_cid=""
+  [ -n "$ollama_cid" ] || return 0
+  local cid
+  cid="$("${COMPOSE[@]}" ps -q "$SERVICE" 2>/dev/null)" || cid=""
+  if [ -n "$cid" ]; then
+    _cbox_ollama_reconcile_one_scope global "$cid" "" "$ollama_cid" || rc=1
+  fi
+  local phash effdir
+  while IFS="$(printf '\t')" read -r cid phash; do
+    [ -n "$cid" ] || continue
+    [ -n "$phash" ] || continue
+    _cbox_ollama_reconcile_one_scope isolated "$cid" "$phash" "$ollama_cid" || rc=1
+  done < <(docker ps --filter label=cbox.kind=isolated --format '{{.ID}}'$'\t''{{.Label "cbox.phash"}}' 2>/dev/null)
+  _cbox_ollama_disconnect_stale_scope_networks "$(_cbox_ollama_owner_name)"
+  return "$rc"
+}
+
+_cbox_ollama_gc_scope_networks_impl() {
+  local name endpoints owner
+  owner="$(_cbox_ollama_owner_name)"
+  docker network ls --filter label=cbox.component=ollama-net --filter "label=cbox.owner=$owner" --format '{{.Name}}' 2>/dev/null | while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    endpoints="$(docker network inspect --format '{{len .Containers}}' -- "$name" 2>/dev/null)" || continue
+    if [ "${endpoints:-0}" = 0 ]; then
+      docker network rm -- "$name" >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+_cbox_ollama_reconcile_networks() {
+  local lockfile rc=0
+  mkdir -p "$HOME/.config/cbox/infra"
+  lockfile="$(_cbox_ollama_lock_file)"
+  _cbox_ollama_lock_fd_open 9 "$lockfile" || return 1
+  if ! flock -x -w 30 9; then
+    echo "cbox: could not lock $lockfile for network reconciliation" >&2
+    exec 9>&-
+    return 1
+  fi
+  _cbox_ollama_reconcile_networks_impl || rc=1
+  exec 9>&-
+  return "$rc"
+}
+
+_cbox_ollama_gc_scope_networks() {
+  local lockfile rc=0
+  mkdir -p "$HOME/.config/cbox/infra"
+  lockfile="$(_cbox_ollama_lock_file)"
+  _cbox_ollama_lock_fd_open 9 "$lockfile" || return 1
+  if ! flock -x -w 30 9; then
+    echo "cbox: could not lock $lockfile for network gc" >&2
+    exec 9>&-
+    return 1
+  fi
+  _cbox_ollama_gc_scope_networks_impl || rc=1
+  exec 9>&-
+  return "$rc"
+}
+
+ollama_cmd() {
+  local sub="${1:-}"
+  case "$sub" in
+    status|up|down|pull|reconcile) ;;
+    *)
+      echo "cbox: usage: $0 ollama {status|up|down|pull <model>|reconcile}" >&2
+      return 1
+      ;;
+  esac
+  shift
+  if _cbox_config_in_container; then
+    echo "cbox: ollama $sub is host-only - it manages the machine-scoped owner compose project" >&2
+    return 1
+  fi
+  [ -f "$INSTALL_DIR/templates/sections.sh" ] || die "$INSTALL_DIR/templates/sections.sh missing"
+  . "$INSTALL_DIR/templates/sections.sh"
+  if [ "$sub" != status ]; then
+    _cbox_ollama_guard || return 1
+  fi
+  mkdir -p "$HOME/.config/cbox/infra"
+  local lockfile rc=0
+  lockfile="$(_cbox_ollama_lock_file)"
+  _cbox_ollama_lock_fd_open 6 "$lockfile" || return 1
+  case "$sub" in
+    status)
+      flock -s -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+      _cbox_ollama_status_cmd || rc=$?
+      ;;
+    up)
+      flock -x -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+      _cbox_ollama_up_cmd || rc=$?
+      ;;
+    down)
+      flock -x -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+      _cbox_ollama_down_cmd || rc=$?
+      ;;
+    pull)
+      flock -x -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+      _cbox_ollama_pull_cmd "$@" || rc=$?
+      ;;
+    reconcile)
+      flock -x -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+      _cbox_ollama_reconcile_cmd || rc=$?
+      ;;
+  esac
+  exec 6>&-
+  return "$rc"
 }
 
 _run_global() {
@@ -1210,6 +1641,7 @@ _session_run() {
     exec 8>&-
     return 1
   }
+  _cbox_ollama_reconcile_networks || echo "cbox: run: ollama per-scope network reconciliation reported an error - run 'cbox ollama reconcile'" >&2
   if [ -n "$pre_hook" ]; then
     "$pre_hook" || true
   fi
@@ -1291,6 +1723,9 @@ _run_isolated() {
     . "$eff/cbox.conf"
     export CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
     export CBOX_HERMES CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME
+    export CBOX_HERMES_DELEGATE CBOX_HERMES_DELEGATE_PROVIDER CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL
+    export CBOX_HERMES_DELEGATE_MAX_CONCURRENCY CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC CBOX_HERMES_DELEGATE_LOCK_DIR OLLAMA_NUM_PARALLEL CBOX_HERMES_DELEGATE_MODE CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS
+    _cbox_load_machine_scoped_vars
     _gen_effective "$eff" "$root"
     local slug
     slug="$(_cbox_slug "$root")"
@@ -1397,6 +1832,7 @@ down_project() {
   fi
   _compose_p "$eff" down --remove-orphans || rc=$?
   exec 9>&-
+  _cbox_ollama_gc_scope_networks >/dev/null 2>&1 || true
   return "$rc"
 }
 
@@ -1404,6 +1840,7 @@ shell_isolated() {
   local eff root rc=0
   eff="$(_project_eff_from_cwd)"
   . "$eff/cbox.conf"
+  _cbox_load_machine_scoped_vars
   root="$(cat "$eff/workspace" 2>/dev/null)" || return 1
   exec 8> "$eff/session.lock"
   flock -s 8 || { echo "cbox: cannot lock session for $eff" >&2; exec 8>&-; return 1; }
@@ -1425,6 +1862,7 @@ shell_isolated() {
     exec 8>&-
     return 1
   }
+  _cbox_ollama_reconcile_networks || echo "cbox: shell: ollama per-scope network reconciliation reported an error - run 'cbox ollama reconcile'" >&2
   if [ -t 0 ] && [ -t 1 ]; then
     _compose_p "$eff" exec -it "${CBOX_CONTAINER_EXEC_ENV[@]}" cbox /entrypoint.sh bash || rc=$?
   else
@@ -1471,6 +1909,7 @@ gc() {
     exec 9>&-
   done < <(docker ps --filter label=cbox.kind=isolated --format '{{.ID}}'$'\t''{{.Label "cbox.effdir"}}')
   docker ps -a --filter label=cbox.kind=isolated --filter status=exited -q | xargs -r docker rm >/dev/null 2>&1 || true
+  _cbox_ollama_gc_scope_networks
   _gc_legacy_bins_volumes
 }
 
@@ -1636,6 +2075,7 @@ up() {
   fi
   _cbox_compose_up "$HOME/.config/cbox/compose.up.stamp" "${cmd[@]}"
   _cbox_netaccess_apply_global
+  _cbox_ollama_reconcile_networks || echo "cbox: up: ollama per-scope network reconciliation reported an error - run 'cbox ollama reconcile'" >&2
   if [ -t 0 ] && [ -t 1 ] && [ "${CBOX_NO_EXEC:-0}" != 1 ]; then
     _clip_bridge_start "$(_cbox_clip_dir "${CBOX_NAME:-cbox}")"
     workspace_root="$(_cbox_workspace_root 2>/dev/null)" || workspace_root=""
@@ -1676,6 +2116,7 @@ down() {
   fi
   "${COMPOSE[@]}" down
   exec 9>&-
+  _cbox_ollama_gc_scope_networks >/dev/null 2>&1 || true
 }
 
 restart() {
@@ -3144,10 +3585,17 @@ doctor() {
     else
       _cbox_doctor_row "container-exec" OFF "CBOX_NETACCESS_EXEC_MODE=${CBOX_NETACCESS_EXEC_MODE:-off}"
     fi
+    local hostroute_detail_suffix=""
+    if [ "${CBOX_HOST_GATEWAY_ALIAS:-off}" = on ] && _cbox_is_rootless_docker; then
+      hostroute_detail_suffix="$hostroute_detail_suffix; warning: rootless docker maps host.docker.internal to the rootlesskit bridge, not the real host (disable-host-loopback blocks it, moby #47684) - bind the host model server to a non-loopback host address (for example the host WireGuard interface IP) and point the URL there directly"
+    fi
     if [ -n "${CBOX_HOST_ROUTE_MODE:-}" ] && [ "${CBOX_HOST_ROUTE_MODE:-off}" != off ]; then
-      _cbox_doctor_row "hostroute" CONFIG-ONLY "CBOX_HOST_ROUTE_MODE=$CBOX_HOST_ROUTE_MODE, applied=${CBOX_HOST_ROUTE_APPLIED:-0} - verify in a running container"
+      _cbox_doctor_row "hostroute" CONFIG-ONLY "CBOX_HOST_ROUTE_MODE=$CBOX_HOST_ROUTE_MODE, applied=${CBOX_HOST_ROUTE_APPLIED:-0}, gateway-alias=${CBOX_HOST_GATEWAY_ALIAS:-off} - verify in a running container$hostroute_detail_suffix"
     else
-      _cbox_doctor_row "hostroute" OFF "CBOX_HOST_ROUTE_MODE=${CBOX_HOST_ROUTE_MODE:-off}"
+      _cbox_doctor_row "hostroute" OFF "CBOX_HOST_ROUTE_MODE=${CBOX_HOST_ROUTE_MODE:-off}, gateway-alias=${CBOX_HOST_GATEWAY_ALIAS:-off}$hostroute_detail_suffix"
+    fi
+    if _cbox_no_proxy_endpoint_unreachable; then
+      _cbox_doctor_row "local-model-egress" WARN "egress lockdown is active and a local-model/hermes endpoint is configured but not proxy-reachable - either allowlist the endpoint host in the egress filter, or turn egress lockdown off (CBOX_EGRESS_MODE=off)"
     fi
     if [ "${CBOX_GPU:-0}" = 1 ]; then
       _cbox_doctor_row "gpu" CONFIG-ONLY "CBOX_GPU=1 - verify in a running container"
@@ -3217,6 +3665,20 @@ doctor() {
     fi
   else
     _cbox_doctor_row "hermes-delegate" OFF "CBOX_HERMES_DELEGATE unset or off (default)"
+  fi
+
+  if [ "$in_container" = 1 ]; then
+    _cbox_doctor_row "ollama" HOST-CHECK "machine-scoped - CBOX_OLLAMA_* is decided by the host owner project, not this container"
+  else
+    local ollama_conf="$INSTALL_DIR/cbox.conf" ollama_mode=off
+    if [ -f "$ollama_conf" ]; then
+      ollama_mode="$(unset CBOX_OLLAMA_MODE; . "$ollama_conf" >/dev/null 2>&1; printf '%s' "${CBOX_OLLAMA_MODE:-off}")"
+    fi
+    if [ "$ollama_mode" = on ]; then
+      _cbox_doctor_row "ollama" CONFIG-ONLY "CBOX_OLLAMA_MODE=on (machine-scoped) - verify the owner project with cbox ollama status"
+    else
+      _cbox_doctor_row "ollama" OFF "CBOX_OLLAMA_MODE=off (default, machine-scoped)"
+    fi
   fi
 
   if [ -f "$claude_dir/settings.json" ] && [ -s "$claude_dir/settings.json" ] \
@@ -3536,6 +3998,9 @@ _cbox_config_validate_var() {
     CBOX_HOST_PROXY_ADDR_MODE)
       _cbox_config_validate_enum "$val" host-gateway explicit || { printf 'expected one of: host-gateway explicit'; return 1; }
       ;;
+    CBOX_HOST_GATEWAY_ALIAS)
+      _cbox_config_validate_enum "$val" off on || { printf 'expected one of: off on'; return 1; }
+      ;;
     CBOX_SSH_MODE)
       _cbox_config_validate_enum "$val" none host-agent container-keys mixed || { printf 'expected one of: none host-agent container-keys mixed'; return 1; }
       ;;
@@ -3581,6 +4046,27 @@ _cbox_config_validate_var() {
       ;;
     CBOX_HERMES_DELEGATE_MODEL)
       : ;;
+    CBOX_HERMES_DELEGATE_MAX_CONCURRENCY)
+      _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer'; return 1; }
+      [ "$val" -ge 0 ] && [ "$val" -le 16 ] || { printf 'expected integer 0..16'; return 1; }
+      ;;
+    CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC)
+      [ -z "$val" ] || _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer (or empty)'; return 1; }
+      ;;
+    CBOX_HERMES_DELEGATE_LOCK_DIR)
+      [ -z "$val" ] || case "$val" in
+        /*) : ;;
+        *) printf 'expected an absolute path (or empty)'; return 1 ;;
+      esac
+      ;;
+    OLLAMA_NUM_PARALLEL)
+      [ -z "$val" ] || _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer (or empty)'; return 1; }
+      ;;
+    CBOX_HERMES_DELEGATE_MODE)
+      [ -z "$val" ] || _cbox_config_validate_enum "$val" qa || { printf 'expected one of: qa (or empty)'; return 1; }
+      ;;
+    CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS)
+      : ;;
     CBOX_LIMIT_AUTORESUME)
       _cbox_config_validate_enum "$val" off on || { printf 'expected one of: off on'; return 1; }
       ;;
@@ -3624,6 +4110,30 @@ _cbox_config_validate_var() {
     CBOX_RESTART_POLICY)
       _cbox_config_validate_enum "$val" no unless-stopped || { printf 'expected one of: no unless-stopped'; return 1; }
       ;;
+    CBOX_OLLAMA_MODE)
+      _cbox_config_validate_enum "$val" off on || { printf 'expected one of: off on'; return 1; }
+      ;;
+    CBOX_OLLAMA_IMAGE)
+      [ -n "$val" ] || { printf 'must not be empty'; return 1; }
+      printf '%s' "$val" | grep -Eq '^[A-Za-z0-9._:/@-]+$' || { printf 'expected an image reference matching [A-Za-z0-9._:/@-]+'; return 1; }
+      ;;
+    CBOX_OLLAMA_GPU)
+      _cbox_config_validate_enum "$val" off cdi || { printf 'expected one of: off cdi'; return 1; }
+      ;;
+    CBOX_OLLAMA_STORE)
+      _cbox_config_validate_enum "$val" dedicated shared || { printf 'expected one of: dedicated shared'; return 1; }
+      ;;
+    CBOX_OLLAMA_STORE_PATH)
+      [ -z "$val" ] || _cbox_config_validate_path "$val" || { printf 'expected an absolute path (or empty)'; return 1; }
+      ;;
+    CBOX_OLLAMA_PORT)
+      _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer (port)'; return 1; }
+      [ "$val" -ge 1 ] && [ "$val" -le 65535 ] || { printf 'expected port 1..65535'; return 1; }
+      ;;
+    CBOX_OLLAMA_NUM_PARALLEL)
+      _cbox_config_validate_uint "$val" || { printf 'expected a non-negative integer'; return 1; }
+      [ "$val" -ge 1 ] || { printf 'expected an integer of at least 1'; return 1; }
+      ;;
     *)
       printf 'no validator registered for %s' "$key"; return 1
       ;;
@@ -3662,8 +4172,19 @@ _cbox_config_apply_cmd_for() {
     restart) printf 'cbox down && cbox run <bin>' ;;
     recreate|topology) printf 'cbox down && cbox run <bin> (compose recreates)' ;;
     rebuild) printf 'next cbox run rebuilds the image automatically (image.inputs changed)' ;;
+    infra-reconcile) printf 'cbox ollama reconcile (owner project, not the current cbox compose project)' ;;
     *) printf 'unknown apply class' ;;
   esac
+}
+
+_cbox_config_get_conf_for_var() {
+  local key="$1" conf="$2" section
+  section="$(_cbox_config_section_for_var "$key")" || { printf '%s' "$conf"; return 0; }
+  if [ "${SEC_SCOPE[$section]:-project}" = machine ]; then
+    printf '%s' "$INSTALL_DIR/cbox.conf"
+  else
+    printf '%s' "$conf"
+  fi
 }
 
 _cbox_config_get() {
@@ -3688,19 +4209,21 @@ _cbox_config_get() {
   _cbox_config_load_sections
   local arg="${1:-}"
   if [ "$arg" = "--all" ]; then
-    local s v val
+    local s v val vconf
     for s in "${SECTIONS[@]}"; do
       [ -n "${SEC_VARS[$s]:-}" ] || continue
       printf '# %s\n' "$s"
       for v in ${SEC_VARS[$s]}; do
-        val="$(unset "$v"; . "$conf" >/dev/null 2>&1; printf '%s' "${!v-}")"
+        vconf="$(_cbox_config_get_conf_for_var "$v" "$conf")"
+        [ -f "$vconf" ] || vconf="$conf"
+        val="$(unset "$v"; . "$vconf" >/dev/null 2>&1; printf '%s' "${!v-}")"
         printf '%s=%s\n' "$v" "$val"
       done
     done
     return 0
   fi
   if [ "$arg" = "--section" ]; then
-    local sname="${2:-}" v val found=0
+    local sname="${2:-}" v val found=0 vconf
     for s in "${SECTIONS[@]}"; do
       [ "$s" = "$sname" ] && { found=1; break; }
     done
@@ -3709,7 +4232,9 @@ _cbox_config_get() {
       return 1
     fi
     for v in ${SEC_VARS[$sname]:-}; do
-      val="$(unset "$v"; . "$conf" >/dev/null 2>&1; printf '%s' "${!v-}")"
+      vconf="$(_cbox_config_get_conf_for_var "$v" "$conf")"
+      [ -f "$vconf" ] || vconf="$conf"
+      val="$(unset "$v"; . "$vconf" >/dev/null 2>&1; printf '%s' "${!v-}")"
       printf '%s=%s\n' "$v" "$val"
     done
     return 0
@@ -3719,8 +4244,10 @@ _cbox_config_get() {
     echo "cbox: unknown key '$key' - valid sections: ${SECTIONS[*]}" >&2
     return 1
   fi
-  local val
-  val="$(unset "$key"; . "$conf" >/dev/null 2>&1; printf '%s' "${!key-}")"
+  local val vconf
+  vconf="$(_cbox_config_get_conf_for_var "$key" "$conf")"
+  [ -f "$vconf" ] || vconf="$conf"
+  val="$(unset "$key"; . "$vconf" >/dev/null 2>&1; printf '%s' "${!key-}")"
   printf '%s=%s\n' "$key" "$val"
 }
 
@@ -3839,6 +4366,17 @@ _cbox_config_set() {
 
   local mode
   mode="$(_cbox_effective_mode)"
+  if [ "$mode" = isolated ]; then
+    local i key section
+    for i in "${!CBOX_CONFIG_KEYS[@]}"; do
+      key="${CBOX_CONFIG_KEYS[$i]}"
+      section="$(_cbox_config_section_for_var "$key")" || continue
+      if [ "${SEC_SCOPE[$section]:-project}" = machine ]; then
+        echo "cbox: $key is machine-scoped (section '$section') - set it from the global scope, not an isolated project: cd \$HOME && $0 config set $key=${CBOX_CONFIG_VALS[$i]}" >&2
+        return 1
+      fi
+    done
+  fi
   case "$mode" in
     isolated) _cbox_config_set_isolated ;;
     global) _cbox_config_set_global ;;
@@ -3921,8 +4459,12 @@ _cbox_config_set_isolated() {
     local tmp
     tmp="$(mktemp "$eff/.cbox.XXXXXX")"
     {
-      local v
+      local v machine_scoped
+      machine_scoped=" $(_cbox_machine_scoped_vars | tr '\n' ' ') "
       for v in $(_cbox_config_whitelist); do
+        case "$machine_scoped" in
+          *" $v "*) continue ;;
+        esac
         printf '%s=%q\n' "$v" "${!v-}"
       done
       _cbox_config_preserve_extra_lines "$eff/cbox.conf"
@@ -3932,6 +4474,9 @@ _cbox_config_set_isolated() {
     . "$eff/cbox.conf"
     export CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
     export CBOX_HERMES CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME
+    export CBOX_HERMES_DELEGATE CBOX_HERMES_DELEGATE_PROVIDER CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL
+    export CBOX_HERMES_DELEGATE_MAX_CONCURRENCY CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC CBOX_HERMES_DELEGATE_LOCK_DIR OLLAMA_NUM_PARALLEL CBOX_HERMES_DELEGATE_MODE CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS
+    _cbox_load_machine_scoped_vars
     _cbox_config_regen_isolated "$eff" "$root"
   ) || rc=$?
 
@@ -4020,6 +4565,8 @@ _cbox_config_set_global() {
     . "$conf"
     export CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
     export CBOX_HERMES CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME
+    export CBOX_HERMES_DELEGATE CBOX_HERMES_DELEGATE_PROVIDER CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL
+    export CBOX_HERMES_DELEGATE_MAX_CONCURRENCY CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC CBOX_HERMES_DELEGATE_LOCK_DIR OLLAMA_NUM_PARALLEL CBOX_HERMES_DELEGATE_MODE CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS
     _cbox_config_regen_global
   ) || rc=$?
 
@@ -4294,6 +4841,11 @@ _hub_render() {
     HUB_ROWS+=("netaccess")
     i=$((i + 1))
   fi
+  if [ "${CBOX_OLLAMA_MODE:-off}" = on ] && ! _cbox_config_in_container; then
+    printf '  %d) ollama\n' "$i" >&2
+    HUB_ROWS+=("ollama")
+    i=$((i + 1))
+  fi
   if [ "$mode" != global ]; then
     printf '  %d) sessions\n' "$i" >&2
     HUB_ROWS+=("sessions")
@@ -4390,6 +4942,35 @@ _hub_netaccess_submenu() {
           netaccess_cmd deny "$target" 2>&1 | cat 1>&2 || true
         fi
         ;;
+      b|B) return 0 ;;
+      *) echo "cbox: unrecognized choice '$ans'" >&2 ;;
+    esac
+  done
+}
+
+_hub_ollama_submenu() {
+  while true; do
+    echo "cbox ollama:" >&2
+    echo "  1) status" >&2
+    echo "  2) up" >&2
+    echo "  3) down" >&2
+    echo "  4) pull a model" >&2
+    echo "  5) reconcile" >&2
+    echo "  b) back" >&2
+    printf '> ' >&2
+    local ans model
+    IFS= read -r ans || return 0
+    case "$ans" in
+      1) ollama_cmd status 2>&1 | cat 1>&2 || true ;;
+      2) ollama_cmd up 2>&1 | cat 1>&2 || true ;;
+      3) ollama_cmd down 2>&1 | cat 1>&2 || true ;;
+      4)
+        printf 'model: ' >&2
+        IFS= read -r model || continue
+        [ -n "$model" ] || continue
+        ollama_cmd pull "$model" 2>&1 | cat 1>&2 || true
+        ;;
+      5) ollama_cmd reconcile 2>&1 | cat 1>&2 || true ;;
       b|B) return 0 ;;
       *) echo "cbox: unrecognized choice '$ans'" >&2 ;;
     esac
@@ -4549,6 +5130,7 @@ _hub_dispatch_row() {
     doctor) doctor || { rc=$?; echo "cbox: doctor exited non-zero ($rc)" >&2; } ;;
     config) _hub_config_submenu "$mode" || true ;;
     netaccess) _hub_netaccess_submenu "$mode" || true ;;
+    ollama) _hub_ollama_submenu || true ;;
     sessions) _hub_sessions_submenu || true ;;
     down) _hub_dispatch_down "$mode" || echo "cbox: down did not proceed" >&2 ;;
     *) echo "cbox: internal error - unknown row '$row'" >&2 ;;
@@ -4632,7 +5214,7 @@ hub() {
 }
 
 usage() {
-  echo "usage: $0 {run [--session <id>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force]|restart [--gpu]|shell|logs [args]|update|reinstall-bins [--fresh|--if-stale]|install-hooks|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|pending}|netaccess {status|allow|deny}|backup|login [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}"
+  echo "usage: $0 {run [--session <id>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force]|restart [--gpu]|shell|logs [args]|update|reinstall-bins [--fresh|--if-stale]|install-hooks|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|pending}|netaccess {status|allow|deny}|ollama {status|up|down|pull <model>|reconcile}|backup|login [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}"
   echo "cbox: with zero arguments and a TTY on stdin+stdout, bare '$0' opens the interactive hub instead of this usage text"
   echo "cbox: 'cbox ls' lists RUNNING isolated projects only, not every configured project"
   exit 1
@@ -4700,6 +5282,7 @@ case "${1:-}" in
     config_cmd "$@"
     ;;
   netaccess) shift; netaccess_cmd "$@";;
+  ollama) shift; ollama_cmd "$@";;
   backup) backup;;
   login) shift; login_claude "$@";;
   login-codex) login_codex;;

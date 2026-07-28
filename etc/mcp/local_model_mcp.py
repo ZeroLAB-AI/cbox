@@ -48,6 +48,13 @@ def base_url():
     return url.rstrip("/") if url else ""
 
 
+def v1_join(url, suffix):
+    root = url.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[:-len("/v1")]
+    return root + "/v1" + suffix
+
+
 def model_name():
     return os.environ.get(NAME_VAR, "").strip()
 
@@ -139,14 +146,14 @@ def health_probe():
     url = base_url()
     if not url:
         return False, URL_VAR + " is not set"
-    req = urllib.request.Request(url + "/api/tags", method="GET")
+    req = urllib.request.Request(v1_join(url, "/models"), method="GET")
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             resp.read(1)
-        return True, ""
+            if 200 <= resp.status < 300:
+                return True, ""
+            return False, "health probe HTTP %d" % resp.status
     except urllib.error.HTTPError as e:
-        if e.code < 500:
-            return True, ""
         return False, "health probe HTTP %d" % e.code
     except Exception as e:
         return False, "health probe failed: %s" % type(e).__name__
@@ -177,7 +184,7 @@ def call_endpoint(prompt, system, temperature):
 
     payload = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
-        url + "/v1/chat/completions",
+        v1_join(url, "/chat/completions"),
         data=payload,
         method="POST",
         headers={"Content-Type": "application/json"})

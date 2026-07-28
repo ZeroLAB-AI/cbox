@@ -29,9 +29,13 @@ class FakeOllamaHandler(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if self.path == "/api/tags":
+        if self.path == "/v1/models":
             if self.FAIL_MODE == "health":
                 self.send_response(503)
+                self.end_headers()
+                return
+            if self.FAIL_MODE == "health404":
+                self.send_response(404)
                 self.end_headers()
                 return
             body = json.dumps({"models": []}).encode()
@@ -134,6 +138,12 @@ class HealthProbeAndCallTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("503", reason)
 
+    def test_health_probe_fails_on_404_but_non_fatal(self):
+        FakeOllamaHandler.FAIL_MODE = "health404"
+        ok, reason = MOD.health_probe()
+        self.assertFalse(ok)
+        self.assertIn("404", reason)
+
     def test_health_probe_fails_without_url(self):
         os.environ["CBOX_LOCAL_MODEL_URL"] = ""
         ok, reason = MOD.health_probe()
@@ -203,6 +213,87 @@ class HealthProbeAndCallTests(unittest.TestCase):
         text, err = MOD.call_endpoint("hi", None, None)
         self.assertIsNone(text)
         self.assertIn("CBOX_LOCAL_MODEL_NAME", err)
+
+
+class V1JoinTests(unittest.TestCase):
+    def test_bare_root_gets_single_v1(self):
+        self.assertEqual(
+            MOD.v1_join("http://host:11434", "/models"),
+            "http://host:11434/v1/models")
+
+    def test_v1_root_not_doubled(self):
+        self.assertEqual(
+            MOD.v1_join("http://host:11434/v1", "/models"),
+            "http://host:11434/v1/models")
+
+    def test_v1_root_trailing_slash_not_doubled(self):
+        self.assertEqual(
+            MOD.v1_join("http://host:11434/v1/", "/models"),
+            "http://host:11434/v1/models")
+
+    def test_bare_root_trailing_slash(self):
+        self.assertEqual(
+            MOD.v1_join("http://host:11434/", "/models"),
+            "http://host:11434/v1/models")
+
+    def test_all_variants_match_for_completions_suffix(self):
+        variants = [
+            "http://host:11434",
+            "http://host:11434/",
+            "http://host:11434/v1",
+            "http://host:11434/v1/",
+        ]
+        results = {MOD.v1_join(v, "/chat/completions") for v in variants}
+        self.assertEqual(
+            results, {"http://host:11434/v1/chat/completions"})
+
+
+class HealthProbeAndCallUrlVariantTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server, cls.thread = start_fake_server()
+        cls.port = cls.server.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.thread.join(timeout=5)
+
+    def setUp(self):
+        FakeOllamaHandler.FAIL_MODE = None
+        FakeOllamaHandler.OVERSIZED_BYTES = 0
+        os.environ["CBOX_LOCAL_MODEL_NAME"] = "fake-model"
+        os.environ.pop("CBOX_LOCAL_MODEL_MAX_RESPONSE_BYTES", None)
+        os.environ.pop("CBOX_LOCAL_MODEL_MAX_PROMPT_BYTES", None)
+        os.environ.pop("CBOX_LOCAL_MODEL_TIMEOUT_SEC", None)
+        os.environ.pop(MOD.DEPTH_VAR, None)
+        os.environ.pop(MOD.LEGACY_DEPTH_VAR, None)
+
+    def test_probe_and_call_ok_with_bare_root(self):
+        os.environ["CBOX_LOCAL_MODEL_URL"] = "http://127.0.0.1:%d" % self.port
+        ok, reason = MOD.health_probe()
+        self.assertTrue(ok, reason)
+        text, err = MOD.call_endpoint("hi", None, None)
+        self.assertIsNone(err)
+        self.assertEqual(text, FakeOllamaHandler.RESPONSE_TEXT)
+
+    def test_probe_and_call_ok_with_v1_root(self):
+        os.environ["CBOX_LOCAL_MODEL_URL"] = (
+            "http://127.0.0.1:%d/v1" % self.port)
+        ok, reason = MOD.health_probe()
+        self.assertTrue(ok, reason)
+        text, err = MOD.call_endpoint("hi", None, None)
+        self.assertIsNone(err)
+        self.assertEqual(text, FakeOllamaHandler.RESPONSE_TEXT)
+
+    def test_probe_and_call_ok_with_v1_root_trailing_slash(self):
+        os.environ["CBOX_LOCAL_MODEL_URL"] = (
+            "http://127.0.0.1:%d/v1/" % self.port)
+        ok, reason = MOD.health_probe()
+        self.assertTrue(ok, reason)
+        text, err = MOD.call_endpoint("hi", None, None)
+        self.assertIsNone(err)
+        self.assertEqual(text, FakeOllamaHandler.RESPONSE_TEXT)
 
 
 class DepthStubTests(unittest.TestCase):

@@ -93,9 +93,14 @@ def _substitute_env_placeholders(entry):
     entry["env"] = resolved
 
 
-def render_stdio_entry(name, spec):
+def render_stdio_entry(name, spec, hooks_dir):
     entry = dict(spec)
     entry.pop("_cbox", None)
+    if entry.get("command") == "python3":
+        args = list(entry.get("args") or [])
+        if args and not os.path.isabs(args[0]):
+            args[0] = hooks_dir + "/" + args[0]
+        entry["args"] = args
     _substitute_env_placeholders(entry)
     return entry
 
@@ -167,7 +172,7 @@ def render(delegates, selection, hooks_dir, shim_mode, target, explicit=None):
         if adapter == "codex-mcp":
             chosen[name] = wrap_codex_entry(name, spec, cbox, hooks_dir, shim_mode)
         elif adapter == "stdio-mcp":
-            chosen[name] = render_stdio_entry(name, spec)
+            chosen[name] = render_stdio_entry(name, spec, hooks_dir)
         elif adapter == "claude-cli":
             chosen[name] = render_claude_cli_entry(name, cbox, hooks_dir)
     return chosen

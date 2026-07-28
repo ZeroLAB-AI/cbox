@@ -42,6 +42,18 @@ def main():
     desc = ti.get("description") or ""
     meta = frontmatter(os.path.expanduser("~/.claude/agents/%s.md" % atype))
     model = ti.get("model") or meta.get("model") or "inherit"
+    if model.isalpha():
+        model = os.environ.get("ANTHROPIC_DEFAULT_%s_MODEL" % model.upper()) or model
+    deny = os.environ.get("CBOX_AGENT_MODEL_DENY") or ""
+    if deny and re.search(deny, model) and "safety-fallback" not in desc:
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": "model '%s' matches the spawn deny pattern; it is allowed only as a safety fallback - retry with a 'safety-fallback:' note in the description" % model,
+            }
+        }))
+        return
     effort = meta.get("effort") or ""
     if effort:
         prefix = "%s (%s/%s): " % (atype, model, effort)

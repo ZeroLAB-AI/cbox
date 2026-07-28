@@ -247,6 +247,27 @@ test_codex_profile_toml_golden_mcp1() {
   echo "PASS: codex profile TOML golden CBOX_CODEX_MCP=1"
 }
 
+test_codex_profile_toml_hermes_local_gated_on() {
+  local outdir="$TMPBASE/profile_hermes_local"
+  (
+    INSTALL_DIR="$INSTALL_DIR"
+    export INSTALL_DIR
+    export HOME="/home/x"
+    export CBOX_WORKSPACES="/zerolab/agent_ecosystem"
+    export CBOX_CODEX_MCP=1
+    export CBOX_HERMES_DELEGATE=on
+    source "$INSTALL_DIR/templates/generators.sh"
+    gen_codex_profile_into "$outdir" global ""
+  )
+  grep -q '^\[mcp_servers.hermes-local\]$' "$outdir/cbox-container.config.toml" \
+    || _fail "codex profile TOML with CBOX_CODEX_MCP=1 and CBOX_HERMES_DELEGATE=on is missing [mcp_servers.hermes-local]"
+  grep -q '"HERMES_BIN" = "/opt/hermes/bin/hermes"' "$outdir/cbox-container.config.toml" \
+    || _fail "codex profile TOML [mcp_servers.hermes-local] has an empty/missing HERMES_BIN (hermes defaults not applied for codex render)"
+  grep -q '"CBOX_HERMES_DELEGATE_HOME_TEMPLATE" = "/opt/hermes/delegate-home"' "$outdir/cbox-container.config.toml" \
+    || _fail "codex profile TOML [mcp_servers.hermes-local] has an empty/missing CBOX_HERMES_DELEGATE_HOME_TEMPLATE (hermes defaults not applied for codex render)"
+  echo "PASS: codex profile TOML carries [mcp_servers.hermes-local] when CBOX_CODEX_MCP=1 and CBOX_HERMES_DELEGATE=on"
+}
+
 test_shim_behavioral_pin_via_existing_suite() {
   python3 "$INSTALL_DIR/lib/test_codex_mcp_shim.py" -v >/dev/null 2>&1 \
     || _fail "codex_mcp_shim.py behavioral pin (test_codex_mcp_shim.py) failed"
@@ -300,15 +321,15 @@ claude_only_gated = sorted(
 )
 expected_claude = ["codex-luna", "codex-sol", "codex-terra", "codex-terra-light"]
 expected_codex = ["ask-claude"]
-expected_gated_multi = ["local-qwen"]
-expected_claude_only_gated = ["hermes-local"]
+expected_gated_multi = ["local-qwen", "hermes-local"]
+expected_claude_only_gated = []
 assert claude_only == sorted(expected_claude + expected_claude_only_gated), claude_only
 assert codex_only == expected_codex, codex_only
-assert gated_multi == expected_gated_multi, gated_multi
+assert gated_multi == sorted(expected_gated_multi), gated_multi
 assert claude_only_gated == expected_claude_only_gated, claude_only_gated
 assert sorted(data.keys()) == sorted(expected_claude + expected_codex + expected_gated_multi + expected_claude_only_gated), sorted(data.keys())
 ' "$INSTALL_DIR/etc/mcp/delegates.json"
-  echo "PASS: delegates.json reproduces the current default set exactly (4 claude-only tiers, ask-claude codex-only, local-qwen env-gated claude+codex, hermes-local env-gated claude-only, no other new entry)"
+  echo "PASS: delegates.json reproduces the current default set exactly (4 claude-only tiers, ask-claude codex-only, local-qwen and hermes-local env-gated claude+codex, no other new entry)"
 }
 
 test_render_refuses_codex_named_non_codex_mcp_adapter() {
@@ -479,7 +500,7 @@ data = json.load(open(sys.argv[1]))
 assert "local-qwen" in data, data.keys()
 spec = data["local-qwen"]
 assert spec["command"] == "python3", spec
-assert spec["args"] == ["local_model_mcp.py"], spec
+assert spec["args"] == ["/home/x/.claude/hooks/local_model_mcp.py"], spec
 assert spec["env"] == {
     "CBOX_LOCAL_MODEL_URL": "http://127.0.0.1:11500",
     "CBOX_LOCAL_MODEL_NAME": "qwen2.5:7b",
@@ -523,6 +544,33 @@ test_local_qwen_invisible_to_boot_gate_when_configured() {
   echo "PASS: local-qwen is invisible to the entrypoint boot gate (not named codex-*) once configured"
 }
 
+test_enabled_when_env_gates_are_exported_everywhere() {
+  local gates
+  gates="$(python3 -c '
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+gates = sorted({
+    s["_cbox"]["enabled_when_env"]
+    for s in data.values()
+    if isinstance(s, dict)
+    and isinstance(s.get("_cbox"), dict)
+    and s["_cbox"].get("enabled_when_env")
+})
+print(" ".join(gates))
+' "$INSTALL_DIR/etc/mcp/delegates.json")"
+  [ -n "$gates" ] || _fail "no enabled_when_env gates found in delegates.json - test fixture assumption broken"
+  local gate f
+  for gate in $gates; do
+    for f in "$INSTALL_DIR/setup.sh" "$INSTALL_DIR/cbox"; do
+      grep -Eq "^[[:space:]]*export[[:space:]]+([A-Z0-9_]+[[:space:]]+)*${gate}([[:space:]]|\$)" "$f" \
+        || _fail "gate var $gate (from delegates.json enabled_when_env) is never exported in $f - it will be silently absent from os.environ when render_mcp.py runs, and the delegate it gates will be silently dead in every real flow"
+    done
+  done
+  echo "PASS: every enabled_when_env gate in delegates.json is exported at least once in both setup.sh and cbox"
+}
+
 test_render_byte_identity_progress_off
 test_render_byte_identity_progress_on
 test_seed_shape_byte_identity
@@ -533,6 +581,7 @@ test_entrypoint_gate_fails_on_tampered_seed
 test_entrypoint_gate_checks_active_config_dir_state
 test_codex_profile_toml_golden_mcp0
 test_codex_profile_toml_golden_mcp1
+test_codex_profile_toml_hermes_local_gated_on
 test_shim_behavioral_pin_via_existing_suite
 test_no_dangling_mcp_servers_json_refs
 test_delegates_registry_reproduces_current_default_set
@@ -548,4 +597,5 @@ test_fixture_stdio_mcp_renders_plain_for_claude
 test_fixture_stdio_mcp_absent_for_codex
 test_fixture_stdio_mcp_invisible_to_boot_gate
 test_fixture_selection_expansion_works
+test_enabled_when_env_gates_are_exported_everywhere
 echo "all render_mcp golden tests passed"

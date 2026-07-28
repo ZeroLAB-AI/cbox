@@ -23,6 +23,8 @@ _load_cbox_functions() {
   awk '
     /^die_no_conf\(\) \{/ { infunc=1 }
     /^_cbox_local_effdir_for\(\) \{/ { infunc=1 }
+    /^_cbox_machine_scoped_vars\(\) \{/ { infunc=1 }
+    /^_cbox_load_machine_scoped_vars\(\) \{/ { infunc=1 }
     /^_cbox_root_in_global_scope\(\) \{/ { infunc=1 }
     /^_cbox_effective_mode\(\) \{/ { infunc=1 }
     /^_cbox_doctor_in_container\(\) \{/ { infunc=1 }
@@ -142,11 +144,154 @@ if _cbox_config_validate_var CBOX_HERMES_PROVIDER bogus >/dev/null 2>&1; then
 fi
 _ok "validator: hermes provider enum"
 
+_cbox_config_validate_var CBOX_HERMES_DELEGATE_MAX_CONCURRENCY 0 || _fail "hermes delegate max concurrency: 0 should be valid (falls back to server default)"
+_cbox_config_validate_var CBOX_HERMES_DELEGATE_MAX_CONCURRENCY 4 || _fail "hermes delegate max concurrency: 4 should be valid"
+if _cbox_config_validate_var CBOX_HERMES_DELEGATE_MAX_CONCURRENCY "-1" >/dev/null 2>&1; then
+  _fail "hermes delegate max concurrency: negative should be rejected"
+fi
+if _cbox_config_validate_var CBOX_HERMES_DELEGATE_MAX_CONCURRENCY 17 >/dev/null 2>&1; then
+  _fail "hermes delegate max concurrency: above the server MAX_CONCURRENCY_CAP (16) should be rejected"
+fi
+if _cbox_config_validate_var CBOX_HERMES_DELEGATE_MAX_CONCURRENCY "abc" >/dev/null 2>&1; then
+  _fail "hermes delegate max concurrency: non-numeric should be rejected"
+fi
+_ok "validator: hermes delegate max concurrency (CBOX_HERMES_DELEGATE_MAX_CONCURRENCY)"
+
+_cbox_config_validate_var CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC "" || _fail "hermes delegate queue wait: empty should be valid (falls back to server default)"
+_cbox_config_validate_var CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC 900 || _fail "hermes delegate queue wait: 900 should be valid"
+if _cbox_config_validate_var CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC "-1" >/dev/null 2>&1; then
+  _fail "hermes delegate queue wait: negative should be rejected"
+fi
+if _cbox_config_validate_var CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC "abc" >/dev/null 2>&1; then
+  _fail "hermes delegate queue wait: non-numeric should be rejected"
+fi
+_ok "validator: hermes delegate queue wait seconds (CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC)"
+
+_cbox_config_validate_var CBOX_HERMES_DELEGATE_LOCK_DIR "" || _fail "hermes delegate lock dir: empty should be valid (falls back to server default)"
+_cbox_config_validate_var CBOX_HERMES_DELEGATE_LOCK_DIR "/tmp/cbox-hermes-delegate-locks" || _fail "hermes delegate lock dir: absolute path should be valid"
+if _cbox_config_validate_var CBOX_HERMES_DELEGATE_LOCK_DIR "relative/path" >/dev/null 2>&1; then
+  _fail "hermes delegate lock dir: relative path should be rejected"
+fi
+_ok "validator: hermes delegate lock dir (CBOX_HERMES_DELEGATE_LOCK_DIR)"
+
+_cbox_config_validate_var OLLAMA_NUM_PARALLEL "" || _fail "ollama num parallel: empty should be valid (falls back to server default)"
+_cbox_config_validate_var OLLAMA_NUM_PARALLEL 4 || _fail "ollama num parallel: 4 should be valid"
+if _cbox_config_validate_var OLLAMA_NUM_PARALLEL "-1" >/dev/null 2>&1; then
+  _fail "ollama num parallel: negative should be rejected"
+fi
+if _cbox_config_validate_var OLLAMA_NUM_PARALLEL "abc" >/dev/null 2>&1; then
+  _fail "ollama num parallel: non-numeric should be rejected"
+fi
+_ok "validator: OLLAMA_NUM_PARALLEL"
+
+_cbox_config_validate_var CBOX_HERMES_DELEGATE_MODE "" || _fail "hermes delegate mode: empty should be valid (falls back to server default)"
+_cbox_config_validate_var CBOX_HERMES_DELEGATE_MODE qa || _fail "hermes delegate mode: qa should be valid"
+if _cbox_config_validate_var CBOX_HERMES_DELEGATE_MODE bogus >/dev/null 2>&1; then
+  _fail "hermes delegate mode: unsupported mode should be rejected"
+fi
+_ok "validator: hermes delegate mode (CBOX_HERMES_DELEGATE_MODE)"
+
+_cbox_config_validate_var CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS "" || _fail "hermes delegate disabled toolsets: empty should be valid (falls back to the default toolset list)"
+_cbox_config_validate_var CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS "terminal,file,web" || _fail "hermes delegate disabled toolsets: csv list should be valid"
+_ok "validator: hermes delegate disabled toolsets (CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS)"
+
 _cbox_config_validate_var CBOX_LIMIT_RESUME_PROMPT "please continue now" || _fail "free-text: spaces should be allowed"
 if _cbox_config_validate_var CBOX_LIMIT_RESUME_PROMPT "" >/dev/null 2>&1; then
   _fail "free-text: empty prompt should be rejected (must not be empty)"
 fi
 _ok "validator: free-text var accepting spaces (CBOX_LIMIT_RESUME_PROMPT)"
+
+_cbox_config_validate_var CBOX_OLLAMA_MODE off || _fail "ollama mode: off should be valid"
+_cbox_config_validate_var CBOX_OLLAMA_MODE on || _fail "ollama mode: on should be valid"
+if _cbox_config_validate_var CBOX_OLLAMA_MODE bogus >/dev/null 2>&1; then
+  _fail "ollama mode: bogus should be rejected"
+fi
+_ok "validator: CBOX_OLLAMA_MODE enum"
+
+_cbox_config_validate_var CBOX_OLLAMA_IMAGE "ollama/ollama:0.32.5" || _fail "ollama image: pinned tag should be valid"
+if _cbox_config_validate_var CBOX_OLLAMA_IMAGE "" >/dev/null 2>&1; then
+  _fail "ollama image: empty should be rejected"
+fi
+if _cbox_config_validate_var CBOX_OLLAMA_IMAGE "ollama/ollama 0.32.5" >/dev/null 2>&1; then
+  _fail "ollama image: whitespace should be rejected"
+fi
+_ok "validator: CBOX_OLLAMA_IMAGE"
+
+_cbox_config_validate_var CBOX_OLLAMA_GPU off || _fail "ollama gpu: off should be valid"
+_cbox_config_validate_var CBOX_OLLAMA_GPU cdi || _fail "ollama gpu: cdi should be valid"
+if _cbox_config_validate_var CBOX_OLLAMA_GPU 1 >/dev/null 2>&1; then
+  _fail "ollama gpu: numeric CBOX_GPU-style value should be rejected (separate knob)"
+fi
+_ok "validator: CBOX_OLLAMA_GPU enum (separate from CBOX_GPU)"
+
+_cbox_config_validate_var CBOX_OLLAMA_STORE dedicated || _fail "ollama store: dedicated should be valid"
+_cbox_config_validate_var CBOX_OLLAMA_STORE shared || _fail "ollama store: shared should be valid"
+if _cbox_config_validate_var CBOX_OLLAMA_STORE bogus >/dev/null 2>&1; then
+  _fail "ollama store: bogus should be rejected"
+fi
+_ok "validator: CBOX_OLLAMA_STORE enum"
+
+_cbox_config_validate_var CBOX_OLLAMA_STORE_PATH "" || _fail "ollama store path: empty should be valid (dedicated mode)"
+_cbox_config_validate_var CBOX_OLLAMA_STORE_PATH "/home/user/.ollama" || _fail "ollama store path: absolute path should be valid"
+if _cbox_config_validate_var CBOX_OLLAMA_STORE_PATH "relative/path" >/dev/null 2>&1; then
+  _fail "ollama store path: relative path should be rejected"
+fi
+_ok "validator: CBOX_OLLAMA_STORE_PATH"
+
+_cbox_config_validate_var CBOX_OLLAMA_PORT 11434 || _fail "ollama port: 11434 should be valid"
+if _cbox_config_validate_var CBOX_OLLAMA_PORT 0 >/dev/null 2>&1; then
+  _fail "ollama port: 0 should be rejected"
+fi
+if _cbox_config_validate_var CBOX_OLLAMA_PORT 70000 >/dev/null 2>&1; then
+  _fail "ollama port: out-of-range should be rejected"
+fi
+_ok "validator: CBOX_OLLAMA_PORT"
+
+_cbox_config_validate_var CBOX_OLLAMA_NUM_PARALLEL 1 || _fail "ollama num parallel: 1 should be valid"
+_cbox_config_validate_var CBOX_OLLAMA_NUM_PARALLEL 4 || _fail "ollama num parallel: 4 should be valid"
+if _cbox_config_validate_var CBOX_OLLAMA_NUM_PARALLEL 0 >/dev/null 2>&1; then
+  _fail "ollama num parallel: 0 should be rejected (must be at least 1, unlike the empty-allowed hermes-delegate fallback var)"
+fi
+if _cbox_config_validate_var CBOX_OLLAMA_NUM_PARALLEL "" >/dev/null 2>&1; then
+  _fail "ollama num parallel: empty should be rejected (this is the owner's own setting, not an optional fallback)"
+fi
+if _cbox_config_validate_var CBOX_OLLAMA_NUM_PARALLEL "abc" >/dev/null 2>&1; then
+  _fail "ollama num parallel: non-numeric should be rejected"
+fi
+_ok "validator: CBOX_OLLAMA_NUM_PARALLEL"
+
+for _v in CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL; do
+  _cbox_config_is_whitelisted "$_v" || _fail "whitelist: $_v should be whitelisted (SEC_VARS[ollama])"
+done
+unset _v
+_ok "whitelist: all ollama vars are whitelisted via SEC_VARS[ollama]"
+
+[ "${SEC_SCOPE[ollama]:-project}" = machine ] || _fail "SEC_SCOPE[ollama] should be machine"
+_ok "SEC_SCOPE[ollama]=machine"
+
+for _s in mode mounts workspaces python gpu egress netaccess hostroute ssh bashrc mcp-servers \
+  codex-progress local-model hermes hermes-delegate autoresume agents codex-mcp continuity \
+  claude-md settings hooks git-identity apt-extra binaries restart-policy; do
+  [ "${SEC_SCOPE[$_s]:-project}" = project ] || _fail "SEC_SCOPE[$_s] should default to project, got ${SEC_SCOPE[$_s]:-unset}"
+done
+unset _s
+_ok "SEC_SCOPE defaults to project for every pre-existing section"
+
+[ "${SEC_APPLY[ollama]:-}" = infra-reconcile ] || _fail "SEC_APPLY[ollama] should be infra-reconcile"
+_ok "SEC_APPLY[ollama]=infra-reconcile"
+
+apply_report="$(_cbox_config_apply_cmd_for infra-reconcile)"
+case "$apply_report" in
+  *"cbox ollama reconcile"*) ;;
+  *) _fail "apply-cmd: infra-reconcile should map to cbox ollama reconcile, got: $apply_report" ;;
+esac
+_ok "apply-cmd: infra-reconcile class names cbox ollama reconcile"
+
+declare -f _cbox_machine_scoped_vars >/dev/null || _fail "extraction failed: _cbox_machine_scoped_vars not defined"
+machine_vars="$(_cbox_machine_scoped_vars | sort)"
+expected_machine_vars="$(printf '%s\n' CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL | sort)"
+[ "$machine_vars" = "$expected_machine_vars" ] || _fail "_cbox_machine_scoped_vars: expected exactly the ollama vars, got: $machine_vars"
+_ok "_cbox_machine_scoped_vars: enumerates exactly SEC_VARS[ollama] (the only machine-scoped section)"
 
 CBOX_MODE=global
 _cbox_config_dep_gate CBOX_RESTART_POLICY >/dev/null 2>&1 || _fail "dep-gate: global mode should be unaffected (condition is isolated-mode)"
@@ -458,5 +603,39 @@ _gen_effective() { :; }
 ) > "$TMPBASE/dictatenote.stdout" 2>"$TMPBASE/dictatenote.stderr" || _fail "dictate-note: set failed: $(cat "$TMPBASE/dictatenote.stderr")"
 grep -q "wizard-only auto-deploy" "$TMPBASE/dictatenote.stdout" || _fail "dictate-note: report did not warn about codex-mcp's dictate:hooks wizard-only behavior"
 _ok "dictate-note: config set report flags a dictate-gated section as wizard-only auto-deploy"
+
+_cbox_path_hash() { printf 'machinescopehash'; }
+MACHINESCOPE="$HOME/.config/cbox/projects/machinescopehash"
+_setup_fixture_eff "$MACHINESCOPE" "$ROOT"
+_gen_effective() { :; }
+(
+  cd "$ROOT"
+  HOME="$TMPBASE/home"
+  export HOME
+  CBOX_MODE=isolated
+  HAVE_GLOBAL_CONF=0
+  _cbox_config_in_container() { return 1; }
+  _cbox_config_set "CBOX_OLLAMA_MODE=on"
+) > "$TMPBASE/machinescope.stdout" 2>"$TMPBASE/machinescope.stderr" && _fail "machine-scope gate: cbox config set should refuse a machine-scoped key from an isolated project"
+grep -qi "machine-scoped" "$TMPBASE/machinescope.stderr" || _fail "machine-scope gate: rejection message does not mention machine-scoped: $(cat "$TMPBASE/machinescope.stderr")"
+grep -q "^CBOX_OLLAMA_MODE='on'" "$MACHINESCOPE/cbox.conf" && _fail "machine-scope gate: CBOX_OLLAMA_MODE=on should never be written into an isolated project's cbox.conf"
+_ok "machine-scope gate: cbox config set refuses CBOX_OLLAMA_MODE from an isolated project and leaves cbox.conf untouched"
+
+_cbox_path_hash() { printf 'machinestriphash'; }
+MACHINESTRIP="$HOME/.config/cbox/projects/machinestriphash"
+_setup_fixture_eff "$MACHINESTRIP" "$ROOT"
+grep -q '^CBOX_OLLAMA_MODE=' "$MACHINESTRIP/cbox.conf" || _fail "test setup: fixture should include a CBOX_OLLAMA_MODE line to prove the write-loop strips it"
+_gen_effective() { :; }
+(
+  cd "$ROOT"
+  HOME="$TMPBASE/home"
+  export HOME
+  CBOX_CONFIG_KEYS=(CBOX_GPU)
+  CBOX_CONFIG_VALS=(1)
+  _cbox_config_set_isolated
+) > /dev/null 2>"$TMPBASE/machinestrip.stderr" || _fail "machine-scope strip: unrelated set failed: $(cat "$TMPBASE/machinestrip.stderr")"
+grep -q '^CBOX_OLLAMA_MODE=' "$MACHINESTRIP/cbox.conf" && _fail "machine-scope strip: _cbox_config_set_isolated's whitelist write-loop should never re-write a machine-scoped key into the per-project file"
+grep -qx 'CBOX_GPU=1' "$MACHINESTRIP/cbox.conf" || _fail "machine-scope strip: the actually-requested key (CBOX_GPU) should still be written"
+_ok "machine-scope strip: _cbox_config_set_isolated's whitelist write-loop omits machine-scoped keys even on an unrelated set"
 
 echo "PASS: all cbox config tests"

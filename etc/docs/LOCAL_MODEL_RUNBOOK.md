@@ -1,11 +1,13 @@
 # Local model runbook (F4/F5)
 
-Written blind on 2026-07-19, autonomous overnight wave, and has never run
-against a live ollama endpoint. Everything below is a plan to verify on the
-host, not a confirmed result. The feature ships OFF by default: absent from
-the rendered MCP server list unless CBOX_LOCAL_MODEL_URL is set, and the
-cbox ai local-qwen engine refuses to run unless CBOX_LOCAL_MODEL=on plus both
-CBOX_LOCAL_MODEL_URL and CBOX_LOCAL_MODEL_NAME are set.
+The feature ships OFF by default: absent from the rendered MCP server list unless
+CBOX_LOCAL_MODEL_URL is set, and the cbox ai local-qwen engine refuses to run unless
+CBOX_LOCAL_MODEL=on plus both CBOX_LOCAL_MODEL_URL and CBOX_LOCAL_MODEL_NAME are set.
+
+Live verification is a host-side step. Paths A, B, and C below describe the topology
+recipes; Path A (sibling container) is likely simplest. Confirm the endpoint is
+reachable and responding to model queries from inside a cbox session before declaring
+success.
 
 ## What this is
 
@@ -24,28 +26,32 @@ Ollama itself runs OUTSIDE cbox always. Nothing here grants cbox a GPU or
 CDI device; compute stays wherever ollama runs, cbox only makes HTTP calls
 to it and gets text back.
 
-## Path A: ollama as its own docker container
+## Path A: cbox-managed ollama (machine-scoped owner project)
 
-Run ollama as a sibling container joined to the same docker network cbox's
-egress/netaccess topology already supports, and reach it by service name.
+Ollama runs in a separate owner compose project under ~/.config/cbox/infra/ollama,
+automatically managed by cbox. This is the primary path: simple, ephemeral, and
+survives per-project container lifecycle.
 
-1. On the host, run ollama as its own container (not inside cbox):
-   `docker run -d --name ollama -v ollama:/root/.ollama -p 11434:11434 ollama/ollama`
-   (or add it as a service in a separate compose file the operator owns -
-   cbox's own docker-compose.yml is not touched by this feature).
-2. Pull the model into that container: `docker exec ollama ollama pull qwen2.5:7b`
-   (pick the qwen variant that fits the available VRAM/RAM - see "open
-   decisions" below).
-3. Join cbox's container to the same docker network as the ollama container
-   (the existing CBOX_NETACCESS_MODE / netaccess section already builds a
-   SOCKS-reachable path to other docker networks; whether local-qwen reuses
-   that path or needs a plain network join is an open decision - see below).
-4. Set CBOX_LOCAL_MODEL_URL=http://ollama:11434 (service-name resolution
-   inside the shared network) and CBOX_LOCAL_MODEL_NAME=qwen2.5:7b.
-5. Run `./setup.sh update local-model` (or the interactive wizard, section
-   "local-model") to persist CBOX_LOCAL_MODEL=on plus the URL/name, then
-   `./setup.sh update mcp-servers` or recreate the container so the rendered
-   MCP server list picks up local-qwen.
+1. Run `./setup.sh update ollama` (or the interactive wizard, section "ollama")
+   and set `CBOX_OLLAMA_MODE=on`. Optionally set `CBOX_OLLAMA_GPU=cdi` if GPU
+   access is available, `CBOX_OLLAMA_IMAGE` to pin a different image tag, or
+   other variables (see cbox/MANUAL.md section "ollama" for full configuration).
+2. Pull a model: `cbox ollama pull qwen2.5:7b` (or any model tag). The pull
+   temporarily starts the serving container on an ephemeral network, stops the
+   server before pulling (so the pull endpoint receives egress permission once
+   then loses it), and restarts the server afterward.
+3. Set `CBOX_LOCAL_MODEL_URL=http://ollama:11434` and `CBOX_LOCAL_MODEL_NAME=qwen2.5:7b`.
+4. Run `./setup.sh update local-model` to persist the local-model settings,
+   then `./setup.sh update mcp-servers` or restart the container so the MCP
+   server list picks up local-qwen.
+
+The cbox-managed owner project (`cbox-infra-u<uid>`) is machine-scoped: every
+project on the machine shares the same ollama instance, and the instance is never
+torn down by a per-project `cbox down`. Apply changes with `cbox ollama reconcile`.
+The per-scope internal network joins the cbox container and the ollama container
+to a shared private network (`cbox-ollama-u<uid>-global` or
+`cbox-ollama-u<uid>-p<projecthash>`), so the endpoint is always `http://ollama:11434`
+inside any cbox container, regardless of mode or scope.
 
 Note: local-qwen only becomes selectable in the mcp-servers wizard step
 (and in `mcp_all_names()`, which the wizard's checkbox list is built from)
@@ -57,29 +63,53 @@ narrowed to an explicit subset before local-model was configured, re-run
 `./setup.sh update mcp-servers` once after setting the URL to add local-qwen
 to that subset.
 
-## Path B: ollama as a host process
+## Path B: Manual sibling container (deprecated; use Path A)
+
+An alternative to cbox-managed ollama: run a separate container yourself and
+join it to cbox's network via `CBOX_NETACCESS_MODE`. This path is not recommended
+for most use cases - Path A handles network wiring and lifecycle automatically.
+
+If you choose this path:
+
+1. On the host, run the model server as its own container (not inside cbox):
+   - **Ollama**: `docker run -d --name ollama -v ollama:/root/.ollama -p 11434:11434 ollama/ollama`.
+   - **llama.cpp**: `docker run -d --name llama-cpp -v models:/models -p 11434:8000 ghcr.io/ggerganov/llama.cpp:full-cuda --model /models/model.gguf --host 0.0.0.0 --port 8000`.
+2. Pull the model: `docker exec ollama ollama pull qwen2.5:7b` or download the GGUF file manually.
+3. Configure netaccess to join cbox to the model server container's network
+   (not a wizard setting - cbox netaccess allow <docker-network> on the host).
+4. Set `CBOX_LOCAL_MODEL_URL=http://ollama:11434` and `CBOX_LOCAL_MODEL_NAME=qwen2.5:7b`.
+5. Run `./setup.sh update local-model`, then `./setup.sh update mcp-servers` or restart.
+
+## Path C: ollama as a host process (via host-route gateway)
 
 Run ollama directly on the host (not containerized) and reach it through the
-host-route gateway the 07-15 egress wave built (CBOX_HOST_ROUTE_MODE and the
-host-proxy layer), which lets a container reach a host-bound port without a
+host-route proxy that lets a container reach a host-bound port without a
 raw host-network mount.
 
-1. On the host: `ollama serve` (default port 11434), `ollama pull qwen2.5:7b`.
-2. Configure the host-route section (CBOX_HOST_ROUTE_MODE=on,
-   CBOX_HOST_PROXY_ADDR_MODE) per its own section in ./setup.sh so the
-   container can reach 127.0.0.1:11434 on the host through the managed
-   forward proxy rather than a direct bind-to-host-network hack.
-3. Set CBOX_LOCAL_MODEL_URL to whatever address the host-route layer exposes
-   for the host-bound ollama port (exact value depends on
-   CBOX_HOST_PROXY_ADDR_MODE - host-gateway vs explicit URL; this mapping
-   needs a real host run to pin down, it is not verified here).
-4. Same as Path A steps 4-5 for CBOX_LOCAL_MODEL_NAME and applying the
-   section.
+1. On the host: ensure ollama listens beyond 127.0.0.1 (e.g. `OLLAMA_HOST=0.0.0.0:11434 ollama serve`).
+2. Pull the model: `ollama pull qwen2.5:7b` (pick a qwen variant that fits available VRAM/RAM).
+3. Enable host-route via `./setup.sh update hostroute`: set `CBOX_HOST_ROUTE_MODE=host-proxy` and optionally `CBOX_HOST_GATEWAY_ALIAS=on` (renders `extra_hosts: host.docker.internal` for `http://host.docker.internal:11434` URLs inside the container).
+4. Set `CBOX_LOCAL_MODEL_URL=http://host.docker.internal:11434` (or use the explicit proxy URL if `CBOX_HOST_GATEWAY_ALIAS` is off; the exact URL depends on `CBOX_HOST_PROXY_ADDR_MODE`).
+5. Set `CBOX_LOCAL_MODEL_NAME=qwen2.5:7b`.
+6. Run `./setup.sh update local-model` to persist the settings, then `./setup.sh update mcp-servers` or restart the container so the MCP server list picks up local-qwen.
 
-Path A is likely simpler (service-name DNS inside a shared docker network,
-no host-route plumbing needed); Path B avoids running ollama in a container
-if the operator wants ollama to have direct GPU access without container
-GPU/CDI wiring. Both are description-only until run once on the host.
+Caveat: the host process must listen beyond 127.0.0.1. If listening only on the loopback, the container cannot reach it even through the proxy. Under rootless docker the host-gateway alias does not work; use an explicit host tunnel interface IP (e.g. a wireguard tunnel IP) instead.
+
+## Path D: remote endpoint over wireguard tunnel
+
+Access a local model running on a remote machine over a wireguard tunnel. The
+container needs no special cbox wiring - it uses plain routing to reach the
+tunnel IP of the remote machine.
+
+1. On the remote machine: run ollama or llama.cpp server with a local model (e.g. `ollama serve` or `llama-server --host 0.0.0.0 --port 11434`).
+2. Establish a wireguard tunnel to that machine (setup and join are host OS steps, outside cbox scope).
+3. On the host running cbox: note the tunnel IP of the remote machine (e.g. `10.0.0.5`).
+4. Set `CBOX_LOCAL_MODEL_URL=http://10.0.0.5:11434` and `CBOX_LOCAL_MODEL_NAME=qwen2.5:7b` (or appropriate model name).
+5. Run `./setup.sh update local-model` to persist the settings, then `./setup.sh update mcp-servers` or restart the container.
+
+Caveat under egress lockdown or SOCKS mode: the remote endpoint must be explicitly allowed in the egress allowlist, or those modes must be turned off entirely for the wireguard path to work.
+
+Path A (cbox-managed) is simplest and recommended; Path B avoids containerizing ollama if you want it to run natively; Path C reaches a host ollama via proxy; Path D reaches a remote model over a tunnel without cbox wiring. Live verification of endpoint reachability is a host-side step - these descriptions are configuration goals, not confirmed results.
 
 ## Design decision: no CBOX_LOCAL_MODEL_APPLIED flag
 
@@ -100,6 +130,9 @@ last change. If this becomes confusing in practice, add
 CBOX_LOCAL_MODEL_APPLIED cloning the sibling pattern; not done here because
 health is already checked per-call, so an apply-time gate would be
 redundant with, not a replacement for, that check.
+
+Note: cbox-managed ollama (Path A) is separate and machine-scoped, applying via
+`cbox ollama reconcile` with its own SEC_APPLY=infra-reconcile apply class.
 
 ## Verifying the MCP delegate (F4) once configured
 

@@ -82,6 +82,11 @@ def compose_network_kind(doc, project):
     return kind if kind in ("internal", "egress") else ""
 
 
+def cbox_infra_network(doc):
+    labels = doc.get("Labels") if isinstance(doc.get("Labels"), dict) else {}
+    return labels.get("cbox.kind") == "infra"
+
+
 def select_networks(docker_bin, scope, requested, project):
     names = list_networks(docker_bin) if scope == "all" else requested
     selected = []
@@ -101,6 +106,8 @@ def select_networks(docker_bin, scope, requested, project):
             reason = "unsupported network driver"
         elif compose_network_kind(doc, project):
             reason = "cbox infrastructure network"
+        elif cbox_infra_network(doc):
+            reason = "cbox infrastructure network (per-scope model network)"
         elif not network_subnets(doc):
             reason = "no eligible IPv4 subnet"
         else:

@@ -107,7 +107,13 @@ Options must precede the container name. Commands are passed as an argv list wit
 
 ### hostroute
 
-Route container egress through a host-managed forward proxy so the host `/etc/hosts` and host DNS resolution are honored (`CBOX_HOST_ROUTE_MODE=off|host-proxy`, `CBOX_HOST_PROXY_URL`, `CBOX_HOST_PROXY_ADDR_MODE`). Off by default. Only meaningful with egress enabled; like egress it is applied host-side (MODE + APPLIED) and verified in a running container.
+Route container egress through a host-managed forward proxy so the host `/etc/hosts` and host DNS resolution are honored (`CBOX_HOST_ROUTE_MODE=off|host-proxy`, `CBOX_HOST_PROXY_URL`, `CBOX_HOST_PROXY_ADDR_MODE`, `CBOX_HOST_GATEWAY_ALIAS`). Off by default. Only meaningful with egress enabled; like egress it is applied host-side (MODE + APPLIED) and verified in a running container.
+
+**Host route setup:** Configure `CBOX_HOST_ROUTE_MODE=host-proxy` and `CBOX_HOST_PROXY_ADDR_MODE` (how the container reaches the proxy endpoint). Optional `CBOX_HOST_GATEWAY_ALIAS` (off|on, default off) renders `extra_hosts: host.docker.internal` mapped to host-gateway on the cbox service. This lets container processes reach host-bound services via `http://host.docker.internal:<port>`.
+
+**Host-side LLM pattern:** Run ollama or llama.cpp on the host (not in a container). The process must listen beyond 127.0.0.1: `OLLAMA_HOST=0.0.0.0:11434` or `llama-server --host 0.0.0.0 --port 11434`. Inside the container, with `CBOX_HOST_GATEWAY_ALIAS=on`, call `http://host.docker.internal:11434` (or substitute the actual port).
+
+**Wireguard-remote pattern:** Access an endpoint on a remote machine over a wireguard tunnel. Use the tunnel IP of the remote machine (e.g. `http://10.0.0.5:11434`). The container needs no extra cbox wiring - plain networking reaches the tunnel. Caveat: under egress lockdown or SOCKS mode, the endpoint must be explicitly allowed (egress allowlist) or those modes turned off entirely for the wireguard path to work.
 
 ### ssh
 
@@ -211,7 +217,7 @@ A running session keeps its already-loaded binary; the next session uses the upd
 
 ### local-model
 
-Off by default (absent from the rendered MCP server list and refused by `cbox ai`) until configured. Wires an OpenAI-compatible endpoint such as ollama as: (1) `local-qwen`, a text-only MCP delegate exposing one tool, and (2) `local-qwen`, a `cbox ai` engine that drives `codex --oss --local-provider ollama` against the same endpoint. Set `CBOX_LOCAL_MODEL=on` plus `CBOX_LOCAL_MODEL_URL` and `CBOX_LOCAL_MODEL_NAME` via this wizard section, `./setup.sh update local-model`, or `--config`; `cbox doctor` reports ACTIVE/CONFIG-ONLY/OFF. Ollama itself always runs outside cbox (no GPU/CDI grant). See etc/docs/LOCAL_MODEL_RUNBOOK.md for the two setup paths (ollama as a sibling container vs a host process) and open decisions left to the operator.
+Off by default (absent from the rendered MCP server list and refused by `cbox ai`) until configured. Wires an OpenAI-compatible endpoint (ollama, llama.cpp llama-server, vllm, or compatible) as: (1) `local-qwen`, a text-only MCP delegate exposing one tool, and (2) `local-qwen`, a `cbox ai` engine that drives `codex --oss --local-provider ollama` against the same endpoint. Set `CBOX_LOCAL_MODEL=on` plus `CBOX_LOCAL_MODEL_URL` and `CBOX_LOCAL_MODEL_NAME` via this wizard section, `./setup.sh update local-model`, or `--config`; `cbox doctor` reports ACTIVE/CONFIG-ONLY/OFF. The endpoint always runs outside cbox (no GPU/CDI grant). The delegate health probe is `GET /v1/models`. See etc/docs/LOCAL_MODEL_RUNBOOK.md for the two setup paths (sibling container vs host process) and open decisions left to the operator.
 
 ### hermes
 
@@ -225,13 +231,15 @@ Managed-keys ownership: provider, base URL (local provider only; `/v1` appended 
 
 Degraded toolset note: the image ships the `hermes-agent` pip package only - no headless-browser or ffmpeg extras are installed, so any Hermes skills that depend on them are unavailable.
 
-First use: enable this section (`./setup.sh update hermes` or the wizard), rebuild (`cbox up` or accept the rebuild prompt), then `cbox run hermes`.
+Refresh safety: when `cbox reinstall-bins` or autoupdate refreshes the hermes venv, a failed refresh restores the previous venv from an in-volume backup (rollback via a `.prev` directory). A successful install removes the backup.
+
+First use: enable this section (`./setup.sh update hermes` or the wizard), then run `cbox reinstall-bins` on the host to install hermes into the shared bins volume. Recreate the container with `cbox up` (or the next `cbox run hermes`), then `cbox run hermes`.
 
 `cbox doctor` reports ACTIVE/CONFIG-ONLY/OFF for this section.
 
 ### hermes-delegate
 
-Off by default. A zero-cost local-model tier callable by `claude`: an MCP delegate tool (`hermes-local`) that shells out to one `hermes -z "<prompt>"` subprocess per tool call (plus up to three short-lived `hermes config set` subprocesses when a provider/base_url/model is configured - see Subprocess hygiene below). This is a separate concern from the `hermes` console engine above - `hermes mcp serve` (which exposes hermes's own messaging state) is not involved at all; the delegate is a small stdio MCP server (`etc/mcp/hermes_delegate_mcp.py`) modeled on the existing `local-qwen` delegate.
+Off by default. A zero-cost local-model tier callable by `claude` and `codex`: an MCP delegate tool (`hermes-local`) that shells out to one `hermes -z "<prompt>"` subprocess per tool call (plus up to three short-lived `hermes config set` subprocesses when a provider/base_url/model is configured - see Subprocess hygiene below). This is a separate concern from the `hermes` console engine above - `hermes mcp serve` (which exposes hermes's own messaging state) is not involved at all; the delegate is a small stdio MCP server (`etc/mcp/hermes_delegate_mcp.py`) modeled on the existing `local-qwen` delegate. When enabled, Claude receives a hermes-local relay subagent, and Codex receives a hermes-local entry in its MCP servers (rendered into the codex profile as `[mcp_servers.hermes-local]` when `CBOX_CODEX_MCP=1` and `CBOX_HERMES_DELEGATE=on`).
 
 Requires the `hermes` console engine (`CBOX_HERMES=on`); `SEC_DEPS[hermes-delegate]=disable:hermes-off` forces `CBOX_HERMES_DELEGATE=off` whenever the console engine is off, both in the wizard and in `cbox config set`'s dep-gate. Set `CBOX_HERMES_DELEGATE=on` plus optional `CBOX_HERMES_DELEGATE_PROVIDER`, `CBOX_HERMES_DELEGATE_BASE_URL`, and `CBOX_HERMES_DELEGATE_MODEL` (default-inherited from the console engine's own `CBOX_HERMES_PROVIDER`/`CBOX_HERMES_MODEL_URL`/`CBOX_HERMES_MODEL_NAME` at ask-time, but stored and applied independently) via this wizard section, `./setup.sh update hermes-delegate`, or `--config`. This is a restart-class change (`SEC_APPLY[hermes-delegate]=restart`), same as the other MCP delegates.
 
@@ -241,9 +249,31 @@ Subprocess hygiene: the prompt is capped below `CBOX_HERMES_DELEGATE_MAX_PROMPT_
 
 Memory is off by design: the ephemeral home already guarantees nothing persists past the call, and `hermes -z ... --ignore-rules` additionally skips auto-injection of `MEMORY.md`/`USER.md` context.
 
-`available_to` is `["claude"]` only in v1 - codex access is a later wave. Depth-guarded identically to `local-qwen`: `CBOX_DELEGATION_DEPTH`/`CBOX_MCP_DEPTH` empties `tools/list` and refuses `tools/call` so a delegate spawned over MCP cannot spawn another one.
+`available_to` is `["claude", "codex"]`. Depth-guarded identically to `local-qwen`: `CBOX_DELEGATION_DEPTH`/`CBOX_MCP_DEPTH` empties `tools/list` and refuses `tools/call` so a delegate spawned over MCP cannot spawn another one.
+
+Concurrency: since every call shells out to the same local-model server, concurrent `hermes-delegate` calls (from claude and codex at once, or several parallel subagent calls) are serialized through a slot semaphore before the `hermes -z` subprocess is spawned. The slot count comes from `CBOX_HERMES_DELEGATE_MAX_CONCURRENCY` if set, else falls back to `OLLAMA_NUM_PARALLEL`, else defaults to 1 - always capped at 16. A call that cannot get a slot blocks for up to `CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC` (default 1500s) before returning a "model is busy" error rather than piling load on the endpoint. The slot files themselves live in `CBOX_HERMES_DELEGATE_LOCK_DIR` (default `/tmp/cbox-hermes-delegate-locks`). All three are `cbox config set`-able (section `hermes-delegate`) alongside `CBOX_HERMES_DELEGATE_MAX_CONCURRENCY`, restart-class like the rest of the section.
+
+qa mode (the only mode implemented, `CBOX_HERMES_DELEGATE_MODE=qa`) pins the hermes child's terminal/file/web toolsets off per call via `hermes config set agent.disabled_toolsets` before the prompt runs, so the model answers from the prompt alone. `CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS` overrides the default toolset list (`terminal,file,web`); this is a config-level restriction enforced by hermes itself, not a sandbox around the process - the hermes child still runs with the container's own filesystem and network reach.
 
 First use: enable `hermes` (`CBOX_HERMES=on`) and run `cbox reinstall-bins` so `/opt/hermes/delegate-home` exists, then enable `hermes-delegate` via the wizard or `--config` and restart. `cbox doctor` reports ACTIVE/CONFIG-ONLY/OFF for this section.
+
+### ollama
+
+Off by default (`CBOX_OLLAMA_MODE=off|on`). Machine-scoped infra service, not a per-project one: `SEC_SCOPE[ollama]=machine` (every other section is `project`-scoped). Ollama runs in its own owner compose project, `cbox-infra-u<uid>`, rendered under the user config dir at `config/cbox/infra/ollama` and labeled `cbox.kind=infra` / `cbox.component=ollama` - never embedded inside a generated cbox project, so it is never torn down by a per-project `compose down --remove-orphans` and there is exactly one instance per machine, not one per project.
+
+Because the section is machine-scoped: the isolated per-project wizard (`run_local_wizard_subset`) never calls `step_ollama`, `setup.sh --local <root>` never asks about it and never writes `CBOX_OLLAMA_*` into a project's effective `cbox.conf` (the isolated derivation path strips those keys after `conf_save`), and `cbox config set` refuses `CBOX_OLLAMA_*` from inside an isolated project - run it from the global scope instead. The isolated runtime path (`cbox run`/`cbox shell` in an isolated project) re-reads `CBOX_OLLAMA_*` from the machine-level `cbox.conf` after sourcing the per-project file, so every project observes the same live value rather than a stale per-project copy.
+
+Vars: `CBOX_OLLAMA_MODE` (`off|on`, default `off`), `CBOX_OLLAMA_IMAGE` (pinned image reference, default `ollama/ollama:0.32.5`), `CBOX_OLLAMA_GPU` (`off|cdi`, default `off` - a separate reservation from `CBOX_GPU`, targeting only the ollama service), `CBOX_OLLAMA_STORE` (`dedicated|shared`, default `dedicated` - a cbox-owned named volume/directory; `shared` mounts only the `models/` subdirectory of a host ollama directory read-write and refuses to start while a host ollama daemon is detected), `CBOX_OLLAMA_STORE_PATH` (host path, shared mode only, default empty), `CBOX_OLLAMA_PORT` (default `11434`; informational only - it is never published on the host, it is only the port the shared-store host-daemon probe checks), `CBOX_OLLAMA_NUM_PARALLEL` (default `1`).
+
+`CBOX_OLLAMA_NUM_PARALLEL` and the hermes-delegate section's `OLLAMA_NUM_PARALLEL`/`CBOX_HERMES_DELEGATE_MAX_CONCURRENCY` name the same upstream concept (ollama's own request-parallelism knob) but are independent settable keys in two different sections - the delegate's concurrency slot count falls back to `OLLAMA_NUM_PARALLEL` only when `CBOX_HERMES_DELEGATE_MAX_CONCURRENCY` is unset. When this owner ollama and the hermes-delegate (or local-model) endpoint are the same server, the operator is expected to set `CBOX_OLLAMA_NUM_PARALLEL` to the real server value and mirror it into `OLLAMA_NUM_PARALLEL` (or set `CBOX_HERMES_DELEGATE_MAX_CONCURRENCY` explicitly) - cbox does not infer one from the other.
+
+This is an `infra-reconcile`-class change (`SEC_APPLY[ollama]=infra-reconcile`): neither `cbox down && cbox run` nor a topology/recreate cycle on the current cbox compose project touches the owner project. Apply with `cbox ollama reconcile`, which creates, updates, or tears down the owner project to match `CBOX_OLLAMA_MODE` and the other vars.
+
+Networking: one `internal:true` docker network per scope (`cbox-ollama-u<uid>-global`, `cbox-ollama-u<uid>-p<projecthash>`), never one shared network across scopes - `internal:true` blocks external routing but not member-to-member traffic, so a single shared network would let unrelated cbox containers reach each other's ollama. Each network joins exactly one cbox container plus the one ollama container, with the ollama container aliased `ollama` on each, so the endpoint is always `http://ollama:11434` regardless of scope. Neither the egress network nor the tinyproxy/dante proxy carries ollama traffic; a per-scope model network's service name goes into `NO_PROXY` always (including under egress lockdown, since a direct route genuinely exists there), while external endpoints (a host IP, a remote tunnel IP) are never added to `NO_PROXY` under egress lockdown. The `NO_PROXY` entry is the bare token `ollama`; some clients (e.g. Python's `urllib`) do a no-dot-boundary suffix match, so a hostname ending in `ollama` would also be treated as proxy-exempt - under lockdown that only means the direct attempt fails (no route exists to it), so this is not currently an escalation, but the exemption must never be widened to a wildcard/pattern.
+
+`cbox doctor` reports `ollama` ACTIVE/CONFIG-ONLY/OFF for this section (host-side reads `CBOX_OLLAMA_MODE` from the machine `cbox.conf` directly; inside a container it is HOST-CHECK, since ownership is decided by the host owner project).
+
+Caveat: the per-scope networks isolate scopes at layer 3 only. All scopes still share one unauthenticated ollama instance with one model namespace, one GPU, and one disk - any project can delete or replace a model another project relies on, or exhaust GPU/disk for everyone. Network separation does not prevent this cross-scope influence.
 
 ## Global vs isolated mode
 
@@ -367,6 +397,7 @@ The engine-start regen path (`_run_isolated`'s call into `_gen_effective`, and `
 - `cbox login-codex` - equivalent for Codex device auth (egress mode only); bridges port 1455 to the container.
 - `cbox gc` - sweep orphaned isolated containers and old binary volumes (run regularly, especially during development).
 - `cbox net-refresh` - restart all cbox egress proxy sidecar containers (images `cbox-proxy:*` / `cbox-proxy-img:*`) so they pick up the host's current DNS after a network/wifi change; main containers are never restarted. Optional: install the NetworkManager dispatcher hook with `sudo install -m 0755 <installdir>/etc/host/90-cbox-net-refresh /etc/NetworkManager/dispatcher.d/` to auto-run the same refresh on connectivity changes.
+- `cbox ollama {status|up|down|pull <model>|reconcile}` - machine-scoped ollama owner project control (host-side only, applies `SEC_APPLY[ollama]=infra-reconcile`). Status shows the current state (OFF/CONFIG-ONLY/ACTIVE). Up/down start or stop the owner project. Pull stops the serving container, then downloads the model in a temporary ephemeral container on its own routable network (deliberately not internal, so the registry is reachable, and torn down right after the pull), then restarts the server. Reconcile creates, updates, or tears down the owner project to match the current `CBOX_OLLAMA_*` configuration and per-scope networks.
 - `cbox doctor` - report configuration status and active features inside the container.
 - `cbox down [--force]` - stop the container (isolated or global, mode-detected). Refuses if a session looks live; `--force` overrides (see Lifecycle: isolated mode).
 - `cbox shell` / `cbox logs [args]` - open a shell / stream logs in the current mode (isolated or global); in isolated mode these work per-project the same way `cbox run` does.

@@ -224,9 +224,13 @@ run_install_one_hermes() {
     _wipe_volume() { echo WIPED >> "$marker/actions"; }
     _adopt_check() { [ -f "$marker/adopts" ]; }
     _stamp_field() { sed -n "${2}p" "$1" 2>/dev/null; }
-    _run_hermes_install() { echo INSTALLED >> "$marker/actions"; }
-    _verify_tool() { printf "%s/opt-hermes/bin/hermes\nh\n0.19.0\n" "$marker"; }
-    _stamp_write() { printf "%s\n" "$2" > "$marker/stamp.written"; }
+    _run_hermes_install() {
+      echo INSTALLED >> "$marker/actions"
+      _HERMES_INSTALL_VERIFIED="$marker/opt-hermes/bin/hermes"
+      _HERMES_INSTALL_HASH="h"
+      _HERMES_INSTALL_VER="0.19.0"
+      printf "%s\n%s\n%s\n%s\n" "$(_want_string hermes)" "$_HERMES_INSTALL_VERIFIED" "$_HERMES_INSTALL_HASH" "$_HERMES_INSTALL_VER" > "$marker/stamp.written"
+    }
     _install_one hermes || echo "RC=$?" >> "$marker/actions"
   ' inst "$1" "$2"
 }
@@ -238,7 +242,7 @@ printf 'latest\n/p\nh\n0.19.0\n' > "$HM/opt-hermes/.cbox-stamp"
 run_install_one_hermes refresh "$HM" latest >/dev/null 2>&1
 grep -q WIPED "$HM/actions" && _fail "install-one hermes: refresh must not wipe the volume"
 grep -q INSTALLED "$HM/actions" || _fail "install-one hermes: refresh must run the installer"
-[ "$(cat "$HM/stamp.written")" = latest ] || _fail "install-one hermes: stamp must record the want tuple"
+[ "$(sed -n '1p' "$HM/stamp.written")" = latest ] || _fail "install-one hermes: stamp must record the want tuple"
 _ok "install-one hermes: refresh reinstalls in place without wipe"
 
 : > "$HM/actions"; : > "$HM/adopts"

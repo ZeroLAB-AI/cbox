@@ -28,7 +28,7 @@ assert spec['command'] == 'python3', spec
 assert spec['args'] == ['hermes_delegate_mcp.py'], spec
 cbox = spec['_cbox']
 assert cbox['adapter'] == 'stdio-mcp', cbox
-assert cbox['available_to'] == ['claude'], cbox
+assert cbox['available_to'] == ['claude', 'codex'], cbox
 assert cbox['backend'] == 'hermes', cbox
 assert cbox['enabled_when_env'] == 'CBOX_HERMES_DELEGATE', cbox
 assert 'spawns-hermes-subprocess' in cbox['side_effects'], cbox
@@ -78,6 +78,10 @@ CBOX_HERMES_DELEGATE_MODEL=qwen2.5:7b \
 CBOX_HERMES_PROVIDER=local \
 CBOX_HERMES_MODEL_URL=http://127.0.0.1:11434 \
 CBOX_HERMES_MODEL_NAME=qwen2.5:7b \
+CBOX_HERMES_DELEGATE_MAX_CONCURRENCY=2 \
+CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC=900 \
+CBOX_HERMES_DELEGATE_LOCK_DIR=/tmp/hermes-locks \
+OLLAMA_NUM_PARALLEL=4 \
   python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
   "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$RENDERED_PRESENT"
 python3 -c "
@@ -86,34 +90,115 @@ data = json.load(open('$RENDERED_PRESENT'))
 assert 'hermes-local' in data, data.keys()
 spec = data['hermes-local']
 assert spec['command'] == 'python3', spec
-assert spec['args'] == ['hermes_delegate_mcp.py'], spec
+assert spec['args'] == ['/home/x/.claude/hooks/hermes_delegate_mcp.py'], spec
 assert spec['env'] == {
     'HERMES_BIN': '/opt/hermes/bin/hermes',
     'CBOX_HERMES_DELEGATE_HOME_TEMPLATE': '/opt/hermes/delegate-home',
     'CBOX_HERMES_DELEGATE_PROVIDER': 'local',
     'CBOX_HERMES_DELEGATE_BASE_URL': 'http://127.0.0.1:11434',
     'CBOX_HERMES_DELEGATE_MODEL': 'qwen2.5:7b',
+    'CBOX_HERMES_DELEGATE_MODE': '',
+    'CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS': '',
     'CBOX_HERMES_PROVIDER': 'local',
     'CBOX_HERMES_MODEL_URL': 'http://127.0.0.1:11434',
     'CBOX_HERMES_MODEL_NAME': 'qwen2.5:7b',
+    'CBOX_HERMES_DELEGATE_MAX_CONCURRENCY': '2',
+    'CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC': '900',
+    'CBOX_HERMES_DELEGATE_LOCK_DIR': '/tmp/hermes-locks',
+    'OLLAMA_NUM_PARALLEL': '4',
+    'CBOX_DELEGATION_DEPTH': '',
+    'CBOX_MCP_DEPTH': '',
 }, spec
 assert 'CBOX_HERMES_PROVIDER' in spec['env'], 'console vars must reach the server, else the fallback is dead code'
+assert spec['startup_timeout_sec'] == 30, spec
+assert spec['tool_timeout_sec'] == 3600, spec
 "
 _ok "hermes-local renders with substituted env when CBOX_HERMES_DELEGATE and inputs are set"
+
+RENDERED_CONCURRENCY_EMPTY="$TMPBASE/concurrency_empty.json"
+CBOX_HERMES_DELEGATE=on \
+  env -u CBOX_HERMES_DELEGATE_MAX_CONCURRENCY -u CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC \
+      -u CBOX_HERMES_DELEGATE_LOCK_DIR -u OLLAMA_NUM_PARALLEL \
+  python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
+  "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$RENDERED_CONCURRENCY_EMPTY"
+python3 -c "
+import json
+data = json.load(open('$RENDERED_CONCURRENCY_EMPTY'))
+spec = data['hermes-local']
+assert spec['env']['CBOX_HERMES_DELEGATE_MAX_CONCURRENCY'] == '', spec
+assert spec['env']['CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC'] == '', spec
+assert spec['env']['CBOX_HERMES_DELEGATE_LOCK_DIR'] == '', spec
+assert spec['env']['OLLAMA_NUM_PARALLEL'] == '', spec
+"
+_ok "hermes-local concurrency knobs render as empty string (not the @VAR@ placeholder) when unset, so the server falls back to its own defaults"
+
+RENDERED_TOOLSETS="$TMPBASE/toolsets.json"
+CBOX_HERMES_DELEGATE=on \
+CBOX_HERMES_DELEGATE_MODE=qa \
+CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS=terminal,web \
+  python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
+  "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$RENDERED_TOOLSETS"
+python3 -c "
+import json
+data = json.load(open('$RENDERED_TOOLSETS'))
+spec = data['hermes-local']
+assert spec['env']['CBOX_HERMES_DELEGATE_MODE'] == 'qa', spec
+assert spec['env']['CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS'] == 'terminal,web', spec
+"
+_ok "hermes-local mode and disabled-toolsets are pinned into the rendered env (not left to ambient inheritance) when set"
+
+RENDERED_CODEX_ABSENT="$TMPBASE/codex_absent.json"
+env -u CBOX_HERMES_DELEGATE \
+  python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
+  "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off codex > "$RENDERED_CODEX_ABSENT"
+python3 -c "
+import json
+data = json.load(open('$RENDERED_CODEX_ABSENT'))
+assert 'hermes-local' not in data, data.keys()
+assert sorted(data.keys()) == ['ask-claude'], data.keys()
+"
+_ok "hermes-local is absent from codex target render when CBOX_HERMES_DELEGATE is unset"
 
 RENDERED_CODEX="$TMPBASE/codex.json"
 CBOX_HERMES_DELEGATE=on \
 CBOX_HERMES_DELEGATE_BIN=/opt/hermes/bin/hermes \
 CBOX_HERMES_DELEGATE_HOME_TEMPLATE=/opt/hermes/delegate-home \
+CBOX_HERMES_DELEGATE_PROVIDER=local \
+CBOX_HERMES_DELEGATE_BASE_URL=http://127.0.0.1:11434 \
+CBOX_HERMES_DELEGATE_MODEL=qwen2.5:7b \
   python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
   "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off codex > "$RENDERED_CODEX"
 python3 -c "
 import json
 data = json.load(open('$RENDERED_CODEX'))
-assert 'hermes-local' not in data, data.keys()
-assert sorted(data.keys()) == ['ask-claude'], data.keys()
+assert sorted(data.keys()) == ['ask-claude', 'hermes-local'], data.keys()
+spec = data['hermes-local']
+assert spec['command'] == 'python3', spec
+assert spec['args'] == ['/home/x/.claude/hooks/hermes_delegate_mcp.py'], spec
+assert spec['env']['HERMES_BIN'] == '/opt/hermes/bin/hermes', spec
+assert spec['env']['CBOX_DELEGATION_DEPTH'] == '', spec
+assert spec['env']['CBOX_MCP_DEPTH'] == '', spec
 "
-_ok "hermes-local is not available_to codex (claude only in v1)"
+_ok "hermes-local is available_to codex when CBOX_HERMES_DELEGATE=on (ask-claude still present)"
+
+RENDERED_CODEX_DEPTH="$TMPBASE/codex_depth.json"
+CBOX_HERMES_DELEGATE=on \
+CBOX_HERMES_DELEGATE_BIN=/opt/hermes/bin/hermes \
+CBOX_HERMES_DELEGATE_HOME_TEMPLATE=/opt/hermes/delegate-home \
+CBOX_HERMES_DELEGATE_PROVIDER=local \
+CBOX_HERMES_DELEGATE_BASE_URL=http://127.0.0.1:11434 \
+CBOX_HERMES_DELEGATE_MODEL=qwen2.5:7b \
+CBOX_DELEGATION_DEPTH_FOR_CODEX_CHILD=1 \
+  python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
+  "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off codex > "$RENDERED_CODEX_DEPTH"
+python3 -c "
+import json
+data = json.load(open('$RENDERED_CODEX_DEPTH'))
+spec = data['hermes-local']
+assert spec['env']['CBOX_DELEGATION_DEPTH'] == '1', spec
+assert spec['env']['CBOX_MCP_DEPTH'] == '1', spec
+"
+_ok "hermes-local rendered for the codex target pins CBOX_DELEGATION_DEPTH=1 when the generator sets CBOX_DELEGATION_DEPTH_FOR_CODEX_CHILD, without relying on codex to inherit the parent shim's env"
 
 RENDERED_GATE="$TMPBASE/gate.json"
 CBOX_HERMES_DELEGATE=on \

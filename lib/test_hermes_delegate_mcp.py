@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -44,8 +45,35 @@ if env_dump and not os.path.exists(env_dump):
     with open(env_dump, "w") as fh:
         fh.write("HOME=" + os.environ.get("HOME", "") + "\\n")
         fh.write("HERMES_HOME=" + os.environ.get("HERMES_HOME", "") + "\\n")
+        for _name in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+                      "http_proxy", "https_proxy", "no_proxy", "all_proxy"):
+            fh.write(_name + "=" + os.environ.get(_name, "") + "\\n")
+
+TOOLSET_STATE_FILE = os.path.join(os.path.dirname(CONTROL_FILE), "toolset_state.txt")
+
+if (len(sys.argv) >= 5 and sys.argv[1] == "config" and sys.argv[2] == "set"
+        and sys.argv[3] == "agent.disabled_toolsets"):
+    with open(TOOLSET_STATE_FILE, "w") as fh:
+        fh.write(sys.argv[4])
+    sys.exit(0)
 
 if len(sys.argv) >= 3 and sys.argv[1] == "config" and sys.argv[2] == "set":
+    sys.exit(0)
+
+if (len(sys.argv) >= 4 and sys.argv[1] == "config" and sys.argv[2] == "get"
+        and sys.argv[3] == "agent.disabled_toolsets"):
+    toolset_get_mode = control.get("toolset_get_mode", "ok")
+    if toolset_get_mode == "fail":
+        sys.stderr.write("config get: injected failure\\n")
+        sys.exit(1)
+    if toolset_get_mode == "mismatch":
+        sys.stdout.write("not-what-was-set\\n")
+        sys.exit(0)
+    stored = ""
+    if os.path.exists(TOOLSET_STATE_FILE):
+        with open(TOOLSET_STATE_FILE) as fh:
+            stored = fh.read()
+    sys.stdout.write(stored + "\\n")
     sys.exit(0)
 
 if len(sys.argv) >= 2 and sys.argv[1] == "-z":
@@ -129,8 +157,55 @@ class HermesDelegateUnitTests(unittest.TestCase):
         result = MOD.run_hermes_delegate({"prompt": "hello there"})
         after = self._tmp_root_dirs()
         self.assertFalse(result["isError"], result)
-        self.assertEqual(result["content"][0]["text"], "stub-canned-answer")
+        self.assertIn("stub-canned-answer", result["content"][0]["text"])
+        self.assertIn(
+            "untrusted local-model output", result["content"][0]["text"])
         self.assertEqual(before, after)
+
+    def test_audit_record_carries_caller_name(self):
+        audit_path = os.path.join(self.tmpdir, "audit.jsonl")
+        os.environ["CBOX_HERMES_DELEGATE_AUDIT"] = audit_path
+        try:
+            MOD.set_caller_name("codex")
+            result = MOD.run_hermes_delegate({"prompt": "hi"})
+            self.assertFalse(result["isError"], result)
+            with open(audit_path) as fh:
+                rec = json.loads(fh.readline())
+            self.assertEqual(rec["caller"], "codex")
+        finally:
+            MOD.set_caller_name(None)
+            MOD._CALLER_NAME = ""
+            os.environ.pop("CBOX_HERMES_DELEGATE_AUDIT", None)
+
+    def test_audit_record_defaults_to_unknown_caller(self):
+        audit_path = os.path.join(self.tmpdir, "audit_unknown.jsonl")
+        os.environ["CBOX_HERMES_DELEGATE_AUDIT"] = audit_path
+        try:
+            MOD._CALLER_NAME = ""
+            result = MOD.run_hermes_delegate({"prompt": "hi"})
+            self.assertFalse(result["isError"], result)
+            with open(audit_path) as fh:
+                rec = json.loads(fh.readline())
+            self.assertEqual(rec["caller"], "unknown")
+        finally:
+            os.environ.pop("CBOX_HERMES_DELEGATE_AUDIT", None)
+
+    def test_audit_write_failure_warns_on_stderr(self):
+        audit_dir = os.path.join(self.tmpdir, "audit_as_dir.jsonl")
+        os.makedirs(audit_dir)
+        os.environ["CBOX_HERMES_DELEGATE_AUDIT"] = audit_dir
+        stderr_capture = io.StringIO()
+        try:
+            old_stderr = sys.stderr
+            sys.stderr = stderr_capture
+            try:
+                result = MOD.run_hermes_delegate({"prompt": "hi"})
+            finally:
+                sys.stderr = old_stderr
+            self.assertFalse(result["isError"], result)
+            self.assertIn("audit write failed", stderr_capture.getvalue())
+        finally:
+            os.environ.pop("CBOX_HERMES_DELEGATE_AUDIT", None)
 
     def test_ephemeral_home_used_not_console_home(self):
         env_dump = os.path.join(self.tmpdir, "env_dump.txt")
@@ -243,6 +318,134 @@ class HermesDelegateUnitTests(unittest.TestCase):
         result = MOD.run_hermes_delegate({"prompt": "hi"})
         self.assertTrue(result["isError"])
         self.assertIn("invalid", result["content"][0]["text"])
+
+    def test_disabled_toolsets_applied_in_qa_mode_by_default(self):
+        marker = os.path.join(self.tmpdir, "marker_toolsets.txt")
+        write_control(self.control_file, marker=marker)
+        os.environ.pop("CBOX_HERMES_DELEGATE_MODE", None)
+        os.environ.pop("CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS", None)
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertFalse(result["isError"], result)
+        with open(marker) as fh:
+            calls = fh.read()
+        self.assertIn(
+            "config set agent.disabled_toolsets " + MOD.DEFAULT_DISABLED_TOOLSETS,
+            calls)
+
+    def test_disabled_toolsets_applied_with_custom_value(self):
+        marker = os.path.join(self.tmpdir, "marker_toolsets2.txt")
+        write_control(self.control_file, marker=marker)
+        os.environ["CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS"] = "terminal,web"
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertFalse(result["isError"], result)
+        with open(marker) as fh:
+            calls = fh.read()
+        self.assertIn("config set agent.disabled_toolsets terminal,web", calls)
+
+    def test_disabled_toolsets_falls_back_to_default_when_var_empty(self):
+        marker = os.path.join(self.tmpdir, "marker_toolsets3.txt")
+        write_control(self.control_file, marker=marker)
+        os.environ["CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS"] = ""
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertFalse(result["isError"], result)
+        with open(marker) as fh:
+            calls = fh.read()
+        self.assertIn(
+            "config set agent.disabled_toolsets " + MOD.DEFAULT_DISABLED_TOOLSETS,
+            calls)
+
+    def test_disabled_toolsets_readback_confirms_the_pin(self):
+        marker = os.path.join(self.tmpdir, "marker_toolsets4.txt")
+        write_control(self.control_file, marker=marker)
+        os.environ["CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS"] = "terminal,web"
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertFalse(result["isError"], result)
+        with open(marker) as fh:
+            calls = fh.read()
+        self.assertIn(
+            "config get agent.disabled_toolsets", calls)
+
+    def test_disabled_toolsets_readback_mismatch_refuses_the_call(self):
+        marker = os.path.join(self.tmpdir, "marker_toolsets5.txt")
+        write_control(
+            self.control_file, marker=marker, toolset_get_mode="mismatch")
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertTrue(result["isError"], result)
+        self.assertIn(
+            "did not take effect", result["content"][0]["text"])
+
+    def test_disabled_toolsets_readback_failure_refuses_the_call(self):
+        marker = os.path.join(self.tmpdir, "marker_toolsets6.txt")
+        write_control(
+            self.control_file, marker=marker, toolset_get_mode="fail")
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertTrue(result["isError"], result)
+        self.assertIn(
+            "confirming the toolset pin", result["content"][0]["text"])
+
+    def test_proxy_env_passed_through_to_child(self):
+        env_dump = os.path.join(self.tmpdir, "proxy_env_dump.txt")
+        write_control(self.control_file, env_dump=env_dump)
+        os.environ["HTTPS_PROXY"] = "http://proxy.internal:3128"
+        os.environ["no_proxy"] = "localhost,127.0.0.1"
+        os.environ["ALL_PROXY"] = "socks5h://proxy.internal:1080"
+        try:
+            result = MOD.run_hermes_delegate({"prompt": "hi"})
+            self.assertFalse(result["isError"], result)
+        finally:
+            os.environ.pop("HTTPS_PROXY", None)
+            os.environ.pop("no_proxy", None)
+            os.environ.pop("ALL_PROXY", None)
+        with open(env_dump) as fh:
+            dumped = fh.read()
+        self.assertIn("HTTPS_PROXY=http://proxy.internal:3128", dumped)
+        self.assertIn("no_proxy=localhost,127.0.0.1", dumped)
+        self.assertIn("HTTP_PROXY=\n", dumped)
+        self.assertIn(
+            "ALL_PROXY=\n", dumped,
+            "ALL_PROXY must never reach the hermes child even when set in "
+            "the parent (netaccess SOCKS bridge must not follow)")
+
+    def test_proxy_env_helper_picks_up_set_vars_only(self):
+        for name in MOD.PROXY_PASSTHROUGH_VARS:
+            os.environ.pop(name, None)
+        self.assertEqual(MOD._proxy_env(), {})
+        os.environ["HTTP_PROXY"] = "http://proxy.internal:8080"
+        try:
+            result = MOD._proxy_env()
+            self.assertEqual(
+                result, {"HTTP_PROXY": "http://proxy.internal:8080"})
+        finally:
+            os.environ.pop("HTTP_PROXY", None)
+
+    def test_proxy_env_helper_never_forwards_all_proxy(self):
+        self.assertNotIn("ALL_PROXY", MOD.PROXY_PASSTHROUGH_VARS)
+        self.assertNotIn("all_proxy", MOD.PROXY_PASSTHROUGH_VARS)
+        os.environ["ALL_PROXY"] = "socks5h://proxy.internal:1080"
+        try:
+            result = MOD._proxy_env()
+            self.assertNotIn("ALL_PROXY", result)
+        finally:
+            os.environ.pop("ALL_PROXY", None)
+
+
+class DelegateModeTests(unittest.TestCase):
+    def test_default_mode_is_qa(self):
+        os.environ.pop("CBOX_HERMES_DELEGATE_MODE", None)
+        self.assertEqual(MOD.delegate_mode(), "qa")
+
+    def test_qa_mode_validates(self):
+        self.assertIsNone(MOD.validate_mode("qa"))
+
+    def test_unknown_mode_refused_with_supported_value_named(self):
+        err = MOD.validate_mode("workspace")
+        self.assertIsNotNone(err)
+        self.assertIn("workspace", err)
+        self.assertIn("qa", err)
+        self.assertIn("CBOX_HERMES_DELEGATE_MODE", err)
+
+    def test_workspace_mode_not_yet_valid(self):
+        self.assertNotIn("workspace", MOD.VALID_MODES)
 
 
 class StripAnsiTests(unittest.TestCase):
@@ -366,9 +569,9 @@ class HermesDelegateStdioTests(unittest.TestCase):
         tool_names = [t["name"] for t in replies[1]["result"]["tools"]]
         self.assertEqual(tool_names, ["hermes-delegate"])
         self.assertFalse(replies[2]["result"]["isError"])
-        self.assertEqual(
-            replies[2]["result"]["content"][0]["text"],
-            "stub-canned-answer")
+        self.assertIn(
+            "stub-canned-answer",
+            replies[2]["result"]["content"][0]["text"])
 
     def test_depth_stub_over_stdio_empty_tools_and_refusal(self):
         env = dict(self.env)
@@ -383,6 +586,26 @@ class HermesDelegateStdioTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
         self.assertEqual(replies[0]["result"]["tools"], [])
         self.assertTrue(replies[1]["result"]["isError"])
+
+    def test_unknown_mode_exits_nonzero(self):
+        env = dict(self.env)
+        env["CBOX_HERMES_DELEGATE_MODE"] = "workspace"
+        proc, replies = self._run([], env=env)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("CBOX_HERMES_DELEGATE_MODE", proc.stderr.decode())
+        self.assertIn("qa", proc.stderr.decode())
+
+    def test_default_mode_is_qa_and_starts_cleanly(self):
+        env = dict(self.env)
+        env.pop("CBOX_HERMES_DELEGATE_MODE", None)
+        messages = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "hermes-delegate",
+                        "arguments": {"prompt": "hello"}}},
+        ]
+        proc, replies = self._run(messages, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+        self.assertFalse(replies[0]["result"]["isError"])
 
     def test_missing_hermes_bin_exits_nonzero(self):
         env = dict(self.env)
@@ -537,6 +760,136 @@ class HermesDelegateTemplateContentTests(unittest.TestCase):
                              "into a regular file during seeding")
         finally:
             shutil.rmtree(ephemeral_home, ignore_errors=True)
+
+
+SLOW_STUB = '''#!/usr/bin/env python3
+import sys
+import time
+REC = %(rec)r
+STATE = REC + ".toolsets"
+if (len(sys.argv) >= 5 and sys.argv[1] == "config" and sys.argv[2] == "set"
+        and sys.argv[3] == "agent.disabled_toolsets"):
+    with open(STATE, "w") as fh:
+        fh.write(sys.argv[4])
+    sys.exit(0)
+if (len(sys.argv) >= 4 and sys.argv[1] == "config" and sys.argv[2] == "get"
+        and sys.argv[3] == "agent.disabled_toolsets"):
+    stored = ""
+    try:
+        with open(STATE) as fh:
+            stored = fh.read()
+    except OSError:
+        pass
+    sys.stdout.write(stored + "\\n")
+    sys.exit(0)
+if len(sys.argv) > 1 and sys.argv[1] == "-z":
+    with open(REC, "a") as fh:
+        fh.write("start %%f\\n" %% time.monotonic())
+    time.sleep(0.8)
+    with open(REC, "a") as fh:
+        fh.write("end %%f\\n" %% time.monotonic())
+    sys.stdout.write("slow-stub-done\\n")
+'''
+
+
+class ConcurrencySlotTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.lockdir = os.path.join(self.tmpdir, "locks")
+        self.env_backup = dict(os.environ)
+        os.environ["CBOX_HERMES_DELEGATE_LOCK_DIR"] = self.lockdir
+        os.environ.pop("CBOX_HERMES_DELEGATE_MAX_CONCURRENCY", None)
+        os.environ.pop("OLLAMA_NUM_PARALLEL", None)
+        os.environ.pop("CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC", None)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.env_backup)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_limit_default_and_sources(self):
+        self.assertEqual(MOD.concurrency_limit(), 1)
+        os.environ["OLLAMA_NUM_PARALLEL"] = "3"
+        self.assertEqual(MOD.concurrency_limit(), 3)
+        os.environ["CBOX_HERMES_DELEGATE_MAX_CONCURRENCY"] = "2"
+        self.assertEqual(MOD.concurrency_limit(), 2)
+        os.environ["CBOX_HERMES_DELEGATE_MAX_CONCURRENCY"] = "garbage"
+        self.assertEqual(MOD.concurrency_limit(), 3)
+        os.environ["OLLAMA_NUM_PARALLEL"] = "99"
+        self.assertEqual(MOD.concurrency_limit(), 16)
+
+    def test_single_slot_blocks_then_releases(self):
+        os.environ["CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC"] = "1"
+        fd, err = MOD.acquire_slot()
+        self.assertIsNone(err)
+        t0 = time.monotonic()
+        fd2, err2 = MOD.acquire_slot()
+        self.assertIsNone(fd2)
+        self.assertIn("queue wait exceeded", err2)
+        self.assertGreaterEqual(time.monotonic() - t0, 1.0)
+        MOD.release_slot(fd)
+        fd3, err3 = MOD.acquire_slot()
+        self.assertIsNone(err3)
+        MOD.release_slot(fd3)
+
+    def test_two_slots_allow_two_holders(self):
+        os.environ["CBOX_HERMES_DELEGATE_MAX_CONCURRENCY"] = "2"
+        os.environ["CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC"] = "1"
+        fd1, err1 = MOD.acquire_slot()
+        fd2, err2 = MOD.acquire_slot()
+        self.assertIsNone(err1)
+        self.assertIsNone(err2)
+        fd3, err3 = MOD.acquire_slot()
+        self.assertIsNone(fd3)
+        self.assertIn("queue wait exceeded", err3)
+        MOD.release_slot(fd1)
+        MOD.release_slot(fd2)
+
+    def test_cross_process_serialization(self):
+        rec = os.path.join(self.tmpdir, "rec.txt")
+        stub_path = os.path.join(self.tmpdir, "slow-stub.py")
+        with open(stub_path, "w") as fh:
+            fh.write(SLOW_STUB % {"rec": rec})
+        os.chmod(stub_path, os.stat(stub_path).st_mode | stat.S_IEXEC)
+        template = make_template_home(self.tmpdir)
+        env = dict(os.environ)
+        env["HERMES_BIN"] = stub_path
+        env["CBOX_HERMES_DELEGATE_HOME_TEMPLATE"] = template
+        env["CBOX_HERMES_DELEGATE_PROVIDER"] = "local"
+        env["CBOX_HERMES_DELEGATE_BASE_URL"] = "http://127.0.0.1:11434"
+        for k in ("CBOX_HERMES_DELEGATE_MODEL", "CBOX_HERMES_PROVIDER",
+                  "CBOX_HERMES_MODEL_URL", "CBOX_HERMES_MODEL_NAME",
+                  "CBOX_DELEGATION_DEPTH", "CBOX_MCP_DEPTH"):
+            env.pop(k, None)
+        msgs = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "hermes-delegate",
+                        "arguments": {"prompt": "x"}}},
+        ]
+        payload = "".join(json.dumps(m) + "\n" for m in msgs).encode()
+        script = str(ROOT / "etc" / "mcp" / "hermes_delegate_mcp.py")
+        procs = [subprocess.Popen([sys.executable, script],
+                                  stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, env=env)
+                 for _ in range(2)]
+        for p in procs:
+            p.stdin.write(payload)
+            p.stdin.close()
+        for p in procs:
+            p.wait(timeout=30)
+        spans = []
+        cur = None
+        with open(rec) as fh:
+            for ln in fh:
+                kind, val = ln.split()
+                if kind == "start":
+                    cur = float(val)
+                else:
+                    spans.append((cur, float(val)))
+        self.assertEqual(len(spans), 2)
+        spans.sort()
+        self.assertGreaterEqual(spans[1][0], spans[0][1] - 0.05)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,8 @@ class FakeDocker:
             "project_a": self.network("bridge", "10.10.0.0/24"),
             "project_b": self.network("bridge", "10.11.0.0/24"),
             "host": self.network("host", "192.168.0.0/24"),
+            "cbox-ollama-u1000-global": self.ollama_network("10.55.0.0/24"),
+            "cbox-ollama-u1000-p1": self.ollama_network("10.56.0.0/24"),
         }
         self.connected = []
         self.disconnected = []
@@ -38,6 +40,10 @@ class FakeDocker:
                 "com.docker.compose.network": kind,
             }
         return {"Driver": driver, "Labels": labels, "IPAM": {"Config": [{"Subnet": subnet}]}}
+
+    def ollama_network(self, subnet):
+        labels = {"cbox.kind": "infra", "cbox.component": "ollama-net"}
+        return {"Driver": "bridge", "Labels": labels, "IPAM": {"Config": [{"Subnet": subnet}]}}
 
     def container(self):
         return {
@@ -117,6 +123,21 @@ class NetaccessTests(unittest.TestCase):
         self.assertIn("cbox-p1_internal", reasons)
         self.assertIn("cbox-p1_egress", reasons)
         self.assertIn("host", reasons)
+
+    def test_all_rejects_per_scope_ollama_networks(self):
+        result = MOD.apply(self.args([], scope="all"))
+        self.assertNotIn("cbox-ollama-u1000-global", result["appliedNetworks"])
+        self.assertNotIn("cbox-ollama-u1000-p1", result["appliedNetworks"])
+        reasons = {item["network"]: item["reason"] for item in result["skipped"]}
+        self.assertIn("cbox-ollama-u1000-global", reasons)
+        self.assertIn("cbox-ollama-u1000-p1", reasons)
+        for name in ("cbox-ollama-u1000-global", "cbox-ollama-u1000-p1"):
+            self.assertIn("cbox infrastructure", reasons[name])
+        self.assertEqual(self.fake.connected, ["project_a", "project_b"])
+
+    def test_explicit_ollama_network_fails_closed(self):
+        with self.assertRaises(PermissionError):
+            MOD.apply(self.args(["cbox-ollama-u1000-global"]))
 
     def test_explicit_unsupported_network_fails_closed(self):
         with self.assertRaises(PermissionError):
