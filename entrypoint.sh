@@ -119,6 +119,25 @@ _socks_proxy_port() {
   printf '%s' "$p"
 }
 
+_socks_proxy_host() {
+  local h="${CBOX_SOCKS_PROXY:-}"
+  h="${h#*://}"
+  h="${h%%/*}"
+  h="${h%:*}"
+  [ -n "$h" ] || return 1
+  printf '%s' "$h"
+}
+
+_socks_state_write() {
+  local dir
+  for dir in /run/cbox /tmp/cbox; do
+    if mkdir -p "$dir" 2>/dev/null && [ -w "$dir" ]; then
+      printf '%s\n' "$1" > "$dir/netaccess.state" 2>/dev/null && return 0
+    fi
+  done
+  return 0
+}
+
 _socks_alive() {
   local host="$1" port="$2" i=0
   while [ "$i" -lt 3 ]; do
@@ -134,15 +153,17 @@ _socks_alive() {
 
 _guard_socks_proxy() {
   [ -n "${CBOX_SOCKS_PROXY:-}${ALL_PROXY:-}${all_proxy:-}" ] || return 0
-  local port
-  if port="$(_socks_proxy_port)" && _socks_alive proxy "$port"; then
+  local host port
+  if host="$(_socks_proxy_host)" && port="$(_socks_proxy_port)" && _socks_alive "$host" "$port"; then
+    _socks_state_write "ok $host:$port"
     return 0
   fi
-  if [ -z "${port:-}" ]; then
-    echo "entrypoint: CBOX_SOCKS_PROXY is malformed or unset while ALL_PROXY is set - dropping ALL_PROXY so the agent uses direct egress" >&2
+  if [ -z "${host:-}" ] || [ -z "${port:-}" ]; then
+    echo "entrypoint: CBOX_SOCKS_PROXY is malformed or unset while a proxy variable is set - dropping the proxy variables so the agent uses direct egress" >&2
   else
-    echo "entrypoint: SOCKS proxy (proxy:$port) is unreachable - dropping ALL_PROXY so the agent uses direct egress instead of failing on a dead proxy" >&2
+    echo "entrypoint: SOCKS proxy ($host:$port) is unreachable - dropping the proxy variables so the agent uses direct egress instead of failing on a dead proxy" >&2
   fi
+  _socks_state_write "broken ${host:-unset}:${port:-unset}"
   unset CBOX_SOCKS_PROXY ALL_PROXY all_proxy
 }
 

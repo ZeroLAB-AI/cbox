@@ -19,13 +19,27 @@ HARNESS="$TMPBASE/socks_harness.sh"
   echo '#!/usr/bin/env bash'
   echo 'set -uo pipefail'
   awk '/^_socks_proxy_port\(\) \{/,/^}$/' "$INSTALL_DIR/entrypoint.sh"
+  awk '/^_socks_proxy_host\(\) \{/,/^}$/' "$INSTALL_DIR/entrypoint.sh"
+  awk '/^_socks_state_write\(\) \{/,/^}$/' "$INSTALL_DIR/entrypoint.sh"
   awk '/^_socks_alive\(\) \{/,/^}$/' "$INSTALL_DIR/entrypoint.sh"
   awk '/^_guard_socks_proxy\(\) \{/,/^}$/' "$INSTALL_DIR/entrypoint.sh"
 } > "$HARNESS"
 
 grep -q '_socks_proxy_port' "$HARNESS" || _fail "could not extract _socks_proxy_port from entrypoint.sh"
+grep -q '_socks_proxy_host' "$HARNESS" || _fail "could not extract _socks_proxy_host from entrypoint.sh"
+grep -q '_socks_state_write' "$HARNESS" || _fail "could not extract _socks_state_write from entrypoint.sh"
 grep -q '_socks_alive' "$HARNESS" || _fail "could not extract _socks_alive from entrypoint.sh"
 grep -q '_guard_socks_proxy' "$HARNESS" || _fail "could not extract _guard_socks_proxy from entrypoint.sh"
+
+host_of() {
+  bash -c '. "$1"; CBOX_SOCKS_PROXY="$2"; _socks_proxy_host' _ "$HARNESS" "$1"
+}
+
+[ "$(host_of socks5h://cbox-proxy-internal:1080)" = cbox-proxy-internal ] || _fail "host parse alias"
+[ "$(host_of socks5h://proxy:1081)" = proxy ] || _fail "host parse plain"
+[ "$(host_of socks5h://172.24.0.2:1080)" = 172.24.0.2 ] || _fail "host parse ip"
+host_of "" >/dev/null 2>&1 && _fail "empty endpoint must be rejected by host parse" || true
+_ok "socks proxy host parse extracts the endpoint host (alias, name, ip), rejects empty"
 
 port_of() {
   bash -c '. "$1"; CBOX_SOCKS_PROXY="$2"; _socks_proxy_port' _ "$HARNESS" "$1"
@@ -38,37 +52,46 @@ port_of socks5h://proxy:99999 >/dev/null 2>&1 && _fail "out-of-range port must b
 port_of socks5h://proxy: >/dev/null 2>&1 && _fail "empty port must be rejected" || true
 _ok "socks proxy port parse accepts valid, rejects garbage/oor/empty"
 
+STATE_OUT="$TMPBASE/netaccess.state"
+
 guard() {
   bash -c '
     . "$1"
     _alive_port="$3"
+    _state_out="$4"
     CBOX_SOCKS_PROXY="$2"; ALL_PROXY="$2"; all_proxy="$2"
     _socks_alive() { [ "$2" = "$_alive_port" ]; }
+    _socks_state_write() { printf "%s\n" "$1" > "$_state_out"; }
     _guard_socks_proxy 2>/dev/null
     printf "%s|%s|%s" "${CBOX_SOCKS_PROXY:-}" "${ALL_PROXY:-}" "${all_proxy:-}"
-  ' _ "$HARNESS" "$1" "$2"
+  ' _ "$HARNESS" "$1" "$2" "$STATE_OUT"
 }
 
-out="$(guard socks5h://proxy:1088 1088)"
-[ "$out" = "socks5h://proxy:1088|socks5h://proxy:1088|socks5h://proxy:1088" ] \
+out="$(guard socks5h://cbox-proxy-internal:1088 1088)"
+[ "$out" = "socks5h://cbox-proxy-internal:1088|socks5h://cbox-proxy-internal:1088|socks5h://cbox-proxy-internal:1088" ] \
   || _fail "live proxy must keep all three vars, got '$out'"
-_ok "live SOCKS proxy keeps ALL_PROXY/all_proxy/CBOX_SOCKS_PROXY"
+grep -qx 'ok cbox-proxy-internal:1088' "$STATE_OUT" || _fail "live proxy must record 'ok host:port' state, got '$(cat "$STATE_OUT")'"
+_ok "live SOCKS proxy keeps the vars and records ok state (probing the endpoint host, not a hardcoded name)"
 
-out="$(guard socks5h://proxy:1080 9999)"
+out="$(guard socks5h://cbox-proxy-internal:1080 9999)"
 [ "$out" = "||" ] || _fail "dead proxy must unset all three vars, got '$out'"
-_ok "dead SOCKS proxy drops the proxy vars (falls back to direct egress)"
+grep -qx 'broken cbox-proxy-internal:1080' "$STATE_OUT" || _fail "dead proxy must record 'broken host:port' state for doctor, got '$(cat "$STATE_OUT")'"
+_ok "dead SOCKS proxy drops the proxy vars and records broken state (falls back to direct egress)"
 
 out="$(guard socks5h://proxy:garbage 9999)"
 [ "$out" = "||" ] || _fail "malformed CBOX_SOCKS_PROXY must unset all three vars, got '$out'"
+grep -q '^broken ' "$STATE_OUT" || _fail "malformed endpoint must record broken state"
 _ok "malformed CBOX_SOCKS_PROXY drops the proxy vars"
 
 out="$(bash -c '
   . "$1"
+  _state_out="$2"
   _socks_alive() { return 0; }
+  _socks_state_write() { printf "%s\n" "$1" > "$_state_out"; }
   unset CBOX_SOCKS_PROXY; ALL_PROXY="socks5h://proxy:1080"; all_proxy="$ALL_PROXY"
   _guard_socks_proxy 2>/dev/null
   printf "%s|%s|%s" "${CBOX_SOCKS_PROXY:-}" "${ALL_PROXY:-}" "${all_proxy:-}"
-' _ "$HARNESS")"
+' _ "$HARNESS" "$STATE_OUT")"
 [ "$out" = "||" ] || _fail "ALL_PROXY set without CBOX_SOCKS_PROXY must unset all, got '$out'"
 _ok "ALL_PROXY set but CBOX_SOCKS_PROXY unset falls back to direct egress"
 

@@ -1,4 +1,4 @@
-SECTIONS=(mode mounts workspaces python gpu egress netaccess hostroute ssh bashrc mcp-servers codex-progress local-model hermes hermes-delegate ollama wireguard autoresume agents codex-mcp continuity claude-md settings hooks git-identity apt-extra binaries restart-policy)
+SECTIONS=(mode mounts workspaces python gpu egress netaccess hostroute ssh bashrc mcp-servers codex-progress local-model hermes hermes-delegate ollama wireguard autoresume agents codex-mcp continuity claude-md settings hooks git-identity apt-extra binaries restart-policy autoupdate dns clipboard)
 
 declare -g -A SEC_TITLE SEC_DESC SEC_VARS SEC_APPLY SEC_PROFILE SEC_SCOPE SEC_DEPS SEC_DEP_TEXT SEC_DOCTOR_ROWS
 
@@ -30,6 +30,9 @@ SEC_TITLE[git-identity]='Git identity'
 SEC_TITLE[apt-extra]='APT packages'
 SEC_TITLE[binaries]='Binaries'
 SEC_TITLE[restart-policy]='Restart policy'
+SEC_TITLE[autoupdate]='Engine autoupdate'
+SEC_TITLE[dns]='DNS'
+SEC_TITLE[clipboard]='Clipboard image bridge'
 
 SEC_DESC[mode]='Container mode: one shared global container, or one container per project.'
 SEC_DESC[mounts]='How ~/.claude and ~/.codex reach the container: bind mount a host dir, or use a volume.'
@@ -59,6 +62,9 @@ SEC_DESC[git-identity]='Mount the host ~/.gitconfig read-only into the container
 SEC_DESC[apt-extra]='Extra apt packages installed into the image at build time.'
 SEC_DESC[binaries]='Claude/codex version pins and the shared binary volumes; installs run host-side, runtime mounts are read-only.'
 SEC_DESC[restart-policy]='Docker restart policy applied to the container.'
+SEC_DESC[autoupdate]='Host-side engine autoupdate for channel targets (claude stable/latest, codex latest, hermes latest): re-runs the vendor installer once the TTL elapses.'
+SEC_DESC[dns]='DNS resolution inside the container when egress is enabled: Docker embedded DNS, public resolvers, or a host-stable stub resolver IP.'
+SEC_DESC[clipboard]='Host clipboard image bridge over a unix socket answering Claude Code'\''s Ctrl+V image paste inside the container.'
 
 SEC_VARS[mode]='CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL'
 SEC_VARS[mounts]='CBOX_CLAUDE_MODE CBOX_CLAUDE_PATH CBOX_CLAUDE_BACKUP CBOX_CODEX_MODE CBOX_CODEX_PATH CBOX_CODEX_BACKUP'
@@ -88,6 +94,9 @@ SEC_VARS[git-identity]='CBOX_GITCONFIG'
 SEC_VARS[apt-extra]='CBOX_APT_EXTRA'
 SEC_VARS[binaries]='CBOX_CLAUDE_TARGET CBOX_CODEX_VERSION CBOX_CODEX_TARGET CBOX_BINS_SCOPE'
 SEC_VARS[restart-policy]='CBOX_RESTART_POLICY'
+SEC_VARS[autoupdate]='CBOX_AUTOUPDATE CBOX_AUTOUPDATE_TTL_HOURS'
+SEC_VARS[dns]='CBOX_DNS_MODE CBOX_DNS_SERVERS CBOX_DNS_STUB_IP'
+SEC_VARS[clipboard]='CBOX_CLIPBOARD_MODE'
 
 SEC_APPLY[mode]='none'
 SEC_APPLY[mounts]='recreate'
@@ -117,6 +126,9 @@ SEC_APPLY[git-identity]='recreate'
 SEC_APPLY[apt-extra]='rebuild'
 SEC_APPLY[binaries]='rebuild'
 SEC_APPLY[restart-policy]='recreate'
+SEC_APPLY[autoupdate]='none'
+SEC_APPLY[dns]='recreate'
+SEC_APPLY[clipboard]='recreate'
 
 SEC_PROFILE[mode]='ask'
 SEC_PROFILE[mounts]='ask'
@@ -146,6 +158,9 @@ SEC_PROFILE[git-identity]='auto'
 SEC_PROFILE[apt-extra]='skip'
 SEC_PROFILE[binaries]='skip'
 SEC_PROFILE[restart-policy]='auto'
+SEC_PROFILE[autoupdate]='skip'
+SEC_PROFILE[dns]='skip'
+SEC_PROFILE[clipboard]='skip'
 
 for _cbox_sec_scope_s in "${SECTIONS[@]}"; do
   SEC_SCOPE[$_cbox_sec_scope_s]='project'
@@ -184,4 +199,7 @@ SEC_DOCTOR_ROWS[hooks]='sessionstart-hooks'
 SEC_DOCTOR_ROWS[apt-extra]=''
 SEC_DOCTOR_ROWS[binaries]=''
 SEC_DOCTOR_ROWS[restart-policy]=''
+SEC_DOCTOR_ROWS[autoupdate]=''
+SEC_DOCTOR_ROWS[dns]=''
+SEC_DOCTOR_ROWS[clipboard]=''
 DOCTOR_EXTRA_ROWS='codex-profile context-manifest local-model local-model-egress managed-dirs config-pending sessions'

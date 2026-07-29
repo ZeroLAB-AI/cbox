@@ -1,4 +1,13 @@
 _cbox_reg_validate_var() {
+  local _cbox_val_had_f=0 _cbox_val_rc=0
+  case $- in *f*) _cbox_val_had_f=1 ;; esac
+  set -f
+  _cbox_reg_validate_var_dispatch "$@" || _cbox_val_rc=$?
+  [ "$_cbox_val_had_f" = 1 ] || set +f
+  return "$_cbox_val_rc"
+}
+
+_cbox_reg_validate_var_dispatch() {
   local key="$1" val="$2"
   _cbox_val_no_ctrl "$val" || { printf 'contains a control character'; return 1; }
   case "$key" in

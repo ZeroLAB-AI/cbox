@@ -92,7 +92,7 @@ A target is classified by shape: anything with a `/` is a CIDR, otherwise it is 
 
 `cbox doctor` on the host shows what the scope currently resolves to: the Docker networks present (with attached containers), which of them the proxy will join, configured-but-missing networks under scope `list`, and the closest matching host route for each raw CIDR.
 
-Inside cbox, `CBOX_SOCKS_PROXY` is the authoritative endpoint (`socks5h://proxy:<port>`). `ALL_PROXY`/`all_proxy` are also set as a convenience, but tools can prefer `HTTP_PROXY`/`HTTPS_PROXY`; use `CBOX_SOCKS_PROXY` explicitly when testing target-network TCP.
+Inside cbox, `CBOX_SOCKS_PROXY` is the authoritative and only proxy variable (`socks5h://cbox-proxy-internal:<port>` - a network-scoped alias that exists solely on the internal network, so the name always resolves to the address sockd actually binds). `ALL_PROXY`/`all_proxy` are deliberately not exported: the SOCKS proxy passes only the allowed target subnets and denies everything else, so a blanket proxy variable would capture general egress (curl, git, pip) and break it. Use `CBOX_SOCKS_PROXY` explicitly for target-network TCP, e.g. `curl -x "$CBOX_SOCKS_PROXY" http://target-container/`. The entrypoint probes the endpoint at session start; if it is unreachable it drops the variable, records the failure for `cbox doctor` (netaccess row turns MISSING with the probed endpoint), and the session falls back to direct egress. A session started before the grant was applied never sees the proxy - recover with `cbox down && cbox run`.
 
 Optional direct test execution (`CBOX_NETACCESS_EXEC_MODE=scoped`) is available only with `scope=list` and at least one explicit Docker network. A session-bound host helper exposes a private Unix socket and the read-only `cbox-container` client inside cbox; `docker.sock` is never mounted into cbox. Each invocation gets a unique read-only socket mount, while its audit file stays outside that mount. The helper re-inspects the configured networks and target container for every request, and denies stopped, privileged, host-namespace, dangerous-capability, device-bearing, unconfined, host-control-mount, and cbox infrastructure containers. Network membership is the default scope boundary. `CBOX_NETACCESS_EXEC_WORKSPACE_GUARD=on` additionally denies target containers whose host bind mounts leave the current isolated project; in global mode it permits the configured `CBOX_WORKSPACES` set. It is off by default.
 
@@ -214,6 +214,10 @@ Engine autoupdate (`CBOX_AUTOUPDATE`, default `on`; `CBOX_AUTOUPDATE_TTL_HOURS`,
 Engine-own opt-outs are respected: `"autoUpdates": false` in host `~/.claude/settings.json` skips claude; `check_for_update_on_startup = false` in host `~/.codex/config.toml` skips codex. In-container self-update stays disabled by design (read-only bins mounts, `DISABLE_AUTOUPDATER=1`).
 
 A running session keeps its already-loaded binary; the next session uses the updated one.
+
+### clipboard
+
+Clipboard image bridge (`CBOX_CLIPBOARD_MODE`, default `off`, or `bridge`). In `bridge` mode a per-session host helper serves the host clipboard's image content read-only over a unix socket, answering Claude Code's Ctrl+V image paste inside the container. Recreate-class change. Details, privacy note, and host requirements under Clipboard image bridge below.
 
 ### local-model
 
@@ -348,6 +352,8 @@ Each of `~/.claude` and `~/.codex` is independent:
 - **volume** - Docker named volume. Logins and state survive restarts but exist only in Docker. Use `cbox backup` to archive global volumes to `./backups/`.
 
 Mixing modes is supported. Never use `docker volume prune` (it deletes volumes not attached to running containers and will destroy volume-mode state). `cbox down` never removes volumes.
+
+The proxy sidecar's `internal` and `egress` networks are labeled `cbox.kind=proxy-net`. `cbox down` (both modes) runs `compose down --remove-orphans` and then sweeps any labeled proxy network that has zero endpoints, and `cbox gc` does the same sweep - so a network stranded by turning the proxy off (its `networks:` block disappears from the render) or by renaming the profile is reclaimed instead of accumulating. Networks created before this labeling existed are not matched by the sweep; remove those once by hand with `docker network rm`.
 
 **Backup and mode switching:** `cbox backup` archives the global claude/codex/venv/ssh volumes to `./backups/` but does not cover isolated per-project volumes (named `cbox-p<hash>-*`); the command prints a hint with a per-volume archive command for manual backup. When switching `~/.claude` or `~/.codex` from mount to volume mode, the wizard offers to back up the outgoing host directory at switch time. Agents and claude-md sections prune files that were deselected (managed files shipped by cbox only - user-created files are untouched); disabling history removes the managed policies/templates it previously deployed. With claude volume mode plus isolated session scope, the per-project session directory `~/.claude/projects/<slug>` is a host bind (kept host-visible for /resume) and lives outside the claude volume - back it up as host files, not via volume backup.
 

@@ -349,7 +349,8 @@ _ok "hermes_venv_reset: previous venv (and its pip) is never reused across insta
 
 DNSOUT="$TMPBASE/dns.yml"
 ( INSTALL_DIR="$TMPBASE" . "$INSTALL_DIR/templates/generators.sh" 2>/dev/null || true
-  CBOX_DNS_MODE=public _cbox_dns_into "$DNSOUT"
+  CBOX_DNS_MODE=public CBOX_DNS_SERVERS='1.1.1.1 8.8.8.8' _cbox_dns_into "$DNSOUT"
+  CBOX_DNS_MODE=public CBOX_DNS_SERVERS="" _cbox_dns_into "$DNSOUT" 2>>"$TMPBASE/dns.warn"
   CBOX_DNS_MODE=stub CBOX_DNS_STUB_IP=172.17.0.1 _cbox_dns_into "$DNSOUT"
   CBOX_DNS_MODE=stub CBOX_DNS_STUB_IP="bad;x" _cbox_dns_into "$DNSOUT" 2>/dev/null
   CBOX_DNS_MODE=stub CBOX_DNS_STUB_IP="" _cbox_dns_into "$DNSOUT" 2>>"$TMPBASE/dns.warn"
@@ -361,6 +362,7 @@ grep -qx '      - 1.1.1.1' "$DNSOUT" || _fail "dns: public servers missing"
 grep -qx '      - 172.17.0.1' "$DNSOUT" || _fail "dns: stub ip missing"
 grep -q 'bad' "$DNSOUT" && _fail "dns: invalid server leaked into yaml"
 grep -q 'CBOX_DNS_STUB_IP is empty' "$TMPBASE/dns.warn" || _fail "dns: empty stub must warn"
+grep -q 'CBOX_DNS_SERVERS is empty' "$TMPBASE/dns.warn" || _fail "dns: empty public servers must warn instead of silently falling back to public resolvers"
 [ "$(grep -cx '    dns:' "$DNSOUT")" = 2 ] || _fail "dns: docker mode must emit nothing"
 grep -qx '      - CBOX_CLIP_SOCK=/run/cbox-clip/clip.sock' "$DNSOUT" || _fail "clip: env missing"
 grep -qx '      - /run/user/7/cbox-clip-pXYZ:/run/cbox-clip' "$DNSOUT" || _fail "clip: sock dir mount missing"

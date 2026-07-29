@@ -129,10 +129,78 @@ bash "$DUMP_HARNESS" "$SEC" > "$TMPBASE/new_dump.txt" 2>/dev/null || true
 python3 "$NORMALIZE_PY" "$TMPBASE/old_dump.txt" > "$TMPBASE/old_norm.txt"
 python3 "$NORMALIZE_PY" "$TMPBASE/new_dump.txt" > "$TMPBASE/new_norm.txt"
 
-diff -u "$TMPBASE/old_norm.txt" "$TMPBASE/new_norm.txt" > "$TMPBASE/parity_diff.txt" 2>&1 \
-  || _fail "SEC_* arrays (declare -p, key order normalised) differ between the pre-registry sections.sh snapshot and the generated one:
+ADOPTION_DELTA_PY="$TMPBASE/adoption_delta.py"
+cat > "$ADOPTION_DELTA_PY" << 'EOF'
+import ast, sys
+
+NEW_SECTIONS = ["autoupdate", "dns", "clipboard"]
+DELTA = {
+    "SEC_TITLE": {
+        "autoupdate": "Engine autoupdate",
+        "dns": "DNS",
+        "clipboard": "Clipboard image bridge",
+    },
+    "SEC_DESC": {
+        "autoupdate": "Host-side engine autoupdate for channel targets (claude stable/latest, codex latest, hermes latest): re-runs the vendor installer once the TTL elapses.",
+        "dns": "DNS resolution inside the container when egress is enabled: Docker embedded DNS, public resolvers, or a host-stable stub resolver IP.",
+        "clipboard": "Host clipboard image bridge over a unix socket answering Claude Code's Ctrl+V image paste inside the container.",
+    },
+    "SEC_VARS": {
+        "autoupdate": "CBOX_AUTOUPDATE CBOX_AUTOUPDATE_TTL_HOURS",
+        "dns": "CBOX_DNS_MODE CBOX_DNS_SERVERS CBOX_DNS_STUB_IP",
+        "clipboard": "CBOX_CLIPBOARD_MODE",
+    },
+    "SEC_APPLY": {
+        "autoupdate": "none",
+        "dns": "recreate",
+        "clipboard": "recreate",
+    },
+    "SEC_PROFILE": {
+        "autoupdate": "skip",
+        "dns": "skip",
+        "clipboard": "skip",
+    },
+    "SEC_SCOPE": {
+        "autoupdate": "project",
+        "dns": "project",
+        "clipboard": "project",
+    },
+    "SEC_DOCTOR_ROWS": {
+        "autoupdate": "",
+        "dns": "",
+        "clipboard": "",
+    },
+}
+
+
+def load(path):
+    return [ast.literal_eval(line) for line in open(path) if line.strip()]
+
+
+old = load(sys.argv[1])
+new = load(sys.argv[2])
+
+expected = []
+for name, kind, payload in old:
+    if name == "SECTIONS" and kind == "array":
+        payload = payload + NEW_SECTIONS
+    elif name in DELTA and kind == "assoc":
+        payload = sorted(payload + list(DELTA[name].items()))
+    expected.append((name, kind, payload))
+
+if expected != new:
+    exp_lines = [repr(x) for x in expected]
+    new_lines = [repr(x) for x in new]
+    import difflib
+    sys.stderr.write("\n".join(difflib.unified_diff(exp_lines, new_lines, "expected(old+delta)", "generated", lineterm="")))
+    sys.stderr.write("\n")
+    sys.exit(1)
+EOF
+
+python3 "$ADOPTION_DELTA_PY" "$TMPBASE/old_norm.txt" "$TMPBASE/new_norm.txt" 2> "$TMPBASE/parity_diff.txt" \
+  || _fail "SEC_* arrays differ from the pre-registry snapshot by MORE than the declared shadow-setting adoption (sections autoupdate/dns/clipboard with their six variables):
 $(cat "$TMPBASE/parity_diff.txt")"
-_ok "parity gate: SEC_TITLE/SEC_DESC/SEC_VARS/SEC_APPLY/SEC_PROFILE/SEC_SCOPE/SEC_DEPS/SEC_DEP_TEXT/SEC_DOCTOR_ROWS/SECTIONS/DOCTOR_EXTRA_ROWS identical to the pre-registry snapshot after sourcing (declare -p, key order normalised)"
+_ok "parity gate: generated sections.sh equals the pre-registry snapshot plus exactly the declared adoption delta (autoupdate/dns/clipboard sections, six variables, skip profile, project scope, empty doctor rows) - nothing else moved"
 
 NAMES="$(python3 "$PY" sections "$REG")"
 [ -n "$NAMES" ] || _fail "sections command returned nothing"

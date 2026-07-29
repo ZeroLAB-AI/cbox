@@ -79,6 +79,11 @@ hr() { printf '%s%s%s\n' "$C_MUTE" "$HR_LINE" "$C_RESET"; }
 [ -f "$INSTALL_DIR/templates/conf_lib.sh" ] || die "templates/conf_lib.sh missing"
 . "$INSTALL_DIR/templates/conf_lib.sh"
 
+[ -f "$INSTALL_DIR/templates/validator_lib.sh" ] || die "templates/validator_lib.sh missing"
+. "$INSTALL_DIR/templates/validator_lib.sh"
+[ -f "$INSTALL_DIR/templates/validator_dispatch.sh" ] || die "templates/validator_dispatch.sh missing"
+. "$INSTALL_DIR/templates/validator_dispatch.sh"
+
 _cbox_machine_scoped_vars() {
   local s v
   for s in "${SECTIONS[@]}"; do
@@ -2523,6 +2528,67 @@ step_restart_policy() {
     ask_choice "setup: container restart policy" "$CBOX_RESTART_POLICY" no unless-stopped
     CBOX_RESTART_POLICY="$ASK_VALUE"
   fi
+}
+
+step_autoupdate() {
+  echo "== section: autoupdate =="
+  if [ "$SEC_AUTO" = 1 ]; then
+    note "auto: keeping CBOX_AUTOUPDATE=$CBOX_AUTOUPDATE (check interval ${CBOX_AUTOUPDATE_TTL_HOURS}h)"
+    return 0
+  fi
+  note "channel targets (claude stable/latest, codex latest, hermes latest) reinstall host-side in the background once the TTL elapses; pinned versions never autoupdate"
+  ask_choice "setup: engine autoupdate" "$CBOX_AUTOUPDATE" on off
+  CBOX_AUTOUPDATE="$ASK_VALUE"
+  [ "$CBOX_AUTOUPDATE" = on ] || return 0
+  local msg
+  while :; do
+    ask "setup: autoupdate check interval in hours: " "$CBOX_AUTOUPDATE_TTL_HOURS"
+    CBOX_AUTOUPDATE_TTL_HOURS="$ASK_VALUE"
+    msg="$(_cbox_reg_validate_var CBOX_AUTOUPDATE_TTL_HOURS "$CBOX_AUTOUPDATE_TTL_HOURS")" && break
+    warn "invalid interval: $msg"
+  done
+}
+
+step_dns() {
+  echo "== section: dns =="
+  if [ "$SEC_AUTO" = 1 ]; then
+    note "auto: keeping CBOX_DNS_MODE=$CBOX_DNS_MODE"
+    return 0
+  fi
+  note "docker = Docker embedded DNS, public = fixed public resolvers (CBOX_DNS_SERVERS), stub = a host-stable resolver IP (CBOX_DNS_STUB_IP); takes effect only when egress is enabled"
+  ask_choice "setup: DNS resolution mode (applied only when egress is enabled)" "$CBOX_DNS_MODE" docker public stub
+  CBOX_DNS_MODE="$ASK_VALUE"
+  local msg
+  if [ "$CBOX_DNS_MODE" = public ]; then
+    while :; do
+      ask "setup: DNS servers for public mode (space-separated IPv4 addresses): " "$CBOX_DNS_SERVERS"
+      CBOX_DNS_SERVERS="$ASK_VALUE"
+      if [ -z "$CBOX_DNS_SERVERS" ]; then
+        warn "public mode needs at least one resolver address"
+        continue
+      fi
+      msg="$(_cbox_reg_validate_var CBOX_DNS_SERVERS "$CBOX_DNS_SERVERS")" && break
+      warn "invalid DNS server list: $msg"
+    done
+  elif [ "$CBOX_DNS_MODE" = stub ]; then
+    while :; do
+      ask "setup: DNS stub resolver IP for stub mode (empty = none): " "$CBOX_DNS_STUB_IP"
+      CBOX_DNS_STUB_IP="$ASK_VALUE"
+      msg="$(_cbox_reg_validate_var CBOX_DNS_STUB_IP "$CBOX_DNS_STUB_IP")" && break
+      warn "invalid stub resolver IP: $msg"
+    done
+  fi
+}
+
+step_clipboard() {
+  echo "== section: clipboard =="
+  if [ "$SEC_AUTO" = 1 ]; then
+    note "auto: keeping CBOX_CLIPBOARD_MODE=$CBOX_CLIPBOARD_MODE"
+    return 0
+  fi
+  note "bridge = a per-session host helper serves the host clipboard's image content read-only over a unix socket, answering Ctrl+V image paste inside the container; off = no bridge"
+  ask_choice "setup: clipboard image bridge" "$CBOX_CLIPBOARD_MODE" off bridge
+  CBOX_CLIPBOARD_MODE="$ASK_VALUE"
 }
 
 

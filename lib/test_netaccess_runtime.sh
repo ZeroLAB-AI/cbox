@@ -26,7 +26,10 @@ _cbox_netaccess_env_into "$out"
 _cbox_container_exec_env_into "$out"
 _cbox_container_exec_mounts_into "$out" p123
 
-grep -qF 'ALL_PROXY=socks5h://proxy:1081' "$out" || fail "SOCKS environment missing"
+grep -qF 'CBOX_SOCKS_PROXY=socks5h://cbox-proxy-internal:1081' "$out" || fail "SOCKS environment missing or not pointing at the internal-only proxy alias"
+if grep -qiF 'all_proxy' "$out"; then
+  fail "blanket ALL_PROXY/all_proxy must not be exported - the deny-by-default SOCKS proxy would capture general egress (curl/git/pip) and block it"
+fi
 grep -qF 'CBOX_CONTAINER_EXEC_TIMEOUT=900' "$out" || fail "exec client timeout environment missing"
 grep -qF 'CBOX_CONTAINER_EXEC_MAX_BYTES=10485760' "$out" || fail "exec client output cap environment missing"
 grep -qF "$TMPBASE/runtime/cbox-container-exec-p123/sockets:/run/cbox-container-exec:ro" "$out" || fail "read-only private socket mount missing"
@@ -77,6 +80,27 @@ gen_sockd_conf_into "$TMPBASE/proxy" 172.20.0.2 172.20.0.0/24 '10.10.0.2,10.10.0
 grep -qF 'from: 172.20.0.0/24 to: 10.10.0.0/24' "$TMPBASE/proxy/sockd.conf" || fail "Docker network pass rule missing"
 grep -qF 'from: 172.20.0.0/24 to: 10.42.0.0/16' "$TMPBASE/proxy/sockd.conf" || fail "raw CIDR pass rule missing"
 grep -qF 'from: 0.0.0.0/0 to: 0.0.0.0/0' "$TMPBASE/proxy/sockd.conf" || fail "default block rule missing"
+[ "$(grep -c '^internal:' "$TMPBASE/proxy/sockd.conf")" -eq 1 ] || fail "sockd must bind exactly one internal address"
+
+gen_supervisord_conf_into "$TMPBASE/proxy"
+grep -qF 'command=/usr/sbin/sockd -f /etc/cbox-generated/sockd.conf' "$TMPBASE/proxy/supervisord.conf" \
+  || fail "supervisord must run sockd in the foreground"
+if grep -qE 'sockd .*-D' "$TMPBASE/proxy/supervisord.conf"; then
+  fail "sockd must not daemonize under supervisord - dante -D forks, the parent exits, supervisord respawns into Address in use and ends FATAL while the orphan serves unsupervised"
+fi
+grep -qF 'stopasgroup=true' "$TMPBASE/proxy/supervisord.conf" || fail "sockd program must stop its process group (dante mother forks children)"
+grep -qF 'killasgroup=true' "$TMPBASE/proxy/supervisord.conf" || fail "sockd program must kill its process group"
+if grep -qF 'program:tinyproxy' "$TMPBASE/proxy/supervisord.conf"; then
+  fail "tinyproxy program rendered while egress is off"
+fi
+CBOX_EGRESS_MODE=allowlist
+CBOX_EGRESS_APPLIED=1
+gen_supervisord_conf_into "$TMPBASE/proxy"
+grep -qF 'command=tinyproxy -d -c /etc/cbox-generated/tinyproxy.conf' "$TMPBASE/proxy/supervisord.conf" \
+  || fail "tinyproxy program missing with egress active (tinyproxy -d means foreground, opposite of dante)"
+grep -qF 'program:sockd' "$TMPBASE/proxy/supervisord.conf" || fail "sockd program missing with both features active"
+CBOX_EGRESS_MODE=off
+CBOX_EGRESS_APPLIED=0
 
 hosts="$TMPBASE/extra-hosts"
 : > "$hosts"
@@ -253,5 +277,120 @@ if grep -q 'ollama' "$ISOD2/eff/docker-compose.yml"; then
   fail "isolated compose: ollama leaked into NO_PROXY/rendering while CBOX_OLLAMA_MODE=off"
 fi
 _ok_render "isolated compose variant omits ollama entirely when the feature is off"
+
+ISOD3="$TMPBASE/isolated-render-netaccess"
+mkdir -p "$ISOD3/eff/claude-config/projects" "$ISOD3/claude" "$ISOD3/codex"
+(
+  set -e
+  export CBOX_CLAUDE_MODE=mount CBOX_CODEX_MODE=mount CBOX_SESSION_SCOPE=isolated
+  export CBOX_CLAUDE_PATH="$ISOD3/claude" CBOX_CODEX_PATH="$ISOD3/codex"
+  export CBOX_EGRESS_MODE=off CBOX_EGRESS_APPLIED=0
+  export CBOX_NETACCESS_MODE=socks CBOX_NETACCESS_APPLIED=1 CBOX_NETACCESS_SOCKS_PORT=1081
+  export CBOX_OLLAMA_MODE=off
+  export CBOX_LOCAL_MODEL_URL="" CBOX_HERMES_MODEL_URL="" CBOX_HERMES_DELEGATE_BASE_URL=""
+  gen_compose_isolated "$ISOD3/eff" "$ISOP" testimg testhash123456 >/dev/null 2>&1
+)
+YML="$ISOD3/eff/docker-compose.yml"
+grep -qF '          - cbox-proxy-internal' "$YML" || fail "netaccess compose: proxy internal-network alias missing"
+[ "$(grep -cF -- '- cbox-proxy-internal' "$YML")" -eq 1 ] || fail "netaccess compose: the proxy alias must exist on exactly one network (internal), not on egress too"
+grep -A 2 '^      internal:$' "$YML" | grep -qF 'aliases:' || fail "netaccess compose: alias is not scoped under the proxy's internal network"
+grep -qF 'CBOX_SOCKS_PROXY=socks5h://cbox-proxy-internal:1081' "$YML" || fail "netaccess compose: env endpoint does not use the internal-only alias"
+if grep -qi 'all_proxy' "$YML"; then
+  fail "netaccess compose: blanket ALL_PROXY/all_proxy leaked into the render"
+fi
+grep -qF 'nc -z -w 2 \"$$ip\" 1081' "$YML" || fail "netaccess compose: healthcheck does not probe the SOCKS port"
+if grep -q '8888' "$YML"; then
+  fail "netaccess compose: healthcheck probes the tinyproxy port while egress is off"
+fi
+if grep -qF '|| nc -z' "$YML"; then
+  fail "netaccess compose: healthcheck must not OR feature ports - a live tinyproxy would mask a dead sockd"
+fi
+_ok_render "netaccess-only compose: internal-scoped proxy alias, alias-based endpoint, no ALL_PROXY, healthcheck probes only the SOCKS port"
+
+ISOD4="$TMPBASE/isolated-render-both"
+mkdir -p "$ISOD4/eff/claude-config/projects" "$ISOD4/claude" "$ISOD4/codex"
+(
+  set -e
+  export CBOX_CLAUDE_MODE=mount CBOX_CODEX_MODE=mount CBOX_SESSION_SCOPE=isolated
+  export CBOX_CLAUDE_PATH="$ISOD4/claude" CBOX_CODEX_PATH="$ISOD4/codex"
+  export CBOX_EGRESS_MODE=allowlist CBOX_EGRESS_APPLIED=1
+  export CBOX_NETACCESS_MODE=socks CBOX_NETACCESS_APPLIED=1 CBOX_NETACCESS_SOCKS_PORT=1081
+  export CBOX_OLLAMA_MODE=off
+  export CBOX_LOCAL_MODEL_URL="" CBOX_HERMES_MODEL_URL="" CBOX_HERMES_DELEGATE_BASE_URL=""
+  gen_compose_isolated "$ISOD4/eff" "$ISOP" testimg testhash123456 >/dev/null 2>&1
+)
+grep -qF 'nc -z -w 2 \"$$ip\" 8888 && nc -z -w 2 \"$$ip\" 1081' "$ISOD4/eff/docker-compose.yml" \
+  || fail "both-active compose: healthcheck must require BOTH tinyproxy and sockd to listen (AND, not OR)"
+_ok_render "both-active compose: healthcheck ANDs the tinyproxy and SOCKS listeners"
+
+EENV="$TMPBASE/exec-env.sh"
+{
+  echo 'set -uo pipefail'
+  echo '_cbox_netaccess_active() { [ "${CBOX_NETACCESS_MODE:-off}" != off ]; }'
+  awk '/^_cbox_netaccess_socks_exec_env\(\) \{/,/^}$/' "$INSTALL_DIR/cbox"
+} > "$EENV"
+[ -s "$EENV" ] || fail "could not extract _cbox_netaccess_socks_exec_env from cbox"
+
+envout="$(bash -c '. "$1"; CBOX_NETACCESS_MODE=socks CBOX_NETACCESS_SOCKS_PORT=1081 _cbox_netaccess_socks_exec_env; printf "%s" "${CBOX_SOCKS_EXEC_ENV[*]}"' _ "$EENV")"
+[ "$envout" = "-e CBOX_SOCKS_PROXY=socks5h://cbox-proxy-internal:1081" ] \
+  || fail "per-exec SOCKS delivery must inject the internal-alias endpoint for a new session, got '$envout'"
+envcount="$(bash -c '. "$1"; CBOX_NETACCESS_MODE=off _cbox_netaccess_socks_exec_env; printf "%s" "${#CBOX_SOCKS_EXEC_ENV[@]}"' _ "$EENV")"
+[ "$envcount" = 0 ] || fail "per-exec SOCKS delivery must inject nothing when netaccess is off, got count '$envcount'"
+envbad="$(bash -c '. "$1"; CBOX_NETACCESS_MODE=socks CBOX_NETACCESS_SOCKS_PORT=notaport _cbox_netaccess_socks_exec_env; printf "%s" "${CBOX_SOCKS_EXEC_ENV[*]}"' _ "$EENV")"
+[ "$envbad" = "-e CBOX_SOCKS_PROXY=socks5h://cbox-proxy-internal:1080" ] \
+  || fail "per-exec SOCKS delivery must fall back to port 1080 on a malformed port, got '$envbad'"
+if printf '%s' "$envout$envbad" | grep -qi 'all_proxy'; then
+  fail "per-exec delivery must never inject ALL_PROXY/all_proxy"
+fi
+echo "ok: per-exec SOCKS delivery injects only CBOX_SOCKS_PROXY (internal alias) for a new session, nothing when off, safe port fallback, never ALL_PROXY"
+
+CBOX_NETACCESS_MODE=socks
+CBOX_NETACCESS_APPLIED=1
+CBOX_NETACCESS_SOCKS_PORT=1081
+gen_sockd_placeholder_into "$TMPBASE/proxy"
+grep -qF 'internal: 127.0.0.1 port = 1081' "$TMPBASE/proxy/sockd.conf" \
+  || fail "sockd placeholder must bind loopback (fail-closed) so a proxy that starts before apply re-renders is unreachable, not serving the previous run's rules"
+grep -qF 'socks block {' "$TMPBASE/proxy/sockd.conf" || fail "sockd placeholder must have a default socks block rule"
+if grep -qF 'socks pass' "$TMPBASE/proxy/sockd.conf"; then
+  fail "sockd placeholder must not carry any pass rule - it is fail-closed until apply renders the real config"
+fi
+CBOX_NETACCESS_MODE=off
+gen_sockd_placeholder_into "$TMPBASE/proxy"
+[ ! -f "$TMPBASE/proxy/sockd.conf" ] || fail "sockd placeholder must be removed when netaccess is off"
+CBOX_NETACCESS_MODE=socks
+_ok_render "sockd placeholder is fail-closed on loopback in prepare/regen (never leaves a stale real sockd.conf), removed when off"
+
+grep -qF 'cbox.kind: proxy-net' "$ISOD4/eff/docker-compose.yml" \
+  || fail "proxy networks must be labeled cbox.kind=proxy-net so an orphan sweep can reclaim them after a topology flip or project rename"
+[ "$(grep -c 'cbox.component: internal' "$ISOD4/eff/docker-compose.yml")" -ge 1 ] || fail "internal proxy network must be labeled"
+[ "$(grep -c 'cbox.component: egress' "$ISOD4/eff/docker-compose.yml")" -ge 1 ] || fail "egress proxy network must be labeled"
+GCF="$TMPBASE/gc.sh"
+{
+  echo 'set -uo pipefail'
+  awk '/^_cbox_gc_orphan_proxy_networks\(\) \{/,/^}$/' "$INSTALL_DIR/cbox"
+} > "$GCF"
+grep -qF 'label=cbox.kind=proxy-net' "$GCF" || fail "orphan proxy-net sweep must filter on the proxy-net label"
+grep -qF 'len .Containers' "$GCF" || fail "orphan proxy-net sweep must only remove networks with zero endpoints"
+_ok_render "proxy networks are labeled and a zero-endpoint sweep exists to reclaim orphans"
+
+ISOD5="$TMPBASE/isolated-render-badport"
+mkdir -p "$ISOD5/eff/claude-config/projects" "$ISOD5/claude" "$ISOD5/codex"
+(
+  set -e
+  export CBOX_CLAUDE_MODE=mount CBOX_CODEX_MODE=mount CBOX_SESSION_SCOPE=isolated
+  export CBOX_CLAUDE_PATH="$ISOD5/claude" CBOX_CODEX_PATH="$ISOD5/codex"
+  export CBOX_EGRESS_MODE=off CBOX_EGRESS_APPLIED=0
+  export CBOX_NETACCESS_MODE=socks CBOX_NETACCESS_APPLIED=1
+  export CBOX_NETACCESS_SOCKS_PORT='1081; touch /pwned'
+  export CBOX_OLLAMA_MODE=off
+  export CBOX_LOCAL_MODEL_URL="" CBOX_HERMES_MODEL_URL="" CBOX_HERMES_DELEGATE_BASE_URL=""
+  gen_compose_isolated "$ISOD5/eff" "$ISOP" testimg testhash123456 >/dev/null 2>&1
+)
+if grep -qF 'touch /pwned' "$ISOD5/eff/docker-compose.yml"; then
+  fail "healthcheck must sanitize CBOX_NETACCESS_SOCKS_PORT before embedding it in the CMD-SHELL string (injected shell reached the healthcheck)"
+fi
+grep -qF 'nc -z -w 2 \"$$ip\" 1080' "$ISOD5/eff/docker-compose.yml" \
+  || fail "a malformed SOCKS port must fall back to 1080 in the healthcheck, not be embedded raw"
+_ok_render "healthcheck sanitizes a malformed CBOX_NETACCESS_SOCKS_PORT (no shell injection, falls back to 1080)"
 
 echo "PASS: netaccess runtime rendering"

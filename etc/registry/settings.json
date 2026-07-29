@@ -326,6 +326,36 @@
         }
       ],
       "doctor_rows": []
+    },
+    {
+      "id": "autoupdate",
+      "title": "Engine autoupdate",
+      "description": "Host-side engine autoupdate for channel targets (claude stable/latest, codex latest, hermes latest): re-runs the vendor installer once the TTL elapses.",
+      "apply_class": "none",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": []
+    },
+    {
+      "id": "dns",
+      "title": "DNS",
+      "description": "DNS resolution inside the container when egress is enabled: Docker embedded DNS, public resolvers, or a host-stable stub resolver IP.",
+      "apply_class": "recreate",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": []
+    },
+    {
+      "id": "clipboard",
+      "title": "Clipboard image bridge",
+      "description": "Host clipboard image bridge over a unix socket answering Claude Code's Ctrl+V image paste inside the container.",
+      "apply_class": "recreate",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": []
     }
   ],
   "dependency_text": {
@@ -1746,7 +1776,7 @@
     },
     {
       "key": "CBOX_AUTOUPDATE",
-      "section": "mode",
+      "section": "autoupdate",
       "type": {
         "kind": "enum",
         "values": [
@@ -1755,7 +1785,7 @@
         ]
       },
       "default": "on",
-      "role": "internal",
+      "role": "setting",
       "export": false,
       "prompt": "setup: engine autoupdate",
       "help": "Engine autoupdate: when the engine target is a channel (claude stable/latest, codex latest, hermes latest), re-run the host-side vendor installer in the background at session start once the TTL elapses. Pinned versions never autoupdate.",
@@ -1763,13 +1793,13 @@
     },
     {
       "key": "CBOX_AUTOUPDATE_TTL_HOURS",
-      "section": "mode",
+      "section": "autoupdate",
       "type": {
         "kind": "uint-min",
         "min": 0
       },
       "default": 24,
-      "role": "internal",
+      "role": "setting",
       "export": false,
       "prompt": "setup: autoupdate check interval in hours: ",
       "help": "How many hours since the last autoupdate check before the next one runs.",
@@ -1777,7 +1807,7 @@
     },
     {
       "key": "CBOX_DNS_MODE",
-      "section": "mode",
+      "section": "dns",
       "type": {
         "kind": "enum",
         "values": [
@@ -1787,7 +1817,7 @@
         ]
       },
       "default": "docker",
-      "role": "internal",
+      "role": "setting",
       "export": false,
       "prompt": "setup: DNS resolution mode (applied only when egress is enabled)",
       "help": "docker (default) - Docker embedded DNS. public - CBOX_DNS_SERVERS. stub - CBOX_DNS_STUB_IP, a host-stable resolver.",
@@ -1795,13 +1825,13 @@
     },
     {
       "key": "CBOX_DNS_SERVERS",
-      "section": "mode",
+      "section": "dns",
       "type": {
         "kind": "string",
         "escape_hatch": "ipv4-list"
       },
       "default": "1.1.1.1 8.8.8.8",
-      "role": "internal",
+      "role": "setting",
       "export": false,
       "prompt": "setup: DNS servers for public mode (space-separated IPv4 addresses): ",
       "help": "Space-separated IPv4 resolver addresses used when CBOX_DNS_MODE=public.",
@@ -1809,13 +1839,13 @@
     },
     {
       "key": "CBOX_DNS_STUB_IP",
-      "section": "mode",
+      "section": "dns",
       "type": {
         "kind": "string",
         "escape_hatch": "ipv4-or-empty"
       },
       "default": "",
-      "role": "internal",
+      "role": "setting",
       "export": false,
       "prompt": "setup: DNS stub resolver IP for stub mode (empty = none): ",
       "help": "Host-stable resolver IPv4 address used when CBOX_DNS_MODE=stub (for example a systemd-resolved DNSStubListenerExtra address or dnsmasq on the docker bridge).",
@@ -1823,7 +1853,7 @@
     },
     {
       "key": "CBOX_CLIPBOARD_MODE",
-      "section": "mode",
+      "section": "clipboard",
       "type": {
         "kind": "enum",
         "values": [
@@ -1832,7 +1862,7 @@
         ]
       },
       "default": "off",
-      "role": "internal",
+      "role": "setting",
       "export": false,
       "prompt": "setup: clipboard image bridge",
       "help": "bridge - a per-session host helper serves the host clipboard's image content read-only over a unix socket, answering Claude Code's Ctrl+V image paste inside the container. off (default) - no bridge.",

@@ -428,6 +428,10 @@ _new_case CBOX_DNS_SERVERS "9.9.9.9" accept
 _new_case CBOX_DNS_SERVERS "" accept
 _new_case CBOX_DNS_SERVERS "not-an-ip" reject
 _new_case CBOX_DNS_SERVERS "1.1.1.1 bogus" reject
+_new_case CBOX_DNS_SERVERS "*" reject
+_new_case CBOX_DNS_SERVERS "?.?.?.?" reject
+_new_case CBOX_DNS_SERVERS "010.10.10.10" reject
+_new_case CBOX_DNS_STUB_IP "0127.0.0.1" reject
 
 _new_case CBOX_DNS_STUB_IP "" accept
 _new_case CBOX_DNS_STUB_IP "127.0.0.53" accept

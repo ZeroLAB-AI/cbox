@@ -585,9 +585,7 @@ _cbox_netaccess_env_into() {
     ''|*[!0-9]*) port=1080 ;;
     *) [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || port=1080 ;;
   esac
-  printf '      - CBOX_SOCKS_PROXY=socks5h://proxy:%s\n' "$port" >> "$tmp"
-  printf '      - ALL_PROXY=socks5h://proxy:%s\n' "$port" >> "$tmp"
-  printf '      - all_proxy=socks5h://proxy:%s\n' "$port" >> "$tmp"
+  printf '      - CBOX_SOCKS_PROXY=socks5h://cbox-proxy-internal:%s\n' "$port" >> "$tmp"
 }
 
 _cbox_url_host() {
@@ -680,7 +678,7 @@ _cbox_proxy_main_networks_into() {
 
 _cbox_dns_servers() {
   case "${CBOX_DNS_MODE:-docker}" in
-    public) printf '%s' "${CBOX_DNS_SERVERS:-1.1.1.1 8.8.8.8}" ;;
+    public) printf '%s' "${CBOX_DNS_SERVERS-}" ;;
     stub) printf '%s' "${CBOX_DNS_STUB_IP:-}" ;;
     *) printf '' ;;
   esac
@@ -690,6 +688,10 @@ _cbox_dns_into() {
   local tmp="$1" s emitted=0
   if [ "${CBOX_DNS_MODE:-docker}" = stub ] && [ -z "${CBOX_DNS_STUB_IP:-}" ]; then
     echo "cbox: warning: CBOX_DNS_MODE=stub but CBOX_DNS_STUB_IP is empty - no dns override emitted" >&2
+    return 0
+  fi
+  if [ "${CBOX_DNS_MODE:-docker}" = public ] && [ -z "${CBOX_DNS_SERVERS:-}" ]; then
+    echo "cbox: warning: CBOX_DNS_MODE=public but CBOX_DNS_SERVERS is empty - no dns override emitted" >&2
     return 0
   fi
   set -f
@@ -918,6 +920,17 @@ EOF
   fi
   if _cbox_proxy_active; then
     _cbox_proxy_main_networks_into "$tmp"
+    local hc_cmd="" hc_port="${CBOX_NETACCESS_SOCKS_PORT:-1080}"
+    case "$hc_port" in
+      ''|*[!0-9]*) hc_port=1080 ;;
+      *) { [ "$hc_port" -ge 1 ] && [ "$hc_port" -le 65535 ]; } || hc_port=1080 ;;
+    esac
+    if _cbox_egress_active; then
+      hc_cmd='nc -z -w 2 \"$$ip\" 8888'
+    fi
+    if _cbox_netaccess_active; then
+      hc_cmd="${hc_cmd:+$hc_cmd && }"'nc -z -w 2 \"$$ip\" '"$hc_port"
+    fi
     cat >> "$tmp" <<EOF
     depends_on:
       - proxy
@@ -928,12 +941,14 @@ EOF
     image: cbox-proxy:$name
     restart: "$policy"
     networks:
-      - internal
-      - egress
+      internal:
+        aliases:
+          - cbox-proxy-internal
+      egress: {}
     volumes:
       - $INSTALL_DIR/generated/proxy:/etc/cbox-generated:ro
     healthcheck:
-      test: ["CMD-SHELL", "ip=127.0.0.1; [ -f /etc/cbox-generated/internal-ip ] && ip=\$\$(cat /etc/cbox-generated/internal-ip); nc -z -w 2 \"\$\$ip\" 8888 || nc -z -w 2 \"\$\$ip\" ${CBOX_NETACCESS_SOCKS_PORT:-1080}"]
+      test: ["CMD-SHELL", "ip=127.0.0.1; [ -f /etc/cbox-generated/internal-ip ] && ip=\$\$(cat /etc/cbox-generated/internal-ip); $hc_cmd"]
       interval: 10s
       timeout: 3s
       start_period: 10s
@@ -990,7 +1005,13 @@ EOF
 networks:
   internal:
     internal: true
-  egress: {}
+    labels:
+      cbox.kind: proxy-net
+      cbox.component: internal
+  egress:
+    labels:
+      cbox.kind: proxy-net
+      cbox.component: egress
 EOF
   fi
   chmod 0644 "$tmp"
@@ -1027,6 +1048,7 @@ gen_compose_isolated() {
     gen_dockerfile_egress_into "$eff"
     gen_supervisord_conf_into "$eff"
     gen_tinyproxy_conf_into "$eff/proxy"
+    gen_sockd_placeholder_into "$eff/proxy"
     gen_egress_filter_into "$eff/proxy"
   fi
 
@@ -1261,6 +1283,17 @@ EOF
   fi
   if _cbox_proxy_active; then
     _cbox_proxy_main_networks_into "$tmp"
+    local hc_cmd="" hc_port="${CBOX_NETACCESS_SOCKS_PORT:-1080}"
+    case "$hc_port" in
+      ''|*[!0-9]*) hc_port=1080 ;;
+      *) { [ "$hc_port" -ge 1 ] && [ "$hc_port" -le 65535 ]; } || hc_port=1080 ;;
+    esac
+    if _cbox_egress_active; then
+      hc_cmd='nc -z -w 2 \"$$ip\" 8888'
+    fi
+    if _cbox_netaccess_active; then
+      hc_cmd="${hc_cmd:+$hc_cmd && }"'nc -z -w 2 \"$$ip\" '"$hc_port"
+    fi
     cat >> "$tmp" <<EOF
     depends_on:
       - proxy
@@ -1271,12 +1304,14 @@ EOF
     image: cbox-proxy-img:$(cat "$eff/Dockerfile.egress" "$eff/supervisord.conf" 2>/dev/null | sha256sum | awk '{print substr($1,1,12)}')
     restart: "$policy"
     networks:
-      - internal
-      - egress
+      internal:
+        aliases:
+          - cbox-proxy-internal
+      egress: {}
     volumes:
       - $eff/proxy:/etc/cbox-generated:ro
     healthcheck:
-      test: ["CMD-SHELL", "ip=127.0.0.1; [ -f /etc/cbox-generated/internal-ip ] && ip=\$\$(cat /etc/cbox-generated/internal-ip); nc -z -w 2 \"\$\$ip\" 8888 || nc -z -w 2 \"\$\$ip\" ${CBOX_NETACCESS_SOCKS_PORT:-1080}"]
+      test: ["CMD-SHELL", "ip=127.0.0.1; [ -f /etc/cbox-generated/internal-ip ] && ip=\$\$(cat /etc/cbox-generated/internal-ip); $hc_cmd"]
       interval: 10s
       timeout: 3s
       start_period: 10s
@@ -1333,7 +1368,13 @@ EOF
 networks:
   internal:
     internal: true
-  egress: {}
+    labels:
+      cbox.kind: proxy-net
+      cbox.component: internal
+  egress:
+    labels:
+      cbox.kind: proxy-net
+      cbox.component: egress
 EOF
   fi
   chmod 0644 "$tmp"
@@ -1438,9 +1479,11 @@ gen_supervisord_conf_into() {
     fi
     if _cbox_netaccess_active; then
       printf '\n[program:sockd]\n'
-      printf 'command=/usr/sbin/sockd -D -f /etc/cbox-generated/sockd.conf\n'
+      printf 'command=/usr/sbin/sockd -f /etc/cbox-generated/sockd.conf\n'
       printf 'autorestart=true\n'
       printf 'startretries=3\n'
+      printf 'stopasgroup=true\n'
+      printf 'killasgroup=true\n'
       printf 'stdout_logfile=/dev/stdout\n'
       printf 'stdout_logfile_maxbytes=0\n'
       printf 'stderr_logfile=/dev/stderr\n'
@@ -1486,6 +1529,41 @@ gen_tinyproxy_conf_into() {
 
 gen_tinyproxy_conf() {
   gen_tinyproxy_conf_into "$INSTALL_DIR/generated/proxy"
+}
+
+gen_sockd_placeholder_into() {
+  local effdir="$1"
+  if ! _cbox_netaccess_active; then
+    rm -f "$effdir/sockd.conf"
+    return 0
+  fi
+  local port="${CBOX_NETACCESS_SOCKS_PORT:-1080}"
+  case "$port" in
+    ""|*[!0-9]*) port=1080 ;;
+    *) { [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; } || port=1080 ;;
+  esac
+  {
+    printf 'logoutput: stderr\n'
+    printf 'internal: 127.0.0.1 port = %s\n' "$port"
+    printf 'external: 127.0.0.1\n'
+    printf 'socksmethod: none\n'
+    printf 'clientmethod: none\n'
+    printf 'user.privileged: root\n'
+    printf 'user.notprivileged: cboxsockd\n'
+    printf '\n'
+    printf 'client block {\n'
+    printf '  from: 0.0.0.0/0 to: 0.0.0.0/0\n'
+    printf '  log: error\n'
+    printf '}\n'
+    printf 'socks block {\n'
+    printf '  from: 0.0.0.0/0 to: 0.0.0.0/0\n'
+    printf '  log: error\n'
+    printf '}\n'
+  } | _cbox_write "$effdir/sockd.conf"
+}
+
+gen_sockd_placeholder() {
+  gen_sockd_placeholder_into "$INSTALL_DIR/generated/proxy"
 }
 
 gen_egress_filter_into() {
@@ -1535,6 +1613,7 @@ _cbox_is_ipv4() {
   for o in "$o1" "$o2" "$o3" "$o4"; do
     case "$o" in
       ""|*[!0-9]*) return 1 ;;
+      0?*) return 1 ;;
     esac
     [ "$o" -ge 0 ] && [ "$o" -le 255 ] || return 1
   done
@@ -2399,6 +2478,7 @@ regen_all() {
   gen_dockerfile_egress
   gen_supervisord_conf
   gen_tinyproxy_conf
+  gen_sockd_placeholder
   gen_egress_filter
   gen_ssh_config
   gen_hooks_dir

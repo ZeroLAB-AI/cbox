@@ -182,12 +182,48 @@ _cbox_netaccess_render() {
   fi
 }
 
+_cbox_netaccess_verify_listener() {
+  local exec_prefix="$1" container_id port i
+  _cbox_netaccess_active || return 0
+  container_id="$($exec_prefix ps -q proxy 2>/dev/null | head -n1)" || container_id=""
+  [ -n "$container_id" ] || return 1
+  port="${CBOX_NETACCESS_SOCKS_PORT:-1080}"
+  for i in 1 2 3 4 5; do
+    if docker exec "$container_id" sh -c "nc -z -w 2 127.0.0.1 $port || nc -z -w 2 \"\$(cat /etc/cbox-generated/internal-ip 2>/dev/null)\" $port" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+_cbox_netaccess_socks_exec_env() {
+  CBOX_SOCKS_EXEC_ENV=()
+  _cbox_netaccess_active || return 0
+  local port="${CBOX_NETACCESS_SOCKS_PORT:-1080}"
+  case "$port" in
+    ''|*[!0-9]*) port=1080 ;;
+    *) [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || port=1080 ;;
+  esac
+  CBOX_SOCKS_EXEC_ENV=(-e "CBOX_SOCKS_PROXY=socks5h://cbox-proxy-internal:$port")
+}
+
 _cbox_netaccess_apply_global() {
   _cbox_proxy_active || return 0
   local container_id
   container_id="$("${COMPOSE[@]}" ps -q proxy 2>/dev/null)" || container_id=""
   _cbox_netaccess_render "$container_id" "$INSTALL_DIR/generated/proxy" || return 1
-  "${COMPOSE[@]}" restart proxy >/dev/null
+  "${COMPOSE[@]}" restart proxy >/dev/null || {
+    echo "cbox: proxy restart failed - the running proxy still serves the previous rules" >&2
+    return 1
+  }
+  if ! _cbox_netaccess_active; then
+    return 0
+  fi
+  _cbox_netaccess_verify_listener "${COMPOSE[*]}" || {
+    echo "cbox: SOCKS listener is not answering on the proxy after restart - the new rules are NOT in force; check 'cbox logs proxy'" >&2
+    return 1
+  }
 }
 
 _cbox_netaccess_apply_isolated() {
@@ -195,7 +231,17 @@ _cbox_netaccess_apply_isolated() {
   _cbox_proxy_active || return 0
   container_id="$(_compose_p "$eff" ps -q proxy 2>/dev/null)" || container_id=""
   _cbox_netaccess_render "$container_id" "$eff/proxy" || return 1
-  _compose_p "$eff" restart proxy >/dev/null
+  _compose_p "$eff" restart proxy >/dev/null || {
+    echo "cbox: proxy restart failed - the running proxy still serves the previous rules" >&2
+    return 1
+  }
+  if ! _cbox_netaccess_active; then
+    return 0
+  fi
+  _cbox_netaccess_verify_listener "_compose_p $eff" || {
+    echo "cbox: SOCKS listener is not answering on the proxy after restart - the new rules are NOT in force; check 'cbox logs proxy'" >&2
+    return 1
+  }
 }
 
 _netaccess_valid_name() {
@@ -283,6 +329,19 @@ _netaccess_print_status() {
   echo
   echo "note: a pass rule covers the target network's WHOLE subnet on all TCP ports - allowing"
   echo "      one container allows every container on its networks."
+}
+
+_cbox_running_cbox_sees_netaccess() {
+  local mode="$1" eff="$2" cbox_id
+  if [ "$mode" = global ]; then
+    cbox_id="$("${COMPOSE[@]}" ps -q "$SERVICE" 2>/dev/null | head -n1)" || cbox_id=""
+  else
+    cbox_id="$(_compose_p "$eff" ps -q cbox 2>/dev/null | head -n1)" || cbox_id=""
+  fi
+  [ -n "$cbox_id" ] || return 1
+  docker inspect -f '{{range $n, $e := .NetworkSettings.Networks}}{{$n}} {{end}}' "$cbox_id" 2>/dev/null | grep -q 'internal' || return 1
+  docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$cbox_id" 2>/dev/null | grep -q '^CBOX_SOCKS_PROXY=' || return 1
+  return 0
 }
 
 _netaccess_apply_now() {
@@ -418,7 +477,13 @@ _netaccess_change() {
   local arc=0
   _netaccess_apply_now "$mode" "$eff" || arc=$?
   if [ "$arc" = 0 ]; then
-    echo "cbox: applied to the running proxy (no container restart needed)"
+    echo "cbox: applied to the running proxy"
+    if _cbox_running_cbox_sees_netaccess "$mode" "$eff"; then
+      echo "cbox: the running cbox session can reach it now (no restart needed)"
+    else
+      echo "cbox: NOTE - the running cbox container predates this grant (it is not attached to the internal network / has no CBOX_SOCKS_PROXY in its environment)." >&2
+      echo "cbox: the CURRENT session cannot see this grant; a new session started after this point will. To repair the current one: cbox down && cbox run" >&2
+    fi
   elif [ "$arc" = 2 ]; then
     :
   elif [ "$action" = deny ]; then
@@ -852,6 +917,17 @@ _cbox_ollama_reconcile_networks_impl() {
   return "$rc"
 }
 
+_cbox_gc_orphan_proxy_networks() {
+  local name endpoints
+  docker network ls --filter label=cbox.kind=proxy-net --format '{{.Name}}' 2>/dev/null | while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    endpoints="$(docker network inspect --format '{{len .Containers}}' -- "$name" 2>/dev/null)" || continue
+    if [ "${endpoints:-0}" = 0 ]; then
+      docker network rm -- "$name" >/dev/null 2>&1 || true
+    fi
+  done
+}
+
 _cbox_ollama_gc_scope_networks_impl() {
   local name endpoints owner
   owner="$(_cbox_ollama_owner_name)"
@@ -1265,6 +1341,7 @@ _run_global() {
     _clip_bridge_stop
     return 1
   }
+  _cbox_netaccess_socks_exec_env
   local workdir="$CBOX_WORKDIR"
   for w in "${workspaces[@]}"; do
     case "$root" in
@@ -1272,9 +1349,9 @@ _run_global() {
     esac
   done
   if [ -t 0 ] && [ -t 1 ]; then
-    exec "${COMPOSE[@]}" exec -it "${CBOX_CONTAINER_EXEC_ENV[@]}" -w "$workdir" "$SERVICE" /entrypoint.sh "$bin" "$@"
+    exec "${COMPOSE[@]}" exec -it "${CBOX_CONTAINER_EXEC_ENV[@]}" "${CBOX_SOCKS_EXEC_ENV[@]}" -w "$workdir" "$SERVICE" /entrypoint.sh "$bin" "$@"
   else
-    exec "${COMPOSE[@]}" exec -T "${CBOX_CONTAINER_EXEC_ENV[@]}" -w "$workdir" "$SERVICE" /entrypoint.sh "$bin" "$@"
+    exec "${COMPOSE[@]}" exec -T "${CBOX_CONTAINER_EXEC_ENV[@]}" "${CBOX_SOCKS_EXEC_ENV[@]}" -w "$workdir" "$SERVICE" /entrypoint.sh "$bin" "$@"
   fi
 }
 
@@ -1965,7 +2042,8 @@ _session_run() {
   if [ -n "$pre_hook" ]; then
     "$pre_hook" || true
   fi
-  extra_env=("${CBOX_CONTAINER_EXEC_ENV[@]}")
+  _cbox_netaccess_socks_exec_env
+  extra_env=("${CBOX_CONTAINER_EXEC_ENV[@]}" "${CBOX_SOCKS_EXEC_ENV[@]}")
   if [ "$use_session_env" = 1 ]; then
     extra_env+=("${CBOX_SESSION_EXEC_ENV[@]}")
   fi
@@ -2150,6 +2228,7 @@ down_project() {
   _compose_p "$eff" down --remove-orphans || rc=$?
   exec 9>&-
   _cbox_ollama_gc_scope_networks >/dev/null 2>&1 || true
+  _cbox_gc_orphan_proxy_networks >/dev/null 2>&1 || true
   return "$rc"
 }
 
@@ -2227,6 +2306,7 @@ gc() {
   done < <(docker ps --filter label=cbox.kind=isolated --format '{{.ID}}'$'\t''{{.Label "cbox.effdir"}}')
   docker ps -a --filter label=cbox.kind=isolated --filter status=exited -q | xargs -r docker rm >/dev/null 2>&1 || true
   _cbox_ollama_gc_scope_networks
+  _cbox_gc_orphan_proxy_networks
   _gc_legacy_bins_volumes
 }
 
@@ -2335,6 +2415,7 @@ _global_prepare() {
   gen_dockerfile_egress
   gen_supervisord_conf
   gen_tinyproxy_conf
+  gen_sockd_placeholder
   gen_egress_filter
   gen_ssh_config
   if [ "${CBOX_HERMES:-off}" = on ]; then
@@ -2361,6 +2442,7 @@ _cbox_global_prepare_locked() {
   gen_dockerfile_egress
   gen_supervisord_conf
   gen_tinyproxy_conf
+  gen_sockd_placeholder
   gen_egress_filter
   gen_ssh_config
   if [ "${CBOX_HERMES:-off}" = on ]; then
@@ -2431,7 +2513,8 @@ down() {
   elif [ "$force" = 1 ] && { [ "$n" = unknown ] || [ "$n" != 0 ]; }; then
     echo "cbox: --force: probe reports $n live process(es) for the global container; stopping anyway" >&2
   fi
-  "${COMPOSE[@]}" down
+  "${COMPOSE[@]}" down --remove-orphans
+  _cbox_gc_orphan_proxy_networks
   exec 9>&-
   _cbox_ollama_gc_scope_networks >/dev/null 2>&1 || true
 }
@@ -3965,7 +4048,19 @@ doctor() {
     if [ -n "${CBOX_SOCKS_PROXY:-}" ]; then
       _cbox_doctor_row "netaccess" ACTIVE "CBOX_SOCKS_PROXY=$CBOX_SOCKS_PROXY; use it explicitly for target-network TCP"
     else
-      _cbox_doctor_row "netaccess" HOST-CHECK "SOCKS proxy topology decided host-side"
+      local na_state=""
+      local na_f
+      for na_f in /run/cbox/netaccess.state /tmp/cbox/netaccess.state; do
+        [ -f "$na_f" ] && { na_state="$(cat "$na_f" 2>/dev/null)"; break; }
+      done
+      case "$na_state" in
+        broken*)
+          _cbox_doctor_row "netaccess" MISSING "SOCKS endpoint was configured but unreachable at session start (${na_state#broken }) - proxy is down or this session predates the grant; recover with cbox down && cbox run"
+          ;;
+        *)
+          _cbox_doctor_row "netaccess" HOST-CHECK "SOCKS proxy topology decided host-side"
+          ;;
+      esac
     fi
     if [ -S "${CBOX_CONTAINER_EXEC_SOCKET:-/run/cbox-container-exec/bridge.sock}" ] && command -v cbox-container >/dev/null 2>&1; then
       _cbox_doctor_row "container-exec" ACTIVE "cbox-container client and private bridge socket are present"

@@ -278,14 +278,48 @@ _run_new_whitelist_writer() {
   )
 }
 
+ADOPTED_KEYS=(CBOX_AUTOUPDATE CBOX_AUTOUPDATE_TTL_HOURS CBOX_DNS_MODE CBOX_DNS_SERVERS CBOX_DNS_STUB_IP CBOX_CLIPBOARD_MODE)
+
+_expected_adopted_block() {
+  local fixture="$1" out="$2"
+  (
+    if [ -s "$fixture" ]; then . "$fixture"; fi
+    local k
+    { for k in "${ADOPTED_KEYS[@]}"; do printf '%s=%q\n' "$k" "${!k-}"; done; } > "$out"
+  )
+}
+
+_strip_adopted_block() {
+  local new="$1" block="$2" remainder="$3"
+  python3 - "$new" "$block" "$remainder" << 'PYEOF'
+import sys
+new = open(sys.argv[1]).read().splitlines(keepends=True)
+block = open(sys.argv[2]).read().splitlines(keepends=True)
+anchors = [i for i, l in enumerate(new) if l.startswith("CBOX_RESTART_POLICY=")]
+if len(anchors) != 1:
+    sys.stderr.write("expected exactly one CBOX_RESTART_POLICY line, found %d\n" % len(anchors))
+    sys.exit(1)
+i = anchors[0] + 1
+if new[i:i + len(block)] != block:
+    sys.stderr.write("the six adopted lines right after CBOX_RESTART_POLICY do not match the expected block:\n")
+    sys.stderr.write("expected: %r\n" % block)
+    sys.stderr.write("found:    %r\n" % new[i:i + len(block)])
+    sys.exit(1)
+open(sys.argv[3], "w").write("".join(new[:i] + new[i + len(block):]))
+PYEOF
+}
+
 for fx in default full isolated special_chars; do
   for skip in 0 1; do
     _run_old_whitelist_writer "$FIXDIR/$fx.sh" "$TMPBASE/oldw_${fx}_${skip}.conf" "$skip" ""
     _run_new_whitelist_writer "$FIXDIR/$fx.sh" "$TMPBASE/neww_${fx}_${skip}.conf" "$skip" ""
-    cmp -s "$TMPBASE/oldw_${fx}_${skip}.conf" "$TMPBASE/neww_${fx}_${skip}.conf" \
-      || _fail "whitelist writer output diverged for fixture '$fx' skip_machine=$skip:
-$(diff -u "$TMPBASE/oldw_${fx}_${skip}.conf" "$TMPBASE/neww_${fx}_${skip}.conf" || true)"
-    _ok "cbox config-set whitelist writer: byte-identical to pre-registry output for fixture '$fx' skip_machine=$skip"
+    _expected_adopted_block "$FIXDIR/$fx.sh" "$TMPBASE/block_${fx}_${skip}.conf"
+    _strip_adopted_block "$TMPBASE/neww_${fx}_${skip}.conf" "$TMPBASE/block_${fx}_${skip}.conf" "$TMPBASE/rem_${fx}_${skip}.conf" \
+      || _fail "whitelist writer: adopted six-line block malformed for fixture '$fx' skip_machine=$skip"
+    cmp -s "$TMPBASE/oldw_${fx}_${skip}.conf" "$TMPBASE/rem_${fx}_${skip}.conf" \
+      || _fail "whitelist writer output diverged beyond the adopted block for fixture '$fx' skip_machine=$skip:
+$(diff -u "$TMPBASE/oldw_${fx}_${skip}.conf" "$TMPBASE/rem_${fx}_${skip}.conf" || true)"
+    _ok "cbox config-set whitelist writer: pre-registry output plus exactly the adopted autoupdate/dns/clipboard block for fixture '$fx' skip_machine=$skip"
   done
 done
 
@@ -299,12 +333,66 @@ UNKNOWN_SRC="$TMPBASE/with_unknown.conf"
 
 _run_old_whitelist_writer "$FIXDIR/default.sh" "$TMPBASE/oldw_preserve.conf" "0" "$UNKNOWN_SRC"
 _run_new_whitelist_writer "$FIXDIR/default.sh" "$TMPBASE/neww_preserve.conf" "0" "$UNKNOWN_SRC"
-cmp -s "$TMPBASE/oldw_preserve.conf" "$TMPBASE/neww_preserve.conf" \
-  || _fail "unknown-line preservation diverged:
-$(diff -u "$TMPBASE/oldw_preserve.conf" "$TMPBASE/neww_preserve.conf" || true)"
+_expected_adopted_block "$FIXDIR/default.sh" "$TMPBASE/block_preserve.conf"
+_strip_adopted_block "$TMPBASE/neww_preserve.conf" "$TMPBASE/block_preserve.conf" "$TMPBASE/rem_preserve.conf" \
+  || _fail "unknown-line preservation: adopted six-line block malformed"
+cmp -s "$TMPBASE/oldw_preserve.conf" "$TMPBASE/rem_preserve.conf" \
+  || _fail "unknown-line preservation diverged beyond the adopted block:
+$(diff -u "$TMPBASE/oldw_preserve.conf" "$TMPBASE/rem_preserve.conf" || true)"
 grep -qx 'SOME_FUTURE_KEY=future-value' "$TMPBASE/neww_preserve.conf" \
   || _fail "new whitelist writer dropped an unknown line it should have preserved"
-_ok "cbox config-set whitelist writer: unknown/newer-version lines are preserved verbatim, byte-identical to pre-registry behavior"
+grep -qx 'CBOX_NAME=myprofile' "$TMPBASE/neww_preserve.conf" \
+  || _fail "new whitelist writer dropped the internal CBOX_NAME line it should have preserved"
+grep -qx 'CBOX_TPL_SHA=deadbeef' "$TMPBASE/neww_preserve.conf" \
+  || _fail "new whitelist writer dropped the internal CBOX_TPL_SHA line it should have preserved"
+_ok "cbox config-set whitelist writer: unknown/newer-version and internal lines are preserved verbatim; only the adopted block was added over pre-registry behavior"
+
+LEGACY_SRC="$TMPBASE/position_legacy.conf"
+fixedhome3="$TMPBASE/home_position"
+mkdir -p "$fixedhome3"
+_run_new_conf_save "$FIXDIR/full.sh" "$LEGACY_SRC" "$fixedhome3"
+_run_old_whitelist_writer "$LEGACY_SRC" "$TMPBASE/pos_old.conf" 0 "$LEGACY_SRC"
+_run_new_whitelist_writer "$LEGACY_SRC" "$TMPBASE/pos_new.conf" 0 "$LEGACY_SRC"
+python3 - "$TMPBASE/pos_old.conf" "$TMPBASE/pos_new.conf" "${ADOPTED_KEYS[@]}" << 'PYEOF' \
+  || _fail "adoption position gate failed: rewriting a legacy-layout cbox.conf moved more than the documented CBOX_NAME relocation"
+import sys
+old = open(sys.argv[1]).read().splitlines()
+new = open(sys.argv[2]).read().splitlines()
+ADOPTED = sys.argv[3:]
+assert len(ADOPTED) == 6, "expected the six adopted keys on argv, got %r" % ADOPTED
+
+
+def key(line):
+    return line.split("=", 1)[0]
+
+
+def anchor(lines):
+    hits = [i for i, l in enumerate(lines) if l.startswith("CBOX_RESTART_POLICY=")]
+    assert len(hits) == 1, "expected one CBOX_RESTART_POLICY line, got %d" % len(hits)
+    return hits[0]
+
+
+i_old, i_new = anchor(old), anchor(new)
+assert i_old == i_new, "known-line head length changed: %d vs %d" % (i_old, i_new)
+assert old[:i_old + 1] == new[:i_new + 1], "lines before the tail changed"
+
+old_tail, new_tail = old[i_old + 1:], new[i_new + 1:]
+assert [key(l) for l in old_tail] == ["CBOX_NAME"] + ADOPTED + ["CBOX_TPL_SHA"], \
+    "old writer tail order unexpected: %r" % [key(l) for l in old_tail]
+assert [key(l) for l in new_tail] == ADOPTED + ["CBOX_NAME", "CBOX_TPL_SHA"], \
+    "new writer tail order unexpected: %r" % [key(l) for l in new_tail]
+assert old_tail[1:7] == new_tail[0:6], \
+    "the six adopted lines changed content or relative order:\nold %r\nnew %r" % (old_tail[1:7], new_tail[0:6])
+assert old_tail[0] == new_tail[6], "CBOX_NAME line content changed"
+assert old_tail[7] == new_tail[7], "CBOX_TPL_SHA line content changed"
+PYEOF
+_ok "adoption position gate: on a legacy-layout cbox.conf the six adopted lines keep byte content and relative order (shifted up one slot); the only relocation is internal CBOX_NAME dropping behind them; every whitelist write happens inside config set which re-stamps the manifest in the same transaction, so no stale-stamp drift path exists"
+
+_run_new_whitelist_writer "$TMPBASE/pos_new.conf" "$TMPBASE/pos_new2.conf" 0 "$TMPBASE/pos_new.conf"
+cmp -s "$TMPBASE/pos_new.conf" "$TMPBASE/pos_new2.conf" \
+  || _fail "whitelist writer is not a fixpoint on its own output:
+$(diff -u "$TMPBASE/pos_new.conf" "$TMPBASE/pos_new2.conf" || true)"
+_ok "adoption fixpoint gate: rewriting an already-adopted cbox.conf is byte-identical (stable layout from the second write on)"
 
 ROUNDTRIP_SRC="$FIXDIR/full.sh"
 fixedhome="$TMPBASE/home_roundtrip"

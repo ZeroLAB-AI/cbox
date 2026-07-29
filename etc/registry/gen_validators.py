@@ -77,6 +77,15 @@ def _dispatch_for(var):
 def render(data):
     lines = []
     lines.append("_cbox_reg_validate_var() {")
+    lines.append("  local _cbox_val_had_f=0 _cbox_val_rc=0")
+    lines.append("  case $- in *f*) _cbox_val_had_f=1 ;; esac")
+    lines.append("  set -f")
+    lines.append("  _cbox_reg_validate_var_dispatch \"$@\" || _cbox_val_rc=$?")
+    lines.append("  [ \"$_cbox_val_had_f\" = 1 ] || set +f")
+    lines.append("  return \"$_cbox_val_rc\"")
+    lines.append("}")
+    lines.append("")
+    lines.append("_cbox_reg_validate_var_dispatch() {")
     lines.append("  local key=\"$1\" val=\"$2\"")
     lines.append("  _cbox_val_no_ctrl \"$val\" || { printf 'contains a control character'; return 1; }")
     lines.append("  case \"$key\" in")
