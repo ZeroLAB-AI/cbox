@@ -4,7 +4,7 @@
     "pr": ""
   },
   "permissions": {
-    "defaultMode": "auto"
+    "defaultMode": "bypassPermissions"
   },
   "autoMode": {
     "allow": [
@@ -15,7 +15,8 @@
   "env": {
     "DISABLE_ERROR_REPORTING": "1",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5[1m]",
-    "CBOX_AGENT_MODEL_DENY": "opus-4"
+    "CBOX_AGENT_MODEL_DENY": "opus-4",
+    "IS_SANDBOX": "1"
   },
   "hooks": {
     "SessionStart": [
