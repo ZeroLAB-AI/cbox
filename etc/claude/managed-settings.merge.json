@@ -10,8 +10,7 @@
       "mcp__codex-terra-light",
       "mcp__codex-sol"
     ],
-    "deny": [],
-    "disableBypassPermissionsMode": "disable"
+    "deny": []
   },
   "hooks": {
     "PreToolUse": [
