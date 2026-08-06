@@ -293,43 +293,34 @@ import json
 import sys
 
 data = json.load(open(sys.argv[1]))
-claude_only = sorted(
+avail = {
+    n: sorted(s["_cbox"].get("available_to") or [])
+    for n, s in data.items()
+    if isinstance(s, dict) and isinstance(s.get("_cbox"), dict)
+}
+codex_tiers = ["codex-luna", "codex-sol", "codex-terra", "codex-terra-light"]
+expected_avail = {
+    "codex-luna": ["claude", "hermes"],
+    "codex-sol": ["claude", "hermes"],
+    "codex-terra": ["claude", "hermes"],
+    "codex-terra-light": ["claude", "hermes"],
+    "ask-claude": ["codex"],
+    "local-qwen": ["claude", "codex", "hermes"],
+    "hermes-local": ["claude", "codex", "hermes"],
+    "container-exec": ["claude", "codex", "hermes"],
+}
+assert avail == expected_avail, avail
+gated = sorted(
     n for n, s in data.items()
     if isinstance(s, dict)
     and isinstance(s.get("_cbox"), dict)
-    and s["_cbox"].get("available_to") == ["claude"]
-)
-codex_only = sorted(
-    n for n, s in data.items()
-    if isinstance(s, dict)
-    and isinstance(s.get("_cbox"), dict)
-    and s["_cbox"].get("available_to") == ["codex"]
-)
-gated_multi = sorted(
-    n for n, s in data.items()
-    if isinstance(s, dict)
-    and isinstance(s.get("_cbox"), dict)
-    and s["_cbox"].get("available_to") == ["claude", "codex"]
     and s["_cbox"].get("enabled_when_env")
 )
-claude_only_gated = sorted(
-    n for n, s in data.items()
-    if isinstance(s, dict)
-    and isinstance(s.get("_cbox"), dict)
-    and s["_cbox"].get("available_to") == ["claude"]
-    and s["_cbox"].get("enabled_when_env")
-)
-expected_claude = ["codex-luna", "codex-sol", "codex-terra", "codex-terra-light"]
-expected_codex = ["ask-claude"]
-expected_gated_multi = ["local-qwen", "hermes-local"]
-expected_claude_only_gated = []
-assert claude_only == sorted(expected_claude + expected_claude_only_gated), claude_only
-assert codex_only == expected_codex, codex_only
-assert gated_multi == sorted(expected_gated_multi), gated_multi
-assert claude_only_gated == expected_claude_only_gated, claude_only_gated
-assert sorted(data.keys()) == sorted(expected_claude + expected_codex + expected_gated_multi + expected_claude_only_gated), sorted(data.keys())
+expected_gated = sorted(["local-qwen", "hermes-local", "container-exec"])
+assert gated == expected_gated, gated
+assert sorted(data.keys()) == sorted(expected_avail.keys()), sorted(data.keys())
 ' "$INSTALL_DIR/etc/mcp/delegates.json"
-  echo "PASS: delegates.json reproduces the current default set exactly (4 claude-only tiers, ask-claude codex-only, local-qwen and hermes-local env-gated claude+codex, no other new entry)"
+  echo "PASS: delegates.json reproduces the current default set exactly (4 codex tiers available to claude+hermes, ask-claude codex-only, local-qwen/container-exec/hermes-local claude+codex+hermes env-gated, no other new entry)"
 }
 
 test_render_refuses_codex_named_non_codex_mcp_adapter() {
@@ -591,6 +582,166 @@ print(" ".join(gates))
   echo "PASS: every enabled_when_env gate in delegates.json is exported at least once (directly, or via a _cbox_reg_export_vars call whose generated export list actually contains the gate) reachable from both setup.sh and cbox"
 }
 
+test_hermes_target_default_render_carries_opted_in_entries_only() {
+  local rendered="$TMPBASE/hermes_default.json"
+  env -u CBOX_HERMES_DELEGATE -u CBOX_LOCAL_MODEL_URL -u CBOX_LOCAL_MODEL_NAME \
+    -u CBOX_CONTAINER_EXEC_TOOL \
+    python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
+    "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off hermes > "$rendered"
+  python3 -c '
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+servers = json.load(open(sys.argv[2]))
+codex_tiers = ["codex-luna", "codex-sol", "codex-terra", "codex-terra-light"]
+gated_off = ["hermes-local", "local-qwen", "container-exec"]
+assert sorted(data.keys()) == sorted(codex_tiers + gated_off), data.keys()
+for tier in codex_tiers:
+    spec = data[tier]
+    cbox = servers[tier]["_cbox"]
+    assert spec["command"] == "python3", (tier, spec)
+    args = spec["args"]
+    assert args[0].endswith("/codex_mcp_shim.py"), (tier, args)
+    assert args[1:9] == [
+        "--tier", tier, "--model", cbox["model"],
+        "--effort", cbox["model_reasoning_effort"], "--progress", "off",
+    ], (tier, args)
+    assert args[9:] == ["--", "codex", "mcp-server"], (tier, args)
+    assert "timeout" not in spec, (tier, spec)
+hl = data["hermes-local"]
+assert hl["command"] == "python3", hl
+assert hl["args"] == ["/home/x/.claude/hooks/hermes_delegate_mcp.py"], hl
+assert hl["enabled"] is False, hl
+assert hl["timeout"] == 3600, hl
+assert hl["connect_timeout"] == 30, hl
+lq = data["local-qwen"]
+assert lq["enabled"] is False, lq
+ce = data["container-exec"]
+assert ce["enabled"] is False, ce
+' "$rendered" "$INSTALL_DIR/etc/mcp/delegates.json"
+  echo "PASS: hermes target default render carries exactly the opted-in entries (4 codex tiers shim-wrapped, hermes-local/local-qwen/container-exec disabled since their gates are unset) and nothing else"
+}
+
+test_hermes_target_entry_absent_without_available_to() {
+  local fixture="$TMPBASE/hermes_no_avail.json"
+  echo '{"fixture-tool":{"type":"stdio","command":"fixture-tool-bin","args":["--serve"],"_cbox":{"adapter":"stdio-mcp","available_to":["claude","codex"],"backend":"fixture-tool-bin","side_effects":["none"]}}}' > "$fixture"
+  local rendered="$TMPBASE/hermes_no_avail_out.json"
+  python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$fixture" fixture-tool "/home/x/.claude/hooks" off hermes > "$rendered"
+  python3 -c '
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+assert data == {}, data
+' "$rendered"
+  echo "PASS: an entry not naming hermes in available_to never appears in the hermes target render"
+}
+
+test_hermes_target_shape_and_timeout() {
+  local fixture="$TMPBASE/hermes_shape.json"
+  echo '{"fixture-tool":{"type":"stdio","command":"fixture-tool-bin","args":["--serve"],"env":{"FIXTURE_TOOL_MODE":"test"},"startup_timeout_sec":30,"tool_timeout_sec":1800,"_cbox":{"adapter":"stdio-mcp","available_to":["claude","hermes"],"backend":"fixture-tool-bin","side_effects":["none"]}}}' > "$fixture"
+  local rendered="$TMPBASE/hermes_shape_out.json"
+  python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$fixture" fixture-tool "/home/x/.claude/hooks" off hermes > "$rendered"
+  python3 -c '
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+assert "fixture-tool" in data, data.keys()
+spec = data["fixture-tool"]
+assert spec == {
+    "command": "fixture-tool-bin",
+    "args": ["--serve"],
+    "env": {"FIXTURE_TOOL_MODE": "test"},
+    "timeout": 1800,
+    "connect_timeout": 30,
+}, spec
+' "$rendered"
+  echo "PASS: hermes target renders the mcp_servers shape (command/args/env) and carries tool_timeout_sec through as timeout"
+}
+
+test_hermes_target_gated_off_entry_renders_enabled_false() {
+  local fixture="$TMPBASE/hermes_gate.json"
+  echo '{"fixture-tool":{"type":"stdio","command":"fixture-tool-bin","args":["--serve"],"tool_timeout_sec":60,"_cbox":{"adapter":"stdio-mcp","available_to":["claude","hermes"],"backend":"fixture-tool-bin","side_effects":["none"],"enabled_when_env":"CBOX_FIXTURE_TOOL_GATE"}}}' > "$fixture"
+  local rendered="$TMPBASE/hermes_gate_out.json"
+  env -u CBOX_FIXTURE_TOOL_GATE \
+    python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$fixture" all "/home/x/.claude/hooks" off hermes > "$rendered"
+  python3 -c '
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+assert "fixture-tool" in data, data.keys()
+spec = data["fixture-tool"]
+assert spec["enabled"] is False, spec
+assert spec["timeout"] == 60, spec
+' "$rendered"
+  echo "PASS: an entry gated by enabled_when_env with an unmet gate renders with hermes native enabled: false instead of being omitted"
+
+  local rendered_on="$TMPBASE/hermes_gate_on_out.json"
+  CBOX_FIXTURE_TOOL_GATE=on \
+    python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$fixture" all "/home/x/.claude/hooks" off hermes > "$rendered_on"
+  python3 -c '
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+spec = data["fixture-tool"]
+assert "enabled" not in spec, spec
+' "$rendered_on"
+  echo "PASS: the same entry with its gate satisfied carries no enabled key (hermes default-enabled applies)"
+}
+
+test_hermes_target_explicit_unconfigured_gate_still_errors() {
+  local fixture="$TMPBASE/hermes_gate_explicit.json"
+  echo '{"fixture-tool":{"type":"stdio","command":"fixture-tool-bin","args":["--serve"],"_cbox":{"adapter":"stdio-mcp","available_to":["claude","hermes"],"backend":"fixture-tool-bin","side_effects":["none"],"enabled_when_env":"CBOX_FIXTURE_TOOL_GATE"}}}' > "$fixture"
+  local err="$TMPBASE/hermes_gate_explicit.err"
+  if env -u CBOX_FIXTURE_TOOL_GATE \
+    python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$fixture" fixture-tool "/home/x/.claude/hooks" off hermes \
+    >/dev/null 2>"$err"; then
+    _fail "render_mcp.py accepted an explicit hermes selection of a gated entry with an unmet gate"
+  fi
+  grep -q "explicitly selected but CBOX_FIXTURE_TOOL_GATE is not set" "$err" \
+    || _fail "render_mcp.py refusal message missing for explicit unconfigured hermes selection"
+  echo "PASS: an explicit hermes selection of an unconfigured gated entry still errors loudly (enabled:false only applies to the implicit selection=all case)"
+}
+
+test_hermes_target_claude_cli_adapter_renders() {
+  local fixture="$TMPBASE/hermes_claude_cli.json"
+  echo '{"ask-claude":{"_cbox":{"adapter":"claude-cli","available_to":["codex","hermes"],"backend":"claude","side_effects":["spawns-claude-subprocess"],"command":"python3","script":"ask_claude_mcp.py","startup_timeout_sec":30,"tool_timeout_sec":3600}}}' > "$fixture"
+  local rendered="$TMPBASE/hermes_claude_cli_out.json"
+  python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$fixture" ask-claude "/home/x/.claude/hooks" off hermes > "$rendered"
+  python3 -c '
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+spec = data["ask-claude"]
+assert spec["command"] == "python3", spec
+assert spec["args"] == ["/home/x/.claude/hooks/ask_claude_mcp.py"], spec
+assert spec["timeout"] == 3600, spec
+assert spec["connect_timeout"] == 30, spec
+' "$rendered"
+  echo "PASS: the claude-cli adapter (ask-claude shape) also renders for the hermes target with timeout carried through"
+}
+
+test_claude_and_codex_renders_unaffected_by_hermes_target() {
+  local claude_rendered="$TMPBASE/parity_claude.json"
+  local codex_rendered="$TMPBASE/parity_codex.json"
+  python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$claude_rendered"
+  python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off codex > "$codex_rendered"
+  local got_claude got_codex
+  got_claude="$(sha256sum "$claude_rendered" | awk '{print $1}')"
+  got_codex="$(sha256sum "$codex_rendered" | awk '{print $1}')"
+  local want_claude want_codex
+  want_claude="f009635ceb81572436f83d7d35c84be582a040e2e8c38f7380294b44f63af064"
+  want_codex="ddde00b645e9cf9d74f0dd7611f36ad4543caee7dcf8273d8e36715edf911ca3"
+  [ "$got_claude" = "$want_claude" ] || _fail "claude target render changed after adding the hermes target (got $got_claude want $want_claude)"
+  [ "$got_codex" = "$want_codex" ] || _fail "codex target render changed after adding the hermes target (got $got_codex want $want_codex)"
+  echo "PASS: claude and codex renders are byte-identical to before the hermes target was added"
+}
+
 test_render_byte_identity_progress_off
 test_render_byte_identity_progress_on
 test_seed_shape_byte_identity
@@ -618,4 +769,11 @@ test_fixture_stdio_mcp_absent_for_codex
 test_fixture_stdio_mcp_invisible_to_boot_gate
 test_fixture_selection_expansion_works
 test_enabled_when_env_gates_are_exported_everywhere
+test_hermes_target_default_render_carries_opted_in_entries_only
+test_hermes_target_entry_absent_without_available_to
+test_hermes_target_shape_and_timeout
+test_hermes_target_gated_off_entry_renders_enabled_false
+test_hermes_target_explicit_unconfigured_gate_still_errors
+test_hermes_target_claude_cli_adapter_renders
+test_claude_and_codex_renders_unaffected_by_hermes_target
 echo "all render_mcp golden tests passed"

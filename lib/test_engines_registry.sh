@@ -212,7 +212,7 @@ install="$(python3 "$PY" get "$REG" hermes install)"
 case "|$ib_allow|" in *"|hermes|"*) ;; *) _fail "hermes must be in install-bins.sh allowlist (install=bins-volume): $ib_allow" ;; esac
 _ok "claude+codex+hermes registry bin/install fields agree with install-bins/entrypoint reality"
 
-sec_binaries="$(grep -oE "^SEC_VARS\[binaries\]='[^']*'" "$v_sections" | sed -E "s/^SEC_VARS\[binaries\]='//; s/'\$//")"
+sec_binaries="$(. "$v_sections"; sec_get SEC_VARS binaries)"
 for eng in claude codex; do
   vv="$(python3 "$PY" get "$REG" "$eng" version_vars | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)))')"
   for v in $vv; do

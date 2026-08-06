@@ -86,9 +86,45 @@ cat > "$DUMP_HARNESS" << 'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 . "$1"
-for arr in SECTIONS SEC_TITLE SEC_DESC SEC_VARS SEC_APPLY SEC_PROFILE SEC_SCOPE SEC_DEPS SEC_DEP_TEXT SEC_DOCTOR_ROWS DOCTOR_EXTRA_ROWS; do
+
+_declare_p_escape() {
+  local v="$1"
+  case "$v" in
+    *[$'\x01'-$'\x1f']*)
+      printf 'dump: value contains a control character; the synthetic declare -A form cannot mirror the ANSI-C $'"'"'...'"'"' quoting real declare -p emits for such values, so the parity gate would silently lose data on one side. Add control-character-safe quoting to _synth_assoc before allowing such a value into the registry.\n' >&2
+      exit 1
+      ;;
+  esac
+  v="${v//\\/\\\\}"
+  v="${v//\"/\\\"}"
+  v="${v//\$/\\\$}"
+  v="${v//\`/\\\`}"
+  printf '%s' "$v"
+}
+
+_synth_assoc() {
+  local arr="$1" k line
+  line="declare -A $arr=("
+  while IFS= read -r k; do
+    line+="[$k]=\"$(_declare_p_escape "$(sec_get "$arr" "$k")")\" "
+  done < <(sec_keys "$arr")
+  line+=")"
+  printf '%s\n' "$line"
+}
+
+for arr in SECTIONS DOCTOR_EXTRA_ROWS; do
   declare -p "$arr" 2>/dev/null || true
 done
+
+if declare -F sec_get >/dev/null 2>&1; then
+  for arr in SEC_TITLE SEC_DESC SEC_VARS SEC_APPLY SEC_PROFILE SEC_SCOPE SEC_DEPS SEC_DEP_TEXT SEC_DOCTOR_ROWS; do
+    _synth_assoc "$arr"
+  done
+else
+  for arr in SEC_TITLE SEC_DESC SEC_VARS SEC_APPLY SEC_PROFILE SEC_SCOPE SEC_DEPS SEC_DEP_TEXT SEC_DOCTOR_ROWS; do
+    declare -p "$arr" 2>/dev/null || true
+  done
+fi
 EOF
 
 NORMALIZE_PY="$TMPBASE/normalize.py"
@@ -133,42 +169,65 @@ ADOPTION_DELTA_PY="$TMPBASE/adoption_delta.py"
 cat > "$ADOPTION_DELTA_PY" << 'EOF'
 import ast, sys
 
-NEW_SECTIONS = ["autoupdate", "dns", "clipboard"]
+NEW_SECTIONS = ["autoupdate", "dns", "clipboard", "kernel-lang"]
 DELTA = {
     "SEC_TITLE": {
         "autoupdate": "Engine autoupdate",
         "dns": "DNS",
         "clipboard": "Clipboard image bridge",
+        "kernel-lang": "Conduct kernel language rule",
     },
     "SEC_DESC": {
         "autoupdate": "Host-side engine autoupdate for channel targets (claude stable/latest, codex latest, hermes latest): re-runs the vendor installer once the TTL elapses.",
         "dns": "DNS resolution inside the container when egress is enabled: Docker embedded DNS, public resolvers, or a host-stable stub resolver IP.",
         "clipboard": "Host clipboard image bridge over a unix socket answering Claude Code's Ctrl+V image paste inside the container.",
+        "kernel-lang": "Two-part language rule rendered into the deployed conduct kernel: reason in one language, answer in another. Off (output language empty) by default - the rule is not rendered until an output language is set.",
     },
     "SEC_VARS": {
         "autoupdate": "CBOX_AUTOUPDATE CBOX_AUTOUPDATE_TTL_HOURS",
         "dns": "CBOX_DNS_MODE CBOX_DNS_SERVERS CBOX_DNS_STUB_IP",
         "clipboard": "CBOX_CLIPBOARD_MODE",
+        "kernel-lang": "CBOX_KERNEL_LANG_OUTPUT CBOX_KERNEL_LANG_REASONING",
     },
     "SEC_APPLY": {
         "autoupdate": "none",
         "dns": "recreate",
         "clipboard": "recreate",
+        "kernel-lang": "none",
     },
     "SEC_PROFILE": {
         "autoupdate": "skip",
         "dns": "skip",
         "clipboard": "skip",
+        "kernel-lang": "skip",
     },
     "SEC_SCOPE": {
         "autoupdate": "project",
         "dns": "project",
         "clipboard": "project",
+        "kernel-lang": "project",
     },
     "SEC_DOCTOR_ROWS": {
         "autoupdate": "",
         "dns": "",
         "clipboard": "",
+        "kernel-lang": "",
+    },
+}
+
+MODIFIED = {
+    "SEC_VARS": {
+        "netaccess": "CBOX_NETACCESS_MODE CBOX_NETACCESS_APPLIED CBOX_NETACCESS_SCOPE CBOX_NETACCESS_NETWORKS CBOX_NETACCESS_CIDRS CBOX_NETACCESS_SOCKS_PORT CBOX_NETACCESS_EXEC_MODE CBOX_NETACCESS_EXEC_WORKSPACE_GUARD CBOX_NETACCESS_EXEC_TIMEOUT CBOX_NETACCESS_EXEC_MAX_BYTES CBOX_CONTAINER_EXEC_TOOL",
+        "mounts": "CBOX_CLAUDE_MODE CBOX_CLAUDE_PATH CBOX_CLAUDE_BACKUP CBOX_CODEX_MODE CBOX_CODEX_PATH CBOX_CODEX_BACKUP CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG",
+        "autoresume": "CBOX_LIMIT_AUTORESUME CBOX_SESSION_MULTIPLEX CBOX_SESSION_BROKER_MODE CBOX_SSHD_LISTEN_ADDR CBOX_SSHD_PORT CBOX_LIMIT_RESUME_DELAY CBOX_LIMIT_RESUME_PROMPT CBOX_LIMIT_RESUME_STAGGER CBOX_LIMIT_RESUME_MAX_PER_DAY",
+        "wireguard": "CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE CBOX_WG_FORWARDS",
+    },
+    "SEC_DESC": {
+        "autoresume": "Wrap interactive sessions in tmux and let a per-container watchdog type the resume prompt after a usage-limit window resets (isolated session scope + claude mount only). Also carries the in-container sshd remote-attach feature (disabled by default): three layers - WireGuard, an ssh key, and this container's access level - gate list/attach/spawn against the tmux sessions the wrap creates.",
+    },
+    "SEC_DOCTOR_ROWS": {
+        "netaccess": "netaccess container-exec container-exec-tool",
+        "autoresume": "session-broker",
     },
 }
 
@@ -186,6 +245,10 @@ for name, kind, payload in old:
         payload = payload + NEW_SECTIONS
     elif name in DELTA and kind == "assoc":
         payload = sorted(payload + list(DELTA[name].items()))
+    if name in MODIFIED and kind == "assoc":
+        payload = [
+            (k, MODIFIED[name].get(k, v)) for k, v in payload
+        ]
     expected.append((name, kind, payload))
 
 if expected != new:
@@ -198,9 +261,9 @@ if expected != new:
 EOF
 
 python3 "$ADOPTION_DELTA_PY" "$TMPBASE/old_norm.txt" "$TMPBASE/new_norm.txt" 2> "$TMPBASE/parity_diff.txt" \
-  || _fail "SEC_* arrays differ from the pre-registry snapshot by MORE than the declared shadow-setting adoption (sections autoupdate/dns/clipboard with their six variables):
+  || _fail "SEC_* arrays differ from the pre-registry snapshot by MORE than the declared shadow-setting adoption (sections autoupdate/dns/clipboard with their six variables, plus the netaccess CBOX_CONTAINER_EXEC_TOOL variable/doctor-row addition, plus the mounts CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG variable addition, plus the autoresume CBOX_SESSION_MULTIPLEX variable addition, plus the wireguard CBOX_WG_FORWARDS variable addition, plus the autoresume CBOX_SESSION_BROKER_MODE variable and session-broker doctor-row addition, plus the autoresume CBOX_SSHD_LISTEN_ADDR and CBOX_SSHD_PORT variable additions and updated SEC_DESC for the in-container sshd ForceCommand entry, plus the new kernel-lang section with its two CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING variables):
 $(cat "$TMPBASE/parity_diff.txt")"
-_ok "parity gate: generated sections.sh equals the pre-registry snapshot plus exactly the declared adoption delta (autoupdate/dns/clipboard sections, six variables, skip profile, project scope, empty doctor rows) - nothing else moved"
+_ok "parity gate: generated sections.sh equals the pre-registry snapshot plus exactly the declared adoption delta (autoupdate/dns/clipboard sections, six variables, skip profile, project scope, empty doctor rows; plus CBOX_CONTAINER_EXEC_TOOL added to the existing netaccess section and its container-exec-tool doctor row; plus CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG added to the existing mounts section; plus CBOX_SESSION_MULTIPLEX added to the existing autoresume section; plus CBOX_WG_FORWARDS added to the existing wireguard section; plus CBOX_SESSION_BROKER_MODE added to the existing autoresume section and its session-broker doctor row; plus CBOX_SSHD_LISTEN_ADDR and CBOX_SSHD_PORT added to the existing autoresume section with its SEC_DESC updated for sshd; plus the new kernel-lang section (CBOX_KERNEL_LANG_OUTPUT, CBOX_KERNEL_LANG_REASONING), apply_class none, skip profile, project scope, empty doctor rows) - nothing else moved"
 
 NAMES="$(python3 "$PY" sections "$REG")"
 [ -n "$NAMES" ] || _fail "sections command returned nothing"
@@ -209,8 +272,8 @@ _ok "sections command lists section ids"
 VARS="$(python3 "$PY" vars "$REG")"
 [ -n "$VARS" ] || _fail "vars command returned nothing"
 VAR_COUNT="$(printf '%s\n' "$VARS" | grep -c .)"
-[ "$VAR_COUNT" -eq 96 ] || _fail "expected 96 variables in the registry, got $VAR_COUNT"
-_ok "vars command lists all 96 variables"
+[ "$VAR_COUNT" -eq 105 ] || _fail "expected 105 variables in the registry, got $VAR_COUNT"
+_ok "vars command lists all 105 variables"
 
 W="$TMPBASE/reg"
 mkdir -p "$W"
@@ -364,9 +427,10 @@ json.dump(data, open(sys.argv[2], "w"))
 PYEOF
 python3 "$PY" validate "$W/two_dep_section.json" >/dev/null 2>&1 \
   || _fail "a section with two dependencies failed to validate"
-TWO_DEP_OUT="$(python3 "$GEN" "$W/two_dep_section.json")"
-echo "$TWO_DEP_OUT" | grep -qx "SEC_DEPS\[gpu\]='disable:no-cdi dictate:hooks'" \
-  || _fail "generator does not space-join a section's multiple dependency tokens into one SEC_DEPS assignment: $(echo "$TWO_DEP_OUT" | grep 'SEC_DEPS\[gpu\]')"
-_ok "a section with two dependencies generates one space-joined SEC_DEPS assignment"
+python3 "$GEN" "$W/two_dep_section.json" "$W/two_dep_sections.sh" || _fail "generator crashed on the two-dependency section"
+TWO_DEP_VAL="$(. "$W/two_dep_sections.sh"; sec_get SEC_DEPS gpu)"
+[ "$TWO_DEP_VAL" = 'disable:no-cdi dictate:hooks' ] \
+  || _fail "generator does not space-join a section's multiple dependency tokens into one SEC_DEPS entry: got [$TWO_DEP_VAL]"
+_ok "a section with two dependencies generates one space-joined SEC_DEPS entry"
 
 echo "PASS: all settings_registry checks"

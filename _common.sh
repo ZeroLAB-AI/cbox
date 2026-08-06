@@ -4,6 +4,10 @@ if [ -n "${_CBOX_COMMON_LOADED:-}" ]; then
 fi
 _CBOX_COMMON_LOADED=1
 
+_CBOX_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$_CBOX_COMMON_DIR/lib/portable.sh" ] && . "$_CBOX_COMMON_DIR/lib/portable.sh"
+unset _CBOX_COMMON_DIR
+
 die() {
   printf 'cbox: error: %s\n' "$*" >&2
   exit 1
@@ -12,19 +16,20 @@ die() {
 _cbox_workspace_root() {
   local r
   if r="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)"; then
-    r="$(realpath "$r")"
+    r="$(_cbox_realpath "$r")"
   else
-    r="$(realpath "$PWD")"
+    r="$(_cbox_realpath "$PWD")"
   fi
   [ "$r" = "/" ] && return 1
-  [ "$r" = "$(realpath "$HOME")" ] && return 1
-  mountpoint -q "$r" 2>/dev/null && return 1
+  [ "$r" = "$(_cbox_realpath "$HOME")" ] && return 1
+  _cbox_ismount "$r" 2>/dev/null && return 1
   printf '%s' "$r"
 }
 
 _cbox_path_hash() {
   local root="$1" sha
-  sha="$(printf '%s' "$root" | sha256sum)"
+  sha="$(printf '%s' "$root" | _cbox_sha256)" || sha=""
+  [ -n "$sha" ] || die "path hash failed for '$root' (is python3 on PATH?) - refusing to derive a project directory from an empty hash"
   printf '%s' "${sha:0:12}"
 }
 
@@ -48,14 +53,15 @@ _cbox_is_rootless_docker() {
 }
 
 _cbox_tpl_sha() {
-  cat "$INSTALL_DIR/_common.sh" "$INSTALL_DIR/templates/generators.sh" | sha256sum | awk '{print $1}'
+  cat "$INSTALL_DIR/_common.sh" "$INSTALL_DIR/templates/generators.sh" | _cbox_sha256
 }
 
 mcp_all_names() {
+  local target="${1:-claude}"
   local etc="${ETC_DIR:-$INSTALL_DIR/etc}"
   [ -f "$etc/mcp/delegates.json" ] || return 0
   local rendered
-  rendered="$(python3 "$etc/mcp/render_mcp.py" "$etc/mcp/delegates.json" all "$HOME/.claude/hooks" off claude)" \
+  rendered="$(python3 "$etc/mcp/render_mcp.py" "$etc/mcp/delegates.json" all "$HOME/.claude/hooks" off "$target")" \
     || die "mcp_all_names: render_mcp.py rejected $etc/mcp/delegates.json (malformed registry entry - see stderr above)"
   python3 -c '
 import json

@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import re
 import selectors
 import shutil
@@ -20,6 +21,10 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 MAX_REQUEST = 1024 * 1024
 MAX_DOCKER_JSON = 8 * 1024 * 1024
 DANGEROUS_CAPS = {"ALL", "SYS_ADMIN", "SYS_MODULE", "SYS_RAWIO", "SYS_PTRACE", "DAC_READ_SEARCH"}
+
+
+def _is_darwin():
+    return platform.system() == "Darwin"
 
 
 def safe_text(raw):
@@ -68,9 +73,13 @@ def docker_json(docker_bin, args):
 def network_members(docker_bin, networks):
     members = {}
     for network in networks:
-        value = docker_json(docker_bin, ["network", "inspect", network])
+        try:
+            value = docker_json(docker_bin, ["network", "inspect", network])
+        except Exception as exc:
+            sys.stderr.write("cbox-container-exec: skipping network %s - %s\n" % (network, safe_text(str(exc))[:200]))
+            continue
         if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
-            raise RuntimeError("invalid network inspect response")
+            continue
         containers = value[0].get("Containers")
         if not isinstance(containers, dict):
             continue
@@ -299,21 +308,45 @@ class Handler:
         op = request.get("op")
         items = scoped_containers(self.docker_bin, self.networks, self.workspace_roots)
         if op == "list":
+            audit(self.audit_path, {"op": "list", "outcome": "ok", "count": len(items)})
             return {"ok": True, "containers": sorted(items.values(), key=lambda x: x.get("name") or "")}
         if op != "exec":
+            audit(self.audit_path, {"op": safe_text(op)[:40], "outcome": "denied", "reason": "unsupported operation"})
             raise ValueError("unsupported operation")
-        item = resolve_container(items, request.get("container"))
+        try:
+            item = resolve_container(items, request.get("container"))
+        except ValueError as exc:
+            audit(self.audit_path, {"op": "exec", "outcome": "denied", "reason": safe_text(str(exc))[:200]})
+            raise
         if item.get("blockedReason"):
+            audit(self.audit_path, {"op": "exec", "container": item["id"], "name": item.get("name"),
+                                    "outcome": "denied", "reason": safe_text(str(item["blockedReason"]))[:200]})
             raise PermissionError(item["blockedReason"])
-        argv = validate_argv(request.get("argv"))
-        cwd = request.get("cwd")
-        if cwd is not None and (not isinstance(cwd, str) or not cwd.startswith("/") or "\x00" in cwd or len(cwd) > 1024):
-            raise ValueError("cwd must be an absolute path")
-        requested_timeout = request.get("timeout", self.timeout)
-        if not isinstance(requested_timeout, int) or requested_timeout < 1:
-            raise ValueError("invalid timeout")
+        try:
+            argv = validate_argv(request.get("argv"))
+            cwd = request.get("cwd")
+            if cwd is not None and (not isinstance(cwd, str) or not cwd.startswith("/") or "\x00" in cwd or len(cwd) > 1024):
+                raise ValueError("cwd must be an absolute path")
+            requested_timeout = request.get("timeout", self.timeout)
+            if not isinstance(requested_timeout, int) or requested_timeout < 1:
+                raise ValueError("invalid timeout")
+        except ValueError as exc:
+            audit(self.audit_path, {"op": "exec", "container": item["id"], "name": item.get("name"),
+                                    "outcome": "denied", "reason": safe_text(str(exc))[:200]})
+            raise
         timeout = min(requested_timeout, self.timeout)
         argv_hash = hashlib.sha256(json.dumps(argv, ensure_ascii=True).encode("ascii")).hexdigest()[:16]
+        audit(self.audit_path, {
+            "op": "exec",
+            "container": item["id"],
+            "name": item.get("name"),
+            "argv0": argv[0],
+            "argc": len(argv),
+            "argvHash": argv_hash,
+            "cwd": (cwd or "")[:256] or None,
+            "timeout": timeout,
+            "outcome": "starting",
+        })
         result = run_exec(self.docker_bin, item["id"], argv, cwd, timeout, self.max_bytes)
         audit(self.audit_path, {
             "op": "exec",
@@ -322,6 +355,9 @@ class Handler:
             "argv0": argv[0],
             "argc": len(argv),
             "argvHash": argv_hash,
+            "cwd": (cwd or "")[:256] or None,
+            "timeout": timeout,
+            "outcome": "ran",
             "rc": result.get("rc"),
             "timedOut": result.get("timedOut"),
             "truncated": result.get("truncated"),
@@ -354,9 +390,23 @@ def write_response(conn, value):
     conn.sendall((json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
 
 
+def _darwin_parent_start(parent_pid):
+    try:
+        out = subprocess.check_output(
+            ["ps", "-p", str(parent_pid), "-o", "lstart="],
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return out.decode("utf-8", "replace").strip()
+
+
 def parent_alive(parent_pid, parent_start):
     if parent_pid <= 0:
         return True
+    if _is_darwin():
+        current = _darwin_parent_start(parent_pid)
+        return bool(current) and current == parent_start.strip()
     try:
         with open("/proc/%d/stat" % parent_pid, "r", encoding="ascii") as fh:
             raw = fh.read()
@@ -364,6 +414,17 @@ def parent_alive(parent_pid, parent_start):
         return len(tail) > 19 and tail[19] == parent_start
     except (OSError, ValueError):
         return False
+
+
+def _darwin_peer_uid(conn):
+    if not hasattr(socket, "SOL_LOCAL") or not hasattr(socket, "LOCAL_PEERCRED"):
+        raise RuntimeError("darwin peercred constants unavailable")
+    xucred = conn.getsockopt(socket.SOL_LOCAL, socket.LOCAL_PEERCRED, 128)
+    header = struct.calcsize("IIh")
+    if len(xucred) < header:
+        raise RuntimeError("short xucred from LOCAL_PEERCRED")
+    _, cr_uid, _ = struct.unpack("IIh", xucred[:header])
+    return cr_uid
 
 
 def serve(sock_dir, parent_pid, parent_start, handler):
@@ -386,7 +447,11 @@ def serve(sock_dir, parent_pid, parent_start, handler):
                 continue
             with conn:
                 try:
-                    if hasattr(socket, "SO_PEERCRED"):
+                    if _is_darwin():
+                        peer_uid = _darwin_peer_uid(conn)
+                        if peer_uid != os.getuid():
+                            raise PermissionError("peer uid mismatch")
+                    elif hasattr(socket, "SO_PEERCRED"):
                         peer = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
                         _, peer_uid, _ = struct.unpack("3i", peer)
                         if peer_uid != os.getuid():
@@ -424,7 +489,10 @@ def main(argv=None):
         raise ValueError("invalid network name")
     if args.timeout < 1 or args.timeout > 3600 or args.max_bytes < 1024 or args.max_bytes > 16777216:
         raise ValueError("invalid bridge limit")
-    if not args.parent_start.isdigit():
+    if _is_darwin():
+        if not args.parent_start.strip():
+            raise ValueError("invalid parent start time")
+    elif not args.parent_start.isdigit():
         raise ValueError("invalid parent start time")
     docker_bin = args.docker_bin
     if os.path.sep not in docker_bin:

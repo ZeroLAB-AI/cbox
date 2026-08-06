@@ -327,6 +327,7 @@ EENV="$TMPBASE/exec-env.sh"
 {
   echo 'set -uo pipefail'
   echo '_cbox_netaccess_active() { [ "${CBOX_NETACCESS_MODE:-off}" != off ]; }'
+  awk '/^_cbox_proxy_internal_alias\(\) \{/,/^}$/' "$INSTALL_DIR/templates/generators.sh"
   awk '/^_cbox_netaccess_socks_exec_env\(\) \{/,/^}$/' "$INSTALL_DIR/cbox"
 } > "$EENV"
 [ -s "$EENV" ] || fail "could not extract _cbox_netaccess_socks_exec_env from cbox"
@@ -392,5 +393,30 @@ fi
 grep -qF 'nc -z -w 2 \"$$ip\" 1080' "$ISOD5/eff/docker-compose.yml" \
   || fail "a malformed SOCKS port must fall back to 1080 in the healthcheck, not be embedded raw"
 _ok_render "healthcheck sanitizes a malformed CBOX_NETACCESS_SOCKS_PORT (no shell injection, falls back to 1080)"
+
+VLF="$TMPBASE/verify_listener.sh"
+{
+  echo 'set -uo pipefail'
+  echo '_cbox_netaccess_active() { [ "${CBOX_NETACCESS_MODE:-off}" != off ]; }'
+  echo '_fake_exec_prefix() { echo cid123; }'
+  echo 'docker() { echo "docker $*" > "$DOCKER_CMD_LOG"; return 1; }'
+  awk '/^_cbox_netaccess_verify_listener\(\) \{/,/^}$/' "$INSTALL_DIR/cbox"
+} > "$VLF"
+[ -s "$VLF" ] || fail "could not extract _cbox_netaccess_verify_listener from cbox"
+grep -q '_cbox_netaccess_verify_listener' "$VLF" || fail "extraction of _cbox_netaccess_verify_listener came up empty"
+
+DOCKER_CMD_LOG="$TMPBASE/docker-cmd.log"
+: > "$DOCKER_CMD_LOG"
+DOCKER_CMD_LOG="$DOCKER_CMD_LOG" bash -c '
+  . "$1"
+  CBOX_NETACCESS_MODE=socks CBOX_NETACCESS_SOCKS_PORT='"'"'1081; touch /pwned'"'"'
+  _cbox_netaccess_verify_listener "_fake_exec_prefix" >/dev/null 2>&1
+' _ "$VLF" || true
+vl_cmd="$(cat "$DOCKER_CMD_LOG")"
+if printf '%s' "$vl_cmd" | grep -qF 'touch /pwned'; then
+  fail "_cbox_netaccess_verify_listener must sanitize CBOX_NETACCESS_SOCKS_PORT before it reaches the docker exec sh -c string (injected shell leaked through)"
+fi
+printf '%s' "$vl_cmd" | grep -qF ' 1080' || fail "a malformed CBOX_NETACCESS_SOCKS_PORT must fall back to 1080 in the listener probe, got '$vl_cmd'"
+echo "ok: _cbox_netaccess_verify_listener sanitizes a malformed CBOX_NETACCESS_SOCKS_PORT before building the docker exec probe string"
 
 echo "PASS: netaccess runtime rendering"

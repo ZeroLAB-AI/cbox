@@ -75,6 +75,28 @@
             "statusMessage": "commit guard"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/rm_glob_guard.py",
+            "timeout": 10,
+            "statusMessage": "rm-glob guard"
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|Workflow",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/spawn_gate.py",
+            "timeout": 15,
+            "statusMessage": "spawn gate"
+          }
+        ]
       }
     ],
     "PostToolUse": [

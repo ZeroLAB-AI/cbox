@@ -41,6 +41,9 @@ _cbox_reg_validate_var_dispatch() {
     CBOX_CODEX_BACKUP)
       _cbox_val_kind_enum "$val" 'y' 'c' 'n' || return 1
       ;;
+    CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG)
+      _cbox_val_kind_enum_or_empty "$val" 'on' 'off' || return 1
+      ;;
     CBOX_WORKSPACES)
       _cbox_val_kind_path_list "$val" || return 1
       ;;
@@ -91,6 +94,9 @@ _cbox_reg_validate_var_dispatch() {
       ;;
     CBOX_NETACCESS_EXEC_MAX_BYTES)
       _cbox_val_kind_uint_range "$val" 1024 16777216 || return 1
+      ;;
+    CBOX_CONTAINER_EXEC_TOOL)
+      _cbox_val_kind_enum "$val" 'off' 'on' || return 1
       ;;
     CBOX_HOST_ROUTE_MODE)
       _cbox_val_kind_enum "$val" 'off' 'host-proxy' || return 1
@@ -224,8 +230,23 @@ _cbox_reg_validate_var_dispatch() {
     CBOX_WG_KEEPALIVE)
       _cbox_val_kind_uint "$val" || return 1
       ;;
+    CBOX_WG_FORWARDS)
+      _cbox_val_kind_wg_forward_list "$val" || return 1
+      ;;
     CBOX_LIMIT_AUTORESUME)
       _cbox_val_kind_enum "$val" 'off' 'on' || return 1
+      ;;
+    CBOX_SESSION_MULTIPLEX)
+      _cbox_val_kind_enum "$val" 'off' 'on' || return 1
+      ;;
+    CBOX_SESSION_BROKER_MODE)
+      _cbox_val_kind_enum "$val" 'disabled' 'viewer' 'full-attach' || return 1
+      ;;
+    CBOX_SSHD_LISTEN_ADDR)
+      _cbox_val_named_ipv4_or_empty "$val" || return 1
+      ;;
+    CBOX_SSHD_PORT)
+      _cbox_val_kind_port "$val" || return 1
       ;;
     CBOX_LIMIT_RESUME_DELAY)
       _cbox_val_kind_uint "$val" || return 1
@@ -298,6 +319,12 @@ _cbox_reg_validate_var_dispatch() {
       ;;
     CBOX_CLIPBOARD_MODE)
       _cbox_val_kind_enum "$val" 'off' 'bridge' || return 1
+      ;;
+    CBOX_KERNEL_LANG_OUTPUT)
+      _cbox_val_named_kernel_lang "$val" || return 1
+      ;;
+    CBOX_KERNEL_LANG_REASONING)
+      _cbox_val_named_kernel_lang "$val" || return 1
       ;;
     *)
       printf 'no validator registered for %s' "$key"; return 1

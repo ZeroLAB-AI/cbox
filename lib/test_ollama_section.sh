@@ -14,6 +14,7 @@ _ok() {
   echo "ok: $1"
 }
 
+source "$INSTALL_DIR/lib/portable.sh"
 source "$INSTALL_DIR/templates/sections.sh"
 source "$INSTALL_DIR/templates/conf_lib.sh"
 
@@ -25,36 +26,36 @@ case " ${SECTIONS[*]} " in
 esac
 _ok "registry: SECTIONS includes ollama"
 
-[ -n "${SEC_TITLE[ollama]:-}" ] || _fail "registry: SEC_TITLE[ollama] missing"
-[ -n "${SEC_DESC[ollama]:-}" ] || _fail "registry: SEC_DESC[ollama] missing"
+[ -n "$(sec_get SEC_TITLE ollama)" ] || _fail "registry: SEC_TITLE[ollama] missing"
+[ -n "$(sec_get SEC_DESC ollama)" ] || _fail "registry: SEC_DESC[ollama] missing"
 _ok "registry: SEC_TITLE/SEC_DESC set for ollama"
 
-[ -n "${SEC_VARS[ollama]:-}" ] || _fail "registry: SEC_VARS[ollama] missing"
+[ -n "$(sec_get SEC_VARS ollama)" ] || _fail "registry: SEC_VARS[ollama] missing"
 for v in $OLLAMA_VARS; do
-  case " ${SEC_VARS[ollama]} " in
+  case " $(sec_get SEC_VARS ollama) " in
     *" $v "*) ;;
     *) _fail "registry: SEC_VARS[ollama] missing $v" ;;
   esac
 done
 _ok "registry: SEC_VARS[ollama] lists every required var"
 
-got_count="$(printf '%s\n' ${SEC_VARS[ollama]} | wc -l)"
+got_count="$(printf '%s\n' $(sec_get SEC_VARS ollama) | wc -l)"
 want_count="$(printf '%s\n' $OLLAMA_VARS | wc -l)"
-[ "$got_count" -eq "$want_count" ] || _fail "registry: SEC_VARS[ollama] has extra/unexpected entries (got $got_count want $want_count): ${SEC_VARS[ollama]}"
+[ "$got_count" -eq "$want_count" ] || _fail "registry: SEC_VARS[ollama] has extra/unexpected entries (got $got_count want $want_count): $(sec_get SEC_VARS ollama)"
 _ok "registry: SEC_VARS[ollama] has exactly the 7 required vars, no more"
 
-[ "${SEC_APPLY[ollama]:-}" = infra-reconcile ] || _fail "registry: SEC_APPLY[ollama] should be infra-reconcile, got ${SEC_APPLY[ollama]:-unset}"
+[ "$(sec_get SEC_APPLY ollama)" = infra-reconcile ] || _fail "registry: SEC_APPLY[ollama] should be infra-reconcile, got $(sec_get SEC_APPLY ollama)"
 _ok "registry: SEC_APPLY[ollama]=infra-reconcile"
 
-[ -n "${SEC_PROFILE[ollama]:-}" ] || _fail "registry: SEC_PROFILE[ollama] missing"
+[ -n "$(sec_get SEC_PROFILE ollama)" ] || _fail "registry: SEC_PROFILE[ollama] missing"
 _ok "registry: SEC_PROFILE[ollama] set"
 
-[ -n "${SEC_DOCTOR_ROWS[ollama]+set}" ] || _fail "registry: SEC_DOCTOR_ROWS[ollama] not declared"
-[ "${SEC_DOCTOR_ROWS[ollama]}" = ollama ] || _fail "registry: SEC_DOCTOR_ROWS[ollama] should declare exactly the 'ollama' row, got: ${SEC_DOCTOR_ROWS[ollama]}"
+sec_has SEC_DOCTOR_ROWS ollama || _fail "registry: SEC_DOCTOR_ROWS[ollama] not declared"
+[ "$(sec_get SEC_DOCTOR_ROWS ollama)" = ollama ] || _fail "registry: SEC_DOCTOR_ROWS[ollama] should declare exactly the 'ollama' row, got: $(sec_get SEC_DOCTOR_ROWS ollama)"
 _ok "registry: SEC_DOCTOR_ROWS[ollama] declares the ollama doctor row"
 
-[ -n "${SEC_SCOPE[ollama]:-}" ] || _fail "registry: SEC_SCOPE[ollama] missing (new concept not wired)"
-[ "${SEC_SCOPE[ollama]}" = machine ] || _fail "registry: SEC_SCOPE[ollama] should be machine, got ${SEC_SCOPE[ollama]}"
+[ -n "$(sec_get SEC_SCOPE ollama)" ] || _fail "registry: SEC_SCOPE[ollama] missing (new concept not wired)"
+[ "$(sec_get SEC_SCOPE ollama)" = machine ] || _fail "registry: SEC_SCOPE[ollama] should be machine, got $(sec_get SEC_SCOPE ollama)"
 _ok "registry: SEC_SCOPE[ollama]=machine"
 
 other_bad=""
@@ -62,8 +63,8 @@ for s in "${SECTIONS[@]}"; do
   case "$s" in
     ollama|wireguard) continue ;;
   esac
-  [ -n "${SEC_SCOPE[$s]:-}" ] || { other_bad="$other_bad missing:$s"; continue; }
-  [ "${SEC_SCOPE[$s]}" = project ] || other_bad="$other_bad wrong:$s=${SEC_SCOPE[$s]}"
+  [ -n "$(sec_get SEC_SCOPE "$s")" ] || { other_bad="$other_bad missing:$s"; continue; }
+  [ "$(sec_get SEC_SCOPE "$s")" = project ] || other_bad="$other_bad wrong:$s=$(sec_get SEC_SCOPE "$s")"
 done
 [ -z "$other_bad" ] || _fail "registry: SEC_SCOPE should default to project for every section except the machine-scoped ones (ollama, wireguard):$other_bad"
 _ok "registry: SEC_SCOPE defaults to project for every non-machine-scoped section"
@@ -250,7 +251,7 @@ case "$step_ollama_body" in
 esac
 _ok "off-default: step_ollama never touches the filesystem or docker directly - it only stages cbox.conf values"
 
-case "${SEC_APPLY[ollama]}" in
+case "$(sec_get SEC_APPLY ollama)" in
   infra-reconcile) ;;
   *) _fail "off-default: SEC_APPLY[ollama] changed unexpectedly" ;;
 esac

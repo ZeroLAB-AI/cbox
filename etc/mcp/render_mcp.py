@@ -5,7 +5,7 @@ import sys
 
 
 ADAPTERS = ("codex-mcp", "stdio-mcp", "claude-cli")
-TARGETS = ("claude", "codex")
+TARGETS = ("claude", "codex", "hermes")
 
 
 class DelegateEntryError(Exception):
@@ -125,6 +125,37 @@ def render_claude_cli_entry(name, cbox, hooks_dir):
     return entry
 
 
+def render_hermes_entry(name, spec, cbox, hooks_dir, shim_mode, adapter, enabled):
+    if adapter == "codex-mcp":
+        entry = wrap_codex_entry(name, spec, cbox, hooks_dir, shim_mode)
+    elif adapter == "stdio-mcp":
+        entry = render_stdio_entry(name, spec, hooks_dir)
+    elif adapter == "claude-cli":
+        entry = render_claude_cli_entry(name, cbox, hooks_dir)
+    else:
+        raise DelegateEntryError(
+            "render_mcp.py: delegate entry %r has adapter %r which the "
+            "hermes target does not know how to render" % (name, adapter)
+        )
+    hermes_entry = {
+        "command": entry["command"],
+        "args": entry.get("args", []),
+    }
+    if entry.get("env"):
+        hermes_entry["env"] = entry["env"]
+    timeout_sec = spec.get("tool_timeout_sec", cbox.get("tool_timeout_sec"))
+    if isinstance(timeout_sec, int):
+        hermes_entry["timeout"] = timeout_sec
+    connect_timeout_sec = spec.get(
+        "startup_timeout_sec", cbox.get("startup_timeout_sec")
+    )
+    if isinstance(connect_timeout_sec, int):
+        hermes_entry["connect_timeout"] = connect_timeout_sec
+    if not enabled:
+        hermes_entry["enabled"] = False
+    return hermes_entry
+
+
 FALSY_GATE_VALUES = ("", "off", "0", "false", "no")
 
 
@@ -159,7 +190,8 @@ def render(delegates, selection, hooks_dir, shim_mode, target, explicit=None):
             )
         if target not in available_to:
             continue
-        if not _env_gate_satisfied(cbox):
+        gate_ok = _env_gate_satisfied(cbox)
+        if not gate_ok:
             gate = cbox.get("enabled_when_env")
             if explicit is not None and name in explicit:
                 raise DelegateEntryError(
@@ -168,8 +200,13 @@ def render(delegates, selection, hooks_dir, shim_mode, target, explicit=None):
                     "unconfigured; see cbox/etc/docs/LOCAL_MODEL_RUNBOOK.md"
                     % (name, gate)
                 )
-            continue
-        if adapter == "codex-mcp":
+            if target != "hermes":
+                continue
+        if target == "hermes":
+            chosen[name] = render_hermes_entry(
+                name, spec, cbox, hooks_dir, shim_mode, adapter, gate_ok
+            )
+        elif adapter == "codex-mcp":
             chosen[name] = wrap_codex_entry(name, spec, cbox, hooks_dir, shim_mode)
         elif adapter == "stdio-mcp":
             chosen[name] = render_stdio_entry(name, spec, hooks_dir)
@@ -182,7 +219,7 @@ def main():
     if len(sys.argv) not in (5, 6):
         sys.stderr.write(
             "usage: render_mcp.py <delegates.json> <selection-space-separated> "
-            "<hooks-dir> <shim-mode:on|off> [target:claude|codex]\n"
+            "<hooks-dir> <shim-mode:on|off> [target:claude|codex|hermes]\n"
         )
         return 2
     servers_path, selection_raw, hooks_dir, shim_mode = sys.argv[1:5]

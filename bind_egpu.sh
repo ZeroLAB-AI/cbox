@@ -7,5 +7,6 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -n "${SUDO_USER:-}" ] || { echo "cbox: SUDO_USER is not set - run this script via sudo from your user session, not as a direct root login"; exit 1; }
 nvidia-smi -L >/dev/null 2>&1 || { echo "cbox: no NVIDIA device visible (nvidia-smi -L failed) - connect the eGPU and load the driver, then retry"; exit 1; }
 nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
-echo "cbox: CDI spec written to /etc/cdi/nvidia.yaml - restarting container with GPU"
-exec sudo -u "$SUDO_USER" "$DIR/cbox" restart --gpu
+echo "cbox: CDI spec written to /etc/cdi/nvidia.yaml - enabling GPU in the config and restarting"
+sudo -u "$SUDO_USER" "$DIR/cbox" config set CBOX_GPU=1
+exec sudo -u "$SUDO_USER" "$DIR/cbox" restart

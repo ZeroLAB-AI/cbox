@@ -46,9 +46,10 @@ done
 
 run_reap() {
   local probe1="$1" probe2="$2" out
-  out="$(bash -c '
+  out="$(INSTALL_DIR="$INSTALL_DIR" bash -c '
     set -u
     eff="$1"; probe1="$2"; probe2="$3"
+    source "$INSTALL_DIR/lib/portable.sh"
     '"$REAP_FN"'
     _compose_p() {
       if [ "$2" = ps ]; then printf "fakecid\n"; return 0; fi
@@ -89,9 +90,10 @@ grep -q DOWNED "$TMPBASE/eff/actions" && _fail "reap: live processes must not do
 _ok "reap: live processes keep container up"
 
 run_autoupdate() {
-  bash -c '
+  INSTALL_DIR="$INSTALL_DIR" bash -c '
     set -u
     HOME="$1"; export HOME
+    source "$INSTALL_DIR/lib/portable.sh"
     '"$AUP_FN"'
     '"$CHAN_FN"'
     '"$EOFF_FN"'
@@ -125,9 +127,10 @@ _ok "autoupdate: engine opt-out respected"
 
 H3="$TMPBASE/h3"
 mkdir -p "$H3/.config/cbox"
-CBOX_CLAUDE_TARGET=1.2.3 CBOX_CODEX_VERSION=0.1.0 bash -c '
+CBOX_CLAUDE_TARGET=1.2.3 CBOX_CODEX_VERSION=0.1.0 INSTALL_DIR="$INSTALL_DIR" bash -c '
   set -u
   HOME="$1"; export HOME
+  source "$INSTALL_DIR/lib/portable.sh"
   '"$AUP_FN"'
   '"$CHAN_FN"'
   '"$EOFF_FN"'
@@ -141,9 +144,10 @@ CBOX_CLAUDE_TARGET=1.2.3 CBOX_CODEX_VERSION=0.1.0 bash -c '
 _ok "autoupdate: pinned versions never refresh"
 
 run_autoupdate_hermes() {
-  CBOX_HERMES="$2" CBOX_HERMES_VERSION="$3" bash -c '
+  CBOX_HERMES="$2" CBOX_HERMES_VERSION="$3" INSTALL_DIR="$INSTALL_DIR" bash -c '
     set -u
     HOME="$1"; export HOME
+    source "$INSTALL_DIR/lib/portable.sh"
     '"$AUP_FN"'
     '"$CHAN_FN"'
     '"$EOFF_FN"'
@@ -385,8 +389,9 @@ cp "$INSTALL_DIR/etc/claude/managed-settings.merge.json" "$MANAGED/etc/claude/ma
 _ok "managed settings: replaces empty Docker-created directory"
 
 FORCE_OUT="$TMPBASE/force.out"
-FORCE_OUT="$FORCE_OUT" TMPBASE="$TMPBASE" bash -c '
+FORCE_OUT="$FORCE_OUT" TMPBASE="$TMPBASE" INSTALL_DIR="$INSTALL_DIR" bash -c '
   set -euo pipefail
+  source "$INSTALL_DIR/lib/portable.sh"
   '"$CDIG_FN"'
   '"$CUP_FN"'
   fake_compose() {

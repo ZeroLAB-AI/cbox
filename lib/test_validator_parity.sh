@@ -441,6 +441,65 @@ _new_case CBOX_CLIPBOARD_MODE off accept
 _new_case CBOX_CLIPBOARD_MODE bridge accept
 _new_case CBOX_CLIPBOARD_MODE bogus reject
 
+_new_case CBOX_CONTAINER_EXEC_TOOL off accept
+_new_case CBOX_CONTAINER_EXEC_TOOL on accept
+_new_case CBOX_CONTAINER_EXEC_TOOL bogus reject
+
+_new_case CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG "" accept
+_new_case CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG on accept
+_new_case CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG off accept
+_new_case CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG bogus reject
+
+_new_case CBOX_SESSION_MULTIPLEX off accept
+_new_case CBOX_SESSION_MULTIPLEX on accept
+_new_case CBOX_SESSION_MULTIPLEX bogus reject
+
+_new_case CBOX_WG_FORWARDS "" accept
+_new_case CBOX_WG_FORWARDS "11434:ollama:11434" accept
+_new_case CBOX_WG_FORWARDS "11434:ollama:11434 11500:other-svc:11500" accept
+_new_case CBOX_WG_FORWARDS "abc:ollama:11434" reject
+_new_case CBOX_WG_FORWARDS "11434:ollama:70000" reject
+_new_case CBOX_WG_FORWARDS "999999:ollama:1" reject
+_new_case CBOX_WG_FORWARDS "11434:bad host:11434" reject
+_new_case CBOX_WG_FORWARDS "11434:ollama:11434 11434:other:22" reject
+_new_case CBOX_WG_FORWARDS "11434:ollama;rm -rf /:11434" reject
+_new_case CBOX_WG_FORWARDS "11434:10.0.0.5:11434" reject
+
+_new_case CBOX_SESSION_BROKER_MODE disabled accept
+_new_case CBOX_SESSION_BROKER_MODE viewer accept
+_new_case CBOX_SESSION_BROKER_MODE full-attach accept
+_new_case CBOX_SESSION_BROKER_MODE bogus reject
+
+_new_case CBOX_SSHD_LISTEN_ADDR "" accept
+_new_case CBOX_SSHD_LISTEN_ADDR "10.90.0.1" accept
+_new_case CBOX_SSHD_LISTEN_ADDR "0.0.0.0" accept
+_new_case CBOX_SSHD_LISTEN_ADDR "not-an-ip" reject
+_new_case CBOX_SSHD_LISTEN_ADDR "10.90.0.1/24" reject
+
+_new_case CBOX_SSHD_PORT 2222 accept
+_new_case CBOX_SSHD_PORT 1 accept
+_new_case CBOX_SSHD_PORT 65535 accept
+_new_case CBOX_SSHD_PORT 0 reject
+_new_case CBOX_SSHD_PORT 65536 reject
+_new_case CBOX_SSHD_PORT bogus reject
+
+_new_case CBOX_KERNEL_LANG_OUTPUT "" accept
+_new_case CBOX_KERNEL_LANG_OUTPUT "English" accept
+_new_case CBOX_KERNEL_LANG_OUTPUT "slovencina bez diakritiky" accept
+_new_case CBOX_KERNEL_LANG_OUTPUT "$(python3 -c "print('x' * 64)")" accept
+_new_case CBOX_KERNEL_LANG_OUTPUT "$(python3 -c "print('x' * 65)")" reject
+_new_case CBOX_KERNEL_LANG_OUTPUT "{NAME}" reject
+_new_case CBOX_KERNEL_LANG_OUTPUT " leading" reject
+_new_case CBOX_KERNEL_LANG_OUTPUT "trailing " reject
+_new_case CBOX_KERNEL_LANG_OUTPUT "$(printf 'Fran\xc3\xa7ais')" reject
+
+_new_case CBOX_KERNEL_LANG_REASONING "" accept
+_new_case CBOX_KERNEL_LANG_REASONING "slovencina bez diakritiky" accept
+_new_case CBOX_KERNEL_LANG_REASONING "English" accept
+_new_case CBOX_KERNEL_LANG_REASONING "$(python3 -c "print('x' * 65)")" reject
+_new_case CBOX_KERNEL_LANG_REASONING "{NAME}" reject
+_new_case CBOX_KERNEL_LANG_REASONING "$(printf 'Fran\xc3\xa7ais')" reject
+
 while IFS=$'\t' read -r key val want; do
   CASE_COUNT=$((CASE_COUNT + 1))
   [ "$val" != '<EMPTY>' ] || val=''
@@ -452,7 +511,7 @@ while IFS=$'\t' read -r key val want; do
     _fail "new-section validator: $key='$val' expected=$want got=$new_verdict"
   fi
 done < "$NEW_CASES_FILE"
-_ok "new-section validators (autoupdate/dns/clipboard/CBOX_NAME): verdicts match intended semantics for $(wc -l < "$NEW_CASES_FILE" | tr -d ' ') cases"
+_ok "new-section validators (autoupdate/dns/clipboard/CBOX_NAME/CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING): verdicts match intended semantics for $(wc -l < "$NEW_CASES_FILE" | tr -d ' ') cases"
 
 DIVERGENCES=0
 while IFS=$'\t' read -r key val; do

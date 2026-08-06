@@ -342,24 +342,24 @@ done
 unset _v
 _ok "whitelist: all wireguard vars are whitelisted via SEC_VARS[wireguard]"
 
-[ "${SEC_SCOPE[ollama]:-project}" = machine ] || _fail "SEC_SCOPE[ollama] should be machine"
+[ "$(sec_get SEC_SCOPE ollama)" = machine ] || _fail "SEC_SCOPE[ollama] should be machine"
 _ok "SEC_SCOPE[ollama]=machine"
 
-[ "${SEC_SCOPE[wireguard]:-project}" = machine ] || _fail "SEC_SCOPE[wireguard] should be machine"
+[ "$(sec_get SEC_SCOPE wireguard)" = machine ] || _fail "SEC_SCOPE[wireguard] should be machine"
 _ok "SEC_SCOPE[wireguard]=machine"
 
 for _s in mode mounts workspaces python gpu egress netaccess hostroute ssh bashrc mcp-servers \
   codex-progress local-model hermes hermes-delegate autoresume agents codex-mcp continuity \
   claude-md settings hooks git-identity apt-extra binaries restart-policy; do
-  [ "${SEC_SCOPE[$_s]:-project}" = project ] || _fail "SEC_SCOPE[$_s] should default to project, got ${SEC_SCOPE[$_s]:-unset}"
+  [ "$(sec_get SEC_SCOPE "$_s")" = project ] || _fail "SEC_SCOPE[$_s] should default to project, got $(sec_get SEC_SCOPE "$_s")"
 done
 unset _s
 _ok "SEC_SCOPE defaults to project for every pre-existing section"
 
-[ "${SEC_APPLY[ollama]:-}" = infra-reconcile ] || _fail "SEC_APPLY[ollama] should be infra-reconcile"
+[ "$(sec_get SEC_APPLY ollama)" = infra-reconcile ] || _fail "SEC_APPLY[ollama] should be infra-reconcile"
 _ok "SEC_APPLY[ollama]=infra-reconcile"
 
-[ "${SEC_APPLY[wireguard]:-}" = infra-reconcile ] || _fail "SEC_APPLY[wireguard] should be infra-reconcile"
+[ "$(sec_get SEC_APPLY wireguard)" = infra-reconcile ] || _fail "SEC_APPLY[wireguard] should be infra-reconcile"
 _ok "SEC_APPLY[wireguard]=infra-reconcile"
 
 apply_report="$(_cbox_config_apply_cmd_for infra-reconcile)"
@@ -371,7 +371,7 @@ _ok "apply-cmd: infra-reconcile class names cbox ollama reconcile"
 
 declare -f _cbox_machine_scoped_vars >/dev/null || _fail "extraction failed: _cbox_machine_scoped_vars not defined"
 machine_vars="$(_cbox_machine_scoped_vars | sort)"
-expected_machine_vars="$(printf '%s\n' CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE | sort)"
+expected_machine_vars="$(printf '%s\n' CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE CBOX_WG_FORWARDS | sort)"
 [ "$machine_vars" = "$expected_machine_vars" ] || _fail "_cbox_machine_scoped_vars: expected exactly the ollama+wireguard vars, got: $machine_vars"
 _ok "_cbox_machine_scoped_vars: enumerates exactly SEC_VARS[ollama] + SEC_VARS[wireguard] (the two machine-scoped sections)"
 

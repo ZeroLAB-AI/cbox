@@ -18,6 +18,7 @@ NAMED_DISPATCH = {
     "path-slash-or-empty": "_cbox_val_named_path_slash_or_empty \"$val\"",
     "unvalidated-legacy-gap": "_cbox_val_named_unvalidated_legacy_gap \"$key\"",
     "ipv4-list": "_cbox_val_named_ipv4_list \"$val\"",
+    "kernel-lang": "_cbox_val_named_kernel_lang \"$val\"",
 }
 
 
@@ -66,6 +67,8 @@ def _dispatch_for(var):
         return "_cbox_val_kind_network_name_list \"$val\""
     if kind == "cidr-list":
         return "_cbox_val_kind_cidr_list \"$val\" %s" % type_spec.get("min_prefix", 0)
+    if kind == "wg-forward-list":
+        return "_cbox_val_kind_wg_forward_list \"$val\""
     if kind == "apt-package-list":
         return "_cbox_val_kind_apt_package_list \"$val\""
     if kind == "canonical-name-list":

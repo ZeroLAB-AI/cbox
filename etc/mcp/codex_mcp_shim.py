@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import argparse
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 import threading
+import time
 import unicodedata
 
 MAX_MSG = 140
@@ -16,6 +18,33 @@ MAX_JOURNAL = 500
 DOCKERENV_PATH = "/.dockerenv"
 
 KERNEL_FILENAME = "conduct-kernel.txt"
+GUARD_MODULE_FILENAME = "codex_mode_guard.py"
+
+
+def _guard_module_path():
+    here = os.path.dirname(os.path.abspath(__file__))
+    sibling = os.path.join(here, GUARD_MODULE_FILENAME)
+    if os.path.isfile(sibling):
+        return sibling
+    repo_source = os.path.join(
+        os.path.dirname(here), "hooks", GUARD_MODULE_FILENAME
+    )
+    if os.path.isfile(repo_source):
+        return repo_source
+    return sibling
+
+
+def _load_guard_module():
+    guard_path = _guard_module_path()
+    spec = importlib.util.spec_from_file_location(
+        "codex_mode_guard_for_shim", guard_path
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+GUARD = _load_guard_module()
 
 
 def in_container():
@@ -142,6 +171,81 @@ def describe(msg):
         label = "stream" if t == "stream_error" else t
         return sanitize(label + ": " + m) if isinstance(m, str) else t
     return sanitize(t.replace("_", " "))
+
+
+def check_cwd_scope_and_git(cwd):
+    if not isinstance(cwd, str) or not cwd:
+        return (
+            "codex_mcp_shim: the codex call must have an EXPLICIT cwd "
+            "(absolute working directory of the task) - add cwd to the "
+            "arguments"
+        )
+    if not os.path.isabs(cwd):
+        return (
+            "codex_mcp_shim: cwd must be an ABSOLUTE path (a relative one "
+            "resolves against a foreign process)"
+        )
+    real = os.path.realpath(cwd)
+    if not os.path.isdir(real):
+        return "codex_mcp_shim: cwd is not an existing directory"
+    cfg = GUARD._load_config()
+    roots = GUARD._allowed_roots(cfg)
+    if not any(real == r or real.startswith(r + os.sep) for r in roots):
+        return (
+            "codex_mcp_shim: cwd is outside the allowed scope "
+            "(codex_scope.json allowed_roots + CODEX_GUARD_EXTRA_ROOTS) - "
+            "codex may write only there"
+        )
+    try:
+        in_git = subprocess.run(
+            ["git", "-C", real, "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, timeout=5,
+        ).returncode == 0
+    except Exception:
+        in_git = False
+    if not in_git:
+        return (
+            "codex_mcp_shim: cwd is not a git work-tree - codex changes "
+            "must ALWAYS be versioned (git init in the target directory, "
+            "or pick a repo)"
+        )
+    return None
+
+
+SHIM_AUDIT_LINE_MAX = 2048
+
+
+def shim_audit_path():
+    return os.environ.get(
+        "CODEX_SHIM_GUARD_AUDIT",
+        os.path.expanduser("~/.claude/hooks/codex_shim_guard_audit.jsonl"),
+    )
+
+
+def shim_audit(tier, decision, reason, cwd):
+    try:
+        rec = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "tier": tier[:64] if isinstance(tier, str) else None,
+            "decision": decision[:16],
+            "reason": reason[:128] if reason else "",
+            "cwd_sha256": GUARD._audit_digest(cwd),
+        }
+        line = json.dumps(rec, ensure_ascii=True)
+        if len(line.encode("utf-8")) > SHIM_AUDIT_LINE_MAX:
+            line = json.dumps(
+                {"ts": rec["ts"], "event": "audit-record-truncated"},
+                ensure_ascii=True,
+            )
+        path = shim_audit_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd = os.open(
+            path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600
+        )
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except Exception:
+        pass
 
 
 def pump(src, dst, on_line):
@@ -315,6 +419,12 @@ class Relay:
             params["arguments"] = args
         if not isinstance(args, dict):
             return "codex_mcp_shim: tools/call arguments must be an object"
+        cwd = args.get("cwd")
+        scope_err = check_cwd_scope_and_git(cwd)
+        if scope_err is not None:
+            shim_audit(self.tier, "deny", scope_err, cwd)
+            return scope_err
+        shim_audit(self.tier, "allow", None, cwd)
         if _has_instruction_key(args):
             return (
                 "codex_mcp_shim: caller-supplied instructions field is rejected - "

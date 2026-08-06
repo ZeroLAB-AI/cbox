@@ -26,6 +26,10 @@ CWD_ALLOWED = "Read,Grep,Glob,Edit,Write,NotebookEdit"
 CWD_DISALLOWED = "Bash,Task,WebFetch,WebSearch"
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 MODE_LEVELS = ("analyse", "plan", "full")
+FALLBACK_MODEL_ENV = "ASK_CLAUDE_FALLBACK_MODEL"
+FALLBACK_MODEL_MAP_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "ask_claude_fallback_models.json")
 MODE_PROMPT = {
     "analyse": ("You are in analyse mode: read and investigate only, make "
                 "no modifications, return findings."),
@@ -50,6 +54,73 @@ def default_mode():
     return "full"
 
 
+SAFETY_REFUSAL_MARKERS = (
+    "safety measures that flagged",
+    "cyber verification program",
+)
+
+
+def is_safety_refusal(proc, prompt=""):
+    if proc.returncode == 0:
+        return False
+    blob = (proc.stderr or "").lower()
+    parsed = None
+    try:
+        parsed = json.loads(proc.stdout or "")
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict):
+        errors = parsed.get("errors")
+        if isinstance(errors, list):
+            blob += "\n" + "\n".join(str(e) for e in errors[:5]).lower()
+    else:
+        blob += "\n" + (proc.stdout or "").lower()
+    supplied = (prompt or "").lower()
+    return any(marker in blob and marker not in supplied
+               for marker in SAFETY_REFUSAL_MARKERS)
+
+
+def valid_model_token(value):
+    return isinstance(value, str) and value and not value.startswith("-") \
+        and not any(ch.isspace() for ch in value)
+
+
+def load_fallback_model_map():
+    try:
+        with open(FALLBACK_MODEL_MAP_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for key, chain in data.items():
+        if not isinstance(key, str) or not isinstance(chain, list):
+            continue
+        clean = [m for m in chain if valid_model_token(m)]
+        if clean:
+            out[key] = clean
+    return out
+
+
+def default_fallback_chain(model):
+    chain = load_fallback_model_map().get(model)
+    return list(chain) if chain else []
+
+
+def resolve_fallback_models(model):
+    override = os.environ.get(FALLBACK_MODEL_ENV)
+    if override is not None:
+        if not override.strip():
+            return [], None
+        entries = [e.strip() for e in override.split(",")]
+        for e in entries:
+            if not valid_model_token(e):
+                return None, "invalid entry in " + FALLBACK_MODEL_ENV + ": " + repr(e)
+        return entries, None
+    return default_fallback_chain(model), None
+
+
 def tool_description():
     if in_container():
         delegation_note = (
@@ -72,7 +143,18 @@ def tool_description():
         "mode selects the delegate's authority with cwd: analyse and plan "
         "are read-only (investigate or produce a plan, no modifications); "
         "full allows edits and, inside the cbox container, runs with full "
-        "permissions bypassed. " + delegation_note)
+        "permissions bypassed. This runs Claude Code in headless print "
+        "mode, so a downgrade chain is passed via --fallback-model: if the "
+        "requested model is overloaded or not available, the CLI retries "
+        "with the next model in the chain before this call returns. A "
+        "safety-rules refusal is not covered by that flag, so this tool "
+        "detects it and re-runs the same prompt on the next model in the "
+        "chain itself; every attempt carries identical tool restrictions, "
+        "and the whole call still obeys one overall timeout. Set "
+        + FALLBACK_MODEL_ENV +
+        " to a comma-separated override list, or leave it unset for a "
+        "built-in default chain keyed on the requested model. " +
+        delegation_note)
 
 
 def build_tool():
@@ -227,8 +309,7 @@ def run_claude(args):
         return tool_text("ask-claude refused: prompt must be a non-empty "
                          "string", True)
     model = args.get("model", "sonnet")
-    if not isinstance(model, str) or not model or model.startswith("-") \
-            or any(ch.isspace() for ch in model):
+    if not valid_model_token(model):
         return tool_text("ask-claude refused: invalid model name", True)
     effort = args.get("effort")
     if effort is not None and effort not in EFFORT_LEVELS:
@@ -249,6 +330,10 @@ def run_claude(args):
     if cwd is not None and not isinstance(cwd, str):
         return tool_text("ask-claude refused: cwd must be a string", True)
 
+    fallback_models, fallback_err = resolve_fallback_models(model)
+    if fallback_err:
+        return tool_text("ask-claude refused: " + fallback_err, True)
+
     run_dir = None
     if cwd:
         real, reason = check_cwd(cwd)
@@ -257,18 +342,21 @@ def run_claude(args):
             return tool_text("ask-claude refused: " + reason, True)
         run_dir = real
 
-    cmd = ["claude", "-p", prompt,
-           "--output-format", "json",
-           "--model", model]
+    base_cmd = ["claude", "-p", prompt, "--output-format", "json"]
+    cmd = []
     if effort:
         cmd += ["--effort", effort]
 
     if run_dir is not None:
         cmd += ["--max-turns", str(max_turns)]
         if in_container() and mode == "full":
-            cmd += ["--dangerously-skip-permissions"]
+            cmd += ["--strict-mcp-config", "--mcp-config",
+                    '{"mcpServers":{}}',
+                    "--dangerously-skip-permissions"]
         elif in_container() and mode in ("analyse", "plan"):
-            cmd += ["--permission-mode", "plan",
+            cmd += ["--strict-mcp-config", "--mcp-config",
+                    '{"mcpServers":{}}',
+                    "--permission-mode", "plan",
                     "--append-system-prompt", MODE_PROMPT[mode]]
         else:
             cmd += ["--strict-mcp-config", "--mcp-config",
@@ -290,17 +378,36 @@ def run_claude(args):
     env[LEGACY_DEPTH_VAR] = "1"
 
     audit("allow", "", args, mode)
-    try:
-        proc = subprocess.run(cmd, cwd=run_dir, env=env,
-                              capture_output=True, text=True,
-                              timeout=CALL_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        audit("error", "timeout", args, mode)
-        return tool_text(
-            f"ask-claude failed: claude run exceeded {CALL_TIMEOUT}s", True)
-    except FileNotFoundError:
-        audit("error", "claude binary not found", args, mode)
-        return tool_text("ask-claude failed: claude binary not found", True)
+    attempts = [model]
+    for m in fallback_models:
+        if m not in attempts:
+            attempts.append(m)
+    deadline = time.monotonic() + CALL_TIMEOUT
+    proc = None
+    for index, attempt_model in enumerate(attempts):
+        remaining = attempts[index + 1:]
+        budget = deadline - time.monotonic()
+        if budget < 1:
+            break
+        attempt_cmd = base_cmd + ["--model", attempt_model]
+        if remaining:
+            attempt_cmd += ["--fallback-model", ",".join(remaining)]
+        attempt_cmd += cmd
+        try:
+            proc = subprocess.run(attempt_cmd, cwd=run_dir, env=env,
+                                  capture_output=True, text=True,
+                                  timeout=budget)
+        except subprocess.TimeoutExpired:
+            audit("error", "timeout", args, mode)
+            return tool_text(
+                f"ask-claude failed: claude run exceeded {CALL_TIMEOUT}s", True)
+        except FileNotFoundError:
+            audit("error", "claude binary not found", args, mode)
+            return tool_text("ask-claude failed: claude binary not found", True)
+        if not remaining or not is_safety_refusal(proc, prompt):
+            break
+        audit("safety-fallback", attempt_model + " -> " + remaining[0],
+              args, mode)
 
     try:
         out = json.loads(proc.stdout)
@@ -369,4 +476,5 @@ def main():
                             "internal error: " + type(e).__name__)
 
 
-main()
+if __name__ == "__main__":
+    main()

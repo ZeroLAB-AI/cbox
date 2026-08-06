@@ -11,6 +11,14 @@ CONFIG = os.environ.get("CODEX_GUARD_CONFIG",
 AUDIT = os.environ.get("CODEX_GUARD_AUDIT",
                        os.path.expanduser("~/.claude/hooks/codex_guard_audit.jsonl"))
 AUTONOMOUS_MODES = {"auto", "acceptEdits", "dontAsk"}
+KNOWN_MODES = AUTONOMOUS_MODES | {"default", "plan", "bypassPermissions"}
+
+
+def _in_container():
+    return os.path.exists("/.dockerenv") \
+        and os.environ.get("CBOX_RUNTIME") == "container"
+
+
 AUDIT_LINE_MAX = 2048
 
 
@@ -34,7 +42,8 @@ def _audit(decision, reason, tool, mode, tool_input):
                "decision": _audit_text(decision, 16),
                "reason": _audit_text(reason, 128),
                "tool": _audit_text(tool, 80),
-               "mode": _audit_text(mode, 16),
+               "mode": _audit_text(mode, 24),
+               "runtime": "container" if _in_container() else "host",
                "cwd_sha256": _audit_digest(ti.get("cwd")),
                "sandbox": _audit_text(ti.get("sandbox"), 32),
                "approval": _audit_text(ti.get("approval-policy"), 32)}
@@ -111,6 +120,10 @@ def main():
     except Exception as e:
         deny(f"unreadable hook payload ({type(e).__name__}) - fail-closed")
 
+    if mode not in KNOWN_MODES:
+        deny(f"unrecognized permission mode {mode!r} - fail-closed; this guard "
+             "must be taught the mode before codex may run in it", tool, mode, ti)
+
     if tool.endswith("__codex-reply"):
         if mode == "plan":
             deny("plan mode: continuing a codex thread may carry write scope - "
@@ -121,8 +134,7 @@ def main():
     approval = ti.get("approval-policy")
     sandbox = ti.get("sandbox")
     cfg = _load_config()
-    in_container = os.path.exists("/.dockerenv") \
-        and os.environ.get("CBOX_RUNTIME") == "container"
+    in_container = _in_container()
     danger_ok = cfg.get("allow_danger_full_access") is True or in_container
     write_capable = sandbox != "read-only"
     if danger_ok and not write_capable:
@@ -172,18 +184,19 @@ def main():
     if mode in AUTONOMOUS_MODES:
         allow(tool, mode, ti)
 
-    if approval == "never" and sandbox != "read-only":
+    if approval == "never" and sandbox != "read-only" and not in_container:
         deny("default mode: approval-policy=never with a write sandbox is not "
              "allowed - re-issue with codex-mode: ask (on-request + workspace-write) "
              "or read-only", tool, mode, ti)
     allow(tool, mode, ti)
 
 
-try:
-    main()
-except SystemExit:
-    raise
-except Exception as e:
-    reason = "codex mode guard internal error (%s)" % type(e).__name__
-    print(f"[codex-mode-guard] DENY: {reason}", file=sys.stderr)
-    sys.exit(2)
+if __name__ == "__main__":
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception as e:
+        reason = "codex mode guard internal error (%s)" % type(e).__name__
+        print(f"[codex-mode-guard] DENY: {reason}", file=sys.stderr)
+        sys.exit(2)

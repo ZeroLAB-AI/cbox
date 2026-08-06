@@ -38,6 +38,7 @@ NAMED_VALIDATORS = {
     "path-slash-or-empty",
     "unvalidated-legacy-gap",
     "ipv4-list",
+    "kernel-lang",
 }
 
 NAMED_RESOLVERS = {
@@ -52,7 +53,7 @@ BUILTIN_TYPE_KINDS = {
     "path", "path-or-empty",
     "url-or-empty",
     "string", "nonempty-string",
-    "path-list", "network-name-list", "cidr-list", "apt-package-list",
+    "path-list", "network-name-list", "cidr-list", "apt-package-list", "wg-forward-list",
     "canonical-name-list",
     "hermes-version", "claude-target", "codex-version", "ollama-image",
     "wg-address-cidr", "wg-peer-address-cidr", "wg-hostport-or-empty",

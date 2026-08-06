@@ -120,11 +120,15 @@ _socks_proxy_port() {
 }
 
 _socks_proxy_host() {
+  local LC_ALL=C
   local h="${CBOX_SOCKS_PROXY:-}"
   h="${h#*://}"
   h="${h%%/*}"
   h="${h%:*}"
   [ -n "$h" ] || return 1
+  case "$h" in
+    *[!A-Za-z0-9.-]*) return 1 ;;
+  esac
   printf '%s' "$h"
 }
 
@@ -257,14 +261,78 @@ PYEOF
 }
 
 _write_tmux_conf() {
-  cat > /tmp/cbox-tmux.conf <<'TMUXCONF'
+  local target="${1:?}"
+  _no_symlinks "$target"
+  cat > "$target" <<'TMUXCONF'
 set -g status off
 set -g mouse on
 set -g history-limit 50000
 set -g escape-time 0
+set -g focus-events on
 set -g default-terminal "xterm-256color"
 TMUXCONF
-  chmod 0644 /tmp/cbox-tmux.conf
+  chmod 0644 "$target"
+}
+
+_multiplex_session_name() {
+  local engine="$1" hex
+  hex="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')" || hex=""
+  [ -n "$hex" ] || return 1
+  printf 'cbox-%s-%s' "$engine" "$hex"
+}
+
+_multiplex_status_dir_new() {
+  local base="/run/cbox/multiplex" dir
+  _no_symlinks "$base"
+  mkdir -p "$base" 2>/dev/null || return 1
+  chmod 0755 "$base" 2>/dev/null || true
+  [ -d "$base" ] && [ ! -L "$base" ] || return 1
+  dir="$(mktemp -d "$base/s.XXXXXXXXXX")" || return 1
+  chmod 0700 "$dir"
+  [ "$CBOX_ROOTLESS" = 1 ] || chown "$HOST_UID:$HOST_GID" "$dir" 2>/dev/null || true
+  printf '%s' "$dir"
+}
+
+_multiplex_status_read() {
+  local file="$1" val
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  val="$(_as_user cat "$file" 2>/dev/null)" || val=""
+  case "$val" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "${#val}" -le 3 ] || return 1
+  [ "$val" -le 255 ] 2>/dev/null || return 1
+  printf '%s' "$val"
+}
+
+_multiplex_run() {
+  local engine="$1"; shift
+  local session status_dir status_file conf inner rc trc=0
+  session="$(_multiplex_session_name "$engine")" || {
+    echo "entrypoint: no usable randomness for a session name - running unwrapped" >&2
+    _run_as_user "$@"
+  }
+  status_dir="$(_multiplex_status_dir_new)" || {
+    echo "entrypoint: could not create a private status directory under /run/cbox - running unwrapped" >&2
+    _run_as_user "$@"
+  }
+  status_file="$status_dir/status"
+  conf="$status_dir/tmux.conf"
+  _write_tmux_conf "$conf"
+  inner="$(printf '%q ' "$@")"
+  inner="$inner; __rc=\$?; printf %s \$__rc > $(printf '%q' "$status_file"); exit \$__rc"
+  _as_user env SHELL=/bin/bash LANG=C.UTF-8 \
+    tmux -u -f "$conf" new-session -s "$session" -c "$PWD" "$inner" || trc=$?
+  if rc="$(_multiplex_status_read "$status_file")"; then
+    :
+  elif [ "$trc" -ne 0 ]; then
+    rc="$trc"
+  else
+    echo "entrypoint: the multiplexed session left no exit status - reporting failure rather than a false success" >&2
+    rc=1
+  fi
+  rm -rf "$status_dir" 2>/dev/null || true
+  exit "$rc"
 }
 
 _codex_profile_preflight() {
@@ -354,6 +422,123 @@ _hermes_apply_managed_env() {
   done < "$envfile"
 }
 
+_sshd_listen_addr_present() {
+  local addr="$1"
+  command -v ip >/dev/null 2>&1 || return 1
+  ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -qxF "$addr"
+}
+
+_start_sshd() {
+  local cfg=/etc/cbox-sshd/sshd_config
+  [ -f "$cfg" ] || return 0
+  if [ ! -f /etc/cbox-sshd/authorized_keys ]; then
+    echo "entrypoint: /etc/cbox-sshd/authorized_keys missing - refusing to start sshd" >&2
+    return 1
+  fi
+  local listen_addr
+  listen_addr="$(awk '$1=="ListenAddress"{print $2; exit}' "$cfg")"
+  if [ -z "$listen_addr" ]; then
+    echo "entrypoint: sshd_config has no ListenAddress - refusing to start sshd" >&2
+    return 1
+  fi
+  if ! _sshd_listen_addr_present "$listen_addr"; then
+    echo "entrypoint: sshd ListenAddress $listen_addr is not held by any interface in this container - refusing to start sshd" >&2
+    return 1
+  fi
+  mkdir -p /run/cbox-sshd /var/log/cbox-sshd
+  [ "$CBOX_ROOTLESS" = 1 ] || chown "$HOST_UID:$HOST_GID" /run/cbox-sshd /var/log/cbox-sshd
+  if [ ! -r /etc/cbox-sshd/hostkeys/ssh_host_ed25519_key ] || [ ! -r /etc/cbox-sshd/hostkeys/ssh_host_rsa_key ]; then
+    echo "entrypoint: sshd host keys missing or unreadable under /etc/cbox-sshd/hostkeys - refusing to start sshd" >&2
+    return 1
+  fi
+  _as_user setsid /usr/sbin/sshd -D -e -f "$cfg" < /dev/null > /var/log/cbox-sshd/sshd.stderr 2>&1 &
+  disown "$!" 2>/dev/null || true
+}
+
+_start_sshd || {
+  echo "entrypoint: sshd did not start - remote session access is unavailable for this container; the container itself continues" >&2
+}
+_hermes_apply_mcp_servers() {
+  local srcfile="$1" configfile="$2"
+  [ -f "$srcfile" ] || srcfile=""
+  _as_user env HERMES_HOME="$HERMES_HOME" python3 - "$srcfile" "$configfile" <<'PY'
+import os
+import sys
+
+src_path, config_path = sys.argv[1], sys.argv[2]
+
+block_lines = ["mcp_servers: {}"]
+if src_path:
+    try:
+        fd = os.open(src_path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        text = ""
+    if text.strip():
+        block_lines = text.rstrip("\n").split("\n")
+
+try:
+    fd = os.open(config_path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "r", encoding="utf-8") as fh:
+        cur_lines = fh.read().split("\n")
+except OSError:
+    cur_lines = [""]
+
+out_lines = []
+skipping = False
+inserted = False
+for line in cur_lines:
+    if line.startswith("mcp_servers:"):
+        skipping = True
+        out_lines.extend(block_lines)
+        inserted = True
+        continue
+    if skipping:
+        if line.startswith((" ", "\t")) or line == "":
+            continue
+        skipping = False
+    out_lines.append(line)
+
+if not inserted:
+    while out_lines and out_lines[-1] == "":
+        out_lines.pop()
+    out_lines.append("")
+    out_lines.extend(block_lines)
+
+body = "\n".join(out_lines)
+if not body.endswith("\n"):
+    body += "\n"
+
+tmp_path = config_path + ".cbox-mcp.tmp"
+try:
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+except OSError as e:
+    sys.stderr.write("entrypoint: cannot write %s: %s\n" % (tmp_path, e))
+    sys.exit(1)
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    fh.write(body)
+os.replace(tmp_path, config_path)
+PY
+}
+
+_hermes_kernel_preamble() {
+  local kernel="$HOST_HOME/.claude/hooks/conduct-kernel.txt"
+  local core="$HOST_HOME/.claude/hooks/session-core.txt"
+  local out=""
+  if [ -f "$kernel" ]; then
+    out="$(cat "$kernel")"
+  else
+    echo "entrypoint: $kernel missing - hermes starts this session without the conduct kernel; run './setup.sh update hooks' on the host" >&2
+  fi
+  if [ -f "$core" ]; then
+    out="${out:+$out$'\n\n'}$(cat "$core")"
+  else
+    echo "entrypoint: $core missing - hermes starts this session without the session core; run './setup.sh update hooks' on the host" >&2
+  fi
+  printf '%s' "$out"
+}
+
 _guard_socks_proxy
 
 case "${1:-}" in
@@ -384,14 +569,13 @@ case "${1:-}" in
       done
       set -- --strict-config --profile cbox-container --dangerously-bypass-hook-trust "$@"
     fi
-    if [ "$_verb" = claude ] && [ "${CBOX_LIMIT_AUTORESUME:-off}" = on ] \
-        && [ -t 0 ] && [ -t 1 ]; then
+    if [ -t 0 ] && [ -t 1 ] \
+        && { [ "${CBOX_SESSION_MULTIPLEX:-off}" = on ] \
+             || { [ "$_verb" = claude ] && [ "${CBOX_LIMIT_AUTORESUME:-off}" = on ]; }; }; then
       if command -v tmux >/dev/null 2>&1; then
-        _write_tmux_conf
-        _cmd="$(printf '%q ' "$_resolved" "$@")"
-        _run_as_user env SHELL=/bin/bash LANG=C.UTF-8 tmux -u -f /tmp/cbox-tmux.conf new-session -c "$PWD" "$_cmd"
+        _multiplex_run "$_verb" "$_resolved" "$@"
       fi
-      echo "entrypoint: CBOX_LIMIT_AUTORESUME=on but tmux is missing in this image - rebuild on the host (next 'cbox run' after re-bless); running without auto-resume" >&2
+      echo "entrypoint: session multiplexing wanted (CBOX_SESSION_MULTIPLEX=${CBOX_SESSION_MULTIPLEX:-off}, CBOX_LIMIT_AUTORESUME=${CBOX_LIMIT_AUTORESUME:-off}) but tmux is missing in this image - rebuild on the host (next 'cbox run' after re-bless); running without a session wrapper" >&2
     fi
     _run_as_user "$_resolved" "$@"
     ;;
@@ -418,7 +602,11 @@ case "${1:-}" in
         || { echo "entrypoint: 'hermes setup --non-interactive' failed - fix manually via 'cbox shell'" >&2; exit 1; }
     fi
     _hermes_apply_managed_env /etc/cbox/hermes-managed/managed.env || exit 1
-    _hermes_session_prompt="${HERMES_EPHEMERAL_SYSTEM_PROMPT:-}"
+    _hermes_apply_mcp_servers /etc/cbox/hermes-managed/mcp_servers.yaml "$HERMES_HOME/config.yaml" || exit 1
+    _hermes_session_prompt="$(_hermes_kernel_preamble)"
+    if [ -n "${HERMES_EPHEMERAL_SYSTEM_PROMPT:-}" ]; then
+      _hermes_session_prompt="${_hermes_session_prompt:+$_hermes_session_prompt$'\n\n'}$HERMES_EPHEMERAL_SYSTEM_PROMPT"
+    fi
     if [ -n "${CBOX_SESSION_MEMORY_FILE:-}" ] && [ -f "${CBOX_SESSION_MEMORY_FILE:-}" ] \
         && [ -f /opt/cbox/cbox_session_bridge.py ]; then
       _cbox_root="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" || _cbox_root=""
@@ -434,6 +622,12 @@ case "${1:-}" in
       if [ -n "$_cbox_memory" ]; then
         _hermes_session_prompt="${_hermes_session_prompt:+$_hermes_session_prompt$'\n\n'}$_cbox_memory"
       fi
+    fi
+    if [ -t 0 ] && [ -t 1 ] && [ "${CBOX_SESSION_MULTIPLEX:-off}" = on ]; then
+      if command -v tmux >/dev/null 2>&1; then
+        _multiplex_run hermes env HERMES_HOME="$HERMES_HOME" HERMES_EPHEMERAL_SYSTEM_PROMPT="$_hermes_session_prompt" /opt/hermes/bin/hermes "$@"
+      fi
+      echo "entrypoint: CBOX_SESSION_MULTIPLEX=on but tmux is missing in this image - rebuild on the host (next 'cbox run' after re-bless); running without a session wrapper" >&2
     fi
     _run_as_user env HERMES_HOME="$HERMES_HOME" HERMES_EPHEMERAL_SYSTEM_PROMPT="$_hermes_session_prompt" /opt/hermes/bin/hermes "$@"
     ;;

@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+_cbox_ai_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -f "$_cbox_ai_dir/_common.sh" ]; then
+  . "$_cbox_ai_dir/_common.sh"
+fi
+unset _cbox_ai_dir
+
 CBOX_AI_ANALYSE_TEXT="You are in analyse mode: read and investigate only, make no modifications, return findings."
 CBOX_AI_PLAN_TEXT="You are in plan mode: produce an implementation plan only, make no modifications."
 CBOX_AI_FULL_TEXT="You are in full mode: complete the task autonomously, including edits, to the point of a finished, verified result."
@@ -190,7 +196,7 @@ _cbox_ai_compose_ctx() {
 _cbox_ai_git_fingerprint() {
   local ws="$1" status diff_hash
   status="$(git -C "$ws" status --porcelain=v2 2>/dev/null)" || status=""
-  diff_hash="$(git -C "$ws" diff 2>/dev/null | sha256sum | awk '{print $1}')"
+  diff_hash="$(git -C "$ws" diff 2>/dev/null | _cbox_sha256)"
   printf '%s\n---\n%s' "$status" "$diff_hash"
 }
 
@@ -260,7 +266,7 @@ _cbox_ai_codex_model_args() {
 _cbox_ai_container_claude_cmd() {
   local mode="$1" headless="$2"
   local -a inner=(claude)
-  mapfile -t -O "${#inner[@]}" inner < <(_cbox_ai_claude_model_args)
+  _cbox_readarray inner < <(_cbox_ai_claude_model_args)
   if [ "$mode" = full ]; then
     if [ "$headless" = 1 ]; then
       inner+=(-p "$CBOX_AI_PROMPT" --output-format text --dangerously-skip-permissions)
@@ -282,7 +288,7 @@ _cbox_ai_container_claude_cmd() {
 _cbox_ai_container_codex_cmd() {
   local mode="$1" headless="$2"
   local -a inner=(codex -a never -s danger-full-access -c "$(_cbox_ai_developer_instructions_arg "$mode")")
-  mapfile -t -O "${#inner[@]}" inner < <(_cbox_ai_codex_model_args)
+  _cbox_readarray inner < <(_cbox_ai_codex_model_args)
   inner+=(-C "$PWD")
   if [ "$headless" = 1 ]; then
     inner+=(exec "$CBOX_AI_PROMPT")
@@ -307,7 +313,7 @@ _cbox_ai_exec_container() {
   fi
 
   if [ "$ro" = 1 ]; then
-    mapfile -t inner < <(
+    _cbox_readarray inner < <(
       case "$CBOX_AI_ENGINE" in
         claude) _cbox_ai_container_claude_cmd "$CBOX_AI_MODE" "$headless" ;;
         local-qwen) _cbox_ai_local_qwen_container_cmd "$CBOX_AI_MODE" "$headless" ;;
@@ -330,7 +336,7 @@ _cbox_ai_exec_container() {
     return "$rc"
   fi
 
-  mapfile -t inner < <(
+  _cbox_readarray inner < <(
     case "$CBOX_AI_ENGINE" in
       claude) _cbox_ai_container_claude_cmd full "$headless" ;;
       local-qwen) _cbox_ai_local_qwen_container_cmd full "$headless" ;;
@@ -356,7 +362,7 @@ _cbox_ai_host_claude_permission_mode() {
 _cbox_ai_host_claude_cmd() {
   local mode="$1" headless="$2"
   local -a cmd=(claude)
-  mapfile -t -O "${#cmd[@]}" cmd < <(_cbox_ai_claude_model_args)
+  _cbox_readarray cmd < <(_cbox_ai_claude_model_args)
   local pmode txt
   pmode="$(_cbox_ai_host_claude_permission_mode "$mode")"
   if [ "$mode" != full ]; then
@@ -382,7 +388,7 @@ _cbox_ai_host_codex_cmd() {
   local mode="$1" headless="$2" sandbox
   sandbox="$(_cbox_ai_host_codex_sandbox "$mode")"
   local -a cmd=(codex -a never -s "$sandbox" -c "$(_cbox_ai_developer_instructions_arg "$mode")")
-  mapfile -t -O "${#cmd[@]}" cmd < <(_cbox_ai_codex_model_args)
+  _cbox_readarray cmd < <(_cbox_ai_codex_model_args)
   cmd+=(-C "$PWD" --strict-config --profile cbox-host)
   if [ "$headless" = 1 ]; then
     cmd+=(exec "$CBOX_AI_PROMPT")
@@ -462,9 +468,9 @@ _cbox_ai_exec_host() {
 
   local -a cmd=()
   case "$CBOX_AI_ENGINE" in
-    claude) mapfile -t cmd < <(_cbox_ai_host_claude_cmd "$CBOX_AI_MODE" "$headless") ;;
-    local-qwen) mapfile -t cmd < <(_cbox_ai_local_qwen_cmd "$CBOX_AI_MODE" "$headless") ;;
-    *) mapfile -t cmd < <(_cbox_ai_host_codex_cmd "$CBOX_AI_MODE" "$headless") ;;
+    claude) _cbox_readarray cmd < <(_cbox_ai_host_claude_cmd "$CBOX_AI_MODE" "$headless") ;;
+    local-qwen) _cbox_readarray cmd < <(_cbox_ai_local_qwen_cmd "$CBOX_AI_MODE" "$headless") ;;
+    *) _cbox_readarray cmd < <(_cbox_ai_host_codex_cmd "$CBOX_AI_MODE" "$headless") ;;
   esac
 
   case "$CBOX_AI_MODE" in

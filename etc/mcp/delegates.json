@@ -8,7 +8,8 @@
     "_cbox": {
       "adapter": "codex-mcp",
       "available_to": [
-        "claude"
+        "claude",
+        "hermes"
       ],
       "backend": "codex",
       "side_effects": [
@@ -27,7 +28,8 @@
     "_cbox": {
       "adapter": "codex-mcp",
       "available_to": [
-        "claude"
+        "claude",
+        "hermes"
       ],
       "backend": "codex",
       "side_effects": [
@@ -46,7 +48,8 @@
     "_cbox": {
       "adapter": "codex-mcp",
       "available_to": [
-        "claude"
+        "claude",
+        "hermes"
       ],
       "backend": "codex",
       "side_effects": [
@@ -65,7 +68,8 @@
     "_cbox": {
       "adapter": "codex-mcp",
       "available_to": [
-        "claude"
+        "claude",
+        "hermes"
       ],
       "backend": "codex",
       "side_effects": [
@@ -107,13 +111,36 @@
       "adapter": "stdio-mcp",
       "available_to": [
         "claude",
-        "codex"
+        "codex",
+        "hermes"
       ],
       "backend": "ollama",
       "side_effects": [
         "text-only"
       ],
       "enabled_when_env": "CBOX_LOCAL_MODEL_URL"
+    }
+  },
+  "container-exec": {
+    "type": "stdio",
+    "command": "python3",
+    "args": [
+      "container_exec_mcp.py"
+    ],
+    "startup_timeout_sec": 30,
+    "tool_timeout_sec": 3600,
+    "_cbox": {
+      "adapter": "stdio-mcp",
+      "available_to": [
+        "claude",
+        "codex",
+        "hermes"
+      ],
+      "backend": "docker-exec-bridge",
+      "side_effects": [
+        "spawns-docker-exec-subprocess"
+      ],
+      "enabled_when_env": "CBOX_CONTAINER_EXEC_TOOL"
     }
   },
   "hermes-local": {
@@ -146,7 +173,8 @@
       "adapter": "stdio-mcp",
       "available_to": [
         "claude",
-        "codex"
+        "codex",
+        "hermes"
       ],
       "backend": "hermes",
       "side_effects": [

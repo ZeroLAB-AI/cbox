@@ -87,6 +87,14 @@ def cbox_infra_network(doc):
     return labels.get("cbox.kind") == "infra"
 
 
+def sanitize_reason(text, limit=120):
+    value = "".join(ch if ch.isprintable() and ord(ch) < 127 else " " for ch in str(text))
+    value = " ".join(value.split())
+    if len(value) > limit:
+        value = value[:limit].rstrip() + "..."
+    return value
+
+
 def select_networks(docker_bin, scope, requested, project):
     names = list_networks(docker_bin) if scope == "all" else requested
     selected = []
@@ -98,9 +106,13 @@ def select_networks(docker_bin, scope, requested, project):
         try:
             doc = inspect_one(docker_bin, ["network", "inspect", name])
         except Exception as exc:
-            if scope == "list":
-                raise RuntimeError("network %s: %s" % (name, exc))
-            skipped.append({"network": name, "reason": "inspect failed"})
+            detail = sanitize_reason(exc, 90)
+            kind = "not present" if "no such network" in detail.lower() else "inspect failed"
+            skipped.append({
+                "network": name,
+                "reason": "%s: %s" % (kind, detail),
+                "requested": scope == "list",
+            })
             continue
         if name in ("host", "none", "ingress") or doc.get("Driver") not in ALLOWED_DRIVERS:
             reason = "unsupported network driver"
@@ -115,7 +127,7 @@ def select_networks(docker_bin, scope, requested, project):
         if reason:
             if scope == "list":
                 raise PermissionError("network %s: %s" % (name, reason))
-            skipped.append({"network": name, "reason": reason})
+            skipped.append({"network": name, "reason": reason, "requested": False})
             continue
         selected.append(name)
         docs[name] = doc

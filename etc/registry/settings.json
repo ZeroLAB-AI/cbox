@@ -76,7 +76,8 @@
       "dependencies": [],
       "doctor_rows": [
         "netaccess",
-        "container-exec"
+        "container-exec",
+        "container-exec-tool"
       ]
     },
     {
@@ -196,12 +197,14 @@
     {
       "id": "autoresume",
       "title": "Session-limit auto-resume",
-      "description": "Wrap interactive sessions in tmux and let a per-container watchdog type the resume prompt after a usage-limit window resets (isolated session scope + claude mount only).",
+      "description": "Wrap interactive sessions in tmux and let a per-container watchdog type the resume prompt after a usage-limit window resets (isolated session scope + claude mount only). Also carries the in-container sshd remote-attach feature (disabled by default): three layers - WireGuard, an ssh key, and this container's access level - gate list/attach/spawn against the tmux sessions the wrap creates.",
       "apply_class": "recreate",
       "profile": "skip",
       "scope": "project",
       "dependencies": [],
-      "doctor_rows": []
+      "doctor_rows": [
+        "session-broker"
+      ]
     },
     {
       "id": "agents",
@@ -352,6 +355,16 @@
       "title": "Clipboard image bridge",
       "description": "Host clipboard image bridge over a unix socket answering Claude Code's Ctrl+V image paste inside the container.",
       "apply_class": "recreate",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": []
+    },
+    {
+      "id": "kernel-lang",
+      "title": "Conduct kernel language rule",
+      "description": "Two-part language rule rendered into the deployed conduct kernel: reason in one language, answer in another. Off (output language empty) by default - the rule is not rendered until an output language is set.",
+      "apply_class": "none",
       "profile": "skip",
       "scope": "project",
       "dependencies": [],
@@ -536,6 +549,23 @@
       "export": false,
       "prompt": "setup: back up $CBOX_CODEX_PATH before first run (y=copy c=tar.gz n=no)",
       "help": "Back up the existing ~/.codex directory before first run: y=copy c=tar.gz n=no.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG",
+      "section": "mounts",
+      "type": {
+        "kind": "enum-or-empty",
+        "values": [
+          "on",
+          "off"
+        ]
+      },
+      "default": "",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: set switchModelsOnFlag in the volume-mode ~/.claude.json seed (empty = leave untouched)",
+      "help": "Only affects CBOX_CLAUDE_MODE=volume, where generated/state/claude.json is the cbox-owned ~/.claude.json seed. Empty (default) leaves the key alone: unset on a fresh seed, and never touched if the file already exists (add-if-missing only, cbox never overwrites a value the user set through the /config menu). on/off writes switchModelsOnFlag into a fresh seed and adds it to an existing seed only when the key is absent.",
       "validator": null
     },
     {
@@ -807,6 +837,23 @@
       "export": false,
       "prompt": null,
       "help": "Output byte cap for a scoped exec call.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_CONTAINER_EXEC_TOOL",
+      "section": "netaccess",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: expose the scoped exec bridge to agents as an MCP tool",
+      "help": "Off by default. Registers the container-exec MCP tool (container_list, container_exec) so an agent can call the already-enabled host exec bridge itself, instead of only a human running cbox-container by hand. A separate, stricter permission from CBOX_NETACCESS_EXEC_MODE: an operator may want the bridge for their own use without exposing it as agent-callable.",
       "validator": null
     },
     {
@@ -1484,6 +1531,19 @@
       "validator": null
     },
     {
+      "key": "CBOX_WG_FORWARDS",
+      "section": "wireguard",
+      "type": {
+        "kind": "wg-forward-list"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: wireguard forward table (server role, space-separated listen_port:target_host:target_port entries; empty synthesises the ollama forward when ollama is on)",
+      "help": "Server-role TCP forward table. Each entry is listen_port:target_host:target_port; target_host is a docker-service-name (max 63 chars), never a LAN IPv4 literal - this feature forwards to a named peer on the sidecar's own network, not an arbitrary LAN host. Empty means: synthesise the ollama forward alone when CBOX_OLLAMA_MODE=on.",
+      "validator": null
+    },
+    {
       "key": "CBOX_LIMIT_AUTORESUME",
       "section": "autoresume",
       "type": {
@@ -1498,6 +1558,68 @@
       "export": false,
       "prompt": "setup: session-limit auto-resume (tmux-wrapped sessions, watchdog continues them after the limit resets)",
       "help": "Wrap interactive sessions in tmux; a per-container watchdog types the resume prompt after a usage-limit window resets.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_SESSION_MULTIPLEX",
+      "section": "autoresume",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Wrap claude, codex and hermes sessions in a named tmux session whenever a TTY is present, independent of auto-resume; the precondition for attaching to a running session remotely. CBOX_LIMIT_AUTORESUME=on implies this wrap for claude even when this variable is off.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_SESSION_BROKER_MODE",
+      "section": "autoresume",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "disabled",
+          "viewer",
+          "full-attach"
+        ]
+      },
+      "default": "disabled",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: remote sshd access level for this container (disabled, viewer = watch only, full-attach = can type)",
+      "help": "Layer 3 of the remote access design: WireGuard, then an ssh key, then this. Read fresh by the ForceCommand entry program (etc/container/cbox-session-entry.py) on every connection, from a file inside the container - never from the SSH_ORIGINAL_COMMAND the caller sends. disabled (default) makes every operation including list fail closed. viewer allows list/attach with input discarded by the entry program itself (a pty wrapper drops client-to-server bytes, not just a tmux read-only flag). full-attach allows a writable tmux client and spawn.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_SSHD_LISTEN_ADDR",
+      "section": "autoresume",
+      "type": {
+        "kind": "ipv4-or-empty",
+        "escape_hatch": "ipv4-or-empty"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: address the in-container sshd binds to (required when the sshd access level is not disabled; never 0.0.0.0)",
+      "help": "The scoped address sshd listens on inside the cbox container - normally this container's address on the WireGuard tunnel. Never a wildcard. Rendering and starting sshd both refuse when this is empty or not held by an interface inside the container at start time.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_SSHD_PORT",
+      "section": "autoresume",
+      "type": {
+        "kind": "port"
+      },
+      "default": 2222,
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: in-container sshd port (unprivileged; sshd runs as the container's host user, not root)",
+      "help": "TCP port the in-container sshd listens on. Kept unprivileged (greater than 1024) on purpose: sshd runs as the container's own unprivileged host user with no privilege separation directory, so it can never admit anyone but that user.",
       "validator": null
     },
     {
@@ -1867,6 +1989,34 @@
       "prompt": "setup: clipboard image bridge",
       "help": "bridge - a per-session host helper serves the host clipboard's image content read-only over a unix socket, answering Claude Code's Ctrl+V image paste inside the container. off (default) - no bridge.",
       "validator": null
+    },
+    {
+      "key": "CBOX_KERNEL_LANG_OUTPUT",
+      "section": "kernel-lang",
+      "type": {
+        "kind": "string",
+        "escape_hatch": "kernel-lang"
+      },
+      "default": "",
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Output language rendered into the deployed conduct kernel (free text, e.g. English). Empty (default) means the rule is not rendered - no language is imposed unless one is set.",
+      "validator": "kernel-lang"
+    },
+    {
+      "key": "CBOX_KERNEL_LANG_REASONING",
+      "section": "kernel-lang",
+      "type": {
+        "kind": "string",
+        "escape_hatch": "kernel-lang"
+      },
+      "default": "slovencina bez diakritiky",
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Reasoning language rendered into the deployed conduct kernel when CBOX_KERNEL_LANG_OUTPUT is set. Only takes effect together with an output language - reasoning and output language are independent settings.",
+      "validator": "kernel-lang"
     }
   ]
 }

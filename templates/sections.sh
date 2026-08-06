@@ -1,205 +1,879 @@
-SECTIONS=(mode mounts workspaces python gpu egress netaccess hostroute ssh bashrc mcp-servers codex-progress local-model hermes hermes-delegate ollama wireguard autoresume agents codex-mcp continuity claude-md settings hooks git-identity apt-extra binaries restart-policy autoupdate dns clipboard)
+SECTIONS=(mode mounts workspaces python gpu egress netaccess hostroute ssh bashrc mcp-servers codex-progress local-model hermes hermes-delegate ollama wireguard autoresume agents codex-mcp continuity claude-md settings hooks git-identity apt-extra binaries restart-policy autoupdate dns clipboard kernel-lang)
 
-declare -g -A SEC_TITLE SEC_DESC SEC_VARS SEC_APPLY SEC_PROFILE SEC_SCOPE SEC_DEPS SEC_DEP_TEXT SEC_DOCTOR_ROWS
+sec_get() {
+  case "$1" in
+    SEC_TITLE)
+      case "$2" in
+        mode)
+          printf '%s\n' 'Mode'
+          ;;
+        mounts)
+          printf '%s\n' 'Mounts'
+          ;;
+        workspaces)
+          printf '%s\n' 'Workspaces'
+          ;;
+        python)
+          printf '%s\n' 'Python venv'
+          ;;
+        gpu)
+          printf '%s\n' 'GPU'
+          ;;
+        egress)
+          printf '%s\n' 'Egress'
+          ;;
+        netaccess)
+          printf '%s\n' 'Container network access'
+          ;;
+        hostroute)
+          printf '%s\n' 'Host route'
+          ;;
+        ssh)
+          printf '%s\n' 'SSH'
+          ;;
+        bashrc)
+          printf '%s\n' 'Shell functions'
+          ;;
+        mcp-servers)
+          printf '%s\n' 'MCP servers'
+          ;;
+        codex-progress)
+          printf '%s\n' 'Codex progress relay'
+          ;;
+        local-model)
+          printf '%s\n' 'Local model'
+          ;;
+        hermes)
+          printf '%s\n' 'Hermes engine'
+          ;;
+        hermes-delegate)
+          printf '%s\n' 'Hermes MCP delegate'
+          ;;
+        ollama)
+          printf '%s\n' 'Ollama (machine-scoped)'
+          ;;
+        wireguard)
+          printf '%s\n' 'WireGuard (machine-scoped)'
+          ;;
+        autoresume)
+          printf '%s\n' 'Session-limit auto-resume'
+          ;;
+        agents)
+          printf '%s\n' 'Agents'
+          ;;
+        codex-mcp)
+          printf '%s\n' 'Codex MCP'
+          ;;
+        continuity)
+          printf '%s\n' 'Continuity'
+          ;;
+        claude-md)
+          printf '%s\n' 'CLAUDE.md'
+          ;;
+        settings)
+          printf '%s\n' 'Settings'
+          ;;
+        hooks)
+          printf '%s\n' 'Hooks'
+          ;;
+        git-identity)
+          printf '%s\n' 'Git identity'
+          ;;
+        apt-extra)
+          printf '%s\n' 'APT packages'
+          ;;
+        binaries)
+          printf '%s\n' 'Binaries'
+          ;;
+        restart-policy)
+          printf '%s\n' 'Restart policy'
+          ;;
+        autoupdate)
+          printf '%s\n' 'Engine autoupdate'
+          ;;
+        dns)
+          printf '%s\n' 'DNS'
+          ;;
+        clipboard)
+          printf '%s\n' 'Clipboard image bridge'
+          ;;
+        kernel-lang)
+          printf '%s\n' 'Conduct kernel language rule'
+          ;;
+        *)
+          return 0
+          ;;
+      esac
+      ;;
+    SEC_DESC)
+      case "$2" in
+        mode)
+          printf '%s\n' 'Container mode: one shared global container, or one container per project.'
+          ;;
+        mounts)
+          printf '%s\n' 'How ~/.claude and ~/.codex reach the container: bind mount a host dir, or use a volume.'
+          ;;
+        workspaces)
+          printf '%s\n' 'Project directories mounted 1:1 read-write; defines the codex guard scope roots.'
+          ;;
+        python)
+          printf '%s\n' 'Python venv source: none (only python3 in image), a read-only host mount, or a volume.'
+          ;;
+        gpu)
+          printf '%s\n' 'Enable GPU support via CDI; checks for nvidia-ctk and the CDI spec on the host.'
+          ;;
+        egress)
+          printf '%s\n' 'Network egress policy: off, allowlist, or blocklist of domains; applied after login.'
+          ;;
+        netaccess)
+          printf '%s\n' 'Reach Docker networks through Dante SOCKS; optional host-side exec bridge runs tests only in containers on explicit scope=list networks and never mounts docker.sock into cbox.'
+          ;;
+        hostroute)
+          printf '%s\n' 'Route container egress through a host-managed forward proxy so host /etc/hosts and host DNS resolution are honored; optional host-gateway alias maps host.docker.internal for direct host-side endpoints.'
+          ;;
+        ssh)
+          printf '%s\n' 'SSH access mode: none, forwarded host agent, container-generated keys, or both.'
+          ;;
+        bashrc)
+          printf '%s\n' 'Install shell functions (~/.bashrc-cbox) plus a marker block in ~/.bashrc.'
+          ;;
+        mcp-servers)
+          printf '%s\n' 'Select which MCP delegates from delegates.json are available in the container.'
+          ;;
+        codex-progress)
+          printf '%s\n' 'Wrap codex-* MCP servers in a shim that translates codex events into MCP progress notifications - codex output shows live in the Claude UI.'
+          ;;
+        local-model)
+          printf '%s\n' 'Off by default. A text-only MCP delegate (local-qwen) backed by a local OpenAI-compatible endpoint such as ollama - see etc/docs/LOCAL_MODEL_RUNBOOK.md.'
+          ;;
+        hermes)
+          printf '%s\n' 'Off by default; third console engine (NousResearch Hermes Agent) installed at runtime into the shared bins volume; local OpenAI-compatible endpoint by default.'
+          ;;
+        hermes-delegate)
+          printf '%s\n' 'Off by default. A zero-cost MCP delegate tool (hermes-local) that shells out to a one-shot hermes -z call per invocation, in an ephemeral per-call home isolated from the hermes console engine; requires the hermes console engine.'
+          ;;
+        ollama)
+          printf '%s\n' 'Off by default. Machine-scoped infra service: ollama runs in its own owner compose project (cbox-infra-u<uid>), never inside a generated cbox project, so it survives per-project compose down. One value applies to every project on this machine; the isolated per-project wizard never asks about it.'
+          ;;
+        wireguard)
+          printf '%s\n' 'Off by default. Machine-scoped WireGuard sidecar in the same owner project as ollama: server mode shares this machine ollama over one authenticated UDP port (no routing, no NAT, no IP forwarding - a single-service TCP forwarder only); client mode dials a remote peer and exposes it under a stable internal alias. One value applies to every project on this machine; the isolated per-project wizard never asks about it.'
+          ;;
+        autoresume)
+          printf '%s\n' 'Wrap interactive sessions in tmux and let a per-container watchdog type the resume prompt after a usage-limit window resets (isolated session scope + claude mount only). Also carries the in-container sshd remote-attach feature (disabled by default): three layers - WireGuard, an ssh key, and this container'\''s access level - gate list/attach/spawn against the tmux sessions the wrap creates.'
+          ;;
+        agents)
+          printf '%s\n' 'Select which agents from etc/agents are installed; codex-* need their MCP server.'
+          ;;
+        codex-mcp)
+          printf '%s\n' 'Register claude as an MCP tool inside codex for reverse orchestration.'
+          ;;
+        continuity)
+          printf '%s\n' 'Durable-continuity toggles: history, git changelog, diary, open questions.'
+          ;;
+        claude-md)
+          printf '%s\n' 'Deploy CLAUDE.md plus policies and templates; skipped when history is disabled.'
+          ;;
+        settings)
+          printf '%s\n' 'Merge etc/claude/settings.merge.json into the effective ~/.claude/settings.json.'
+          ;;
+        hooks)
+          printf '%s\n' 'Install hook scripts (codex guard, ask-claude MCP bridge) into ~/.claude/hooks.'
+          ;;
+        git-identity)
+          printf '%s\n' 'Mount the host ~/.gitconfig read-only into the container.'
+          ;;
+        apt-extra)
+          printf '%s\n' 'Extra apt packages installed into the image at build time.'
+          ;;
+        binaries)
+          printf '%s\n' 'Claude/codex version pins and the shared binary volumes; installs run host-side, runtime mounts are read-only.'
+          ;;
+        restart-policy)
+          printf '%s\n' 'Docker restart policy applied to the container.'
+          ;;
+        autoupdate)
+          printf '%s\n' 'Host-side engine autoupdate for channel targets (claude stable/latest, codex latest, hermes latest): re-runs the vendor installer once the TTL elapses.'
+          ;;
+        dns)
+          printf '%s\n' 'DNS resolution inside the container when egress is enabled: Docker embedded DNS, public resolvers, or a host-stable stub resolver IP.'
+          ;;
+        clipboard)
+          printf '%s\n' 'Host clipboard image bridge over a unix socket answering Claude Code'\''s Ctrl+V image paste inside the container.'
+          ;;
+        kernel-lang)
+          printf '%s\n' 'Two-part language rule rendered into the deployed conduct kernel: reason in one language, answer in another. Off (output language empty) by default - the rule is not rendered until an output language is set.'
+          ;;
+        *)
+          return 0
+          ;;
+      esac
+      ;;
+    SEC_VARS)
+      case "$2" in
+        mode)
+          printf '%s\n' 'CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL'
+          ;;
+        mounts)
+          printf '%s\n' 'CBOX_CLAUDE_MODE CBOX_CLAUDE_PATH CBOX_CLAUDE_BACKUP CBOX_CODEX_MODE CBOX_CODEX_PATH CBOX_CODEX_BACKUP CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG'
+          ;;
+        workspaces)
+          printf '%s\n' 'CBOX_WORKSPACES CBOX_WORKDIR'
+          ;;
+        python)
+          printf '%s\n' 'CBOX_VENV_MODE CBOX_VENV_PATH'
+          ;;
+        gpu)
+          printf '%s\n' 'CBOX_GPU'
+          ;;
+        egress)
+          printf '%s\n' 'CBOX_EGRESS_MODE CBOX_EGRESS_APPLIED'
+          ;;
+        netaccess)
+          printf '%s\n' 'CBOX_NETACCESS_MODE CBOX_NETACCESS_APPLIED CBOX_NETACCESS_SCOPE CBOX_NETACCESS_NETWORKS CBOX_NETACCESS_CIDRS CBOX_NETACCESS_SOCKS_PORT CBOX_NETACCESS_EXEC_MODE CBOX_NETACCESS_EXEC_WORKSPACE_GUARD CBOX_NETACCESS_EXEC_TIMEOUT CBOX_NETACCESS_EXEC_MAX_BYTES CBOX_CONTAINER_EXEC_TOOL'
+          ;;
+        hostroute)
+          printf '%s\n' 'CBOX_HOST_ROUTE_MODE CBOX_HOST_ROUTE_APPLIED CBOX_HOST_PROXY_URL CBOX_HOST_PROXY_ADDR_MODE CBOX_HOST_GATEWAY_ALIAS'
+          ;;
+        ssh)
+          printf '%s\n' 'CBOX_SSH_MODE CBOX_SSH_AGENT_DIR'
+          ;;
+        bashrc)
+          printf '%s\n' 'CBOX_BASHRC'
+          ;;
+        mcp-servers)
+          printf '%s\n' 'CBOX_MCP_SERVERS'
+          ;;
+        codex-progress)
+          printf '%s\n' 'CBOX_CODEX_PROGRESS_MODE'
+          ;;
+        local-model)
+          printf '%s\n' 'CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME'
+          ;;
+        hermes)
+          printf '%s\n' 'CBOX_HERMES CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME'
+          ;;
+        hermes-delegate)
+          printf '%s\n' 'CBOX_HERMES_DELEGATE CBOX_HERMES_DELEGATE_PROVIDER CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL CBOX_HERMES_DELEGATE_MAX_CONCURRENCY CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC CBOX_HERMES_DELEGATE_LOCK_DIR OLLAMA_NUM_PARALLEL CBOX_HERMES_DELEGATE_MODE CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS'
+          ;;
+        ollama)
+          printf '%s\n' 'CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL'
+          ;;
+        wireguard)
+          printf '%s\n' 'CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE CBOX_WG_FORWARDS'
+          ;;
+        autoresume)
+          printf '%s\n' 'CBOX_LIMIT_AUTORESUME CBOX_SESSION_MULTIPLEX CBOX_SESSION_BROKER_MODE CBOX_SSHD_LISTEN_ADDR CBOX_SSHD_PORT CBOX_LIMIT_RESUME_DELAY CBOX_LIMIT_RESUME_PROMPT CBOX_LIMIT_RESUME_STAGGER CBOX_LIMIT_RESUME_MAX_PER_DAY'
+          ;;
+        agents)
+          printf '%s\n' 'CBOX_AGENTS'
+          ;;
+        codex-mcp)
+          printf '%s\n' 'CBOX_CODEX_MCP'
+          ;;
+        continuity)
+          printf '%s\n' 'CBOX_HISTORY CBOX_GIT CBOX_DIARY CBOX_OPEN_QUESTIONS CBOX_CONTEXT_PROFILE'
+          ;;
+        claude-md)
+          printf '%s\n' ''
+          ;;
+        settings)
+          printf '%s\n' ''
+          ;;
+        hooks)
+          printf '%s\n' ''
+          ;;
+        git-identity)
+          printf '%s\n' 'CBOX_GITCONFIG'
+          ;;
+        apt-extra)
+          printf '%s\n' 'CBOX_APT_EXTRA'
+          ;;
+        binaries)
+          printf '%s\n' 'CBOX_CLAUDE_TARGET CBOX_CODEX_VERSION CBOX_CODEX_TARGET CBOX_BINS_SCOPE'
+          ;;
+        restart-policy)
+          printf '%s\n' 'CBOX_RESTART_POLICY'
+          ;;
+        autoupdate)
+          printf '%s\n' 'CBOX_AUTOUPDATE CBOX_AUTOUPDATE_TTL_HOURS'
+          ;;
+        dns)
+          printf '%s\n' 'CBOX_DNS_MODE CBOX_DNS_SERVERS CBOX_DNS_STUB_IP'
+          ;;
+        clipboard)
+          printf '%s\n' 'CBOX_CLIPBOARD_MODE'
+          ;;
+        kernel-lang)
+          printf '%s\n' 'CBOX_KERNEL_LANG_OUTPUT CBOX_KERNEL_LANG_REASONING'
+          ;;
+        *)
+          return 0
+          ;;
+      esac
+      ;;
+    SEC_APPLY)
+      case "$2" in
+        mode)
+          printf '%s\n' 'none'
+          ;;
+        mounts)
+          printf '%s\n' 'recreate'
+          ;;
+        workspaces)
+          printf '%s\n' 'recreate'
+          ;;
+        python)
+          printf '%s\n' 'recreate'
+          ;;
+        gpu)
+          printf '%s\n' 'none'
+          ;;
+        egress)
+          printf '%s\n' 'topology'
+          ;;
+        netaccess)
+          printf '%s\n' 'topology'
+          ;;
+        hostroute)
+          printf '%s\n' 'topology'
+          ;;
+        ssh)
+          printf '%s\n' 'recreate'
+          ;;
+        bashrc)
+          printf '%s\n' 'shell'
+          ;;
+        mcp-servers)
+          printf '%s\n' 'restart'
+          ;;
+        codex-progress)
+          printf '%s\n' 'restart'
+          ;;
+        local-model)
+          printf '%s\n' 'restart'
+          ;;
+        hermes)
+          printf '%s\n' 'recreate'
+          ;;
+        hermes-delegate)
+          printf '%s\n' 'restart'
+          ;;
+        ollama)
+          printf '%s\n' 'infra-reconcile'
+          ;;
+        wireguard)
+          printf '%s\n' 'infra-reconcile'
+          ;;
+        autoresume)
+          printf '%s\n' 'recreate'
+          ;;
+        agents)
+          printf '%s\n' 'none'
+          ;;
+        codex-mcp)
+          printf '%s\n' 'none'
+          ;;
+        continuity)
+          printf '%s\n' 'none'
+          ;;
+        claude-md)
+          printf '%s\n' 'none'
+          ;;
+        settings)
+          printf '%s\n' 'restart'
+          ;;
+        hooks)
+          printf '%s\n' 'restart'
+          ;;
+        git-identity)
+          printf '%s\n' 'recreate'
+          ;;
+        apt-extra)
+          printf '%s\n' 'rebuild'
+          ;;
+        binaries)
+          printf '%s\n' 'rebuild'
+          ;;
+        restart-policy)
+          printf '%s\n' 'recreate'
+          ;;
+        autoupdate)
+          printf '%s\n' 'none'
+          ;;
+        dns)
+          printf '%s\n' 'recreate'
+          ;;
+        clipboard)
+          printf '%s\n' 'recreate'
+          ;;
+        kernel-lang)
+          printf '%s\n' 'none'
+          ;;
+        *)
+          return 0
+          ;;
+      esac
+      ;;
+    SEC_PROFILE)
+      case "$2" in
+        mode)
+          printf '%s\n' 'ask'
+          ;;
+        mounts)
+          printf '%s\n' 'ask'
+          ;;
+        workspaces)
+          printf '%s\n' 'ask'
+          ;;
+        python)
+          printf '%s\n' 'skip'
+          ;;
+        gpu)
+          printf '%s\n' 'skip'
+          ;;
+        egress)
+          printf '%s\n' 'skip'
+          ;;
+        netaccess)
+          printf '%s\n' 'skip'
+          ;;
+        hostroute)
+          printf '%s\n' 'skip'
+          ;;
+        ssh)
+          printf '%s\n' 'skip'
+          ;;
+        bashrc)
+          printf '%s\n' 'auto'
+          ;;
+        mcp-servers)
+          printf '%s\n' 'skip'
+          ;;
+        codex-progress)
+          printf '%s\n' 'skip'
+          ;;
+        local-model)
+          printf '%s\n' 'skip'
+          ;;
+        hermes)
+          printf '%s\n' 'skip'
+          ;;
+        hermes-delegate)
+          printf '%s\n' 'skip'
+          ;;
+        ollama)
+          printf '%s\n' 'skip'
+          ;;
+        wireguard)
+          printf '%s\n' 'skip'
+          ;;
+        autoresume)
+          printf '%s\n' 'skip'
+          ;;
+        agents)
+          printf '%s\n' 'skip'
+          ;;
+        codex-mcp)
+          printf '%s\n' 'skip'
+          ;;
+        continuity)
+          printf '%s\n' 'auto'
+          ;;
+        claude-md)
+          printf '%s\n' 'auto'
+          ;;
+        settings)
+          printf '%s\n' 'auto'
+          ;;
+        hooks)
+          printf '%s\n' 'auto'
+          ;;
+        git-identity)
+          printf '%s\n' 'auto'
+          ;;
+        apt-extra)
+          printf '%s\n' 'skip'
+          ;;
+        binaries)
+          printf '%s\n' 'skip'
+          ;;
+        restart-policy)
+          printf '%s\n' 'auto'
+          ;;
+        autoupdate)
+          printf '%s\n' 'skip'
+          ;;
+        dns)
+          printf '%s\n' 'skip'
+          ;;
+        clipboard)
+          printf '%s\n' 'skip'
+          ;;
+        kernel-lang)
+          printf '%s\n' 'skip'
+          ;;
+        *)
+          return 0
+          ;;
+      esac
+      ;;
+    SEC_SCOPE)
+      case "$2" in
+        mode)
+          printf '%s\n' 'project'
+          ;;
+        mounts)
+          printf '%s\n' 'project'
+          ;;
+        workspaces)
+          printf '%s\n' 'project'
+          ;;
+        python)
+          printf '%s\n' 'project'
+          ;;
+        gpu)
+          printf '%s\n' 'project'
+          ;;
+        egress)
+          printf '%s\n' 'project'
+          ;;
+        netaccess)
+          printf '%s\n' 'project'
+          ;;
+        hostroute)
+          printf '%s\n' 'project'
+          ;;
+        ssh)
+          printf '%s\n' 'project'
+          ;;
+        bashrc)
+          printf '%s\n' 'project'
+          ;;
+        mcp-servers)
+          printf '%s\n' 'project'
+          ;;
+        codex-progress)
+          printf '%s\n' 'project'
+          ;;
+        local-model)
+          printf '%s\n' 'project'
+          ;;
+        hermes)
+          printf '%s\n' 'project'
+          ;;
+        hermes-delegate)
+          printf '%s\n' 'project'
+          ;;
+        ollama)
+          printf '%s\n' 'machine'
+          ;;
+        wireguard)
+          printf '%s\n' 'machine'
+          ;;
+        autoresume)
+          printf '%s\n' 'project'
+          ;;
+        agents)
+          printf '%s\n' 'project'
+          ;;
+        codex-mcp)
+          printf '%s\n' 'project'
+          ;;
+        continuity)
+          printf '%s\n' 'project'
+          ;;
+        claude-md)
+          printf '%s\n' 'project'
+          ;;
+        settings)
+          printf '%s\n' 'project'
+          ;;
+        hooks)
+          printf '%s\n' 'project'
+          ;;
+        git-identity)
+          printf '%s\n' 'project'
+          ;;
+        apt-extra)
+          printf '%s\n' 'project'
+          ;;
+        binaries)
+          printf '%s\n' 'project'
+          ;;
+        restart-policy)
+          printf '%s\n' 'project'
+          ;;
+        autoupdate)
+          printf '%s\n' 'project'
+          ;;
+        dns)
+          printf '%s\n' 'project'
+          ;;
+        clipboard)
+          printf '%s\n' 'project'
+          ;;
+        kernel-lang)
+          printf '%s\n' 'project'
+          ;;
+        *)
+          return 0
+          ;;
+      esac
+      ;;
+    SEC_DEPS)
+      case "$2" in
+        gpu)
+          printf '%s\n' 'disable:no-cdi'
+          ;;
+        codex-progress)
+          printf '%s\n' 'dictate:shim-hook'
+          ;;
+        hermes-delegate)
+          printf '%s\n' 'disable:hermes-off'
+          ;;
+        codex-mcp)
+          printf '%s\n' 'dictate:hooks'
+          ;;
+        continuity)
+          printf '%s\n' 'dictate:continuity-hooks'
+          ;;
+        restart-policy)
+          printf '%s\n' 'disable:isolated-mode'
+          ;;
+        *)
+          return 0
+          ;;
+      esac
+      ;;
+    SEC_DEP_TEXT)
+      case "$2" in
+        disable:no-cdi)
+          printf '%s\n' 'disabled until nvidia-ctk and /etc/cdi/nvidia.yaml are present'
+          ;;
+        dictate:shim-hook)
+          printf '%s\n' 'auto-deploys the codex_mcp_shim hook when enabled'
+          ;;
+        disable:hermes-off)
+          printf '%s\n' 'disabled until the hermes console engine (CBOX_HERMES=on) is enabled'
+          ;;
+        dictate:hooks)
+          printf '%s\n' 'auto-deploys the ask-claude hook when enabled'
+          ;;
+        dictate:continuity-hooks)
+          printf '%s\n' 'history=1 auto-deploys the continuity hooks (commit log, ledger sweep, session digest)'
+          ;;
+        disable:isolated-mode)
+          printf '%s\n' 'disabled in isolated mode - container lifecycle managed per-project'
+          ;;
+        *)
+          return 0
+          ;;
+      esac
+      ;;
+    SEC_DOCTOR_ROWS)
+      case "$2" in
+        mounts)
+          printf '%s\n' ''
+          ;;
+        workspaces)
+          printf '%s\n' ''
+          ;;
+        python)
+          printf '%s\n' ''
+          ;;
+        netaccess)
+          printf '%s\n' 'netaccess container-exec container-exec-tool'
+          ;;
+        bashrc)
+          printf '%s\n' ''
+          ;;
+        mcp-servers)
+          printf '%s\n' ''
+          ;;
+        ollama)
+          printf '%s\n' 'ollama'
+          ;;
+        wireguard)
+          printf '%s\n' 'wireguard'
+          ;;
+        autoresume)
+          printf '%s\n' 'session-broker'
+          ;;
+        agents)
+          printf '%s\n' ''
+          ;;
+        continuity)
+          printf '%s\n' 'continuity-brain history git-changelog diary open-questions context-profile'
+          ;;
+        claude-md)
+          printf '%s\n' ''
+          ;;
+        hooks)
+          printf '%s\n' 'sessionstart-hooks'
+          ;;
+        apt-extra)
+          printf '%s\n' ''
+          ;;
+        binaries)
+          printf '%s\n' ''
+          ;;
+        restart-policy)
+          printf '%s\n' ''
+          ;;
+        autoupdate)
+          printf '%s\n' ''
+          ;;
+        dns)
+          printf '%s\n' ''
+          ;;
+        clipboard)
+          printf '%s\n' ''
+          ;;
+        kernel-lang)
+          printf '%s\n' ''
+          ;;
+        *)
+          return 0
+          ;;
+      esac
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
 
-SEC_TITLE[mode]='Mode'
-SEC_TITLE[mounts]='Mounts'
-SEC_TITLE[workspaces]='Workspaces'
-SEC_TITLE[python]='Python venv'
-SEC_TITLE[gpu]='GPU'
-SEC_TITLE[egress]='Egress'
-SEC_TITLE[netaccess]='Container network access'
-SEC_TITLE[hostroute]='Host route'
-SEC_TITLE[ssh]='SSH'
-SEC_TITLE[bashrc]='Shell functions'
-SEC_TITLE[mcp-servers]='MCP servers'
-SEC_TITLE[codex-progress]='Codex progress relay'
-SEC_TITLE[local-model]='Local model'
-SEC_TITLE[hermes]='Hermes engine'
-SEC_TITLE[hermes-delegate]='Hermes MCP delegate'
-SEC_TITLE[ollama]='Ollama (machine-scoped)'
-SEC_TITLE[wireguard]='WireGuard (machine-scoped)'
-SEC_TITLE[autoresume]='Session-limit auto-resume'
-SEC_TITLE[agents]='Agents'
-SEC_TITLE[codex-mcp]='Codex MCP'
-SEC_TITLE[continuity]='Continuity'
-SEC_TITLE[claude-md]='CLAUDE.md'
-SEC_TITLE[settings]='Settings'
-SEC_TITLE[hooks]='Hooks'
-SEC_TITLE[git-identity]='Git identity'
-SEC_TITLE[apt-extra]='APT packages'
-SEC_TITLE[binaries]='Binaries'
-SEC_TITLE[restart-policy]='Restart policy'
-SEC_TITLE[autoupdate]='Engine autoupdate'
-SEC_TITLE[dns]='DNS'
-SEC_TITLE[clipboard]='Clipboard image bridge'
+sec_has() {
+  case "$1" in
+    SEC_TITLE)
+      case "$2" in
+        mode|mounts|workspaces|python|gpu|egress|netaccess|hostroute|ssh|bashrc|mcp-servers|codex-progress|local-model|hermes|hermes-delegate|ollama|wireguard|autoresume|agents|codex-mcp|continuity|claude-md|settings|hooks|git-identity|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang)
+          return 0
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    SEC_DESC)
+      case "$2" in
+        mode|mounts|workspaces|python|gpu|egress|netaccess|hostroute|ssh|bashrc|mcp-servers|codex-progress|local-model|hermes|hermes-delegate|ollama|wireguard|autoresume|agents|codex-mcp|continuity|claude-md|settings|hooks|git-identity|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang)
+          return 0
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    SEC_VARS)
+      case "$2" in
+        mode|mounts|workspaces|python|gpu|egress|netaccess|hostroute|ssh|bashrc|mcp-servers|codex-progress|local-model|hermes|hermes-delegate|ollama|wireguard|autoresume|agents|codex-mcp|continuity|claude-md|settings|hooks|git-identity|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang)
+          return 0
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    SEC_APPLY)
+      case "$2" in
+        mode|mounts|workspaces|python|gpu|egress|netaccess|hostroute|ssh|bashrc|mcp-servers|codex-progress|local-model|hermes|hermes-delegate|ollama|wireguard|autoresume|agents|codex-mcp|continuity|claude-md|settings|hooks|git-identity|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang)
+          return 0
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    SEC_PROFILE)
+      case "$2" in
+        mode|mounts|workspaces|python|gpu|egress|netaccess|hostroute|ssh|bashrc|mcp-servers|codex-progress|local-model|hermes|hermes-delegate|ollama|wireguard|autoresume|agents|codex-mcp|continuity|claude-md|settings|hooks|git-identity|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang)
+          return 0
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    SEC_SCOPE)
+      case "$2" in
+        mode|mounts|workspaces|python|gpu|egress|netaccess|hostroute|ssh|bashrc|mcp-servers|codex-progress|local-model|hermes|hermes-delegate|ollama|wireguard|autoresume|agents|codex-mcp|continuity|claude-md|settings|hooks|git-identity|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang)
+          return 0
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    SEC_DEPS)
+      case "$2" in
+        gpu|codex-progress|hermes-delegate|codex-mcp|continuity|restart-policy)
+          return 0
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    SEC_DEP_TEXT)
+      case "$2" in
+        disable:no-cdi|dictate:shim-hook|disable:hermes-off|dictate:hooks|dictate:continuity-hooks|disable:isolated-mode)
+          return 0
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    SEC_DOCTOR_ROWS)
+      case "$2" in
+        mounts|workspaces|python|netaccess|bashrc|mcp-servers|ollama|wireguard|autoresume|agents|continuity|claude-md|hooks|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang)
+          return 0
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
 
-SEC_DESC[mode]='Container mode: one shared global container, or one container per project.'
-SEC_DESC[mounts]='How ~/.claude and ~/.codex reach the container: bind mount a host dir, or use a volume.'
-SEC_DESC[workspaces]='Project directories mounted 1:1 read-write; defines the codex guard scope roots.'
-SEC_DESC[python]='Python venv source: none (only python3 in image), a read-only host mount, or a volume.'
-SEC_DESC[gpu]='Enable GPU support via CDI; checks for nvidia-ctk and the CDI spec on the host.'
-SEC_DESC[egress]='Network egress policy: off, allowlist, or blocklist of domains; applied after login.'
-SEC_DESC[netaccess]='Reach Docker networks through Dante SOCKS; optional host-side exec bridge runs tests only in containers on explicit scope=list networks and never mounts docker.sock into cbox.'
-SEC_DESC[hostroute]='Route container egress through a host-managed forward proxy so host /etc/hosts and host DNS resolution are honored; optional host-gateway alias maps host.docker.internal for direct host-side endpoints.'
-SEC_DESC[ssh]='SSH access mode: none, forwarded host agent, container-generated keys, or both.'
-SEC_DESC[bashrc]='Install shell functions (~/.bashrc-cbox) plus a marker block in ~/.bashrc.'
-SEC_DESC[mcp-servers]='Select which MCP delegates from delegates.json are available in the container.'
-SEC_DESC[codex-progress]='Wrap codex-* MCP servers in a shim that translates codex events into MCP progress notifications - codex output shows live in the Claude UI.'
-SEC_DESC[local-model]='Off by default. A text-only MCP delegate (local-qwen) backed by a local OpenAI-compatible endpoint such as ollama - see etc/docs/LOCAL_MODEL_RUNBOOK.md.'
-SEC_DESC[hermes]='Off by default; third console engine (NousResearch Hermes Agent) installed at runtime into the shared bins volume; local OpenAI-compatible endpoint by default.'
-SEC_DESC[hermes-delegate]='Off by default. A zero-cost MCP delegate tool (hermes-local) that shells out to a one-shot hermes -z call per invocation, in an ephemeral per-call home isolated from the hermes console engine; requires the hermes console engine.'
-SEC_DESC[ollama]='Off by default. Machine-scoped infra service: ollama runs in its own owner compose project (cbox-infra-u<uid>), never inside a generated cbox project, so it survives per-project compose down. One value applies to every project on this machine; the isolated per-project wizard never asks about it.'
-SEC_DESC[wireguard]='Off by default. Machine-scoped WireGuard sidecar in the same owner project as ollama: server mode shares this machine ollama over one authenticated UDP port (no routing, no NAT, no IP forwarding - a single-service TCP forwarder only); client mode dials a remote peer and exposes it under a stable internal alias. One value applies to every project on this machine; the isolated per-project wizard never asks about it.'
-SEC_DESC[autoresume]='Wrap interactive sessions in tmux and let a per-container watchdog type the resume prompt after a usage-limit window resets (isolated session scope + claude mount only).'
-SEC_DESC[agents]='Select which agents from etc/agents are installed; codex-* need their MCP server.'
-SEC_DESC[codex-mcp]='Register claude as an MCP tool inside codex for reverse orchestration.'
-SEC_DESC[continuity]='Durable-continuity toggles: history, git changelog, diary, open questions.'
-SEC_DESC[claude-md]='Deploy CLAUDE.md plus policies and templates; skipped when history is disabled.'
-SEC_DESC[settings]='Merge etc/claude/settings.merge.json into the effective ~/.claude/settings.json.'
-SEC_DESC[hooks]='Install hook scripts (codex guard, ask-claude MCP bridge) into ~/.claude/hooks.'
-SEC_DESC[git-identity]='Mount the host ~/.gitconfig read-only into the container.'
-SEC_DESC[apt-extra]='Extra apt packages installed into the image at build time.'
-SEC_DESC[binaries]='Claude/codex version pins and the shared binary volumes; installs run host-side, runtime mounts are read-only.'
-SEC_DESC[restart-policy]='Docker restart policy applied to the container.'
-SEC_DESC[autoupdate]='Host-side engine autoupdate for channel targets (claude stable/latest, codex latest, hermes latest): re-runs the vendor installer once the TTL elapses.'
-SEC_DESC[dns]='DNS resolution inside the container when egress is enabled: Docker embedded DNS, public resolvers, or a host-stable stub resolver IP.'
-SEC_DESC[clipboard]='Host clipboard image bridge over a unix socket answering Claude Code'\''s Ctrl+V image paste inside the container.'
+sec_keys() {
+  case "$1" in
+    SEC_TITLE)
+      printf '%s\n' 'mode' 'mounts' 'workspaces' 'python' 'gpu' 'egress' 'netaccess' 'hostroute' 'ssh' 'bashrc' 'mcp-servers' 'codex-progress' 'local-model' 'hermes' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'codex-mcp' 'continuity' 'claude-md' 'settings' 'hooks' 'git-identity' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang'
+      ;;
+    SEC_DESC)
+      printf '%s\n' 'mode' 'mounts' 'workspaces' 'python' 'gpu' 'egress' 'netaccess' 'hostroute' 'ssh' 'bashrc' 'mcp-servers' 'codex-progress' 'local-model' 'hermes' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'codex-mcp' 'continuity' 'claude-md' 'settings' 'hooks' 'git-identity' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang'
+      ;;
+    SEC_VARS)
+      printf '%s\n' 'mode' 'mounts' 'workspaces' 'python' 'gpu' 'egress' 'netaccess' 'hostroute' 'ssh' 'bashrc' 'mcp-servers' 'codex-progress' 'local-model' 'hermes' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'codex-mcp' 'continuity' 'claude-md' 'settings' 'hooks' 'git-identity' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang'
+      ;;
+    SEC_APPLY)
+      printf '%s\n' 'mode' 'mounts' 'workspaces' 'python' 'gpu' 'egress' 'netaccess' 'hostroute' 'ssh' 'bashrc' 'mcp-servers' 'codex-progress' 'local-model' 'hermes' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'codex-mcp' 'continuity' 'claude-md' 'settings' 'hooks' 'git-identity' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang'
+      ;;
+    SEC_PROFILE)
+      printf '%s\n' 'mode' 'mounts' 'workspaces' 'python' 'gpu' 'egress' 'netaccess' 'hostroute' 'ssh' 'bashrc' 'mcp-servers' 'codex-progress' 'local-model' 'hermes' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'codex-mcp' 'continuity' 'claude-md' 'settings' 'hooks' 'git-identity' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang'
+      ;;
+    SEC_SCOPE)
+      printf '%s\n' 'mode' 'mounts' 'workspaces' 'python' 'gpu' 'egress' 'netaccess' 'hostroute' 'ssh' 'bashrc' 'mcp-servers' 'codex-progress' 'local-model' 'hermes' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'codex-mcp' 'continuity' 'claude-md' 'settings' 'hooks' 'git-identity' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang'
+      ;;
+    SEC_DEPS)
+      printf '%s\n' 'gpu' 'codex-progress' 'hermes-delegate' 'codex-mcp' 'continuity' 'restart-policy'
+      ;;
+    SEC_DEP_TEXT)
+      printf '%s\n' 'disable:no-cdi' 'dictate:shim-hook' 'disable:hermes-off' 'dictate:hooks' 'dictate:continuity-hooks' 'disable:isolated-mode'
+      ;;
+    SEC_DOCTOR_ROWS)
+      printf '%s\n' 'mounts' 'workspaces' 'python' 'netaccess' 'bashrc' 'mcp-servers' 'ollama' 'wireguard' 'autoresume' 'agents' 'continuity' 'claude-md' 'hooks' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang'
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
 
-SEC_VARS[mode]='CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL'
-SEC_VARS[mounts]='CBOX_CLAUDE_MODE CBOX_CLAUDE_PATH CBOX_CLAUDE_BACKUP CBOX_CODEX_MODE CBOX_CODEX_PATH CBOX_CODEX_BACKUP'
-SEC_VARS[workspaces]='CBOX_WORKSPACES CBOX_WORKDIR'
-SEC_VARS[python]='CBOX_VENV_MODE CBOX_VENV_PATH'
-SEC_VARS[gpu]='CBOX_GPU'
-SEC_VARS[egress]='CBOX_EGRESS_MODE CBOX_EGRESS_APPLIED'
-SEC_VARS[netaccess]='CBOX_NETACCESS_MODE CBOX_NETACCESS_APPLIED CBOX_NETACCESS_SCOPE CBOX_NETACCESS_NETWORKS CBOX_NETACCESS_CIDRS CBOX_NETACCESS_SOCKS_PORT CBOX_NETACCESS_EXEC_MODE CBOX_NETACCESS_EXEC_WORKSPACE_GUARD CBOX_NETACCESS_EXEC_TIMEOUT CBOX_NETACCESS_EXEC_MAX_BYTES'
-SEC_VARS[hostroute]='CBOX_HOST_ROUTE_MODE CBOX_HOST_ROUTE_APPLIED CBOX_HOST_PROXY_URL CBOX_HOST_PROXY_ADDR_MODE CBOX_HOST_GATEWAY_ALIAS'
-SEC_VARS[ssh]='CBOX_SSH_MODE CBOX_SSH_AGENT_DIR'
-SEC_VARS[bashrc]='CBOX_BASHRC'
-SEC_VARS[mcp-servers]='CBOX_MCP_SERVERS'
-SEC_VARS[codex-progress]='CBOX_CODEX_PROGRESS_MODE'
-SEC_VARS[local-model]='CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME'
-SEC_VARS[hermes]='CBOX_HERMES CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME'
-SEC_VARS[hermes-delegate]='CBOX_HERMES_DELEGATE CBOX_HERMES_DELEGATE_PROVIDER CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL CBOX_HERMES_DELEGATE_MAX_CONCURRENCY CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC CBOX_HERMES_DELEGATE_LOCK_DIR OLLAMA_NUM_PARALLEL CBOX_HERMES_DELEGATE_MODE CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS'
-SEC_VARS[ollama]='CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL'
-SEC_VARS[wireguard]='CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE'
-SEC_VARS[autoresume]='CBOX_LIMIT_AUTORESUME CBOX_LIMIT_RESUME_DELAY CBOX_LIMIT_RESUME_PROMPT CBOX_LIMIT_RESUME_STAGGER CBOX_LIMIT_RESUME_MAX_PER_DAY'
-SEC_VARS[agents]='CBOX_AGENTS'
-SEC_VARS[codex-mcp]='CBOX_CODEX_MCP'
-SEC_VARS[continuity]='CBOX_HISTORY CBOX_GIT CBOX_DIARY CBOX_OPEN_QUESTIONS CBOX_CONTEXT_PROFILE'
-SEC_VARS[claude-md]=''
-SEC_VARS[settings]=''
-SEC_VARS[hooks]=''
-SEC_VARS[git-identity]='CBOX_GITCONFIG'
-SEC_VARS[apt-extra]='CBOX_APT_EXTRA'
-SEC_VARS[binaries]='CBOX_CLAUDE_TARGET CBOX_CODEX_VERSION CBOX_CODEX_TARGET CBOX_BINS_SCOPE'
-SEC_VARS[restart-policy]='CBOX_RESTART_POLICY'
-SEC_VARS[autoupdate]='CBOX_AUTOUPDATE CBOX_AUTOUPDATE_TTL_HOURS'
-SEC_VARS[dns]='CBOX_DNS_MODE CBOX_DNS_SERVERS CBOX_DNS_STUB_IP'
-SEC_VARS[clipboard]='CBOX_CLIPBOARD_MODE'
-
-SEC_APPLY[mode]='none'
-SEC_APPLY[mounts]='recreate'
-SEC_APPLY[workspaces]='recreate'
-SEC_APPLY[python]='recreate'
-SEC_APPLY[gpu]='none'
-SEC_APPLY[egress]='topology'
-SEC_APPLY[netaccess]='topology'
-SEC_APPLY[hostroute]='topology'
-SEC_APPLY[ssh]='recreate'
-SEC_APPLY[bashrc]='shell'
-SEC_APPLY[mcp-servers]='restart'
-SEC_APPLY[codex-progress]='restart'
-SEC_APPLY[local-model]='restart'
-SEC_APPLY[hermes]='recreate'
-SEC_APPLY[hermes-delegate]='restart'
-SEC_APPLY[ollama]='infra-reconcile'
-SEC_APPLY[wireguard]='infra-reconcile'
-SEC_APPLY[autoresume]='recreate'
-SEC_APPLY[agents]='none'
-SEC_APPLY[codex-mcp]='none'
-SEC_APPLY[continuity]='none'
-SEC_APPLY[claude-md]='none'
-SEC_APPLY[settings]='restart'
-SEC_APPLY[hooks]='restart'
-SEC_APPLY[git-identity]='recreate'
-SEC_APPLY[apt-extra]='rebuild'
-SEC_APPLY[binaries]='rebuild'
-SEC_APPLY[restart-policy]='recreate'
-SEC_APPLY[autoupdate]='none'
-SEC_APPLY[dns]='recreate'
-SEC_APPLY[clipboard]='recreate'
-
-SEC_PROFILE[mode]='ask'
-SEC_PROFILE[mounts]='ask'
-SEC_PROFILE[workspaces]='ask'
-SEC_PROFILE[python]='skip'
-SEC_PROFILE[gpu]='skip'
-SEC_PROFILE[egress]='skip'
-SEC_PROFILE[netaccess]='skip'
-SEC_PROFILE[hostroute]='skip'
-SEC_PROFILE[ssh]='skip'
-SEC_PROFILE[bashrc]='auto'
-SEC_PROFILE[mcp-servers]='skip'
-SEC_PROFILE[codex-progress]='skip'
-SEC_PROFILE[local-model]='skip'
-SEC_PROFILE[hermes]='skip'
-SEC_PROFILE[hermes-delegate]='skip'
-SEC_PROFILE[ollama]='skip'
-SEC_PROFILE[wireguard]='skip'
-SEC_PROFILE[autoresume]='skip'
-SEC_PROFILE[agents]='skip'
-SEC_PROFILE[codex-mcp]='skip'
-SEC_PROFILE[continuity]='auto'
-SEC_PROFILE[claude-md]='auto'
-SEC_PROFILE[settings]='auto'
-SEC_PROFILE[hooks]='auto'
-SEC_PROFILE[git-identity]='auto'
-SEC_PROFILE[apt-extra]='skip'
-SEC_PROFILE[binaries]='skip'
-SEC_PROFILE[restart-policy]='auto'
-SEC_PROFILE[autoupdate]='skip'
-SEC_PROFILE[dns]='skip'
-SEC_PROFILE[clipboard]='skip'
-
-for _cbox_sec_scope_s in "${SECTIONS[@]}"; do
-  SEC_SCOPE[$_cbox_sec_scope_s]='project'
-done
-unset _cbox_sec_scope_s
-SEC_SCOPE[ollama]='machine'
-SEC_SCOPE[wireguard]='machine'
-
-SEC_DEPS[gpu]='disable:no-cdi'
-SEC_DEPS[codex-progress]='dictate:shim-hook'
-SEC_DEPS[hermes-delegate]='disable:hermes-off'
-SEC_DEPS[codex-mcp]='dictate:hooks'
-SEC_DEPS[continuity]='dictate:continuity-hooks'
-SEC_DEPS[restart-policy]='disable:isolated-mode'
-
-SEC_DEP_TEXT[disable:no-cdi]='disabled until nvidia-ctk and /etc/cdi/nvidia.yaml are present'
-SEC_DEP_TEXT[dictate:shim-hook]='auto-deploys the codex_mcp_shim hook when enabled'
-SEC_DEP_TEXT[disable:hermes-off]='disabled until the hermes console engine (CBOX_HERMES=on) is enabled'
-SEC_DEP_TEXT[dictate:hooks]='auto-deploys the ask-claude hook when enabled'
-SEC_DEP_TEXT[dictate:continuity-hooks]='history=1 auto-deploys the continuity hooks (commit log, ledger sweep, session digest)'
-SEC_DEP_TEXT[disable:isolated-mode]='disabled in isolated mode - container lifecycle managed per-project'
-
-SEC_DOCTOR_ROWS[mounts]=''
-SEC_DOCTOR_ROWS[workspaces]=''
-SEC_DOCTOR_ROWS[python]=''
-SEC_DOCTOR_ROWS[netaccess]='netaccess container-exec'
-SEC_DOCTOR_ROWS[bashrc]=''
-SEC_DOCTOR_ROWS[mcp-servers]=''
-SEC_DOCTOR_ROWS[ollama]='ollama'
-SEC_DOCTOR_ROWS[wireguard]='wireguard'
-SEC_DOCTOR_ROWS[autoresume]=''
-SEC_DOCTOR_ROWS[agents]=''
-SEC_DOCTOR_ROWS[continuity]='continuity-brain history git-changelog diary open-questions context-profile'
-SEC_DOCTOR_ROWS[claude-md]=''
-SEC_DOCTOR_ROWS[hooks]='sessionstart-hooks'
-SEC_DOCTOR_ROWS[apt-extra]=''
-SEC_DOCTOR_ROWS[binaries]=''
-SEC_DOCTOR_ROWS[restart-policy]=''
-SEC_DOCTOR_ROWS[autoupdate]=''
-SEC_DOCTOR_ROWS[dns]=''
-SEC_DOCTOR_ROWS[clipboard]=''
 DOCTOR_EXTRA_ROWS='codex-profile context-manifest local-model local-model-egress managed-dirs config-pending sessions'

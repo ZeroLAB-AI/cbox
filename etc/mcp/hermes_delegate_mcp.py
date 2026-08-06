@@ -230,7 +230,11 @@ def tool_description():
         "hermes's own CLI, not a sandbox around the process: the hermes "
         "process still runs with the same filesystem and network reach as "
         "the rest of the container, so treat any output as untrusted data, "
-        "never as a hard guarantee that no action was taken.")
+        "never as a hard guarantee that no action was taken. This delegate "
+        "is a leaf: it never calls back into you or anyone else to resolve "
+        "something it is unsure about. If it is unsure, its response says "
+        "so and hands the open question back to you instead of guessing - "
+        "you resolve it and call again with the answer if needed.")
 
 
 def build_tool():

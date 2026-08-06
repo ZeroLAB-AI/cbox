@@ -22,6 +22,8 @@ Mounted `~/.claude` and `~/.codex` must be outside every configured workspace pa
 
 The entrypoint fixes ownership of the managed directories (`~/.claude`, `~/.claude-cbox`, `~/.codex`, the venv path, `~/.ssh` when forwarded, and the per-project `~/.claude/projects/<slug>` for isolated scopes) to the container user on every start, listed via `CBOX_MANAGED_DIRS`. `cbox doctor` reports this as the `managed-dirs` row.
 
+`CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG=|on|off` (empty by default) controls the `switchModelsOnFlag` key in the volume-mode `~/.claude.json` seed (`generated/state/claude.json`; only applies when `CBOX_CLAUDE_MODE=volume`, mount mode never writes to the real host `~/.claude.json`). Empty leaves the key alone: a fresh seed is written without it, exactly as before this setting existed, and an existing seed is never touched. `on`/`off` write the key into a fresh seed, and add it to an existing seed only when the key is absent - cbox never overwrites a value already present, since the user may have set it deliberately through the `/config` menu. This is a one-shot add, not a live toggle: flipping the gate after the seed file already carries the key has no effect on that file.
+
 ### workspaces
 
 List git repositories or directories where cbox will run. The wizard checks each path and offers to `git init` if not a work-tree (required for git guards and codex write-capable delegation).
@@ -43,13 +45,17 @@ Inside the container, `~/.local` and `~/.codex/packages` are read-only; `pip ins
 
 Check for NVIDIA GPU support (nvidia-container-toolkit + CDI). If missing, the wizard prints exact manual installation commands but does not run them.
 
+`CBOX_GPU=1` is sufficient by itself: the CDI reservation is rendered into the compose file automatically, in both global and isolated (per-project) mode, and is attached every time the container starts (`cbox run`, `cbox shell`, `cbox up`, ...). The `--gpu` flag on `cbox up`/`cbox restart` is legacy and redundant when `CBOX_GPU=1` - it is still accepted for old habits and scripts, but it is a no-op in that case. If `CBOX_GPU=0`, passing `--gpu` fails loudly and tells you to run `cbox config set CBOX_GPU=1` instead of silently starting without GPU.
+
+Host prerequisites are unchanged: install `nvidia-container-toolkit`, run `nvidia-ctk runtime configure --runtime=docker`, restart docker, then `nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`. Under rootless docker, CDI typically also needs `no-cgroups = true` in the nvidia-container-runtime config; this is a host-side step cbox cannot verify.
+
 After installing on the host and plugging in an eGPU:
 
 ```bash
 sudo ./bind_egpu.sh
 ```
 
-This regenerates the CDI specification and restarts the stack with `--gpu`. A plain `cbox up` always works without GPU.
+This regenerates the CDI specification, sets `CBOX_GPU=1` in the config, and restarts the stack. It no longer passes `--gpu`, because the config is now what decides: passing the flag on a machine where `CBOX_GPU=0` would stop the container and then refuse to start it. A plain `cbox up` always works without GPU when `CBOX_GPU=0`.
 
 ### egress
 
@@ -71,10 +77,12 @@ Apply via `./setup.sh update egress` (compose re-render + container recreate).
 
 ### netaccess
 
-Optional Dante SOCKS proxy on the egress container for reaching other Docker networks and raw IP ranges. On every `cbox run`, `cbox shell`, or global `cbox up`, the host-side lifecycle resolves the configured scope, joins the proxy to eligible Docker networks, renders `sockd.conf`, disconnects networks removed from the previous scope, and restarts the proxy. The Docker-network side has two scopes (`CBOX_NETACCESS_SCOPE`):
+Optional Dante SOCKS proxy on the egress container for reaching other Docker networks and raw IP ranges. The host-side lifecycle that resolves the configured scope, joins the proxy to eligible Docker networks, renders `sockd.conf`, disconnects networks removed from the previous scope, and restarts the proxy runs on `cbox run` (both global and isolated), isolated `cbox shell`, and `cbox up`. Global `cbox shell` only execs into the already-running global container - it does not re-run this lifecycle, so a grant made after the global container was started needs `cbox down && cbox up` (or `cbox run`) to take effect there. The Docker-network side has two scopes (`CBOX_NETACCESS_SCOPE`):
 
 - **all (default)** - the proxy joins every eligible bridge or overlay Docker network present at apply time; networks are autodetected, nothing to enumerate. Host, none, ingress, unsupported-driver, non-IPv4, and the current cbox project's own internal/egress networks are skipped. New networks appearing later are picked up on the next apply.
 - **list** - the proxy joins only the networks named in the wizard. An empty list under this scope passes nothing beyond the raw CIDRs; with no CIDRs either, the proxy denies everything.
+
+A network named under `scope=list` that does not exist (or cannot be inspected) at apply time is skipped, not fatal: the apply still proceeds and grants every other reachable network, and a warning names it on stderr (`cbox: netaccess: SKIPPING granted network ...`) stating whether the network was absent or merely failed to inspect. `cbox doctor` then lists it under `configured networks not found on this host`; `cbox netaccess status` shows it under `networks:` but not under `applied:`. Only an unsupported driver, a cbox-infrastructure network, or a network with no eligible IPv4 subnet stays a hard error under `scope=list`, since those name a real network the operator asked for that cbox refuses to join on principle rather than one that is simply not there right now.
 
 Raw IPv4 CIDR ranges (minimum `/8` prefix, e.g. k3s pods `10.42.0.0/16`, services `10.43.0.0/16`) are always listed manually under both scopes - they are not Docker networks and cannot be autodetected. Their reachability depends on host routing. A wildcard CIDR does not exist: `0.0.0.0/*` and prefixes broader than `/8` are rejected.
 
@@ -104,6 +112,8 @@ cbox-container exec --cwd /workspace --timeout 300 app -- pytest -q
 ```
 
 Options must precede the container name. Commands are passed as an argv list without shell interpretation, output is capped, audit records contain an argv hash rather than full arguments, and a target-side `timeout` process bounds execution. If the target image has no `timeout` executable, the command fails instead of running unbounded.
+
+`CBOX_CONTAINER_EXEC_TOOL=off|on` (off by default) additionally registers the bridge as an MCP tool (`container-exec` in `delegates.json`, tools `container_list` and `container_exec`) so an agent can call it directly instead of a human running `cbox-container` by hand. This is a separate, stricter gate on top of `CBOX_NETACCESS_EXEC_MODE=scoped`: an operator may want the bridge for their own manual use without exposing it as agent-callable, so both must be on for the tool to actually work. The tool speaks the same one-shot, no-TTY, no-stdin protocol as the `cbox-container` client - one bounded `docker exec` per call, nothing persists between calls, and shell metacharacters in `argv` do nothing unless the caller passes `sh -c` itself. If the bridge socket is absent or not a socket, the tool returns a clear error rather than crashing; that error means the operator has not enabled the feature for this session, not that the caller did something wrong. Whatever the tool returns on stdout or stderr is untrusted data from a foreign container; the rendered tool description and the injected context paragraphs say so explicitly, because that output flows straight into an agent's context. Scope deliberately stays where it already was: an exec runs inside the target container's own namespaces, so it grants exactly what that container grants and no host access of its own. There is no hardcoded path deny-list. The one case worth knowing is that a target container which itself bind-mounts a host path lends that access to whoever execs into it; `CBOX_NETACCESS_EXEC_WORKSPACE_GUARD=on` is the opt-in control for that, and it stays off by default. Every request is audited, including denials and `list` calls, not only successful execs, and the exec record is written before the command runs as well as after it. hermes can render this tool too (see the MCP servers for hermes paragraph in the hermes section), but `container-exec`'s own `available_to` list in `delegates.json` does not name `hermes` yet - the entry has to opt in there first, independently of `CBOX_CONTAINER_EXEC_TOOL`.
 
 ### hostroute
 
@@ -153,6 +163,8 @@ Parameters: `prompt` (question), `model` (haiku/sonnet/opus), `effort` (low/medi
 
 Safety: recursion limit (Claude refuses further hops when invoked over MCP), read-only wrapper script, bytewise audit trail to `~/.claude/ask_claude_audit.container.jsonl`.
 
+Each call runs Claude Code in headless print mode (`claude -p ... --output-format json`), so it can carry a real `--fallback-model` chain: a comma-separated list Claude Code tries in order if the requested model is overloaded or not available. This is a genuine multi-step chain, but it is scoped to this one-shot delegate call, not to an interactive Claude Code session - `--fallback-model` only works with `--print`, and it covers "overloaded or not available", not a safety-rules refusal. An interactive session only has `switchModelsOnFlag`, a single automatic switch (see the mounts section above); there is no native three-step interactive chain, and cbox does not pretend otherwise. Set `ASK_CLAUDE_FALLBACK_MODEL` to a comma-separated override list (empty string disables the chain entirely); leave it unset for a built-in default chain keyed on the requested `model` (defined in `etc/codex/ask_claude_fallback_models.json`, deployed alongside `ask_claude_mcp.py`). Every entry in the chain, override or default, passes the same validation as `model` itself: non-empty, no leading `-`, no whitespace; a malformed override entry refuses the call before Claude Code is invoked.
+
 ### codex-progress
 
 Enable live progress relay: MCP calls show live Claude Code UI activity during Codex delegation instead of a bare spinner. The relay (`~/.claude/hooks/codex_mcp_shim.py`) translates Codex events to standard MCP progress notifications. Requires claude mount mode and staged hook install (`cbox install-hooks`).
@@ -177,6 +189,10 @@ Install global policies and templates into `~/.claude/policies/` and `~/.claude/
 
 Policies are read-only inside the container (mounted read-only in both mount and volume mode) to prevent prompt injection. Manage policies on the host via `./setup.sh update claude-md`.
 
+### kernel-lang
+
+Two-part language rule rendered into the deployed conduct kernel: `CBOX_KERNEL_LANG_OUTPUT` (free text, default empty) and `CBOX_KERNEL_LANG_REASONING` (free text, default `slovencina bez diakritiky`). Empty output language means the rule is not rendered at all - no language is imposed unless one is set. When an output language is set, one line is added to the kernel: reason and think in the reasoning language, answer and write every output in the output language. Values are bounded to 64 ASCII characters, no control characters, no leading/trailing spaces, no `{`/`}`; non-ASCII input is refused, not transliterated. Set via `cbox config` or `./setup.sh update claude-md` (`apply_class: none`, `profile: skip` - no interactive wizard prompt).
+
 ### settings
 
 Configure model routing: tiers (luna, sol, terra, terra-light) and their associated Claude models + reasoning effort, plus approvals and billing. Pulls from `~/.claude/settings.json`. Changes stage with diffs before confirmation.
@@ -198,6 +214,40 @@ Optional extra apt packages to install in the container image (security updates,
 ### autoresume
 
 Enable session-limit auto-resume: `cbox run claude` sessions wrapped in tmux survive usage-limit stops. The watchdog detects resets and types the resume prompt at the appointed time (tunable: `CBOX_LIMIT_RESUME_DELAY` default 300s, `CBOX_LIMIT_RESUME_STAGGER` default 30s, `CBOX_LIMIT_RESUME_PROMPT` default "pokracuj"). Requires isolated session scope and claude mount mode.
+
+`CBOX_SESSION_MULTIPLEX` (default `off`) wraps the interactive session in a named tmux session (`cbox-<engine>-<random>`) whenever a real TTY is attached, for all three engines (claude, codex, hermes) - not just claude. This is the precondition for attaching to a running cbox session from elsewhere: a bare process cannot be adopted by a multiplexer after the fact, so the session must start under tmux. `CBOX_LIMIT_AUTORESUME=on` already implies this wrap for claude even when `CBOX_SESSION_MULTIPLEX` is off; set `CBOX_SESSION_MULTIPLEX=on` to get the same wrap (and therefore the same attach precondition) for codex and hermes, or for claude without turning on auto-resume. Both variables require a TTY on stdin and stdout; the non-interactive exec path (`cbox exec`, scripted invocations) never wraps.
+
+Remote session access is three layers stacked in the owner's order, and all three must be satisfied before a remote viewer sees a single byte: **(1) WireGuard** - the peer has to be a configured tunnel peer (`cbox wg peer add`, see the wireguard section above) before it can reach this container's sshd port at all; without the tunnel up, the port is not on any network the peer can route to. **(2) an ssh key** - the peer's public key has to be in this container's `authorized_keys` (`cbox session-broker key add`, below); WireGuard reachability alone does not authenticate anyone. **(3) the runtime allow** - even a peer who is on the tunnel and holds a trusted key gets nothing until the owner opens the access level and, optionally, a time window (`cbox session-broker access`/`window`, below). Losing any one of the three closes the door; all three are host-side decisions, never made by the connecting peer.
+
+The container runs its own `sshd` (`AllowUsers <container user>`, `PermitRootLogin no`, no password/keyboard-interactive auth, no TCP/agent/stream-local/X11 forwarding, no tunneling, `PermitOpen none`) with a single `ForceCommand /opt/cbox/cbox-session-entry.py` - every connection, regardless of what the client asks for, runs this one program with the client's request available only as the `SSH_ORIGINAL_COMMAND` environment string (`ForceCommand` always wins over any `command=` an authorized_keys line might also carry). The entry program never execs a shell with that string: it matches it against a strict allow-list (`list`, `attach <session>`, `spawn <engine>`) before doing anything, rejects anything shaped like a flag or a path, and builds every downstream `tmux` argv itself - the caller supplies only a session or engine name, never a flag position, so a connection cannot smuggle `-CC`, `send-keys`, or any other tmux argv regardless of what it sends as its "command".
+
+`CBOX_SESSION_BROKER_MODE` (default `disabled`; per-container setup.sh default, see the wizard) is the access level: `disabled` renders nothing at all (see Inert default below); `viewer` and `full-attach` render the sshd config, generate host keys once, and mount everything needed. The entry program reads this level fresh from `/etc/cbox-sshd/access.level` on every single connection, before evaluating even a `list` request, and there is also a companion optional time window at `/etc/cbox-sshd/access.window` (an epoch deadline, or empty meaning open indefinitely) checked the same way - so opening or closing access takes effect for an already-running container without any recreate, which is the entire point of resolving it per connection rather than once at container start. Both files are mounted `:ro` into the container and are always written host-side.
+
+`viewer` allows `list` and a read-only `attach`: the entry program builds `tmux attach-session -r -f read-only,ignore-size -t <session>` itself, and independently of tmux honouring `-r`, the entry program's own byte-relay loop only ever forwards stdin bytes into the tmux pty when `tier == full-attach` - a compromised or buggy client cannot regain write access by asking for a different tmux flag, because it never controls the flags at all. `full-attach` allows a writable attach (no `-r`) and is also required for `spawn`, which generates a brand-new session name itself (`cbox-<engine>-<16 hex chars>`, matching the shape `entrypoint.sh`'s own session multiplexing already uses) and starts it under the container's own tmux server; a `viewer`-tier `spawn` request is refused. `list` runs a bounded `tmux list-sessions` and returns only sessions matching that `cbox-<engine>-<hex>` shape.
+
+The tmux socket itself is never exposed beyond the entry program: sessions live on the container's own default tmux socket (the same one `entrypoint.sh`'s multiplexing already uses; the entry program never sets, reads, or forwards `TMUX_TMPDIR`, and `sshd_config` neither accepts nor permits any client-supplied environment), and the entry program is the only thing that ever opens a client against it on a remote connection's behalf. Window resizing works: the entry program opens its own pty for the tmux client, watches `SIGWINCH` on the real ssh terminal, applies `TIOCSWINSZ` to the pty, and forwards `SIGWINCH` to tmux's process group - so an interactive full-attach client resizes correctly, but see the residual risk below about what that does to a session shared with other viewers.
+
+Every operation is audited, including refusals, append-only and `O_NOFOLLOW`-protected JSON lines at `/var/log/cbox-sshd/audit.jsonl` inside the container: op, tier, session/engine, outcome, reason, return code, and start/end pairs for attach/spawn. Identity in the audit record is the connecting address only (`SSH_CONNECTION`), never a key fingerprint - OpenSSH does not pass the authenticated key's fingerprint to `ForceCommand` via environment, only key-level rejections and successes appear in sshd's own log (`LogLevel VERBOSE`) outside this audit file. Cross-reference sshd's own log by timestamp and address if you need to know exactly which trusted key a given audit line used.
+
+**Opening and closing the window.** `cbox session-broker window <minutes>` writes an epoch deadline the entry program checks fresh every connection; `cbox session-broker window off` clears it back to "open indefinitely" (still gated by the access level - clearing the window does not itself grant access). Both are host-only and runtime: no recreate, effective on the very next connection attempt.
+
+**Adding and revoking a key.** `cbox session-broker key add <pubkey-file> [comment]` appends a `restrict,pty <type> <blob> [comment]` line to `authorized_keys` after verifying the file parses as a real public key and is not already present; `restrict` disables everything the sshd hardening directives already disable a second time at the per-key level (forwarding, X11, PTY allocation by default - `pty` is added back explicitly since the entry program needs one for tmux) and `pty` re-enables just that. `cbox session-broker key rm <fingerprint>` removes the matching line. `cbox session-broker key fingerprints` lists every currently trusted key's `ssh-keygen -lf`-style fingerprint line, so the owner can audit what is trusted without hand-parsing `authorized_keys`. All three are host-only, edit the same file the running container already has bind-mounted `:ro`, and OpenSSH re-reads `AuthorizedKeysFile` on every new connection attempt rather than caching it at daemon start - so key add/rm are runtime too, no recreate needed, exactly like access and window.
+
+**What is genuinely runtime versus what needs a recreate.** Runtime, no recreate: `session-broker access`, `session-broker window`, `session-broker key add/rm` - all three write host-side files the running container already has mounted `:ro` and the entry program (or sshd itself, for keys) re-reads fresh on the next connection. Recreate required: `CBOX_SESSION_BROKER_MODE` itself (flips whether sshd config/mounts/port-publish exist in the compose file at all), `CBOX_SSHD_LISTEN_ADDR`, and `CBOX_SSHD_PORT` (both baked into the rendered `sshd_config` and the compose `ports:` mapping) - changing any of these three needs `cbox down` + `cbox up`/`cbox run` to re-render and re-create the container.
+
+**Residual risks, stated plainly.** A `viewer` attach still sees everything the session prints to its terminal, including secrets that scroll past mid-session - read-only stops typing, it does not stop reading. A writable `full-attach` client connecting from a narrow terminal reflows the shared tmux session for every other attached viewer, because tmux by default sizes a session to its smallest attached client - the only mitigation is every attacher using `ignore-size` on their own side, and only `viewer` connections get that automatically here (the read-only attach argv always sets it); a `full-attach` operator sharing a session with a phone-sized terminal will visibly shrink it for everyone else. The audit trail identifies a connection by its source address, not by which trusted key it used - correlating a specific audit line to a specific key requires cross-referencing sshd's own log (`LogLevel VERBOSE`) by timestamp, it is not in `audit.jsonl` itself.
+
+**Reaching the container: the WireGuard forward gap.** `CBOX_WG_FORWARDS` (the WireGuard sidecar's server-role port-forward table) is how a WireGuard peer would normally reach a service that isn't the sidecar itself - but it cannot reach the cbox container's sshd port today, and this is a real, unresolved topology gap rather than something implemented and merely undocumented. The WireGuard sidecar runs in its own machine-scoped compose project (`cbox-infra-u<uid>`, shared with ollama), on that project's own `default`/`wg-egress` networks; a per-project cbox container's own compose file defines an entirely separate `internal`/`egress` network pair (only rendered when the egress proxy is active) and never joins the infra project's networks - there is no shared docker network between the two today. `CBOX_WG_FORWARDS`'s `target_host` is deliberately validated as a docker-service-name (not an IPv4 literal, precisely to keep every forward target a named peer the sidecar can legitimately reach on its own network - see the wireguard section above), and the cbox container is not a named service the sidecar can resolve, because it is not on that network at all. Two ways to close this, neither implemented here: give the WireGuard sidecar a second attachment onto the target cbox container's own compose network (widening what the sidecar is dual-homed into, which is itself a blast-radius increase - see the wireguard section's blast-radius paragraph), or run sshd's own `CBOX_SSHD_LISTEN_ADDR` as a plain address the container already holds on an interface the peer's WireGuard tunnel can already route to directly (a LAN address, or, if the peer's tunnel address space includes it, a genuinely reachable address) rather than routing through the forward table at all. Until one of those lands, `CBOX_SSHD_LISTEN_ADDR` in practice has to be an address the container holds today (a docker-bridge or host-LAN address), not a literal WireGuard tunnel IP - `entrypoint.sh` refuses to start sshd if the configured address is not actually present on one of the container's own interfaces at boot, so a misconfigured address fails loudly rather than silently.
+
+**The client story - no custom client needed.** With WireGuard up on the peer device and its key added, an ordinary ssh client reaches the forwarded port; `ForceCommand` means the usual interactive login shell is never available, so every operation is passed as the one-shot ssh command argument rather than typed after connecting:
+```
+ssh -p <CBOX_SSHD_PORT> <container-user>@<CBOX_SSHD_LISTEN_ADDR> list
+ssh -p <CBOX_SSHD_PORT> <container-user>@<CBOX_SSHD_LISTEN_ADDR> 'attach cbox-claude-3f9a2b1c'
+ssh -p <CBOX_SSHD_PORT> <container-user>@<CBOX_SSHD_LISTEN_ADDR> 'spawn claude'
+```
+`list` prints session name, created time, and path, one per line. `attach <session>` and `spawn <engine>` are interactive (they take over the ssh session's own terminal for the tmux client) - run them with a real pty (an interactive terminal, or a mobile ssh app that allocates one), not through `-T`/batch mode. The container's host key is generated once and stable across recreate (verified idempotent by sha256 across renders), so a peer that has accepted it once will not see a changed-host-key warning on a routine `cbox down && cbox up`; it only changes if the owner deletes the host-side key directory.
+
+Inert default, proved not asserted: with `CBOX_SESSION_BROKER_MODE=disabled`, the rendered `docker-compose.yml` has zero occurrences of `sshd`, no `ports:` key for it, and none of `sshd_config`, `sshd-hostkeys/`, `sshd-authorized_keys`, or `sshd-access/` are ever written to disk - `openssh-server` is still installed into the image (like `tmux`), but nothing execs it, no config exists for it to run against, no port is published, and no key material is generated (`lib/test_sshd_entry.sh`).
 
 ### restart-policy
 
@@ -231,7 +281,9 @@ Installed into the shared bins volume `cbox-bins-hermes`, exactly like the claud
 
 Set `CBOX_HERMES=on` plus `CBOX_HERMES_VERSION` (default `latest`, or an exact `x.y[.z[.w]]` pin), `CBOX_HERMES_PROVIDER` (`local`, `nous`, `openrouter`, `openai`, or `anthropic`; default `local`), and for `local` provider `CBOX_HERMES_MODEL_URL` plus `CBOX_HERMES_MODEL_NAME` via this wizard section, `./setup.sh update hermes`, or `--config`. This is a recreate-class change (`SEC_APPLY[hermes]=recreate`): compose recreates the container, and the binary itself lands via `cbox reinstall-bins` or the next autoupdate pass.
 
-Managed-keys ownership: provider, base URL (local provider only; `/v1` appended if missing), and model name are re-applied on every `cbox run hermes` via the official `hermes config set model.provider|base_url|default` CLI - never a copy-if-absent seed, never a hand-written YAML merge. Any other key in `~/.hermes-cbox/config.yaml` that the user or hermes itself sets is left untouched between starts. Secrets (`.env` under `HERMES_HOME`) and Nous OAuth login are manual, host-operator steps: `cbox shell` into the running container, then run the relevant `hermes` auth/config command by hand.
+Managed-keys ownership: provider, base URL (local provider only; `/v1` appended if missing), and model name are re-applied on every `cbox run hermes` via the official `hermes config set model.provider|base_url|default` CLI - never a copy-if-absent seed, never a hand-written YAML merge for these three keys. Any other key in `~/.hermes-cbox/config.yaml` that the user or hermes itself sets is left untouched between starts, with one more managed exception: `mcp_servers` (see below), which is a hand-written top-level block replace precisely because `hermes config set`'s dotted-key CLI cannot express a nested mapping (its own model names contain dots, which collide with the dotted-key syntax) and `hermes mcp add` has no non-interactive flag for env maps, timeouts, or the enabled switch. Secrets (`.env` under `HERMES_HOME`) and Nous OAuth login are manual, host-operator steps: `cbox shell` into the running container, then run the relevant `hermes` auth/config command by hand.
+
+MCP servers for hermes: cbox's MCP registry (`etc/mcp/delegates.json`, rendered by `etc/mcp/render_mcp.py`) now has a third render target alongside `claude` and `codex`. `regen_all` writes the rendered set to `generated/hermes/mcp_servers.yaml` (mounted read-only into the container next to `managed.env`, at `/etc/cbox/hermes-managed/`) whenever `CBOX_HERMES=on`; on every `cbox run hermes`, the entrypoint replaces the `mcp_servers:` top-level block in `~/.hermes-cbox/config.yaml` with that file's contents (a block replace, not a general YAML parse - cbox owns the entire block it writes, so no other key in the file is touched). An entry only reaches hermes if its `_cbox.available_to` list in `delegates.json` names `hermes` explicitly; today none does, so the default render is `mcp_servers: {}` and this is inert until an entry opts in (a decision for the entry's owner, not made here - `container-exec`, notably, is not opted in yet). `timeout` (hermes defaults to 300s) is carried through explicitly from the entry's `tool_timeout_sec` so long-running tools do not silently hit hermes's own default. An entry gated by `enabled_when_env` that names `hermes` but whose gate is currently unset renders with hermes's native `enabled: false` rather than being omitted, so `hermes mcp list` shows it as present-but-off instead of it simply not existing. Caveat that matters: each configured server becomes its own `mcp-<server>` toolset, auto-generated by hermes - this is a *different* mechanism from `agent.disabled_toolsets` (the knob the hermes-delegate section's qa mode uses to strip `terminal,file,web`). A tool given to hermes through `mcp_servers` is not covered by that strip list at all, so opting an entry in here can silently bypass a toolset restriction set up elsewhere for the same hermes instance.
 
 Degraded toolset note: the image ships the `hermes-agent` pip package only - no headless-browser or ffmpeg extras are installed, so any Hermes skills that depend on them are unavailable.
 
@@ -287,23 +339,33 @@ Blast radius: the sidecar is dual-homed whenever active - it has NET_ADMIN, `/de
 
 The central security decision is no routing: the sidecar terminates the tunnel and forwards exactly one TCP service in each direction with a userspace forwarder. It never enables IP forwarding, never adds NAT or masquerade rules, and never acts as a network gateway - it only accepts a TCP connection on one port and opens another TCP connection to one fixed destination, so it cannot route arbitrary traffic anywhere. The sidecar never joins any per-scope cbox network; only the ollama service and one cbox container belong to those.
 
-Vars: `CBOX_WG_MODE` (`off|server|client|both`, default `off`), `CBOX_WG_IMPL` (`auto|kernel|userspace`, default `auto` - rootless user namespaces may not support a kernel WireGuard interface, so a userspace implementation is the deterministic fallback), `CBOX_WG_ADDRESS` (this node's tunnel address in CIDR form, default empty), `CBOX_WG_LISTEN_PORT` (server role, default `51820` - the single intentional exposure in this feature, key-authenticated by WireGuard unlike the unauthenticated ollama API, which is why the ollama port itself stays unpublished), `CBOX_WG_PUBLISH_ADDR` (the host address the UDP port is published on, default empty meaning all addresses), `CBOX_WG_PEER_ENDPOINT` (client role, host:port of the remote), `CBOX_WG_PEER_PUBKEY` (client role, the remote's public key), `CBOX_WG_PEER_ADDRESS` (client role, the remote's tunnel address in CIDR form), `CBOX_WG_KEEPALIVE` (seconds, default `25`).
+Vars: `CBOX_WG_MODE` (`off|server|client|both`, default `off`), `CBOX_WG_IMPL` (`auto|kernel|userspace`, default `auto` - rootless user namespaces may not support a kernel WireGuard interface, so a userspace implementation is the deterministic fallback), `CBOX_WG_ADDRESS` (this node's tunnel address in CIDR form, default empty), `CBOX_WG_LISTEN_PORT` (server role, default `51820` - the single intentional exposure in this feature, key-authenticated by WireGuard unlike the unauthenticated ollama API, which is why the ollama port itself stays unpublished), `CBOX_WG_PUBLISH_ADDR` (the host address the UDP port is published on, default empty meaning all addresses), `CBOX_WG_PEER_ENDPOINT` (legacy scalar client-role remote, host:port), `CBOX_WG_PEER_PUBKEY` (legacy scalar client-role remote's public key), `CBOX_WG_PEER_ADDRESS` (legacy scalar client-role remote's tunnel address in CIDR form), `CBOX_WG_KEEPALIVE` (seconds, default `25`), `CBOX_WG_FORWARDS` (server-role forward table, default empty - space-separated `listen_port:target_host:target_port` entries; see the forward table paragraph below).
+
+The three legacy `CBOX_WG_PEER_*` scalars are kept working as an alias for exactly one client-role peer: `gen_wireguard_conf_into` (`templates/generators.sh`) still renders a `[Peer]` stanza from them whenever any of the three is non-empty, alongside whatever client-role peers now live in the peer store - so an existing single-remote client setup that predates the peer store needs no migration.
 
 Because the section is machine-scoped, the same rules apply as for `ollama`: the isolated per-project wizard never calls `step_wireguard`, `setup.sh --local <root>` never writes `CBOX_WG_*` into a project's effective `cbox.conf`, and `cbox config set` refuses `CBOX_WG_*` from inside an isolated project.
 
-Key material lives under `~/.config/cbox/infra/wireguard` on the host: `privatekey` (created at mode 0600 before any content is written, never world- or group-readable), `publickey` (0644), and `peers` (0600, one line per peer: `name|pubkey|allowed-address`). None of these files are ever mounted into a workspace container, only read-only into the sidecar. If `wg` (wireguard-tools) is not installed on the host, key generation fails naming the missing package rather than writing a placeholder key. Every peer's allowed address must be a single host (`/32`); a wider `AllowedIPs` is refused because it would let one peer claim other peers' addresses. Generating a peer's own key locally is optional - generating it on the peer itself is the documented preference; a peer configuration handed to the other machine contains only public material (plus that peer's own private key only if cbox generated it locally).
+Key material lives under `~/.config/cbox/infra/wireguard` on the host: `privatekey` (created at mode 0600 before any content is written, never world- or group-readable), `publickey` (0644), and `peers` (0600, one line per peer: `name|pubkey|allowed-address|endpoint|capability`). None of these files are ever mounted into a workspace container, only read-only into the sidecar. If `wg` (wireguard-tools) is not installed on the host, key generation fails naming the missing package rather than writing a placeholder key. Every peer's allowed address must be a single host (`/32`); a wider `AllowedIPs` is refused because it would let one peer claim other peers' addresses. Generating a peer's own key locally is optional - generating it on the peer itself is the documented preference; a peer configuration handed to the other machine contains only public material (plus that peer's own private key only if cbox generated it locally).
+
+The peer store holds both roles at once, on the same `wg0` interface: a peer record with a non-empty `endpoint` field is a client-role peer (this node dials it, `Endpoint = ` is rendered in its `[Peer]` stanza); a peer record with an empty `endpoint` is a server-role peer (it dials this node, no `Endpoint` line). `cbox wg peer add <name> <pubkey> <addr/32> [--endpoint host:port] [--capability ...]` sets the role by whether `--endpoint` is passed. Both roles coexist freely - `cbox wg peer list` shows each peer's resolved role (`role=client (dials host:port)` or `role=server (dials us)`). The four legacy `CBOX_WG_PEER_*` scalars remain a backward-compatible alias for one additional client-role peer, rendered alongside the store; an existing `peers` file written before this addition has exactly three pipe-delimited fields per line and continues to parse and render identically (missing trailing fields read as empty, which is the pre-existing server-role, no-capability-restriction behaviour - see the capability paragraph below).
+
+Every peer record also carries a `capability` field: `none`, `ollama`, `session`, or a comma-set of `ollama` and `session` (mixing `none` with another value is rejected). `cbox wg peer add` defaults a new peer's capability to `ollama` when `--capability` is omitted - the minimum capability that is actually useful given this feature exists to share ollama access; `none` would be a peer that can reach nothing over the tunnel-forwarded services. A peer record written before this field existed (three-field legacy line) reads its capability as empty, and cbox treats empty the same as `ollama` - matching exactly what that peer could already do before capability existed, so no existing peer silently loses or gains access on upgrade.
+
+Honesty about enforcement: `capability=session` is not enforced by anything yet - it is recorded for the session broker to read in a later phase. `capability=ollama` (or the empty/legacy default) is NOT currently enforced per peer either, and cannot be with the current forwarder: the `socat` listener for each forward-table entry binds this node's own tunnel address with `fork,reuseaddr` and no source-address filter, so every peer that can route a packet to that address reaches the forwarded service identically, regardless of what its stored capability says. The capability field is bookkeeping and future-facing policy, not a present isolation boundary - do not read "capability=none peer" as "this peer cannot reach ollama" if it holds a valid tunnel address at all; a peer with a tunnel address but capability=none simply is not the documented supported configuration, not a technically enforced denial. The real per-peer enforcement fix is a named follow-up: a source-address filter at the forward point (nftables scoped to each peer's `/32`, or socat's `range=`/`tcpwrap=`), not yet implemented.
 
 Rootless reality: the sidecar needs `NET_ADMIN` and `/dev/net/tun`, which does not exist inside a cbox workspace container - this is a host prerequisite checked at runtime, not assumed. A published port under rootless docker goes through the rootless port forwarder, which can rewrite the observed source address in status output; this is harmless for WireGuard (peer authentication is by key, not source address) but means a displayed peer endpoint is not necessarily the true remote address.
 
 This is an `infra-reconcile`-class change (`SEC_APPLY[wireguard]=infra-reconcile`), reusing the same apply command as `ollama`: `cbox ollama reconcile` creates, updates, or tears down the shared owner project to match both `CBOX_OLLAMA_*` and `CBOX_WG_*`. Turning the feature off (`CBOX_WG_MODE=off`) leaves no interface, no key, no published port, no container, no network, and no image build beyond what `ollama` already needs, and leaves nothing listening.
 
-The sidecar is a second service (`wireguard`) rendered into the same owner `docker-compose.yml` as `ollama`, built from a small Alpine image (`wireguard-tools`, `wireguard-go` for the userspace fallback, `socat` as the TCP forwarder, `supervisor`) tagged `cbox-wg-img:<hash>` where `<hash>` covers the Dockerfile, the supervisord program list, and the startup script - the same build-input-hash pattern the egress proxy image uses. At container start, the private key is read from the read-only-mounted key file and substituted into the rendered `[Interface]` template to produce the runtime `wg-quick` config at `0600`; the rendered template on disk always carries a placeholder, never the real key. The startup script also asserts `net.ipv4.ip_forward=0` and that every `AllowedIPs` entry is a `/32` before bringing the interface up, so a misconfiguration cannot silently turn the sidecar into a router. Two `socat` forwarders run under supervisord depending on role: the server forwarder listens on the tunnel address only and forwards to `ollama` on the infra network; the client forwarder listens on the infra network under the `wg-remote-ollama` alias and forwards to the configured remote tunnel address. `CBOX_WG_IMPL=auto` probes for the kernel WireGuard module at container start and falls back to `wireguard-go` only if it is absent; `kernel`/`userspace` force the choice.
+The sidecar is a second service (`wireguard`) rendered into the same owner `docker-compose.yml` as `ollama`, built from a small Alpine image (`wireguard-tools`, `wireguard-go` for the userspace fallback, `socat` as the TCP forwarder, `supervisor`) tagged `cbox-wg-img:<hash>` where `<hash>` covers the Dockerfile, the supervisord program list, and the startup script - the same build-input-hash pattern the egress proxy image uses. At container start, the private key is read from the read-only-mounted key file and substituted into the rendered `[Interface]` template to produce the runtime `wg-quick` config at `0600`; the rendered template on disk always carries a placeholder, never the real key. The startup script also asserts `net.ipv4.ip_forward=0`, that every `AllowedIPs` entry is a `/32`, that this node's own `Address` prefix is no wider than `/8`, and (fourth) that every rendered forward resolves to one fixed host and one fixed port - no wildcard `bind=` and no shell metacharacter anywhere in a rendered `socat` target - before bringing the interface up, so a misconfiguration cannot silently turn the sidecar into a router or an injection point.
+
+Server-role TCP forwarding is data-driven: `CBOX_WG_FORWARDS` is a space-separated list of `listen_port:target_host:target_port` entries (`templates/generators.sh`, `_cbox_wg_forward_entries`/`gen_supervisord_wireguard_conf_into`), each rendered as its own `[program:wg-forward-<n>]` supervisord block - `exec socat TCP-LISTEN:<listen>,bind=<this node's tunnel address>,fork,reuseaddr TCP:<target_host>:<target_port>`. Validation is hard because these strings are interpolated straight into a supervisord command line: `listen_port`/`target_port` must be digits, 1..65535; `target_host` must be a docker-service-name-shaped string (`[A-Za-z0-9][A-Za-z0-9_.-]*`, max 63 chars) - a LAN IPv4 literal is refused even though it would otherwise match that charset, because this feature's own no-routing posture means a forward target must be something the sidecar can legitimately reach as a named peer on its own network, not an arbitrary host elsewhere on the LAN; listen ports must be unique across the table. When `CBOX_WG_FORWARDS` is empty and `CBOX_OLLAMA_MODE=on`, cbox synthesises exactly one entry (`<CBOX_OLLAMA_PORT-or-11434>:ollama:11434`) so an installation from before the forward table existed renders byte-for-byte the same single ollama forward it always did - this is the documented backward-compatibility path, not a special case. The client-role forwarder is unchanged: it listens on the infra network under the `wg-remote-ollama` alias and forwards to the configured remote tunnel address, driven by the legacy `CBOX_WG_PEER_*` scalars exactly as before. `CBOX_WG_IMPL=auto` probes for the kernel WireGuard module at container start and falls back to `wireguard-go` only if it is absent; `kernel`/`userspace` force the choice.
 
 In client mode, the forwarder that dials the remote ollama over the tunnel listens under a stable service alias (`wg-remote-ollama`) on the infra internal network (the sidecar's `default` network); that alias is an internal docker service name with a genuine direct route, so it belongs in `NO_PROXY` always (the rule already implemented for the `ollama` alias), while the remote endpoint itself (an external host:port) is never added to `NO_PROXY` under egress lockdown. A workspace container reaches that alias because per-scope network reconciliation also connects the workspace container (never the sidecar) to the infra project's `default` network when the client role is active - the sidecar itself never joins a per-scope cbox network, only the shared infra network.
 
 `cbox doctor` reports `wireguard` ACTIVE/CONFIG-ONLY/OFF for this section (host-side reads `CBOX_WG_MODE` from the machine `cbox.conf` directly; inside a container it is HOST-CHECK, since ownership is decided by the host owner project).
 
-Verbs: `cbox wg status|up|down|keygen|peer {add|rm|list|config}`, host-only and wired into the hub exactly like `cbox ollama`. Every state-changing subcommand takes the same machine lock as the `ollama` verbs (`~/.config/cbox/infra/ollama.lock`), so the two features cannot race on the shared owner project; `status` and `peer list` take the lock in shared mode, while `peer config` takes it exclusively because it can generate this node's keypair on first use and must not race a concurrent `keygen`/`peer add`/`peer rm`. `status` distinguishes OFF/CONFIG-ONLY/ACTIVE and, when active, reports the interface, whether the kernel or userspace implementation is actually running, the listen port, and each configured peer's last handshake (via `wg show` inside the sidecar) - it never prints private key material, and it notes that under rootless docker a peer's displayed endpoint may be the port forwarder's address rather than the peer's true remote address. `peer add <name> <pubkey> <addr/32>` validates all three, refuses duplicates and any address wider than `/32`, then tries to reload the running interface in place (`wg syncconf`, so other peers are not dropped) and falls back to restarting the sidecar if that is not possible, saying so; `peer rm <name>` is the inverse. `peer config <name>` prints a ready-to-paste `[Peer]` block for the named peer containing this node's public key, endpoint, and that peer's allowed address - it generates the peer's own private key locally only when `--generate-key` is explicitly passed, and both the output and the flag itself state that the peer generating its own key is the preferred path. A runtime preflight (shared with `cbox ollama reconcile`) reports a clear, actionable message rather than an opaque failure when `/dev/net/tun` is missing or `wireguard-tools` is not installed for the server role; these preflight paths are unexercised in a container without `/dev/net/tun` or a docker socket.
+Verbs: `cbox wg status|up|down|keygen|peer {add|rm|list|config}`, host-only and wired into the hub exactly like `cbox ollama`. Every state-changing subcommand takes the same machine lock as the `ollama` verbs (`~/.config/cbox/infra/ollama.lock`), so the two features cannot race on the shared owner project; `status` and `peer list` take the lock in shared mode, while `peer config` takes it exclusively because it can generate this node's keypair on first use and must not race a concurrent `keygen`/`peer add`/`peer rm`. `status` distinguishes OFF/CONFIG-ONLY/ACTIVE and, when active, reports the interface, whether the kernel or userspace implementation is actually running, the listen port, and each configured peer's last handshake (via `wg show` inside the sidecar) - it never prints private key material, and it notes that under rootless docker a peer's displayed endpoint may be the port forwarder's address rather than the peer's true remote address. `peer add <name> <pubkey> <addr/32> [--endpoint host:port] [--capability none|ollama|session|ollama,session]` validates name/pubkey/address, refuses duplicates (including against the legacy `CBOX_WG_PEER_*` scalar remote) and any address wider than `/32`; passing `--endpoint` makes it a client-role peer (this node dials it), omitting it keeps the pre-existing server-role behaviour (it dials this node); `--capability` defaults to `ollama` when omitted. `peer add`/`peer rm` both try to reload the running interface in place (`wg syncconf`, so other peers are not dropped) and fall back to restarting the sidecar if that is not possible, saying so. `peer list` prints each peer's name, public key, allowed address, resolved role, and capability. `peer config <name>` prints a ready-to-paste `[Peer]` block for the named peer containing this node's public key, endpoint, and that peer's allowed address - it generates the peer's own private key locally only when `--generate-key` is explicitly passed, and both the output and the flag itself state that the peer generating its own key is the preferred path. A runtime preflight (shared with `cbox ollama reconcile`) reports a clear, actionable message rather than an opaque failure when `/dev/net/tun` is missing or `wireguard-tools` is not installed for the server role; these preflight paths are unexercised in a container without `/dev/net/tun` or a docker socket.
 
 ## Global vs isolated mode
 
@@ -458,6 +520,18 @@ Input handling: `IFS= read -r` off a genuine prompt loop under `set -euo pipefai
 
 First-run flow: an isolated scope with no effective config yet lands in the existing `_first_run_init` prompt (configure from scratch / derive from global / cancel) before the hub ever renders; a successful init continues straight into the hub screen without a second invocation.
 
+## Hub (python core)
+
+Track H of `cbox/docs/MULTIPLATFORM_DESIGN.md`: the hub host half is Python, no tmux, portable by construction. As of H1, bare `cbox` with a TTY on stdin and stdout first tries `lib/cbox_hub.py`: if `python3` is on PATH and the file `py_compile`s cleanly, it runs the python hub; otherwise (no `python3`, the file missing, or a syntax error in it) `cbox` falls back to the bash `hub()` described above unchanged. Runtime failure is covered too, since `py_compile` only proves the file parses: any unhandled exception inside the hub is converted by its entry wrapper to the reserved exit code 97, on which `cbox` prints a one-line note and opens the bash hub. The residual gap is a crash at module import time (before the wrapper exists) - that still surfaces as a plain exit 1 with a traceback; it is a class py_compile all but excludes, and it is stated here rather than claimed away. Exit codes other than 0 and 97 pass through unchanged, so the hub's usage-style exits keep their meaning. Every other invocation shape (arguments present, no TTY, non-TTY stdin/stdout) still prints the same usage text as always - unaffected by which hub implementation exists.
+
+Mode and scope resolution stay bash's job: the python hub calls a hidden `cbox __hub_context` to get one JSON line (mode, workspace root, effective directory, config path, the exact `docker compose` argv for this scope, service name, egress mode) computed by the same `_cbox_effective_mode`/`_cbox_workspace_root`/`_first_run_init` bash uses for every other command - so mode logic is never duplicated or allowed to drift between the two hubs. `__hub_context` prints `{"mode": "none"}` when there is no workspace or no config yet and non-interactive init was refused; the python hub degrades to the usage text in that case, same as bash.
+
+The python module separates screen data from rendering by construction (`build_status_rows`, `build_screen` return plain rows/strings; `hub_loop` owns stdin and the screen rendering, while the config listing and error paths still write to stderr directly - a later curses/alternate-screen increment must route those two through the swappable writer as its first step) so the renderer can be replaced without touching the probe or dispatch logic. `__hub_context` is an internal handshake between the two hub halves, not a public verb: its output shape may change with the hub and nothing outside `cbox_hub.py` may depend on it. Every docker probe call (`Probe.container_id`, `.container_state`, `.running_engines`) is wrapped by the caller in a bare `except Exception`, so any probe failure - no docker, no daemon, a stale container - renders `unknown` rather than crashing the loop; a `NullProbe` exists for callers/tests that want to guarantee zero docker calls.
+
+H1 screens: the main hub screen (header line, container/egress/engines status rows, one numbered row per enabled engine from `etc/engines/engines.json` plus shell/logs/doctor/config/down/quit) and its four action targets - engine rows and shell/logs/doctor/down all `exec` the existing bash verb (`cbox run <engine>`, `cbox shell`, `cbox logs`, `cbox doctor`, `cbox down`) as a subprocess, so the direct run path and every write-capable verb still live in bash unchanged. `config` in H1 is read-only: it parses `KEY=VALUE` lines directly out of the resolved `cbox.conf` (no sourcing, no section metadata) and prints them - no `cbox config set`, no netaccess/ollama/wg/session-broker/sessions submenus, no apply staging. Those stay bash-only for now and are reachable by leaving the hub (`q`) and running the verb directly, or by falling back to the bash hub's fuller submenu tree.
+
+In global mode selecting an engine or shell row ends the python hub loop after the subprocess returns (matching the bash hub's `(ends hub)` convention, rendered the same way in the menu labels); isolated-mode rows loop back to the hub screen.
+
 ## Per-feature toggles
 
 | Feature | Config var | Enable | Behavior |
@@ -470,8 +544,9 @@ First-run flow: an isolated scope with no effective config yet lands in the exis
 | Progress relay | codex-progress section | on | Live Claude Code UI activity during Codex delegation (mount mode only) |
 | Egress lockdown | egress section | on | tinyproxy sidecar; all HTTP/HTTPS filtered by domain |
 | SSH access | ssh section | on | `host-agent`, `container-keys`, or `mixed` |
-| GPU (CUDA via CDI) | gpu section | on | attach NVIDIA GPU at container start |
+| GPU (CUDA via CDI) | `CBOX_GPU` | on | attach NVIDIA GPU at container start, global and isolated alike; `--gpu` flag is legacy, not required |
 | Session auto-resume | autoresume section | on | tmux + watchdog auto-types resume prompt after usage limit reset |
+| Session multiplexing | `CBOX_SESSION_MULTIPLEX` | on | wraps claude/codex/hermes in a named tmux session when a TTY is attached; precondition for remote session attach |
 | Light context profile | `CBOX_CONTEXT_PROFILE=light` | light | ~700 tokens; skips orchestration detail, keeps kernel + ledger |
 
 ## File layout
@@ -496,6 +571,7 @@ cbox/                           # Install directory
       orchestrator-global.txt     # Codex conduct kernel (host-side)
     codex/
       ask_claude_mcp.py           # Reverse orch wrapper (read-only in container)
+      ask_claude_fallback_models.json  # Default --fallback-model chain by requested model
     agents/                       # Subagent definitions (agents section)
     claude/                       # CLAUDE.md, policies/, templates/, settings merges
     docs/                         # Runbooks (local model, remote design)
@@ -621,6 +697,464 @@ results.
   engines with no entrypoint arm yet are reported as a NOTE, not a failure.
 
 Configurations that fail verification refuse to start.
+
+## Multiplatform gates (step 0)
+
+`cbox/docs/MULTIPLATFORM_DESIGN.md` records the decision to target Linux and
+macOS on stock system tools. Step 0 of that design lands gates only, with no
+behavior change on a healthy Linux host:
+
+- `etc/registry/file_inventory.json` classifies every shell/python file in the
+  tree as `host` (runs on the operator's machine, in scope for the portability
+  gates), `container` (runs inside the image, Linux forever), `template-
+  generating-container-content` (a host script whose job is to author or stage
+  container content), `test` (the `lib/test_*` harness), or `fixture-snapshot`
+  (a frozen parity fixture, never executed). `lib/portability_denylist.py
+  check` fails if a discoverable script (`*.sh`, `*.py`, anything with a `#!`
+  shebang, or a fixture named `*.sh.*`) is missing from the inventory, or if
+  an inventory entry points at a file that no longer exists - the boundary is
+  machine-enforced, not tribal knowledge. The gitignored `generated/`
+  directory is excluded from discovery; it is 1:1 build output from `etc/`
+  sources, which are what the inventory tracks.
+- The same tool ratchets a GNU/bashism denylist (`declare -A`, `mapfile`,
+  `${var^}`, `stat -c`, GNU `sed -i`, `sha256sum`, `xargs -r`, raw `timeout`,
+  raw `realpath`, raw `flock`, `mountpoint`, `/proc/`, raw `XDG_RUNTIME_DIR`,
+  `ip route`) over `host`-layer files only, against a pinned baseline at
+  `lib/fixtures/portability_denylist_baseline.json`. A new occurrence anywhere
+  fails; a reduced count also fails until the baseline is regenerated with
+  `python3 lib/portability_denylist.py regen`, so the baseline cannot drift
+  silently in either direction. `lib/test_portability_denylist.sh` and
+  `lib/test_file_inventory.sh` wire both checks into the `lib/test_*` suite.
+- `lib/test_bash32_parse_gate.sh` runs `bash -n` on every host-layer bash
+  script under the official `bash:3.2` docker image. It detects a missing
+  docker binary or an unreachable daemon and skips with an explicit note
+  instead of reporting a false pass; the gate is real only on a docker-capable
+  host or CI.
+- `lib/portable_preflight.sh` is sourced as the first executable code in both
+  `cbox` and `setup.sh`, before `templates/sections.sh` or
+  `templates/generators.sh` are referenced (the latter is not bash-3.2-clean
+  today). Two conditions refuse to run: a bash below the floor (currently
+  4.2, dropping to 3.2 after track P of the design) and macOS during the
+  unsupported window, each with one clear message instead of letting a later
+  `declare -g -A` fail with a raw syntax error. Missing python3 or docker
+  only warns on stderr and continues: bare `cbox`, the hub and the help
+  paths work without docker today, and turning that into a hard refusal
+  would be a behavior change step 0 is not allowed to make. On a healthy
+  Linux host with docker and python3 present it prints nothing and changes
+  no exit path. `lib/test_portable_preflight.sh` exercises the floor-comparison and
+  message logic through injectable seams (`cbox_preflight_check` takes the
+  bash binary, an OS-name override, and yes/no/auto flags for python3 and
+  docker), since a real bash-3.2 interpreter is not available to run this
+  suite in a container without a docker socket.
+
+### Track P1: the portable waist
+
+`lib/portable.sh` holds thin bash-3.2-clean entry points; `lib/cbox_host.py`
+holds the python3-stdlib implementation. `_common.sh` sources `lib/portable.sh`
+once, right after its own idempotency guard - `_common.sh` is already the
+single ancestor every host entry point passes through (`cbox` and `setup.sh`
+source it directly and first; `templates/generators.sh` also self-sources it
+defensively at its own top), so this is the one wiring point that reaches
+every consumer exactly once before first use, with no new sourcing line
+needed anywhere else.
+
+`_cbox_sha256` is the first waist primitive: `hashlib.sha256` in
+`lib/cbox_host.py`, called either as `_cbox_sha256 <path>` (file form, prints
+the digest) or with stdin piped in (`... | _cbox_sha256`), matching the two
+shapes the call sites used (`sha256sum "$path" | awk '{print $1}'` and
+`... | sha256sum | awk '{print $1}'`). Exit code and stderr/stdout placement
+on a missing file match `sha256sum`. Every `sha256sum` call in the production
+host files (`_common.sh`, `cbox`, `lib/cbox-ai.sh`, `setup.sh`,
+`templates/generators.sh`) executes on the host - none sit inside a
+heredoc/printf payload emitted for the container - so all of them convert;
+none stay pinned. `lib/test_cbox_sha256_oracle.sh` feeds identical inputs
+(empty, multi-line, binary with NUL bytes, a large file, a missing-file
+error path) to `sha256sum` and `_cbox_sha256` side by side and asserts
+identical digests and matching failure behavior. Any test harness that hand-
+assembles a fake `INSTALL_DIR` tree (copying `_common.sh`/
+`templates/generators.sh` in isolation, or `eval`-extracting individual
+function bodies) must also carry `lib/portable.sh` and `lib/cbox_host.py` (or
+source `lib/portable.sh` directly) into that fixture, since `_common.sh`'s
+source of the waist is a soft `[ -f ... ] &&` guard that skips silently
+rather than failing loudly when the file is absent.
+
+Measured on this machine, N=50: spawning `sha256sum` has a ~1ms median cost;
+the python3 waist call has a ~11ms median cost, a ~10ms delta - matching the
+design's stated budget. Three call sites loop over the local
+`~/.config/cbox/projects/*/` directory once per project (`images_list`,
+`images_rm` in `cbox`, and the sibling-image-sharing check in `cbox verify`);
+each now pays the ~10ms python3 cost per project per invocation instead of
+the previous ~1ms `sha256sum` spawn. This is an existing per-project loop
+shape, not one introduced by this change, and its cardinality is bounded by
+the number of locally configured projects rather than by container or GC
+cardinality; it has not been batched into a single python invocation.
+
+`_cbox_flock` is the second waist primitive: `fcntl.flock` in
+`lib/cbox_host.py` on the bash-inherited file descriptor, called as
+`_cbox_flock [-x|-s] [-n] [-w N] FD`, matching the flag surface every real
+call site used - fd-form only, never the file-path or command-wrapping forms
+of util-linux `flock`. `-x` and `-s` map directly to `LOCK_EX`/`LOCK_SH`
+(exclusive is the default when neither is given, matching util-linux); `-n`
+attempts the lock once and returns immediately; `-w N` polls `LOCK_NB` in a
+loop bounded by the deadline, matching util-linux's own poll-based timeout
+behavior; when `-n` and `-w N` are combined, `-n` wins and the call returns
+immediately on contention with the deadline ignored - measured against real
+util-linux (`flock -n -w 5` against a held lock returns in ~1ms), not
+assumed. Exit codes were measured against util-linux flock
+2.39.3 on this machine rather than assumed: 0 on acquisition, 1 on `-n`
+contention and on `-w` timeout (both match this machine's util-linux flock
+exactly), 64 on a usage error (unrecognized flag, missing fd argument -
+matches util-linux's own sysexits-derived usage code), 65 on a bad file
+descriptor (matches util-linux's `EX_OSERR` on the same condition).
+
+All 35 production fd-style `flock` sites named in
+`cbox/docs/MULTIPLATFORM_DESIGN.md` section 3 (32 in `cbox`, 2 in
+`lib/cbox-session.sh`, 1 in `templates/generators.sh`) convert to
+`_cbox_flock`; none sit inside a heredoc/printf payload emitted for the
+container. `templates/generators.sh`'s `gen_claude_cbox_json_seed_into` used
+to guard its lock attempt behind `command -v flock` and skip locking
+silently when the binary was absent; that guard is removed, since the waist
+makes python3 - already load-bearing for every other waist call - the
+dependency instead, and the design calls for locking to be unconditional
+again. The lockfile symlink refusal and the writability probe on that same
+line are independent safety checks unrelated to which flock implementation
+runs underneath, and both stay as-is.
+
+`lib/test_cbox_flock_oracle.sh` proves five properties against util-linux
+flock as counterparty, using file-based signals polled in a loop rather than
+fixed sleeps for synchronization: an exclusive lock taken through the waist
+blocks a contending `flock -n` from util-linux, and the reverse direction
+also blocks; a lock acquired by the waist's python child, which exits
+immediately after the `fcntl.flock` call returns, persists on the bash
+parent's open file descriptor and is observably still held by both a
+util-linux and a waist contender, releasing only once that fd is closed -
+this is the design's central verified claim, reproduced here as a pinned
+regression rather than asserted from the flock(2) contract alone; two
+shared (`-s`) waist locks coexist on the same file while an exclusive
+util-linux contender stays blocked; `-n` contention returns the
+util-linux-matching exit code immediately, without waiting on the holder;
+`-w 1` against a held lock times out at approximately one second (matching
+util-linux's own poll-based `-w` implementation, not an instant fail) with
+the util-linux-matching exit code.
+
+Measured on this machine, N=50: spawning `flock -x FD` has a ~0.6ms median
+cost; the python3 waist call has a ~11.7ms median cost, a ~11ms delta -
+matching the design's stated ~10ms budget (and consistent with the
+`_cbox_sha256` category's own measurement, since both pay the same python3
+interpreter startup). Every converted call site was checked for placement
+inside a per-item loop, per the section 6 risk 2 rule that no lock operation
+may sit inside a per-item GC loop without batching or justification. One
+site violates the letter of that rule: `gc()` in `cbox` calls
+`_cbox_flock -n -x 9` twice inside its `while` loop over currently running
+`cbox.kind=isolated` containers (once per iteration, and again inside the
+post-sleep recheck branch). It is not batched into a single python
+invocation. The call was left as a per-item lock rather than restructured,
+for two reasons stated plainly rather than assumed: each loop iteration
+already pays a `docker exec` round trip via `_probe` before or after the
+lock check, a cost an order of magnitude above the flock delta on any real
+docker daemon, so the ~11ms addition is not the dominant cost in that
+iteration; and the loop's cardinality is bounded by the count of currently
+running isolated containers on the machine, not by a filesystem or registry
+scan. This environment has no docker socket, so the relative-dominance claim
+above could not be measured directly here and is not presented as verified
+- it is the stated justification for the choice, flagged as such, not a
+proven bound. If a live measurement on a docker-capable host later shows the
+lock cost is material against `_probe`, the fix is to batch the per-iteration
+`_cbox_flock -n -x 9` probe into a single python invocation that opens and
+trylocks every candidate session lock file in one process, mirroring the
+existing `-n` semantics per file.
+
+### Track P1: exit code reference for `_cbox_flock`
+
+| Condition | Exit code | Verified against |
+|---|---|---|
+| Lock acquired | 0 | util-linux flock 2.39.3, this machine |
+| `-n` contention | 1 | util-linux flock 2.39.3, this machine |
+| `-w N` timeout | 1 | util-linux flock 2.39.3, this machine |
+| Usage error (bad flag, missing fd) | 64 | util-linux flock 2.39.3, this machine |
+| Bad file descriptor | 65 | util-linux flock 2.39.3, this machine |
+
+`_cbox_realpath` and `_cbox_realpath_m` are the third waist primitive pair:
+`os.path.realpath` in `lib/cbox_host.py`, called as `_cbox_realpath PATH`
+(bare GNU form) or `_cbox_realpath_m PATH` (GNU `-m` form). The design's
+original estimate (`cbox/docs/MULTIPLATFORM_DESIGN.md` section 3, "22 sites,
+all `-m`") did not survive a direct recount: the denylist baseline pinned 25
+raw `realpath` line-hits across four host files, and reading every site
+before converting showed only 5 use `-m`; the remaining 20 invocations (17
+line-sites, 3 of them with two calls per line) are bare `realpath`, whose
+default GNU semantics differ from `-m` and had to be implemented separately.
+Both forms are backed by `os.path.realpath`, but bare mode additionally
+enforces GNU's documented default ("all but the last component must exist"):
+the waist first stats the full path; if that fails with `ENOENT`, it
+distinguishes a truly absent leaf from a leaf that exists as a dangling
+symlink (`os.path.lexists`) - a dangling symlink is a hard failure exactly
+as in GNU, only a genuinely absent leaf whose parent directory exists is
+tolerated; any other failure (a missing intermediate directory, `ELOOP` on
+a symlink cycle anywhere in the path including the leaf itself, `ENOTDIR`
+on a non-directory intermediate) is reported with the same exit code and an
+error on stderr. Trailing-slash handling has two sides, both mirrored from
+measured GNU 9.4 behavior: on an otherwise-missing path the slash is
+cosmetic (`realpath /tmp/does-not-exist/` succeeds like the slashless
+form), but on a path resolving to a regular file it forces a directory
+check and fails `ENOTDIR` (`realpath file/` and `realpath link-to-file/`
+both fail in GNU, and the waist refuses them the same way). These parity
+claims hold exactly as far as the oracle test asserts them - its case list
+(existing/missing leaves and intermediates, symlink chains, dangling
+symlinks, symlink loops, both trailing-slash sides, spaces, `..` past root,
+empty string, relative from non-root cwd, each compared live against the
+installed GNU realpath for stdout, exit code and stderr placement) is the
+boundary of what is verified, and the first cut of this category is the
+proof that reading GNU's docs is not enough: adversarial review found the
+dangling-symlink and file-with-slash divergences only by differential
+execution. `strict=True` was not used (unavailable on the python 3.9 floor
+this design targets - the 3.12 development machine's presence of `strict=`
+was not relied on). An empty string argument is rejected by both
+GNU forms (`realpath: '': No such file or directory`, exit 1) even though
+`os.path.realpath('')` alone would return the current directory; the waist
+special-cases the empty string ahead of any `os.path.realpath` call in both
+modes to match GNU rather than Python's default.
+
+All 25 production `realpath` invocations named by the denylist baseline
+(`_common.sh`, `cbox`, `setup.sh`, `templates/generators.sh`) execute on the
+host - none sit inside a heredoc/printf payload emitted for the container -
+so all convert; the denylist's `raw_realpath` count drops from 25 to 0, and
+no site stays pinned. `lib/test_cbox_realpath_oracle.sh` runs both forms
+against GNU realpath 9.4 on this machine for: an existing file and directory,
+a missing final component, a missing intermediate directory, a symlink chain
+(to both a directory and a file), a symlink loop (`ELOOP`, both as the final
+component and as an intermediate component), a trailing slash on both an
+existing and a missing path, a path with spaces (both existing and missing),
+`..` traversal past `/`, an empty string, and a relative path resolved from a
+non-root working directory - 15 cases per form, 30 assertions total, each
+checking identical stdout, a matching exit code, and (on failure) that
+`stderr` carries the error while `stdout` stays empty.
+
+Measured on this machine, N=50: spawning GNU `realpath` has a ~1.1ms median
+cost; the python3 waist call has a ~11.7-12.0ms median cost for both forms, a
+~10.5ms delta - matching the design's stated ~10ms budget and consistent with
+the `_cbox_sha256` and `_cbox_flock` categories' own measurements (all three
+pay the same python3 interpreter startup). Four converted call sites in
+`cbox` sit inside a per-item loop: `_cbox_realpath "$root"` in the netaccess
+exec workspace guard loops over `guard_roots` (bounded by workspace count,
+normally 1); the two-call comparison `_cbox_realpath "$other"` /
+`_cbox_realpath "$eff"` appears twice more (`images_list`/verify-adjacent
+sibling checks) inside `for other in "$HOME"/.config/cbox/projects/*/`, and
+once more as `_cbox_realpath "$other_eff"` / `_cbox_realpath "$eff"` in the
+bins-volume-sharing verify check over the same glob - the identical
+per-project loop shape already named and accepted for `_cbox_sha256`'s
+image-hash sites, bounded by locally configured project count rather than by
+container or GC cardinality, not batched into a single python invocation for
+the same reason given there.
+
+`_cbox_timeout` is the fourth waist primitive: `subprocess.Popen` plus a
+deadline in `lib/cbox_host.py`, called as `_cbox_timeout DURATION COMMAND
+[ARGS...]`, matching the flag surface every real site uses - a bare numeric
+duration followed by the command, never `-s`/`-k`/`--foreground` or any other
+GNU `timeout` option, none of which any site passes. The denylist's
+`raw_timeout` baseline counted 5 line-hits; two stay pinned rather than
+convert, both in `cbox` (`3206`, `3930`): both run `timeout` as part of a
+shell string or argv list executed through `"${X[@]}"`/`_compose_p ... exec
+-T cbox`, i.e. a `docker exec`/`docker compose exec` invocation - the
+`timeout` binary named there runs inside the container, on the container's
+own coreutils, never on the host, so it is out of this waist's scope by the
+design's own container/host boundary. The remaining 3 (`templates/
+generators.sh:134,492,495`, all `timeout 5 docker ...` querying the local
+docker daemon or a registry from the host) convert; the denylist's
+`raw_timeout` count drops from 5 to 2, pinned at exactly the two in-container
+sites. `_cbox_docker_bounded`'s `command -v timeout` fallback branch is
+removed, mirroring the same unconditional-locking argument the `_cbox_flock`
+category made for `generators.sh`'s dead flock guard: python3 is already the
+load-bearing dependency for every other waist call, so gating on a second
+binary's presence no longer buys anything.
+
+Exit code and process semantics were measured against GNU `timeout` 9.4 on
+this machine, not assumed: a child that exits cleanly passes its exit code
+through unchanged (0 or nonzero); a child killed by a signal is reported as
+`128+signal` (verified with a self-`SIGKILL` child, both GNU and the waist
+report 137); a command that cannot be found reports 127 and a command that
+exists but is not executable reports 126, GNU's own split (the first cut
+collapsed both to 127 - adversarial review caught it, and the oracle now
+pins each side separately); on the deadline firing, both report
+124 and both preserve any stdout the child already wrote before being
+signaled. One case was measured and deliberately not mirrored: GNU `timeout`
+without `-k` sends a single `SIGTERM` to its direct child and returns 124
+immediately, even if the child ignores `SIGTERM` and keeps running past
+`timeout`'s own return - reproduced live here with a child that traps `TERM`
+and sleeps on, which GNU orphans in the background. The waist instead starts
+the child in its own session (`start_new_session=True`) and, on deadline,
+sends `SIGTERM` to that process group, waits up to two seconds, and escalates
+to `SIGKILL` on the same group if the child is still alive, waiting again
+before returning 124 - it does not orphan a `SIGTERM`-ignoring child. This is
+a stated, deliberate improvement over GNU's own default behavior (which
+requires `-k` to get the same guarantee), not a parity claim; the oracle
+proves it as its own case, labeled as a divergence rather than folded
+silently into the parity list. None of the 3 real call sites install a
+`SIGTERM` trap on `docker`/`docker buildx`/`docker manifest`, so the
+divergence is never actually exercised in production; it exists to keep the
+waist from introducing a runaway-process class GNU's own default already
+half-solves.
+
+`lib/test_cbox_timeout_oracle.sh` runs both against GNU `timeout` for: a
+child exiting 0, a child exiting nonzero, a child writing stdout, a missing
+command, the deadline firing with partial stdout preserved and its ~1s
+elapsed time checked, a self-`SIGKILL`ed child's `128+signal` exit code, and
+the `SIGTERM`-ignoring child case proving the waist does not orphan it.
+
+`_cbox_stat_uid` and `_cbox_stat_mtime` are the fifth waist primitive pair:
+`os.lstat` in `lib/cbox_host.py`, called as `_cbox_stat_uid [--] PATH` /
+`_cbox_stat_mtime [--] PATH`, matching the two `-c` formats real sites use
+(`%u`, `%Y`) - no other format appears at any host site, so no general
+`stat -c FORMAT` dispatcher was built. `os.lstat`, not `os.stat`, is the
+correct counterpart: reading GNU's own `--help` (`-L, --dereference: follow
+links`, opt-in) and confirming live on this machine that plain `stat -c %u`
+on a symlink - dangling or not - reports the link's own uid/mtime, never the
+target's, settled it; a first instinct to reach for `os.stat` would have been
+wrong; the oracle's dedicated symlink-vs-target case (constructed so the two
+mtimes provably differ, not merely presumed to) exists because this
+divergence would otherwise only surface later, on a real symlinked private
+key or a real symlinked project directory.
+
+The denylist's `stat_c` baseline counted 5 line-hits; 2 stay pinned, both in
+`cbox` (`3459`, `3465`, both `stat -c %u "$HOME/.ssh"` inside a `sh -c '...'`
+string executed via `"${X[@]}"`, i.e. inside the container, same boundary
+reasoning as `_cbox_timeout`'s two pinned sites). The remaining 3 convert:
+`cbox:700` (the shared-ollama models-directory ownership refusal named in the
+design), `templates/generators.sh:3159` (the wireguard private-key ownership
+refusal), and `lib/cbox-session.sh:586` (`%Y` - the newest-transcript-file
+scan in the native-session-id diff heuristic). All three already refuse or
+skip symlinks before reaching `stat` (`[ -L ... ]` guards on the two uid
+sites, `[ -f ... ]` before the mtime site), so the lstat-not-stat semantics
+change nothing about their observed behavior on the paths they actually
+receive - the divergence matters for correctness of the primitive, not for
+any live call site's current input shape. The denylist's `stat_c` count
+drops from 5 to 2, pinned at exactly the two in-container sites.
+
+`lib/test_cbox_stat_oracle.sh` runs both against GNU `stat` 9.4 for: a
+regular file, a directory, a missing path, a symlink to a file (asserting the
+link's own metadata is returned, not the target's), and a dangling symlink -
+5 cases per primitive, 10 assertions total, each checking identical stdout, a
+matching exit code, and (on failure) that stderr carries the error while
+stdout stays empty.
+
+`_cbox_ismount` is the sixth waist primitive: `os.path.ismount` in
+`lib/cbox_host.py`, called as `_cbox_ismount PATH`, matching the only flag
+shape either real site uses - plain `mountpoint -q PATH`, stderr discarded,
+only the 0-vs-nonzero exit code read. `os.path.ismount` alone is not a
+faithful stand-in: measured live on this machine, `mountpoint -q` dereferences
+a symlink before checking (a symlink to `/` reports as a mountpoint), while
+bare `os.path.ismount` does not (it lstats the path's own device/inode and
+reports `False` for the same symlink) - the waist resolves the path with
+`os.path.realpath` before the `ismount` check to match `mountpoint`'s
+dereferencing default. Neither of the two real call sites (`_common.sh:25`
+inside `_cbox_workspace_root`, `setup.sh:3345`) ever hands `_cbox_ismount` a
+symlink in practice - both already run their path through `_cbox_realpath`
+first - but the waist implements the general case correctly rather than
+relying on that incidental protection. Exit codes were measured against
+util-linux `mountpoint` 2.39.3 rather than assumed: 0 when the path is a
+mountpoint, 32 when it exists but is not one (not 1 - a genuine three-way
+split in util-linux's own exit codes, not a boolean), 1 when the path cannot
+be stat'd at all (missing, or a non-directory intermediate component). Both
+real call sites only branch on zero-vs-nonzero, so the 32-vs-1 distinction is
+inert for them today, but the waist reproduces it anyway rather than
+collapsing to a boolean, since the design calls for one faithful
+implementation, not a call-site-shaped one. The denylist's `mountpoint` count
+drops from 2 to 0; no site stays pinned.
+
+`lib/test_cbox_ismount_oracle.sh` runs both against util-linux `mountpoint -q`
+for: the real root mountpoint, a plain non-mount directory, a missing path, a
+regular file, and a symlink to a real mountpoint (the adversarial case that
+would have caught the dereferencing gap) - 5 cases, each checking a matching
+exit code and, on a stat failure, that stderr carries the error.
+
+`_cbox_xdg_runtime_dir` is the seventh waist primitive, and the odd one out:
+a pure bash derivation with no GNU/util-linux tool as counterparty, backed by
+nothing but `id -u` - the design's own framing ("pure derivation, no tool
+counterparty") is taken literally, so this primitive lives entirely in
+`lib/portable.sh` with no `lib/cbox_host.py` subcommand and pays no python3
+spawn cost at all, unlike the other six. It reproduces exactly the bash
+expression every real site already used inline: `${XDG_RUNTIME_DIR:-/run/
+user/$(id -u)}`, using bash's own `:-` semantics (empty-but-set also falls
+through to the fallback, matched deliberately rather than treated as a
+special case). Darwin's TMPDIR-derived answer is out of scope here per the
+design (Track P3); this category returns only the Linux answer read from the
+current call sites' own fallback, nothing invented ahead of it.
+
+The primitive is named `_cbox_xdg_runtime_dir`, not `_cbox_runtime_dir` as
+the design section 3 prose says, because `_cbox_runtime_dir` was already a
+live function name: `lib/cbox-session.sh:45` defines `_cbox_runtime_dir(root)`
+- an unrelated, pre-existing primitive returning `$root/.cbox/runtime`, the
+project-scoped session bookkeeping directory, used by
+`_cbox_runtime_sessions_file`. `cbox` sources `templates/generators.sh` (line
+16) before `lib/cbox-session.sh` (line 21); a same-named waist function
+defined in `lib/portable.sh` and sourced even earlier via `_common.sh` would
+have been silently redefined by `cbox-session.sh`'s definition partway
+through `cbox`'s own startup, so every XDG-derivation call site reached after
+that point - `_cbox_clip_dir`, `_cbox_container_exec_dir`, both `gen_compose`
+agent-dir defaults - would have silently called the session-scoped function
+with no `$1`, printing `/.cbox/runtime` instead of an XDG-rooted socket
+directory. This was caught before it shipped, by grepping for the target name
+across the tree before wiring the waist in, not by a test failure; the
+rename is the fix, and the two names now coexist without collision.
+
+All 7 raw `XDG_RUNTIME_DIR` line-hits named by the denylist baseline convert:
+`etc/registry/gen_conf_lib.py:148` (the registry generator's own emitted-text
+template for the `ssh_agent_dir_default` resolver - not itself a host
+execution site, but the source of the pattern that becomes one),
+`templates/conf_lib.sh:36` (that template's generated artifact, which is
+itself host-executed and scanned directly - regenerating it from the updated
+generator was checked byte-for-byte identical to the hand-edit before either
+landed), `setup.sh:2922`, and `templates/generators.sh:581,604,902,1215` (two
+direct assignments, two nested `${CBOX_SSH_AGENT_DIR:-...}` defaults, where
+bash's own lazy evaluation of `:-` means the waist call only actually runs
+when `CBOX_SSH_AGENT_DIR` is unset, verified live on this machine before
+relying on it - the common case where the registry default already populated
+the variable pays zero extra cost). The denylist's `xdg_runtime_dir` count
+drops from 7 to 0; no site stays pinned.
+
+`lib/test_cbox_xdg_runtime_dir_oracle.sh` runs the waist against the literal
+bash expression it replaces, in a subshell per case so the environment
+mutation does not leak: `XDG_RUNTIME_DIR` set, unset, set-but-empty (proving
+`:-` triggers on empty, not just unset), and containing a space (proving the
+waist does not need its own quoting beyond what the call sites already do).
+
+Measured on this machine, N=50 (direct `lib/cbox_host.py` invocation,
+matching the earlier categories' methodology): `_cbox_stat_uid`,
+`_cbox_stat_mtime`, and `_cbox_ismount` each cost the same ~11ms delta over
+their GNU/util-linux counterparts as the first three categories - all four
+non-timeout primitives pay only the bare `python3 -c pass` interpreter-
+startup cost, since `lib/cbox_host.py`'s top-level imports stayed unchanged
+for them. `_cbox_timeout` costs more: importing `subprocess` (needed only for
+this primitive, and only for this one) roughly doubles interpreter startup on
+this machine (measured: `python3 -c 'import fcntl, hashlib'` ~10ms versus
+`python3 -c 'import fcntl, hashlib, signal, subprocess'` ~17ms) - moving
+`import signal` and `import subprocess` from module level into `cmd_timeout`
+itself keeps that cost local to the one primitive that needs it, so
+`_cbox_stat_uid`/`_cbox_stat_mtime`/`_cbox_ismount` are not taxed for a
+dependency they never load; `_cbox_timeout`'s own delta against GNU `timeout`
+is ~19-21ms, roughly double the design's ~10ms figure, named here rather than
+rounded down, and still small against the sub-second-to-multi-second docker
+operations every real call site wraps. `_cbox_xdg_runtime_dir` costs nothing
+extra - measured faster than the bash expression it replaces (~2.3ms versus
+~3.6ms) in the common case, since it skips the `$(id -u)` subshell fork
+whenever `XDG_RUNTIME_DIR` is already set. No converted call site in this
+extension sits inside a per-item loop: the three `_cbox_timeout` sites and
+three `_cbox_stat_uid`/`_cbox_stat_mtime` sites each run at most once or
+twice per command invocation, the two `_cbox_ismount` sites run once per
+`_cbox_workspace_root`/`--local` call, and the `_cbox_xdg_runtime_dir` sites
+are cheaper than what they replaced.
+
+### Track P1: exit code reference for `_cbox_timeout` and `_cbox_ismount`
+
+| Primitive | Condition | Exit code | Verified against |
+|---|---|---|---|
+| `_cbox_timeout` | Child exits normally | child's own code | GNU timeout 9.4, this machine |
+| `_cbox_timeout` | Child killed by a signal | 128+signal | GNU timeout 9.4, this machine |
+| `_cbox_timeout` | Command not found | 127 | GNU timeout 9.4, this machine |
+| `_cbox_timeout` | Command found, not executable | 126 | GNU timeout 9.4, this machine |
+| `_cbox_timeout` | Deadline fires | 124 | GNU timeout 9.4, this machine |
+| `_cbox_ismount` | Path is a mountpoint | 0 | util-linux mountpoint 2.39.3, this machine |
+| `_cbox_ismount` | Path exists, not a mountpoint | 32 | util-linux mountpoint 2.39.3, this machine |
+| `_cbox_ismount` | Path cannot be stat'd | 1 | util-linux mountpoint 2.39.3, this machine |
 
 ## Troubleshooting
 

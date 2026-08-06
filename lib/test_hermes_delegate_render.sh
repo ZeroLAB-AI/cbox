@@ -28,7 +28,7 @@ assert spec['command'] == 'python3', spec
 assert spec['args'] == ['hermes_delegate_mcp.py'], spec
 cbox = spec['_cbox']
 assert cbox['adapter'] == 'stdio-mcp', cbox
-assert cbox['available_to'] == ['claude', 'codex'], cbox
+assert cbox['available_to'] == ['claude', 'codex', 'hermes'], cbox
 assert cbox['backend'] == 'hermes', cbox
 assert cbox['enabled_when_env'] == 'CBOX_HERMES_DELEGATE', cbox
 assert 'spawns-hermes-subprocess' in cbox['side_effects'], cbox

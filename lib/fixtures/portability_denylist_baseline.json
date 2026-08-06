@@ -1,0 +1,28 @@
+{
+  "note": "pinned occurrence counts for the GNU/bashism denylist over host-layer files (cbox/docs/MULTIPLATFORM_DESIGN.md section 4 step 0a); a new occurrence anywhere fails the ratchet, a reduced count fails too until this baseline is regenerated",
+  "per_file": {
+    "cbox": {
+      "ip_route": 1,
+      "proc_path": 3,
+      "raw_timeout": 2,
+      "stat_c": 2
+    },
+    "etc/container/docker_exec_bridge.py": {
+      "proc_path": 1
+    },
+    "lib/cbox-session.sh": {
+      "proc_path": 3
+    },
+    "templates/generators.sh": {
+      "proc_path": 1
+    }
+  },
+  "regen_command": "python3 lib/portability_denylist.py regen",
+  "schema_version": 1,
+  "totals": {
+    "ip_route": 1,
+    "proc_path": 8,
+    "raw_timeout": 2,
+    "stat_c": 2
+  }
+}

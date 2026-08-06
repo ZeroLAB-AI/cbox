@@ -1,0 +1,497 @@
+{
+  "excluded_dirs": {
+    ".git": "version control internals, not project content",
+    "generated": "gitignored build output mirrored 1:1 from etc/hooks, etc/mcp and etc/codex sources by _cbox_write in templates/generators.sh; absent on a fresh checkout until a render runs, so it is excluded from tree discovery rather than tracked in files - the etc/ source is what is graded"
+  },
+  "files": {
+    "_common.sh": {
+      "layer": "host",
+      "purpose": "sourced by cbox and setup.sh on the host"
+    },
+    "bind_egpu.sh": {
+      "layer": "host",
+      "purpose": "host CLI wrapper invoking cbox config set / restart (Linux-only GPU/CDI feature, gated per section 3, still host-executed bash)"
+    },
+    "cbox": {
+      "layer": "host",
+      "purpose": "the main host dispatcher"
+    },
+    "entrypoint.sh": {
+      "layer": "container",
+      "purpose": "container entrypoint, Linux forever per section 3"
+    },
+    "etc/clipboard/clip_bridge.py": {
+      "layer": "host",
+      "purpose": "executed directly by cbox on the host (cbox:2172)"
+    },
+    "etc/clipboard/wl_paste_shim.py": {
+      "layer": "container",
+      "purpose": "bind-mounted into the container as /usr/local/bin/wl-paste (generators.sh:591)"
+    },
+    "etc/codex/ask_claude_mcp.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "copied into generated/hooks and staged into the container claude/codex hooks dir"
+    },
+    "etc/codex/codex_bump_probe.sh": {
+      "layer": "template-generating-container-content",
+      "purpose": "copied into generated/hooks and staged into the container hooks dir"
+    },
+    "etc/codex/codex_notify.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "copied into generated/hooks and staged into the container hooks dir; also referenced by codex notify= in container config"
+    },
+    "etc/container/cbox-container": {
+      "layer": "container",
+      "purpose": "bind-mounted into the container at /usr/local/bin/cbox-container (generators.sh:616), the exec-bridge client run inside the container"
+    },
+    "etc/container/cbox-session-entry.py": {
+      "layer": "container",
+      "purpose": "COPYd into the docker image, sshd ForceCommand target (generators.sh:298,706)"
+    },
+    "etc/container/docker_exec_bridge.py": {
+      "layer": "host",
+      "purpose": "executed directly by cbox on the host (cbox:2215), the exec bridge server"
+    },
+    "etc/engines/engines_registry.py": {
+      "layer": "host",
+      "purpose": "read by cbox doctor/dispatch on the host (cbox:3574 etc, marked host-side check)"
+    },
+    "etc/hooks/agent_label_guard.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "copied into generated/hooks, staged into container claude hooks"
+    },
+    "etc/hooks/code_hygiene_guard.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "copied into generated/hooks, staged into container claude hooks"
+    },
+    "etc/hooks/codex_mode_guard.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "copied into generated/hooks, staged into container claude hooks"
+    },
+    "etc/hooks/commit_guard.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "copied into generated/hooks, staged into container claude hooks"
+    },
+    "etc/hooks/continuity_commit_log.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "copied into generated/hooks, staged into container claude hooks"
+    },
+    "etc/hooks/continuity_ledger_sweep.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "copied into generated/hooks, staged into container claude hooks"
+    },
+    "etc/hooks/continuity_session_digest.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "copied into generated/hooks, staged into container claude hooks"
+    },
+    "etc/hooks/continuity_session_start.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "copied into generated/hooks, staged into container claude hooks"
+    },
+    "etc/hooks/limit_watchdog.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "copied into generated/hooks, staged into container claude hooks"
+    },
+    "etc/hooks/rm_glob_guard.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "copied into generated/hooks, staged into container claude hooks"
+    },
+    "etc/hooks/session_pane_map.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "copied into generated/hooks, staged into container claude hooks"
+    },
+    "etc/hooks/session_scope_farm.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "copied into generated/hooks, staged into container claude hooks"
+    },
+    "etc/hooks/spawn_gate.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "copied into generated/hooks, staged into container claude hooks"
+    },
+    "etc/host/90-cbox-net-refresh": {
+      "layer": "host",
+      "purpose": "host NetworkManager dispatcher script, sh not bash, /bin/sh shebang, host ip/docker restart on network events"
+    },
+    "etc/mcp/codex_mcp_shim.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "_cbox_write copies verbatim into generated/hooks/codex_mcp_shim.py, an in-container MCP relay"
+    },
+    "etc/mcp/container_exec_mcp.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "_cbox_write copies verbatim into generated/hooks, an in-container MCP server"
+    },
+    "etc/mcp/hermes_delegate_mcp.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "_cbox_write copies verbatim into generated/hooks, an in-container MCP server"
+    },
+    "etc/mcp/local_model_mcp.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "_cbox_write copies verbatim into generated/hooks, an in-container MCP server"
+    },
+    "etc/mcp/render_mcp.py": {
+      "layer": "host",
+      "purpose": "invoked on the host by setup.sh and generators.sh to render MCP json for staging (template-generating-container-content: the script itself runs host-side, its output becomes container config)"
+    },
+    "etc/registry/gen_conf_lib.py": {
+      "layer": "host",
+      "purpose": "host-side registry generator (cbox doctor host-side check)"
+    },
+    "etc/registry/gen_sections_sh.py": {
+      "layer": "host",
+      "purpose": "host-side registry generator, retargeted in track P2"
+    },
+    "etc/registry/gen_validators.py": {
+      "layer": "host",
+      "purpose": "host-side registry generator (cbox doctor host-side check)"
+    },
+    "etc/registry/settings_registry.py": {
+      "layer": "host",
+      "purpose": "host-side registry source of truth (cbox doctor host-side check)"
+    },
+    "install-bins.sh": {
+      "layer": "container",
+      "purpose": "Linux/ubuntu-24.04 image build script, never portable per section 3"
+    },
+    "lib/cbox-ai.sh": {
+      "layer": "host",
+      "purpose": "sourced by cbox on the host (cbox:13)"
+    },
+    "lib/cbox-session.sh": {
+      "layer": "host",
+      "purpose": "sourced by cbox on the host (cbox:14)"
+    },
+    "lib/cbox_host.py": {
+      "layer": "host",
+      "purpose": "python3-stdlib implementation backing lib/portable.sh (the P1 waist skeleton, cbox/docs/MULTIPLATFORM_DESIGN.md section 3); sourced/invoked host-side only"
+    },
+    "lib/cbox_hub.py": {
+      "layer": "host",
+      "purpose": "the H1 python hub core (cbox/docs/MULTIPLATFORM_DESIGN.md track H); invoked host-side by cbox's bare-invocation dispatch arm when python3 is present and the file py_compiles, reads scope context from 'cbox __hub_context' and renders/dispatches the interactive crossroads; falls back to the existing bash hub() otherwise"
+    },
+    "lib/cbox_netaccess.py": {
+      "layer": "host",
+      "purpose": "invoked by cbox on the host (cbox:177)"
+    },
+    "lib/cbox_session_bridge.py": {
+      "layer": "container",
+      "purpose": "mounted into the container at /opt/cbox/cbox_session_bridge.py:ro (generators.sh:987,1340), executed inside the container by entrypoint.sh"
+    },
+    "lib/cbox_session_nofollow.py": {
+      "layer": "host",
+      "purpose": "invoked host-side by lib/cbox-session.sh via python3 on host paths"
+    },
+    "lib/fixtures/cbox.pre_conf_writer_snapshot": {
+      "layer": "fixture-snapshot",
+      "purpose": "frozen pre-conf-writer snapshot of cbox, read as fixture data by lib/test_conf_writer_parity.sh, never executed as a live script"
+    },
+    "lib/fixtures/cbox_validator.pre_registry_snapshot.sh": {
+      "layer": "fixture-snapshot",
+      "purpose": "frozen pre-registry validator snapshot, read as fixture data by lib/test_validator_parity.sh, never executed as a live script"
+    },
+    "lib/fixtures/sections.sh.pre_registry_snapshot": {
+      "layer": "fixture-snapshot",
+      "purpose": "frozen pre-registry sections.sh snapshot, read as fixture data by parity tests, never executed as a live script"
+    },
+    "lib/fixtures/setup.sh.pre_conf_writer_snapshot": {
+      "layer": "fixture-snapshot",
+      "purpose": "frozen pre-conf-writer snapshot of setup.sh, read as fixture data by lib/test_conf_writer_parity.sh, never executed as a live script"
+    },
+    "lib/portability_denylist.py": {
+      "layer": "host",
+      "purpose": "GNU/bashism denylist detector and inventory-coverage checker; drives lib/test_portability_denylist.sh and lib/test_file_inventory.sh, doubles as the baseline regen tool"
+    },
+    "lib/portable.sh": {
+      "layer": "host",
+      "purpose": "the P1 portable waist entry points (bash-3.2-clean), sourced by _common.sh so every consumer of cbox and setup.sh gets it exactly once before first use"
+    },
+    "lib/portable_preflight.sh": {
+      "layer": "host",
+      "purpose": "bash-3.2-safe pre-flight sourced at the very top of cbox and setup.sh, before sections.sh/generators.sh (step 0 pre-flight, section 3)"
+    },
+    "lib/test_ask_claude_fallback.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_bash32_oneliners.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_bash32_parse_gate.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_cbox_ai_local_qwen.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_cbox_config.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_cbox_flock_oracle.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_cbox_hub.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_cbox_ismount_oracle.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_cbox_netaccess.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_cbox_realpath_oracle.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_cbox_sha256_oracle.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_cbox_stat_oracle.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_cbox_timeout_oracle.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_cbox_xdg_runtime_dir_oracle.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_claude_switch_models_flag.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_clip_bridge.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_codex_mcp_shim.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_conf_save_coverage.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_conf_writer_parity.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_container_exec_inertness.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_container_exec_mcp.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_container_exec_render.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_continuity_migrate.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_continuity_session_start.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_docker_exec_bridge.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_engines_registry.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_file_inventory.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_gpu_render.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_hermes_delegate_mcp.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_hermes_delegate_render.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_hermes_gen.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_hermes_install_rollback.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_hub_menu.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_jobs_farm_mirror.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_kernel_lang.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_lifecycle_guard.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_local_model_mcp.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_netaccess_runtime.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_netaccess_verb.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_ollama_network.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_ollama_owner.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_ollama_section.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_ops_lifecycle.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_portability_denylist.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_portable_preflight.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_probe_and_seed.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_render_mcp.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_rm_glob_guard.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_session_bridge.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_session_handoff.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_session_lease.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_session_multiplex.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_session_scope_farm.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_session_store.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_settings_registry.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_socks_guard.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_spawn_gate.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_sshd_entry.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_sshd_entry_pty.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_validator_parity.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_wireguard_render.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_wireguard_section.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_wireguard_verbs.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "setup.sh": {
+      "layer": "host",
+      "purpose": "the setup wizard entry point"
+    },
+    "templates/conf_lib.sh": {
+      "layer": "host",
+      "purpose": "sourced by cbox and setup.sh on the host"
+    },
+    "templates/generators.sh": {
+      "layer": "host",
+      "purpose": "sourced by cbox and setup.sh on the host, the compose/dockerfile generator"
+    },
+    "templates/sections.sh": {
+      "layer": "host",
+      "purpose": "generated artifact sourced by cbox and setup.sh on the host; case-dispatch accessors (sec_get/sec_has/sec_keys), bash-3.2-clean, no declare -A"
+    },
+    "templates/validator_dispatch.sh": {
+      "layer": "host",
+      "purpose": "sourced by cbox/setup.sh on the host"
+    },
+    "templates/validator_lib.sh": {
+      "layer": "host",
+      "purpose": "sourced by cbox/setup.sh on the host"
+    }
+  },
+  "generated_by": "step 0 of the multiplatform migration (cbox/docs/MULTIPLATFORM_DESIGN.md section 4)",
+  "layers": {
+    "container": "runs inside the cbox docker image; Linux forever, never ported, excluded from the portability gates",
+    "fixture-snapshot": "a frozen historical snapshot read as fixture data by a parity test, never executed as a live script; excluded from every gate",
+    "host": "runs on the developer/operator machine; in scope for the bash-3.2/GNU-bashism portability gates",
+    "template-generating-container-content": "a script that runs on the host but whose job is to author or stage content that ends up inside the container (compose/dockerfile generation, MCP json rendering, hook staging); the script itself is host-layer and in scope for the gates, the content it emits is container-layer and out of scope",
+    "test": "lib/test_* host-side test harness; not part of the shipped host/container boundary but tracked so the inventory covers every script in the tree; in scope for the bash-3.2 parse gate (tests must also run on a 3.2 floor host) but not for the GNU/bashism denylist ratchet, which targets production host code only"
+  },
+  "schema_version": 1
+}

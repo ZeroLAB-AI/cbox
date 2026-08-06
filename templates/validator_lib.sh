@@ -233,10 +233,68 @@ _cbox_val_named_unvalidated_legacy_gap() {
   printf 'no validator registered for %s' "$key"; return 1
 }
 
+_cbox_val_kind_wg_forward_list() {
+  local val="$1" entry listen_port target_host target_port rest seen=' ' rc=0 msg=''
+  command -v _cbox_is_ipv4 >/dev/null 2>&1 || . "$INSTALL_DIR/templates/generators.sh"
+  set -f
+  for entry in $val; do
+    case "$entry" in
+      *:*:*) ;;
+      *) msg="invalid forward entry (want listen_port:target_host:target_port): $entry"; rc=1; break ;;
+    esac
+    listen_port="${entry%%:*}"
+    rest="${entry#*:}"
+    target_host="${rest%:*}"
+    target_port="${rest##*:}"
+    case "$listen_port" in
+      ''|*[!0-9]*) msg="invalid forward listen_port: $entry"; rc=1; break ;;
+    esac
+    { [ "${#listen_port}" -le 5 ] && [ "$listen_port" -ge 1 ] && [ "$listen_port" -le 65535 ]; } \
+      || { msg="forward listen_port out of range 1..65535: $entry"; rc=1; break; }
+    case "$target_port" in
+      ''|*[!0-9]*) msg="invalid forward target_port: $entry"; rc=1; break ;;
+    esac
+    { [ "${#target_port}" -le 5 ] && [ "$target_port" -ge 1 ] && [ "$target_port" -le 65535 ]; } \
+      || { msg="forward target_port out of range 1..65535: $entry"; rc=1; break; }
+    if _cbox_is_ipv4 "$target_host" 2>/dev/null; then
+      msg="forward target_host must be a docker service name, not a LAN IPv4 literal: $entry"; rc=1; break
+    fi
+    case "$target_host" in
+      [A-Za-z0-9]*) ;;
+      *) msg="invalid forward target_host: $entry"; rc=1; break ;;
+    esac
+    case "$target_host" in
+      *[!A-Za-z0-9_.-]*) msg="invalid forward target_host: $entry"; rc=1; break ;;
+    esac
+    [ "${#target_host}" -le 63 ] || { msg="forward target_host too long (max 63): $entry"; rc=1; break; }
+    case "$seen" in
+      *" $listen_port "*) msg="duplicate forward listen_port: $listen_port"; rc=1; break ;;
+    esac
+    seen="$seen$listen_port "
+  done
+  set +f
+  [ "$rc" -eq 0 ] || printf '%s' "$msg"
+  return "$rc"
+}
+
 _cbox_val_named_ipv4_list() {
   local val="$1" a
   command -v _cbox_is_ipv4 >/dev/null 2>&1 || . "$INSTALL_DIR/templates/generators.sh"
   for a in $val; do
     _cbox_is_ipv4 "$a" || { printf 'invalid IPv4 address: %s' "$a"; return 1; }
   done
+}
+
+_cbox_val_named_kernel_lang() {
+  local val="$1"
+  [ -z "$val" ] && return 0
+  [ "${#val}" -le 64 ] || { printf 'must be at most 64 characters'; return 1; }
+  case "$val" in
+    *[!\ -~]*) printf 'must be plain ASCII (a rendered instruction line, no non-ASCII characters)'; return 1 ;;
+  esac
+  case "$val" in
+    *'{'*|*'}'*) printf 'must not contain { or }'; return 1 ;;
+    ' '*|*' ') printf 'must not have leading or trailing spaces'; return 1 ;;
+  esac
+  return 0
 }

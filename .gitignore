@@ -15,3 +15,5 @@ backups/
 *.lock
 *.stamp
 __pycache__/
+sshd_config
+sshd/

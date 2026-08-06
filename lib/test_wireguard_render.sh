@@ -174,17 +174,17 @@ grep -q 'supervisor' "$DF" || _fail "Dockerfile.wireguard missing supervisor"
 _ok "Dockerfile.wireguard: installs wireguard-tools, wireguard-go (userspace fallback), socat, supervisor"
 
 SUP_SERVER="$SRVOWNER/wireguard-build/supervisord.wireguard.conf"
-grep -q '\[program:wg-forward-server\]' "$SUP_SERVER" || _fail "server supervisord: missing wg-forward-server program"
+grep -q '\[program:wg-forward-1\]' "$SUP_SERVER" || _fail "server supervisord: missing wg-forward-1 program (synthesised ollama entry)"
 ! grep -q '\[program:wg-forward-client\]' "$SUP_SERVER" || _fail "server supervisord: must not run the client forwarder in server-only mode"
 
 SUP_CLIENT="$CLIOWNER/wireguard-build/supervisord.wireguard.conf"
 grep -q '\[program:wg-forward-client\]' "$SUP_CLIENT" || _fail "client supervisord: missing wg-forward-client program"
-! grep -q '\[program:wg-forward-server\]' "$SUP_CLIENT" || _fail "client supervisord: must not run the server forwarder in client-only mode"
+! grep -q '\[program:wg-forward-1\]' "$SUP_CLIENT" || _fail "client supervisord: must not run the server forward table in client-only mode"
 
 SUP_BOTH="$BOTHOWNER/wireguard-build/supervisord.wireguard.conf"
-grep -q '\[program:wg-forward-server\]' "$SUP_BOTH" || _fail "both supervisord: missing wg-forward-server program"
+grep -q '\[program:wg-forward-1\]' "$SUP_BOTH" || _fail "both supervisord: missing wg-forward-1 program (synthesised ollama entry)"
 grep -q '\[program:wg-forward-client\]' "$SUP_BOTH" || _fail "both supervisord: missing wg-forward-client program"
-_ok "supervisord: server role runs only the server forwarder, client role runs only the client forwarder, both runs both"
+_ok "supervisord: server role runs the forward table (wg-forward-N), client role runs only the client forwarder, both runs both"
 
 grep -q 'TCP:ollama:11434' "$SUP_SERVER" || _fail "server forwarder: must forward to the ollama service on the infra network, not elsewhere"
 grep -q 'TCP-LISTEN:11434,bind=10.90.0.1' "$SUP_SERVER" || _fail "server forwarder: must accept only on the tunnel address, not all interfaces"
@@ -325,5 +325,182 @@ grep -q 'wg-egress:' "$CLIOFFCOMPOSE" || _fail "client role with ollama off: wg-
 ! grep -q '^volumes:' "$CLIOFFCOMPOSE" || _fail "client role with ollama off: no ollama store volume should be declared"
 [ -f "$CLIOFFHOME/.config/cbox/infra/wireguard/cbox0.conf.tpl" ] || _fail "client role with ollama off: wireguard config template must still be rendered"
 _ok "client role with ollama off: owner project renders the wireguard sidecar alone (this is the bug the reconcile/up verbs must also honor - see cbox _cbox_ollama_reconcile_cmd)"
+
+add_peer_full() {
+  local home="$1" name="$2" pubkey="$3" addr="$4" endpoint="${5:-}" capability="${6:-}"
+  ( set -e
+    source "$INSTALL_DIR/templates/generators.sh"
+    export HOME="$home"
+    mkdir -p "$home"
+    _cbox_wg_peer_add "$name" "$pubkey" "$addr" "$endpoint" "$capability"
+  )
+}
+
+validate_forwards() {
+  ( set -e
+    source "$INSTALL_DIR/templates/generators.sh"
+    source "$INSTALL_DIR/templates/validator_lib.sh" 2>/dev/null || true
+    _cbox_val_kind_wg_forward_list "$1"
+  )
+}
+
+if validate_forwards "11434:ollama:11434 11500:other-svc:11500" >/dev/null 2>&1; then :; else _fail "forward validator: a valid two-entry table must be accepted"; fi
+_ok "forward validator: valid multi-entry table accepted"
+
+if validate_forwards "abc:ollama:11434" >/dev/null 2>&1; then _fail "forward validator: non-numeric listen_port must be rejected"; fi
+if validate_forwards "11434:ollama:70000" >/dev/null 2>&1; then _fail "forward validator: out-of-range target_port must be rejected"; fi
+if validate_forwards "11434:bad host:11434" >/dev/null 2>&1; then _fail "forward validator: space in target_host must be rejected"; fi
+if validate_forwards "11434:ollama:11434 11434:other:22" >/dev/null 2>&1; then _fail "forward validator: duplicate listen_port must be rejected"; fi
+if validate_forwards "11434:ollama;rm -rf /:11434" >/dev/null 2>&1; then _fail "forward validator: shell metacharacter in target_host must be rejected"; fi
+if validate_forwards "11434:10.0.0.5:11434" >/dev/null 2>&1; then _fail "forward validator: a LAN IPv4 literal target_host must be rejected (posture: forward to a named peer only, never an arbitrary LAN host)"; fi
+if validate_forwards "11434:192.168.1.1:11434" >/dev/null 2>&1; then _fail "forward validator: a LAN IPv4 literal target_host must be rejected regardless of address class"; fi
+_ok "forward validator: invalid entries (bad port, bad range, bad host, duplicate listen port, shell metacharacter, LAN IPv4 literal target_host) all rejected"
+
+FWDHOME="$TMPBASE/forwards/home"
+FWDOWNER="$TMPBASE/forwards/owner"
+render "$FWDHOME" "$FWDOWNER" server \
+  CBOX_WG_IMPL=auto CBOX_WG_ADDRESS=10.90.0.1/24 CBOX_WG_LISTEN_PORT=51820 CBOX_WG_PUBLISH_ADDR=198.51.100.7 \
+  CBOX_WG_PEER_ENDPOINT= CBOX_WG_PEER_PUBKEY= CBOX_WG_PEER_ADDRESS= CBOX_WG_KEEPALIVE=25 \
+  CBOX_WG_FORWARDS="9000:ollama:11434 9001:other-svc:9001"
+FWDSUP="$FWDOWNER/wireguard-build/supervisord.wireguard.conf"
+grep -q '\[program:wg-forward-1\]' "$FWDSUP" || _fail "forward table: first entry must render as wg-forward-1"
+grep -q '\[program:wg-forward-2\]' "$FWDSUP" || _fail "forward table: second entry must render as wg-forward-2"
+grep -q 'TCP-LISTEN:9000,bind=10.90.0.1.*TCP:ollama:11434' "$FWDSUP" || _fail "forward table: first entry target mismatch"
+grep -q 'TCP-LISTEN:9001,bind=10.90.0.1.*TCP:other-svc:9001' "$FWDSUP" || _fail "forward table: second entry target mismatch"
+! grep -q '\[program:wg-forward-3\]' "$FWDSUP" || _fail "forward table: must render exactly the configured entries, no more"
+_ok "forward table: a valid multi-entry CBOX_WG_FORWARDS renders one wg-forward-N program per entry, in order"
+
+SYNTHHOME="$TMPBASE/synth/home"
+SYNTHOWNER="$TMPBASE/synth/owner"
+render "$SYNTHHOME" "$SYNTHOWNER" server \
+  CBOX_WG_IMPL=auto CBOX_WG_ADDRESS=10.90.0.1/24 CBOX_WG_LISTEN_PORT=51820 CBOX_WG_PUBLISH_ADDR=198.51.100.7 \
+  CBOX_WG_PEER_ENDPOINT= CBOX_WG_PEER_PUBKEY= CBOX_WG_PEER_ADDRESS= CBOX_WG_KEEPALIVE=25 CBOX_WG_FORWARDS=
+SYNTHSUP="$SYNTHOWNER/wireguard-build/supervisord.wireguard.conf"
+grep -q '\[program:wg-forward-1\]' "$SYNTHSUP" || _fail "forward synthesis: empty CBOX_WG_FORWARDS with ollama on must synthesise one entry"
+grep -q 'TCP-LISTEN:11434,bind=10.90.0.1.*TCP:ollama:11434' "$SYNTHSUP" || _fail "forward synthesis: synthesised entry must match today's hardcoded ollama forward exactly"
+! grep -q '\[program:wg-forward-2\]' "$SYNTHSUP" || _fail "forward synthesis: must synthesise exactly one entry, not more"
+_ok "forward synthesis: empty CBOX_WG_FORWARDS + ollama on synthesises exactly today's single ollama forward"
+
+NOOLLAMAHOME="$TMPBASE/no_ollama_forward/home"
+NOOLLAMAOWNER="$TMPBASE/no_ollama_forward/owner"
+render_ollama_off "$NOOLLAMAHOME" "$NOOLLAMAOWNER" server \
+  CBOX_WG_IMPL=auto CBOX_WG_ADDRESS=10.90.0.1/24 CBOX_WG_LISTEN_PORT=51820 CBOX_WG_PUBLISH_ADDR=198.51.100.7 \
+  CBOX_WG_PEER_ENDPOINT= CBOX_WG_PEER_PUBKEY= CBOX_WG_PEER_ADDRESS= CBOX_WG_KEEPALIVE=25 CBOX_WG_FORWARDS=
+NOOLLAMASUP="$NOOLLAMAOWNER/wireguard-build/supervisord.wireguard.conf"
+! grep -q '\[program:wg-forward-1\]' "$NOOLLAMASUP" || _fail "forward synthesis: nothing should render when the table is empty and ollama is off"
+_ok "forward synthesis: empty table + ollama off renders no forward program at all"
+
+! grep -q '\[program:wg-forward' "$OFFOWNER/docker-compose.yml" 2>/dev/null || _fail "off: no forward program of any kind should render when wireguard itself is off"
+_ok "off: wireguard off renders no forward program regardless of CBOX_WG_FORWARDS"
+
+MPHOME="$TMPBASE/multipeer/home"
+MPOWNER="$TMPBASE/multipeer/owner"
+SERVERPEER_PUBKEY="cRcYqQIm9uH5B9V0IEQKddz3nO2FnHOEcYcQ0YQnMBs="
+CLIENTPEER_PUBKEY="dRcYqQIm9uH5B9V0IEQKddz3nO2FnHOEcYcQ0YQnMBs="
+add_peer_full "$MPHOME" srvpeer "$SERVERPEER_PUBKEY" "10.90.0.20/32"
+add_peer_full "$MPHOME" clipeer "$CLIENTPEER_PUBKEY" "10.90.0.21/32" "remote2.example:51820" "session"
+render "$MPHOME" "$MPOWNER" both \
+  CBOX_WG_IMPL=auto CBOX_WG_ADDRESS=10.90.0.1/24 CBOX_WG_LISTEN_PORT=51820 CBOX_WG_PUBLISH_ADDR=198.51.100.7 \
+  CBOX_WG_PEER_ENDPOINT= CBOX_WG_PEER_PUBKEY= CBOX_WG_PEER_ADDRESS= CBOX_WG_KEEPALIVE=25
+
+MPCONF="$MPHOME/.config/cbox/infra/wireguard/cbox0.conf.tpl"
+[ -f "$MPCONF" ] || _fail "multi-peer: wireguard config not rendered"
+grep -q "PublicKey = $SERVERPEER_PUBKEY" "$MPCONF" || _fail "multi-peer: server-role peer must be rendered"
+grep -q "PublicKey = $CLIENTPEER_PUBKEY" "$MPCONF" || _fail "multi-peer: client-role peer must be rendered"
+grep -A3 "PublicKey = $SERVERPEER_PUBKEY" "$MPCONF" | grep -q 'AllowedIPs = 10.90.0.20/32' || _fail "multi-peer: server-role peer AllowedIPs must be /32"
+grep -A3 "PublicKey = $CLIENTPEER_PUBKEY" "$MPCONF" | grep -q 'AllowedIPs = 10.90.0.21/32' || _fail "multi-peer: client-role peer AllowedIPs must be /32"
+grep -A3 "PublicKey = $SERVERPEER_PUBKEY" "$MPCONF" | grep -q '^Endpoint' && _fail "multi-peer: server-role peer must not carry an Endpoint line"
+grep -A4 "PublicKey = $CLIENTPEER_PUBKEY" "$MPCONF" | grep -q 'Endpoint = remote2.example:51820' || _fail "multi-peer: client-role peer must carry its own Endpoint"
+_ok "multi-peer: server-role and client-role peers coexist on one wg0, each keeping its /32 AllowedIPs, only the client-role peer carries Endpoint"
+
+CAPHOME="$TMPBASE/capability/home"
+mkdir -p "$CAPHOME/.config/cbox/infra/wireguard"
+CAP_PUBKEY1="eRcYqQIm9uH5B9V0IEQKddz3nO2FnHOEcYcQ0YQnMBs="
+CAP_PUBKEY2="1RcYqQIm9uH5B9V0IEQKddz3nO2FnHOEcYcQ0YQnMBs="
+add_peer_full "$CAPHOME" capdefault "$CAP_PUBKEY1" "10.90.0.30/32"
+add_peer_full "$CAPHOME" capboth "$CAP_PUBKEY2" "10.90.0.31/32" "" "ollama,session"
+printf 'legacyline|%s|10.90.0.32/32\n' "fRcYqQIm9uH5B9V0IEQKddz3nO2FnHOEcYcQ0YQnMBs=" >> "$CAPHOME/.config/cbox/infra/wireguard/peers"
+CAPOUT="$(
+  ( set -e
+    source "$INSTALL_DIR/templates/generators.sh"
+    export HOME="$CAPHOME"
+    _cbox_wg_peer_list
+  )
+)"
+echo "$CAPOUT" | grep -q '^capdefault|.*||ollama$' || _fail "capability: a new peer with no --capability must default to capability=ollama"
+echo "$CAPOUT" | grep -q '^capboth|.*||ollama,session$' || _fail "capability: a comma-set capability must round-trip through the store"
+echo "$CAPOUT" | grep -q '^legacyline|' || _fail "capability: a legacy three-field line (no endpoint, no capability) must still parse and list"
+CAPLINE_LEGACY="$(echo "$CAPOUT" | grep '^legacyline|')"
+(
+  source "$INSTALL_DIR/templates/generators.sh"
+  [ "$(_cbox_wg_peer_capability "$CAPLINE_LEGACY")" = "ollama" ] || { echo "legacy line capability did not read as ollama" >&2; exit 1; }
+) || _fail "capability: a legacy record without the field must read as today's behaviour (full ollama reachability), not capability=none"
+_ok "capability: new peer defaults to ollama, a comma-set round-trips, a legacy record without the field reads as ollama (today's behaviour, not silently narrowed)"
+
+WGUP4="$SRVOWNER/wireguard-build/wg-up.sh"
+sh -n "$WGUP4" || _fail "wg-up.sh: fails sh -n after the forward-table assertion was added"
+grep -q 'structural no-routing assertion: every rendered forward must resolve to one fixed host and one fixed port' "$WGUP4" \
+  || _fail "wg-up.sh: missing the fourth structural assertion (forward table resolves to one fixed host and one fixed port)"
+grep -q 'wildcard bind' "$WGUP4" || _fail "wg-up.sh: fourth assertion must check for a wildcard bind"
+grep -q 'shell metacharacter' "$WGUP4" || _fail "wg-up.sh: fourth assertion must check for a shell metacharacter in the rendered forward"
+_ok "wg-up.sh: fourth structural assertion (rendered forwards resolve to one fixed host and one fixed port) is present and sh -n clean"
+
+_fourth_assertion_accepts() {
+  local socat_line="$1" script rc
+  script="$(awk '/structural no-routing assertion: every rendered forward must resolve to one fixed host and one fixed port/,/^done \|\| exit 1$/' "$WGUP4")"
+  rc=0
+  ( printf 'command=%s\n' "$socat_line" > "$FOURTHTMP/supervisord.conf"
+    cd "$FOURTHTMP" && sh -c "$(printf '%s\n' "$script" | sed 's#/etc/supervisord.conf#supervisord.conf#')" ) >/dev/null 2>&1 || rc=1
+  return "$rc"
+}
+
+FOURTHTMP="$TMPBASE/fourth_assertion"
+mkdir -p "$FOURTHTMP"
+if _fourth_assertion_accepts 'wg-forward-1] command=/bin/sh -c "exec socat TCP-LISTEN:9000,bind=10.90.0.1,fork,reuseaddr TCP:ollama:11434"'; then
+  :
+else
+  _fail "wg-up.sh fourth assertion: a genuinely single-host single-port forward must be accepted"
+fi
+if _fourth_assertion_accepts 'wg-forward-1] command=/bin/sh -c "exec socat TCP-LISTEN:9000,bind=10.90.0.1,fork,reuseaddr TCP:host:1:2:3"'; then
+  _fail "wg-up.sh fourth assertion: a forward target with more than one host:port split must be refused (this is the gap the assertion message overstated before the fix)"
+fi
+if _fourth_assertion_accepts 'wg-forward-1] command=/bin/sh -c "exec socat TCP-LISTEN:9000,bind=10.90.0.1,fork,reuseaddr TCP:a b:9"'; then
+  _fail "wg-up.sh fourth assertion: a forward target host containing a space must be refused"
+fi
+_ok "wg-up.sh fourth assertion: functionally proves one fixed host and one fixed port, not just grep-for-string-presence (multi-colon and space-in-host targets are refused, a real single host:port target is accepted)"
+
+FGDIR="$TMPBASE/forward_glob/cwd"
+mkdir -p "$FGDIR"
+: > "$FGDIR/9000:ollama:11434-planted-by-an-attacker"
+: > "$FGDIR/9001:other-svc:9001-also-planted"
+
+GLOBENTRIES="$(
+  ( set -e
+    cd "$FGDIR" &&
+    source "$INSTALL_DIR/templates/generators.sh"
+    export CBOX_WG_FORWARDS='9000:ollama:11434* 9001:other-svc:9001*'
+    _cbox_wg_forward_entries
+  )
+)"
+EXPECTED_GLOBENTRIES="9000:ollama:11434*
+9001:other-svc:9001*"
+[ "$GLOBENTRIES" = "$EXPECTED_GLOBENTRIES" ] \
+  || _fail "glob-active parsing: _cbox_wg_forward_entries must return CBOX_WG_FORWARDS unchanged (literal, including the trailing '*') even when the rendering directory contains files whose names match what the entry would glob-expand to; got: $GLOBENTRIES"
+_ok "glob-active parsing: _cbox_wg_forward_entries returns the configured value byte-for-byte unchanged (set -f) even when planted filenames in cwd are shaped to match a glob-expansion of that value"
+
+set +e
+GLOBVAL_MSG="$(
+  cd "$FGDIR" &&
+  source "$INSTALL_DIR/templates/generators.sh" &&
+  source "$INSTALL_DIR/templates/validator_lib.sh" 2>/dev/null
+  _cbox_val_kind_wg_forward_list '9000:ollama:11434* 9001:other-svc:9001*'
+)"
+GLOBVAL_RC=$?
+set -e
+[ "$GLOBVAL_RC" -ne 0 ] \
+  || _fail "glob-active parsing: _cbox_val_kind_wg_forward_list must reject a target_port containing '*' (a glob metacharacter must never be treated as a valid port token, whether or not it happens to expand against files in cwd)"
+_ok "glob-active parsing: _cbox_val_kind_wg_forward_list rejects a glob metacharacter in an entry as invalid input, unaffected by planted filenames in the current directory that shape-match its would-be expansion"
+
+rm -f -- "$FGDIR/9000:ollama:11434-planted-by-an-attacker" "$FGDIR/9001:other-svc:9001-also-planted"
 
 echo "PASS: all wireguard render checks"

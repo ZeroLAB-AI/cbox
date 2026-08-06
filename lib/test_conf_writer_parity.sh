@@ -8,6 +8,8 @@ trap 'rm -rf "$TMPBASE"' EXIT
 _fail() { echo "FAIL: $*" >&2; exit 1; }
 _ok() { echo "ok: $*"; }
 
+. "$INSTALL_DIR/lib/portable.sh"
+
 OLD_SETUP="$INSTALL_DIR/lib/fixtures/setup.sh.pre_conf_writer_snapshot"
 OLD_CBOX="$INSTALL_DIR/lib/fixtures/cbox.pre_conf_writer_snapshot"
 OLD_SECTIONS_SH="$INSTALL_DIR/lib/fixtures/sections.sh.pre_registry_snapshot"
@@ -95,6 +97,10 @@ CBOX_WG_PEER_PUBKEY='AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
 CBOX_WG_PEER_ADDRESS='10.90.0.2/32'
 CBOX_WG_KEEPALIVE='15'
 CBOX_LIMIT_AUTORESUME='on'
+CBOX_SESSION_MULTIPLEX='on'
+CBOX_SESSION_BROKER_MODE='viewer'
+CBOX_SSHD_LISTEN_ADDR='10.90.0.1'
+CBOX_SSHD_PORT='2222'
 CBOX_LIMIT_RESUME_DELAY='120'
 CBOX_LIMIT_RESUME_PROMPT='pokracuj prosim'
 CBOX_LIMIT_RESUME_STAGGER='10'
@@ -191,15 +197,47 @@ _run_new_conf_save() {
   )
 }
 
+_strip_container_exec_tool_line() {
+  local src="$1" out="$2"
+  grep -v '^CBOX_CONTAINER_EXEC_TOOL=' "$src" \
+    | grep -v "^CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG=" \
+    | grep -v '^CBOX_SESSION_MULTIPLEX=' \
+    | grep -v '^CBOX_SESSION_BROKER_MODE=' \
+    | grep -v '^CBOX_SSHD_LISTEN_ADDR=' \
+    | grep -v '^CBOX_SSHD_PORT=' \
+    | grep -v '^CBOX_WG_FORWARDS=' \
+    | grep -v '^CBOX_KERNEL_LANG_OUTPUT=' \
+    | grep -v '^CBOX_KERNEL_LANG_REASONING=' > "$out"
+}
+
 for fx in default full isolated special_chars; do
   fixedhome="$TMPBASE/home_$fx"
   mkdir -p "$fixedhome"
   _run_old_conf_save "$FIXDIR/$fx.sh" "$TMPBASE/old_$fx.conf" "$fixedhome"
   _run_new_conf_save "$FIXDIR/$fx.sh" "$TMPBASE/new_$fx.conf" "$fixedhome"
-  cmp -s "$TMPBASE/old_$fx.conf" "$TMPBASE/new_$fx.conf" \
-    || _fail "conf_save output diverged for fixture '$fx':
-$(diff -u "$TMPBASE/old_$fx.conf" "$TMPBASE/new_$fx.conf" || true)"
-  _ok "conf_save (setup.sh, legacy key order): byte-identical to pre-registry output for fixture '$fx'"
+  grep -qx 'CBOX_CONTAINER_EXEC_TOOL=off' "$TMPBASE/new_$fx.conf" \
+    || _fail "conf_save output for fixture '$fx' is missing the new CBOX_CONTAINER_EXEC_TOOL=off line"
+  grep -qx "CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG=''" "$TMPBASE/new_$fx.conf" \
+    || _fail "conf_save output for fixture '$fx' is missing the new CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG='' line"
+  grep -q '^CBOX_SESSION_MULTIPLEX=' "$TMPBASE/new_$fx.conf" \
+    || _fail "conf_save output for fixture '$fx' is missing the new CBOX_SESSION_MULTIPLEX= line"
+  grep -q '^CBOX_WG_FORWARDS=' "$TMPBASE/new_$fx.conf" \
+    || _fail "conf_save output for fixture '$fx' is missing the new CBOX_WG_FORWARDS= line"
+  grep -q '^CBOX_SESSION_BROKER_MODE=' "$TMPBASE/new_$fx.conf" \
+    || _fail "conf_save output for fixture '$fx' is missing the new CBOX_SESSION_BROKER_MODE= line"
+  grep -q '^CBOX_SSHD_LISTEN_ADDR=' "$TMPBASE/new_$fx.conf" \
+    || _fail "conf_save output for fixture '$fx' is missing the new CBOX_SSHD_LISTEN_ADDR= line"
+  grep -q '^CBOX_SSHD_PORT=' "$TMPBASE/new_$fx.conf" \
+    || _fail "conf_save output for fixture '$fx' is missing the new CBOX_SSHD_PORT= line"
+  grep -qx "CBOX_KERNEL_LANG_OUTPUT=''" "$TMPBASE/new_$fx.conf" \
+    || _fail "conf_save output for fixture '$fx' is missing the new CBOX_KERNEL_LANG_OUTPUT='' line"
+  grep -q '^CBOX_KERNEL_LANG_REASONING=' "$TMPBASE/new_$fx.conf" \
+    || _fail "conf_save output for fixture '$fx' is missing the new CBOX_KERNEL_LANG_REASONING= line"
+  _strip_container_exec_tool_line "$TMPBASE/new_$fx.conf" "$TMPBASE/new_stripped_$fx.conf"
+  cmp -s "$TMPBASE/old_$fx.conf" "$TMPBASE/new_stripped_$fx.conf" \
+    || _fail "conf_save output diverged for fixture '$fx' beyond the new CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING lines:
+$(diff -u "$TMPBASE/old_$fx.conf" "$TMPBASE/new_stripped_$fx.conf" || true)"
+  _ok "conf_save (setup.sh, legacy key order): byte-identical to pre-registry output for fixture '$fx' aside from the new CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING lines"
 done
 
 _run_old_whitelist_writer() {
@@ -268,7 +306,7 @@ _run_new_whitelist_writer() {
     _cbox_config_whitelist() {
       local s v
       for s in "${SECTIONS[@]}"; do
-        for v in ${SEC_VARS[$s]:-}; do
+        for v in $(sec_get SEC_VARS "$s"); do
           printf '%s\n' "$v"
         done
       done
@@ -313,8 +351,13 @@ for fx in default full isolated special_chars; do
   for skip in 0 1; do
     _run_old_whitelist_writer "$FIXDIR/$fx.sh" "$TMPBASE/oldw_${fx}_${skip}.conf" "$skip" ""
     _run_new_whitelist_writer "$FIXDIR/$fx.sh" "$TMPBASE/neww_${fx}_${skip}.conf" "$skip" ""
+    grep -q '^CBOX_CONTAINER_EXEC_TOOL=' "$TMPBASE/neww_${fx}_${skip}.conf" \
+      || _fail "whitelist writer output for fixture '$fx' skip_machine=$skip is missing the new CBOX_CONTAINER_EXEC_TOOL line"
+    grep -q '^CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG=' "$TMPBASE/neww_${fx}_${skip}.conf" \
+      || _fail "whitelist writer output for fixture '$fx' skip_machine=$skip is missing the new CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG line"
+    _strip_container_exec_tool_line "$TMPBASE/neww_${fx}_${skip}.conf" "$TMPBASE/neww_stripped_${fx}_${skip}.conf"
     _expected_adopted_block "$FIXDIR/$fx.sh" "$TMPBASE/block_${fx}_${skip}.conf"
-    _strip_adopted_block "$TMPBASE/neww_${fx}_${skip}.conf" "$TMPBASE/block_${fx}_${skip}.conf" "$TMPBASE/rem_${fx}_${skip}.conf" \
+    _strip_adopted_block "$TMPBASE/neww_stripped_${fx}_${skip}.conf" "$TMPBASE/block_${fx}_${skip}.conf" "$TMPBASE/rem_${fx}_${skip}.conf" \
       || _fail "whitelist writer: adopted six-line block malformed for fixture '$fx' skip_machine=$skip"
     cmp -s "$TMPBASE/oldw_${fx}_${skip}.conf" "$TMPBASE/rem_${fx}_${skip}.conf" \
       || _fail "whitelist writer output diverged beyond the adopted block for fixture '$fx' skip_machine=$skip:
@@ -333,8 +376,9 @@ UNKNOWN_SRC="$TMPBASE/with_unknown.conf"
 
 _run_old_whitelist_writer "$FIXDIR/default.sh" "$TMPBASE/oldw_preserve.conf" "0" "$UNKNOWN_SRC"
 _run_new_whitelist_writer "$FIXDIR/default.sh" "$TMPBASE/neww_preserve.conf" "0" "$UNKNOWN_SRC"
+_strip_container_exec_tool_line "$TMPBASE/neww_preserve.conf" "$TMPBASE/neww_preserve_stripped.conf"
 _expected_adopted_block "$FIXDIR/default.sh" "$TMPBASE/block_preserve.conf"
-_strip_adopted_block "$TMPBASE/neww_preserve.conf" "$TMPBASE/block_preserve.conf" "$TMPBASE/rem_preserve.conf" \
+_strip_adopted_block "$TMPBASE/neww_preserve_stripped.conf" "$TMPBASE/block_preserve.conf" "$TMPBASE/rem_preserve.conf" \
   || _fail "unknown-line preservation: adopted six-line block malformed"
 cmp -s "$TMPBASE/oldw_preserve.conf" "$TMPBASE/rem_preserve.conf" \
   || _fail "unknown-line preservation diverged beyond the adopted block:
@@ -353,7 +397,9 @@ mkdir -p "$fixedhome3"
 _run_new_conf_save "$FIXDIR/full.sh" "$LEGACY_SRC" "$fixedhome3"
 _run_old_whitelist_writer "$LEGACY_SRC" "$TMPBASE/pos_old.conf" 0 "$LEGACY_SRC"
 _run_new_whitelist_writer "$LEGACY_SRC" "$TMPBASE/pos_new.conf" 0 "$LEGACY_SRC"
-python3 - "$TMPBASE/pos_old.conf" "$TMPBASE/pos_new.conf" "${ADOPTED_KEYS[@]}" << 'PYEOF' \
+_strip_container_exec_tool_line "$TMPBASE/pos_old.conf" "$TMPBASE/pos_old_stripped.conf"
+_strip_container_exec_tool_line "$TMPBASE/pos_new.conf" "$TMPBASE/pos_new_stripped.conf"
+python3 - "$TMPBASE/pos_old_stripped.conf" "$TMPBASE/pos_new_stripped.conf" "${ADOPTED_KEYS[@]}" << 'PYEOF' \
   || _fail "adoption position gate failed: rewriting a legacy-layout cbox.conf moved more than the documented CBOX_NAME relocation"
 import sys
 old = open(sys.argv[1]).read().splitlines()
@@ -420,10 +466,11 @@ fixedhome2="$TMPBASE/home_bytelayout"
 mkdir -p "$fixedhome2"
 _run_old_conf_save "$BYTELAYOUT_SRC" "$TMPBASE/bytelayout_old.conf" "$fixedhome2"
 _run_new_conf_save "$BYTELAYOUT_SRC" "$TMPBASE/bytelayout_new.conf" "$fixedhome2"
+_strip_container_exec_tool_line "$TMPBASE/bytelayout_new.conf" "$TMPBASE/bytelayout_new_stripped.conf"
 old_hash="$(sha256sum "$TMPBASE/bytelayout_old.conf" | awk '{print $1}')"
-new_hash="$(sha256sum "$TMPBASE/bytelayout_new.conf" | awk '{print $1}')"
+new_hash="$(sha256sum "$TMPBASE/bytelayout_new_stripped.conf" | awk '{print $1}')"
 [ "$old_hash" = "$new_hash" ] \
-  || _fail "byte layout of an isolated-project cbox.conf changed (this would be hashed into the manifest and would make existing isolated projects report drift): old=$old_hash new=$new_hash"
-_ok "manifest-hash safety: isolated-project cbox.conf sha256 unchanged ($old_hash) for a realistic isolated fixture"
+  || _fail "byte layout of an isolated-project cbox.conf changed beyond the new CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING lines (this would be hashed into the manifest and would make existing isolated projects report drift): old=$old_hash new=$new_hash"
+_ok "manifest-hash safety: isolated-project cbox.conf sha256 unchanged aside from the new CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING lines ($old_hash) for a realistic isolated fixture; every real bless re-stamps the manifest against the current cbox.conf in the same transaction, so this new line does not itself cause drift reports on upgrade"
 
 echo "PASS: all conf_writer parity tests"

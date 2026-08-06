@@ -302,7 +302,7 @@ echo "$GUARD_FN" | grep -q 'CBOX_OLLAMA_STORE.*shared' || _fail "shared store gu
 echo "$GUARD_FN" | grep -q '_cbox_ollama_host_daemon_detected' || _fail "shared store guard does not call the host-daemon detector"
 echo "$GUARD_FN" | grep -q '\-L "\$models_dir"' || _fail "shared store guard does not refuse a symlinked models directory"
 echo "$GUARD_FN" | grep -q '! -d "\$models_dir"' || _fail "shared store guard does not require the models directory to already exist"
-echo "$GUARD_FN" | grep -q "stat -c '%u'" || _fail "shared store guard does not check the models directory's owning uid"
+echo "$GUARD_FN" | grep -q '_cbox_stat_uid' || _fail "shared store guard does not check the models directory's owning uid"
 _ok "shared store guard: refuses shared mode on a host ollama daemon, a missing/symlinked models dir, or a foreign-owned models dir"
 
 for fn in _cbox_ollama_reconcile_cmd _cbox_ollama_up_cmd _cbox_ollama_pull_cmd; do

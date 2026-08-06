@@ -14,10 +14,11 @@ _ok() {
   echo "ok: $1"
 }
 
+source "$INSTALL_DIR/lib/portable.sh"
 source "$INSTALL_DIR/templates/sections.sh"
 source "$INSTALL_DIR/templates/conf_lib.sh"
 
-WG_VARS="CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE"
+WG_VARS="CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE CBOX_WG_FORWARDS"
 
 case " ${SECTIONS[*]} " in
   *" wireguard "*) ;;
@@ -25,36 +26,36 @@ case " ${SECTIONS[*]} " in
 esac
 _ok "registry: SECTIONS includes wireguard"
 
-[ -n "${SEC_TITLE[wireguard]:-}" ] || _fail "registry: SEC_TITLE[wireguard] missing"
-[ -n "${SEC_DESC[wireguard]:-}" ] || _fail "registry: SEC_DESC[wireguard] missing"
+[ -n "$(sec_get SEC_TITLE wireguard)" ] || _fail "registry: SEC_TITLE[wireguard] missing"
+[ -n "$(sec_get SEC_DESC wireguard)" ] || _fail "registry: SEC_DESC[wireguard] missing"
 _ok "registry: SEC_TITLE/SEC_DESC set for wireguard"
 
-[ -n "${SEC_VARS[wireguard]:-}" ] || _fail "registry: SEC_VARS[wireguard] missing"
+[ -n "$(sec_get SEC_VARS wireguard)" ] || _fail "registry: SEC_VARS[wireguard] missing"
 for v in $WG_VARS; do
-  case " ${SEC_VARS[wireguard]} " in
+  case " $(sec_get SEC_VARS wireguard) " in
     *" $v "*) ;;
     *) _fail "registry: SEC_VARS[wireguard] missing $v" ;;
   esac
 done
 _ok "registry: SEC_VARS[wireguard] lists every required var"
 
-got_count="$(printf '%s\n' ${SEC_VARS[wireguard]} | wc -l)"
+got_count="$(printf '%s\n' $(sec_get SEC_VARS wireguard) | wc -l)"
 want_count="$(printf '%s\n' $WG_VARS | wc -l)"
-[ "$got_count" -eq "$want_count" ] || _fail "registry: SEC_VARS[wireguard] has extra/unexpected entries (got $got_count want $want_count): ${SEC_VARS[wireguard]}"
-_ok "registry: SEC_VARS[wireguard] has exactly the 9 required vars, no more"
+[ "$got_count" -eq "$want_count" ] || _fail "registry: SEC_VARS[wireguard] has extra/unexpected entries (got $got_count want $want_count): $(sec_get SEC_VARS wireguard)"
+_ok "registry: SEC_VARS[wireguard] has exactly the 10 required vars, no more"
 
-[ "${SEC_APPLY[wireguard]:-}" = infra-reconcile ] || _fail "registry: SEC_APPLY[wireguard] should be infra-reconcile, got ${SEC_APPLY[wireguard]:-unset}"
+[ "$(sec_get SEC_APPLY wireguard)" = infra-reconcile ] || _fail "registry: SEC_APPLY[wireguard] should be infra-reconcile, got $(sec_get SEC_APPLY wireguard)"
 _ok "registry: SEC_APPLY[wireguard]=infra-reconcile (reuses the ollama owner-project apply class)"
 
-[ -n "${SEC_PROFILE[wireguard]:-}" ] || _fail "registry: SEC_PROFILE[wireguard] missing"
+[ -n "$(sec_get SEC_PROFILE wireguard)" ] || _fail "registry: SEC_PROFILE[wireguard] missing"
 _ok "registry: SEC_PROFILE[wireguard] set"
 
-[ -n "${SEC_DOCTOR_ROWS[wireguard]+set}" ] || _fail "registry: SEC_DOCTOR_ROWS[wireguard] not declared"
-[ "${SEC_DOCTOR_ROWS[wireguard]}" = wireguard ] || _fail "registry: SEC_DOCTOR_ROWS[wireguard] should declare exactly the 'wireguard' row, got: ${SEC_DOCTOR_ROWS[wireguard]}"
+sec_has SEC_DOCTOR_ROWS wireguard || _fail "registry: SEC_DOCTOR_ROWS[wireguard] not declared"
+[ "$(sec_get SEC_DOCTOR_ROWS wireguard)" = wireguard ] || _fail "registry: SEC_DOCTOR_ROWS[wireguard] should declare exactly the 'wireguard' row, got: $(sec_get SEC_DOCTOR_ROWS wireguard)"
 _ok "registry: SEC_DOCTOR_ROWS[wireguard] declares the wireguard doctor row"
 
-[ -n "${SEC_SCOPE[wireguard]:-}" ] || _fail "registry: SEC_SCOPE[wireguard] missing"
-[ "${SEC_SCOPE[wireguard]}" = machine ] || _fail "registry: SEC_SCOPE[wireguard] should be machine, got ${SEC_SCOPE[wireguard]}"
+[ -n "$(sec_get SEC_SCOPE wireguard)" ] || _fail "registry: SEC_SCOPE[wireguard] missing"
+[ "$(sec_get SEC_SCOPE wireguard)" = machine ] || _fail "registry: SEC_SCOPE[wireguard] should be machine, got $(sec_get SEC_SCOPE wireguard)"
 _ok "registry: SEC_SCOPE[wireguard]=machine"
 
 other_bad=""
@@ -62,8 +63,8 @@ for s in "${SECTIONS[@]}"; do
   case "$s" in
     wireguard|ollama) continue ;;
   esac
-  [ -n "${SEC_SCOPE[$s]:-}" ] || { other_bad="$other_bad missing:$s"; continue; }
-  [ "${SEC_SCOPE[$s]}" = project ] || other_bad="$other_bad wrong:$s=${SEC_SCOPE[$s]}"
+  [ -n "$(sec_get SEC_SCOPE "$s")" ] || { other_bad="$other_bad missing:$s"; continue; }
+  [ "$(sec_get SEC_SCOPE "$s")" = project ] || other_bad="$other_bad wrong:$s=$(sec_get SEC_SCOPE "$s")"
 done
 [ -z "$other_bad" ] || _fail "registry: SEC_SCOPE should default to project for every section except ollama/wireguard:$other_bad"
 _ok "registry: SEC_SCOPE defaults to project for every non-machine-scoped section"
@@ -250,7 +251,7 @@ case "$step_wireguard_body" in
 esac
 _ok "off-default: step_wireguard never touches the filesystem or docker directly - it only stages cbox.conf values"
 
-case "${SEC_APPLY[wireguard]}" in
+case "$(sec_get SEC_APPLY wireguard)" in
   infra-reconcile) ;;
   *) _fail "off-default: SEC_APPLY[wireguard] changed unexpectedly" ;;
 esac
@@ -350,17 +351,19 @@ _ok "key material: _cbox_wg_keygen creates privatekey (0600) and publickey from 
 ) || _fail "key material: missing wg tooling should fail naming the package, never write a placeholder key"
 _ok "key material: missing wireguard-tools fails cleanly, names the package, writes nothing"
 
+ALPHA_PUBKEY="fRcYqQIm9uH5B9V0IEQKddz3nO2FnHOEcYcQ0YQnMBs="
 (
   HOME="$WGHOME/peerhome"
+  unset CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS
   export HOME
   mkdir -p "$HOME"
-  _cbox_wg_peer_add alpha "$VALID_PUBKEY" "10.90.0.2/32" || exit 1
+  _cbox_wg_peer_add alpha "$ALPHA_PUBKEY" "10.90.0.12/32" || exit 1
   out="$(_cbox_wg_peer_list)"
-  [ "$out" = "alpha|$VALID_PUBKEY|10.90.0.2/32" ] || { echo "peer list mismatch: $out" >&2; exit 1; }
+  [ "$out" = "alpha|$ALPHA_PUBKEY|10.90.0.12/32||ollama" ] || { echo "peer list mismatch: $out" >&2; exit 1; }
   perm="$(stat -c '%a' "$(_cbox_wg_peers_file)")"
   [ "$perm" = "600" ] || { echo "peers file perms: got $perm want 600" >&2; exit 1; }
 ) || _fail "peer store: add + list round-trip failed"
-_ok "peer store: add + list round-trip (name|pubkey|allowed-address), file mode 0600"
+_ok "peer store: add + list round-trip (name|pubkey|allowed-address|endpoint|capability), file mode 0600, new peer defaults to capability=ollama"
 
 (
   HOME="$WGHOME/peerhome"
@@ -373,7 +376,7 @@ _ok "peer store: refuses a duplicate peer name"
 (
   HOME="$WGHOME/peerhome"
   export HOME
-  _cbox_wg_peer_add beta "$VALID_PUBKEY" "10.90.0.4/32" 2>/dev/null && exit 1
+  _cbox_wg_peer_add beta "$ALPHA_PUBKEY" "10.90.0.4/32" 2>/dev/null && exit 1
   exit 0
 ) || _fail "peer store: duplicate public key should be refused"
 _ok "peer store: refuses a duplicate public key"

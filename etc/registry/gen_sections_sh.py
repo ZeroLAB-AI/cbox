@@ -10,6 +10,46 @@ def _sq(val):
     return "'" + val.replace("'", "'\\''") + "'"
 
 
+def _case_block(array_name, entries):
+    lines = []
+    lines.append("    %s)" % array_name)
+    lines.append('      case "$2" in')
+    for key, value in entries:
+        lines.append("        %s)" % key)
+        lines.append("          printf '%%s\\n' %s" % _sq(value))
+        lines.append("          ;;")
+    lines.append("        *)")
+    lines.append("          return 0")
+    lines.append("          ;;")
+    lines.append("      esac")
+    lines.append("      ;;")
+    return lines
+
+
+def _has_block(array_name, keys):
+    lines = []
+    lines.append("    %s)" % array_name)
+    lines.append('      case "$2" in')
+    if keys:
+        lines.append("        %s)" % "|".join(keys))
+        lines.append("          return 0")
+        lines.append("          ;;")
+    lines.append("        *)")
+    lines.append("          return 1")
+    lines.append("          ;;")
+    lines.append("      esac")
+    lines.append("      ;;")
+    return lines
+
+
+def _keys_block(array_name, keys):
+    lines = []
+    lines.append("    %s)" % array_name)
+    lines.append("      printf '%%s\\n' %s" % " ".join(_sq(k) for k in keys))
+    lines.append("      ;;")
+    return lines
+
+
 def render(data):
     sections = reg.sections_in_order(data)
     section_ids = [s["id"] for s in sections]
@@ -17,46 +57,29 @@ def render(data):
 
     lines.append("SECTIONS=(%s)" % " ".join(section_ids))
     lines.append("")
-    lines.append("declare -g -A SEC_TITLE SEC_DESC SEC_VARS SEC_APPLY SEC_PROFILE SEC_SCOPE SEC_DEPS SEC_DEP_TEXT SEC_DOCTOR_ROWS")
-    lines.append("")
 
-    for s in sections:
-        lines.append("SEC_TITLE[%s]=%s" % (s["id"], _sq(s["title"])))
-    lines.append("")
+    sec_title = [(s["id"], s["title"]) for s in sections]
+    sec_desc = [(s["id"], s["description"]) for s in sections]
 
-    for s in sections:
-        lines.append("SEC_DESC[%s]=%s" % (s["id"], _sq(s["description"])))
-    lines.append("")
-
+    sec_vars = []
     for s in sections:
         vars_for_sec = reg.variables_for_section(data, s["id"])
         keys = " ".join(v["key"] for v in vars_for_sec if v["role"] == "setting")
-        lines.append("SEC_VARS[%s]=%s" % (s["id"], _sq(keys)))
-    lines.append("")
+        sec_vars.append((s["id"], keys))
 
+    sec_apply = [(s["id"], s["apply_class"]) for s in sections]
+    sec_profile = [(s["id"], s["profile"]) for s in sections]
+
+    sec_scope = []
     for s in sections:
-        lines.append("SEC_APPLY[%s]=%s" % (s["id"], _sq(s["apply_class"])))
-    lines.append("")
+        sec_scope.append((s["id"], "machine" if s["scope"] == "machine" else "project"))
 
-    for s in sections:
-        lines.append("SEC_PROFILE[%s]=%s" % (s["id"], _sq(s["profile"])))
-    lines.append("")
-
-    lines.append('for _cbox_sec_scope_s in "${SECTIONS[@]}"; do')
-    lines.append("  SEC_SCOPE[$_cbox_sec_scope_s]='project'")
-    lines.append("done")
-    lines.append("unset _cbox_sec_scope_s")
-    for s in sections:
-        if s["scope"] == "machine":
-            lines.append("SEC_SCOPE[%s]='machine'" % s["id"])
-    lines.append("")
-
+    sec_deps = []
     for s in sections:
         if not s["dependencies"]:
             continue
         tokens = ["%s:%s" % (dep["kind"], dep["reason"]) for dep in s["dependencies"]]
-        lines.append("SEC_DEPS[%s]=%s" % (s["id"], _sq(" ".join(tokens))))
-    lines.append("")
+        sec_deps.append((s["id"], " ".join(tokens)))
 
     dep_text = reg.dependency_text(data)
     seen_tokens = []
@@ -65,13 +88,60 @@ def render(data):
             token = "%s:%s" % (dep["kind"], dep["reason"])
             if token not in seen_tokens:
                 seen_tokens.append(token)
-    for token in seen_tokens:
-        lines.append("SEC_DEP_TEXT[%s]=%s" % (token, _sq(dep_text[token])))
-    lines.append("")
+    sec_dep_text = [(token, dep_text[token]) for token in seen_tokens]
 
+    sec_doctor_rows = []
     for s in sections:
         if s["doctor_rows"] is not None:
-            lines.append("SEC_DOCTOR_ROWS[%s]=%s" % (s["id"], _sq(" ".join(s["doctor_rows"]))))
+            sec_doctor_rows.append((s["id"], " ".join(s["doctor_rows"])))
+
+    arrays = [
+        ("SEC_TITLE", sec_title),
+        ("SEC_DESC", sec_desc),
+        ("SEC_VARS", sec_vars),
+        ("SEC_APPLY", sec_apply),
+        ("SEC_PROFILE", sec_profile),
+        ("SEC_SCOPE", sec_scope),
+        ("SEC_DEPS", sec_deps),
+        ("SEC_DEP_TEXT", sec_dep_text),
+        ("SEC_DOCTOR_ROWS", sec_doctor_rows),
+    ]
+
+    lines.append("sec_get() {")
+    lines.append('  case "$1" in')
+    for array_name, entries in arrays:
+        lines.extend(_case_block(array_name, entries))
+    lines.append("    *)")
+    lines.append("      return 0")
+    lines.append("      ;;")
+    lines.append("  esac")
+    lines.append("}")
+    lines.append("")
+
+    lines.append("sec_has() {")
+    lines.append('  case "$1" in')
+    for array_name, entries in arrays:
+        keys = [k for k, _ in entries]
+        lines.extend(_has_block(array_name, keys))
+    lines.append("    *)")
+    lines.append("      return 1")
+    lines.append("      ;;")
+    lines.append("  esac")
+    lines.append("}")
+    lines.append("")
+
+    lines.append("sec_keys() {")
+    lines.append('  case "$1" in')
+    for array_name, entries in arrays:
+        keys = [k for k, _ in entries]
+        lines.extend(_keys_block(array_name, keys))
+    lines.append("    *)")
+    lines.append("      return 0")
+    lines.append("      ;;")
+    lines.append("  esac")
+    lines.append("}")
+    lines.append("")
+
     lines.append("DOCTOR_EXTRA_ROWS=%s" % _sq(" ".join(reg.doctor_extra_rows(data))))
 
     return "\n".join(lines) + "\n"

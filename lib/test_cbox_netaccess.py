@@ -143,6 +143,35 @@ class NetaccessTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             MOD.apply(self.args(["host"]))
 
+    def test_scope_list_absent_network_is_skipped_not_fatal(self):
+        result = MOD.apply(self.args(["project_a", "markiza-cloud-network"]))
+        self.assertEqual(result["appliedNetworks"], ["project_a"])
+        self.assertEqual(self.fake.connected, ["project_a"])
+        skipped = {item["network"]: item for item in result["skipped"]}
+        self.assertIn("markiza-cloud-network", skipped)
+        self.assertTrue(skipped["markiza-cloud-network"]["requested"])
+        self.assertIn("not found", skipped["markiza-cloud-network"]["reason"])
+
+    def test_scope_list_forbidden_network_still_raises(self):
+        with self.assertRaises(PermissionError):
+            MOD.apply(self.args(["project_a", "host"]))
+        self.assertEqual(self.fake.connected, [])
+
+    def test_scope_all_skipped_shape_is_stable(self):
+        result = MOD.apply(self.args([], scope="all"))
+        for item in result["skipped"]:
+            self.assertIn("network", item)
+            self.assertIn("reason", item)
+            self.assertIn("requested", item)
+            self.assertFalse(item["requested"])
+
+    def test_sanitize_reason_caps_length_and_strips_control_chars(self):
+        raw = "boom\x1b[31m" + ("x" * 200)
+        cleaned = MOD.sanitize_reason(raw)
+        self.assertLessEqual(len(cleaned), 123)
+        self.assertTrue(all(32 <= ord(ch) < 127 for ch in cleaned))
+        self.assertTrue(cleaned.endswith("..."))
+
     def test_symlink_state_dir_is_rejected(self):
         target = os.path.join(self.tmp.name, "target")
         link = os.path.join(self.tmp.name, "link")

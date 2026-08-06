@@ -106,9 +106,9 @@ _cbox_session_lock_acquire() {
     return 1
   fi
   eval "exec $fd> \"\$lockfile\""
-  if ! flock -n -x "$fd"; then
+  if ! _cbox_flock -n -x "$fd"; then
     echo "cbox: another leg is using the session runtime lock for $root - waiting..." >&2
-    flock -x "$fd"
+    _cbox_flock -x "$fd"
   fi
 }
 
@@ -219,14 +219,22 @@ _cbox_proc_live() {
   local pid="$1" want_start="$2" have_start
   [ -n "$pid" ] && [ "$pid" -gt 0 ] 2>/dev/null || return 1
   [ -n "$want_start" ] || return 1
-  [ -d "/proc/$pid" ] || return 1
-  have_start="$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)" || return 1
+  if _cbox_is_darwin; then
+    have_start="$(ps -p "$pid" -o lstart= 2>/dev/null)"
+  else
+    [ -d "/proc/$pid" ] || return 1
+    have_start="$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)" || return 1
+  fi
   [ -n "$have_start" ] && [ "$have_start" = "$want_start" ]
 }
 
 _cbox_proc_start_ticks() {
   local pid="$1"
-  awk '{print $22}' "/proc/$pid/stat" 2>/dev/null
+  if _cbox_is_darwin; then
+    ps -p "$pid" -o lstart= 2>/dev/null
+  else
+    awk '{print $22}' "/proc/$pid/stat" 2>/dev/null
+  fi
 }
 
 _cbox_runtime_leg_read_field() {
@@ -583,7 +591,7 @@ _cbox_claude_diff_native_id() {
       *" $id "*) continue ;;
     esac
     new_count=$((new_count + 1))
-    mtime="$(stat -c %Y "$f" 2>/dev/null)" || continue
+    mtime="$(_cbox_stat_mtime "$f" 2>/dev/null)" || continue
     if [ "$mtime" -ge "$newest_mtime" ]; then
       newest_mtime="$mtime"
       newest="$id"

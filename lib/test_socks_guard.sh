@@ -39,7 +39,9 @@ host_of() {
 [ "$(host_of socks5h://proxy:1081)" = proxy ] || _fail "host parse plain"
 [ "$(host_of socks5h://172.24.0.2:1080)" = 172.24.0.2 ] || _fail "host parse ip"
 host_of "" >/dev/null 2>&1 && _fail "empty endpoint must be rejected by host parse" || true
-_ok "socks proxy host parse extracts the endpoint host (alias, name, ip), rejects empty"
+host_of 'socks5h://proxy; touch /pwned:1080' >/dev/null 2>&1 && _fail "host with shell metacharacters must be rejected by host parse" || true
+host_of 'socks5h://$(touch /pwned):1080' >/dev/null 2>&1 && _fail "host with command substitution must be rejected by host parse" || true
+_ok "socks proxy host parse extracts the endpoint host (alias, name, ip), rejects empty and shell-metacharacter hosts"
 
 port_of() {
   bash -c '. "$1"; CBOX_SOCKS_PROXY="$2"; _socks_proxy_port' _ "$HARNESS" "$1"
@@ -82,6 +84,11 @@ out="$(guard socks5h://proxy:garbage 9999)"
 [ "$out" = "||" ] || _fail "malformed CBOX_SOCKS_PROXY must unset all three vars, got '$out'"
 grep -q '^broken ' "$STATE_OUT" || _fail "malformed endpoint must record broken state"
 _ok "malformed CBOX_SOCKS_PROXY drops the proxy vars"
+
+out="$(guard 'socks5h://proxy; touch /pwned:1080' 1080)"
+[ "$out" = "||" ] || _fail "CBOX_SOCKS_PROXY host with shell metacharacters must unset all three vars, got '$out'"
+grep -q '^broken ' "$STATE_OUT" || _fail "shell-metacharacter host must record broken state"
+_ok "CBOX_SOCKS_PROXY host with shell metacharacters is treated as an unusable endpoint, never reaches _socks_alive"
 
 out="$(bash -c '
   . "$1"

@@ -76,6 +76,20 @@ class DockerExecBridgeTests(unittest.TestCase):
         self.assertTrue(MOD.parent_alive(os.getpid(), start))
         self.assertFalse(MOD.parent_alive(os.getpid(), str(int(start) + 1)))
 
+    def test_darwin_parent_identity_uses_lstart_and_survives_the_gate(self):
+        original = MOD._is_darwin
+        MOD._is_darwin = lambda: True
+        try:
+            lstart = MOD._darwin_parent_start(os.getpid())
+            self.assertTrue(lstart)
+            self.assertFalse(lstart.isdigit())
+            self.assertTrue(MOD.parent_alive(os.getpid(), lstart))
+            self.assertTrue(MOD.parent_alive(os.getpid(), "  " + lstart + "  "))
+            self.assertFalse(MOD.parent_alive(os.getpid(), "Mon Jan  1 00:00:00 2000"))
+            self.assertFalse(MOD.parent_alive(2 ** 31 - 1, lstart))
+        finally:
+            MOD._is_darwin = original
+
     def test_handler_revalidates_scope_before_exec(self):
         original_scope = MOD.scoped_containers
         original_exec = MOD.run_exec
@@ -98,7 +112,9 @@ class DockerExecBridgeTests(unittest.TestCase):
                 self.assertTrue(result["ok"])
                 self.assertEqual(calls, [("project_a",), ("project_a",)])
                 with open(os.path.join(tmp, "audit.jsonl"), encoding="ascii") as handle:
-                    record = json.loads(handle.read())
+                    records = [json.loads(line) for line in handle if line.strip()]
+                self.assertTrue(any(r.get("op") == "list" for r in records))
+                record = [r for r in records if r.get("op") == "exec"][-1]
                 self.assertEqual(record["argv0"], "pytest")
                 self.assertNotIn("argv", record)
         finally:

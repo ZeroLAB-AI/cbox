@@ -22,7 +22,7 @@ awk '/^_cbox_reg_conf_defaults\(\) \{/,/^}$/' "$CONF_LIB" > "$TMPBASE/conf_defau
 missing_save=""
 missing_default=""
 for section in "${SECTIONS[@]}"; do
-  vars="${SEC_VARS[$section]:-}"
+  vars="$(sec_get SEC_VARS "$section")"
   [ -n "$vars" ] || continue
   for var in $vars; do
     if ! grep -q "printf '$var=%q" "$TMPBASE/conf_save.txt"; then
@@ -42,7 +42,7 @@ _ok "every SEC_VARS variable has a registry-driven defaults entry"
 
 dupes="$(
   for section in "${SECTIONS[@]}"; do
-    for var in ${SEC_VARS[$section]:-}; do
+    for var in $(sec_get SEC_VARS "$section"); do
       printf '%s %s\n' "$var" "$section"
     done
   done | sort | awk '{count[$1]++; owners[$1]=owners[$1]" "$2} END {for (v in count) if (count[v] > 1) print v ":" owners[v]}'
@@ -54,7 +54,7 @@ unknown=""
 while IFS= read -r var; do
   found=0
   for section in "${SECTIONS[@]}"; do
-    case " ${SEC_VARS[$section]:-} " in
+    case " $(sec_get SEC_VARS "$section") " in
       *" $var "*) found=1; break ;;
     esac
   done

@@ -115,7 +115,11 @@ def tool_description():
         "OpenAI-compatible HTTP endpoint (for example ollama). Text-only: "
         "this tool has no filesystem or shell access, and does not spawn a "
         "subprocess. Endpoint and model are fixed by the container "
-        "operator, not the caller.")
+        "operator, not the caller. This delegate is a leaf: it cannot call "
+        "back into you or anyone else. If its answer is unsure or "
+        "incomplete, treat that as the delegate handing the question back "
+        "- resolve it yourself rather than re-prompting it for certainty "
+        "it cannot reach.")
 
 
 def build_tool():

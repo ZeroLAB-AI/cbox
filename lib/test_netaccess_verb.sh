@@ -267,4 +267,40 @@ printf '%s\n' "$out" | grep -qF '"cbox-ollama-u1000-global"' || _fail "scope=all
 printf '%s\n' "$out" | grep -qF '"cbox-ollama-u1000-p1"' || _fail "scope=all CLI must name the rejected per-project ollama network in skipped[]: $out"
 _ok "scope=all end-to-end (real cbox_netaccess.py CLI, stubbed docker): per-scope ollama model networks are rejected alongside the compose internal/egress networks, never joined"
 
+out="$(python3 "$INSTALL_DIR/lib/cbox_netaccess.py" --docker-bin "$FAKE_DOCKER" --container proxy-cid --state-dir "$STATE_DIR" --scope list --network project_a --network markiza-cloud-network)"
+printf '%s\n' "$out" | grep -qF '"appliedNetworks":["project_a"]' || _fail "scope=list CLI must still apply the live granted network when another grant is absent: $out"
+printf '%s\n' "$out" | grep -qF '"network":"markiza-cloud-network"' || _fail "scope=list CLI must name the absent granted network in skipped[]: $out"
+printf '%s\n' "$out" | grep -qF '"requested":true' || _fail "scope=list CLI must mark the absent granted network as requested (not scope=all noise): $out"
+_ok "scope=list end-to-end (real cbox_netaccess.py CLI, stubbed docker): an absent granted network is skipped, not fatal - the live granted network still applies"
+
+RENDER_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_netaccess_render)"
+[ -n "$RENDER_FN" ] || _fail "cannot extract _cbox_netaccess_render from cbox"
+
+RENDER_SCRIPT="$TMPBASE/render.sh"
+{
+  echo 'set -uo pipefail'
+  echo "INSTALL_DIR=\"$INSTALL_DIR\""
+  echo '_cbox_proxy_active() { return 0; }'
+  echo '_cbox_netaccess_active() { return 0; }'
+  echo '_cbox_netaccess_scope() { printf list; }'
+  echo '_cbox_egress_active() { return 1; }'
+  echo 'gen_sockd_conf_into() { :; }'
+  echo 'gen_tinyproxy_conf_into() { :; }'
+  printf '%s\n' "$RENDER_FN"
+} > "$RENDER_SCRIPT"
+
+RENDER_STATE="$TMPBASE/render-state"
+mkdir -p "$RENDER_STATE"
+RENDER_BIN_DIR="$TMPBASE/render-bin"
+mkdir -p "$RENDER_BIN_DIR"
+ln -sf "$FAKE_DOCKER" "$RENDER_BIN_DIR/docker"
+render_err="$(CBOX_NETACCESS_NETWORKS="project_a markiza-cloud-network" PATH="$RENDER_BIN_DIR:$PATH" bash -c '
+  . "$1"
+  _cbox_netaccess_render proxy-cid "$2"
+' render "$RENDER_SCRIPT" "$RENDER_STATE" 2>&1 >/dev/null)" || true
+printf '%s\n' "$render_err" | grep -qF 'cbox: netaccess: SKIPPING granted network markiza-cloud-network' \
+  || _fail "_cbox_netaccess_render must print a loud stderr warning for an absent granted network: $render_err"
+printf '%s\n' "$render_err" | grep -qiF 'ollama' && _fail "_cbox_netaccess_render must not warn about scope=all infrastructure noise under scope=list: $render_err"
+_ok "_cbox_netaccess_render warns loudly, once per absent granted network, on stderr"
+
 echo "PASS: all netaccess verb checks"

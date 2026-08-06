@@ -18,6 +18,7 @@ LEGACY_WRITE_ORDER = (
     "CBOX_CODEX_MODE",
     "CBOX_CODEX_PATH",
     "CBOX_CODEX_BACKUP",
+    "CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG",
     "CBOX_WORKSPACES",
     "CBOX_VENV_MODE",
     "CBOX_VENV_PATH",
@@ -34,6 +35,7 @@ LEGACY_WRITE_ORDER = (
     "CBOX_NETACCESS_EXEC_WORKSPACE_GUARD",
     "CBOX_NETACCESS_EXEC_TIMEOUT",
     "CBOX_NETACCESS_EXEC_MAX_BYTES",
+    "CBOX_CONTAINER_EXEC_TOOL",
     "CBOX_HOST_ROUTE_MODE",
     "CBOX_HOST_ROUTE_APPLIED",
     "CBOX_HOST_PROXY_URL",
@@ -78,7 +80,12 @@ LEGACY_WRITE_ORDER = (
     "CBOX_WG_PEER_PUBKEY",
     "CBOX_WG_PEER_ADDRESS",
     "CBOX_WG_KEEPALIVE",
+    "CBOX_WG_FORWARDS",
     "CBOX_LIMIT_AUTORESUME",
+    "CBOX_SESSION_MULTIPLEX",
+    "CBOX_SESSION_BROKER_MODE",
+    "CBOX_SSHD_LISTEN_ADDR",
+    "CBOX_SSHD_PORT",
     "CBOX_LIMIT_RESUME_DELAY",
     "CBOX_LIMIT_RESUME_PROMPT",
     "CBOX_LIMIT_RESUME_STAGGER",
@@ -107,6 +114,8 @@ LEGACY_WRITE_ORDER = (
     "CBOX_DIARY",
     "CBOX_OPEN_QUESTIONS",
     "CBOX_CONTEXT_PROFILE",
+    "CBOX_KERNEL_LANG_OUTPUT",
+    "CBOX_KERNEL_LANG_REASONING",
 )
 
 
@@ -136,7 +145,7 @@ def _emit_defaults(data, lines):
                 continue
             if name == "ssh_agent_dir_default":
                 lines.append(
-                    '  : "${%s:=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/cbox-ssh}"' % key
+                    '  : "${%s:=$(_cbox_xdg_runtime_dir)/cbox-ssh}"' % key
                 )
                 continue
             raise ValueError("unbound resolver %s for %s" % (name, key))

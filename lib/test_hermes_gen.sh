@@ -263,6 +263,7 @@ _image_inputs_hash() {
   mkdir -p "$eff"
   : > "$eff/entrypoint.sh"
   : > "$eff/install-bins.sh"
+  : > "$eff/cbox-session-entry.py"
   (
     INSTALL_DIR="$INSTALL_DIR"
     export INSTALL_DIR
@@ -316,5 +317,335 @@ $entry_body"
 _cross_check_validator "url"      _cbox_hermes_validate_url      _hermes_validate_url
 _cross_check_validator "model"    _cbox_hermes_validate_model    _hermes_validate_model
 _cross_check_validator "provider" _cbox_hermes_validate_provider _hermes_validate_provider
+
+_render_hermes_mcp_servers() {
+  local fake_install="$1" out="$2"
+  (
+    INSTALL_DIR="$fake_install"
+    export INSTALL_DIR
+    export HOME="/home/x"
+    source "$INSTALL_DIR/_common.sh"
+    source "$INSTALL_DIR/templates/generators.sh"
+    gen_hermes_mcp_servers_into "$out"
+  )
+}
+
+_make_fake_install_with_delegates() {
+  local dir="$1" delegates_json="$2"
+  mkdir -p "$dir/etc/mcp" "$dir/generated/hermes" "$dir/templates"
+  cp "$INSTALL_DIR/_common.sh" "$dir/_common.sh"
+  cp "$INSTALL_DIR/templates/generators.sh" "$dir/templates/generators.sh"
+  cp "$INSTALL_DIR/etc/mcp/render_mcp.py" "$dir/etc/mcp/render_mcp.py"
+  printf '%s' "$delegates_json" > "$dir/etc/mcp/delegates.json"
+}
+
+FI_EMPTY="$TMPBASE/fi_empty"
+_make_fake_install_with_delegates "$FI_EMPTY" "$(cat "$INSTALL_DIR/etc/mcp/delegates.json")"
+MCP_OUT_EMPTY="$FI_EMPTY/generated/hermes/mcp_servers.yaml"
+(
+  unset CBOX_HERMES_DELEGATE CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME CBOX_CONTAINER_EXEC_TOOL
+  _render_hermes_mcp_servers "$FI_EMPTY" "$MCP_OUT_EMPTY"
+)
+[ -f "$MCP_OUT_EMPTY" ] || _fail "gen_hermes_mcp_servers_into did not write $MCP_OUT_EMPTY"
+grep -q '^mcp_servers:$' "$MCP_OUT_EMPTY" \
+  || _fail "gen_hermes_mcp_servers_into: default render missing top-level mcp_servers: key (real delegates.json opts codex-* and hermes-local into hermes):
+$(cat "$MCP_OUT_EMPTY")"
+for tier in codex-sol codex-terra codex-terra-light codex-luna; do
+  grep -q "\"$tier\":" "$MCP_OUT_EMPTY" \
+    || _fail "gen_hermes_mcp_servers_into: default render missing opted-in $tier:
+$(cat "$MCP_OUT_EMPTY")"
+  grep -q 'codex_mcp_shim.py' "$MCP_OUT_EMPTY" \
+    || _fail "gen_hermes_mcp_servers_into: default render codex tier not shim-wrapped:
+$(cat "$MCP_OUT_EMPTY")"
+done
+grep -q '"hermes-local":' "$MCP_OUT_EMPTY" \
+  || _fail "gen_hermes_mcp_servers_into: default render missing hermes-local - mcp_all_names() is now target-aware (hermes) so a gated entry available to hermes must show up disabled, not vanish:
+$(cat "$MCP_OUT_EMPTY")"
+_gated_entry_disabled() {
+  local name="$1" file="$2"
+  awk -v name="\"$name\":" '
+    $0 == "  " name { grab=1; next }
+    grab && /^  "/ { exit }
+    grab { print }
+  ' "$file" | grep -q '^    enabled: false$'
+}
+
+_gated_entry_disabled hermes-local "$MCP_OUT_EMPTY" \
+  || _fail "gen_hermes_mcp_servers_into: default render's hermes-local entry does not carry enabled: false with CBOX_HERMES_DELEGATE unset:
+$(cat "$MCP_OUT_EMPTY")"
+grep -q '"local-qwen":' "$MCP_OUT_EMPTY" \
+  || _fail "gen_hermes_mcp_servers_into: default render missing local-qwen - it is now available_to hermes and must show up disabled, not vanish:
+$(cat "$MCP_OUT_EMPTY")"
+_gated_entry_disabled local-qwen "$MCP_OUT_EMPTY" \
+  || _fail "gen_hermes_mcp_servers_into: default render's local-qwen entry does not carry enabled: false with CBOX_LOCAL_MODEL_URL unset:
+$(cat "$MCP_OUT_EMPTY")"
+grep -q '"container-exec":' "$MCP_OUT_EMPTY" \
+  || _fail "gen_hermes_mcp_servers_into: default render missing container-exec - it is now available_to hermes and must show up disabled, not vanish:
+$(cat "$MCP_OUT_EMPTY")"
+_gated_entry_disabled container-exec "$MCP_OUT_EMPTY" \
+  || _fail "gen_hermes_mcp_servers_into: default render's container-exec entry does not carry enabled: false with CBOX_CONTAINER_EXEC_TOOL unset:
+$(cat "$MCP_OUT_EMPTY")"
+_ok "gen_hermes_mcp_servers_into: real delegates.json default render carries the 4 codex tiers (shim-wrapped) plus hermes-local/local-qwen/container-exec rendered disabled since their gates are unset"
+
+FI_OPTED="$TMPBASE/fi_opted"
+OPTED_JSON="$(python3 -c '
+import json
+data = json.load(open("'"$INSTALL_DIR"'/etc/mcp/delegates.json"))
+data["local-qwen"]["_cbox"]["available_to"].append("hermes")
+print(json.dumps(data))
+')"
+_make_fake_install_with_delegates "$FI_OPTED" "$OPTED_JSON"
+MCP_OUT_OPTED="$FI_OPTED/generated/hermes/mcp_servers.yaml"
+(
+  CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500"
+  CBOX_LOCAL_MODEL_NAME="qwen2.5:7b"
+  export CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
+  _render_hermes_mcp_servers "$FI_OPTED" "$MCP_OUT_OPTED"
+)
+grep -q '^mcp_servers:$' "$MCP_OUT_OPTED" \
+  || _fail "gen_hermes_mcp_servers_into: opted-in render missing top-level mcp_servers: key:
+$(cat "$MCP_OUT_OPTED")"
+grep -q '"local-qwen":' "$MCP_OUT_OPTED" \
+  || _fail "gen_hermes_mcp_servers_into: opted-in local-qwen entry missing from render:
+$(cat "$MCP_OUT_OPTED")"
+grep -q 'timeout: 180$' "$MCP_OUT_OPTED" \
+  || _fail "gen_hermes_mcp_servers_into: local-qwen tool_timeout_sec (180) did not carry through as timeout:
+$(cat "$MCP_OUT_OPTED")"
+_ok "gen_hermes_mcp_servers_into: an entry with hermes added to available_to renders with its command/args/env and timeout"
+
+FI_REAL_OPTED="$TMPBASE/fi_real_opted"
+_make_fake_install_with_delegates "$FI_REAL_OPTED" "$(cat "$INSTALL_DIR/etc/mcp/delegates.json")"
+MCP_OUT_REAL_OPTED="$FI_REAL_OPTED/generated/hermes/mcp_servers.yaml"
+(
+  CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500"
+  CBOX_LOCAL_MODEL_NAME="qwen2.5:7b"
+  CBOX_CONTAINER_EXEC_TOOL="on"
+  export CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME CBOX_CONTAINER_EXEC_TOOL
+  _render_hermes_mcp_servers "$FI_REAL_OPTED" "$MCP_OUT_REAL_OPTED"
+)
+grep -q '"local-qwen":' "$MCP_OUT_REAL_OPTED" \
+  || _fail "gen_hermes_mcp_servers_into: real delegates.json opted-in render missing local-qwen:
+$(cat "$MCP_OUT_REAL_OPTED")"
+grep -q '"container-exec":' "$MCP_OUT_REAL_OPTED" \
+  || _fail "gen_hermes_mcp_servers_into: real delegates.json opted-in render missing container-exec:
+$(cat "$MCP_OUT_REAL_OPTED")"
+grep -q 'timeout: 180$' "$MCP_OUT_REAL_OPTED" \
+  || _fail "gen_hermes_mcp_servers_into: real local-qwen tool_timeout_sec (180) did not carry through as timeout:
+$(cat "$MCP_OUT_REAL_OPTED")"
+grep -q 'timeout: 3600$' "$MCP_OUT_REAL_OPTED" \
+  || _fail "gen_hermes_mcp_servers_into: real container-exec tool_timeout_sec (3600) did not carry through as timeout:
+$(cat "$MCP_OUT_REAL_OPTED")"
+_gated_entry_disabled local-qwen "$MCP_OUT_REAL_OPTED" \
+  && _fail "gen_hermes_mcp_servers_into: local-qwen should carry no enabled key once its gate is satisfied:
+$(cat "$MCP_OUT_REAL_OPTED")"
+_gated_entry_disabled container-exec "$MCP_OUT_REAL_OPTED" \
+  && _fail "gen_hermes_mcp_servers_into: container-exec should carry no enabled key once its gate is satisfied:
+$(cat "$MCP_OUT_REAL_OPTED")"
+_ok "gen_hermes_mcp_servers_into: real delegates.json local-qwen and container-exec render enabled for hermes with their timeouts (180, 3600) carried through once their gates are set"
+
+_apply_mcp_servers_func() {
+  awk '
+    /^_hermes_apply_mcp_servers\(\) \{/ { infunc=1 }
+    infunc { print }
+    infunc && /^PY$/ { sawpy++; if (sawpy == 1) next }
+    infunc && sawpy >= 1 && /^\}/ { exit }
+  ' "$INSTALL_DIR/entrypoint.sh"
+}
+
+APPLY_FUNC="$TMPBASE/apply_func.sh"
+_apply_mcp_servers_func > "$APPLY_FUNC"
+[ -s "$APPLY_FUNC" ] || _fail "could not extract _hermes_apply_mcp_servers from entrypoint.sh"
+
+CFG_DIR="$TMPBASE/cfgmerge"
+mkdir -p "$CFG_DIR"
+cat > "$CFG_DIR/config.yaml" <<'EOF'
+model:
+  provider: local
+mcp_servers:
+  "stale-tool":
+    command: "stale"
+    args: []
+agent:
+  iteration_budget: 40
+EOF
+cp "$MCP_OUT_OPTED" "$CFG_DIR/mcp_servers.yaml"
+(
+  _as_user() { "$@"; }
+  HERMES_HOME="$CFG_DIR"
+  source "$APPLY_FUNC"
+  _hermes_apply_mcp_servers "$CFG_DIR/mcp_servers.yaml" "$CFG_DIR/config.yaml"
+)
+grep -q 'stale-tool' "$CFG_DIR/config.yaml" \
+  && _fail "_hermes_apply_mcp_servers left the stale mcp_servers block in place instead of replacing it:
+$(cat "$CFG_DIR/config.yaml")"
+grep -q 'local-qwen' "$CFG_DIR/config.yaml" \
+  || _fail "_hermes_apply_mcp_servers did not write the new mcp_servers block:
+$(cat "$CFG_DIR/config.yaml")"
+grep -q '^  provider: local$' "$CFG_DIR/config.yaml" \
+  || _fail "_hermes_apply_mcp_servers dropped an unrelated top-level key (model.provider):
+$(cat "$CFG_DIR/config.yaml")"
+grep -q '^  iteration_budget: 40$' "$CFG_DIR/config.yaml" \
+  || _fail "_hermes_apply_mcp_servers dropped an unrelated top-level key after the block (agent.iteration_budget):
+$(cat "$CFG_DIR/config.yaml")"
+_ok "_hermes_apply_mcp_servers: replaces only the mcp_servers: block in config.yaml, every other key is untouched"
+
+CFG_DIR2="$TMPBASE/cfgmerge_missing_src"
+mkdir -p "$CFG_DIR2"
+cp "$CFG_DIR/config.yaml" "$CFG_DIR2/config.yaml" 2>/dev/null || cat > "$CFG_DIR2/config.yaml" <<'EOF'
+model:
+  provider: local
+mcp_servers:
+  "old-tool":
+    command: "old"
+    args: []
+EOF
+(
+  _as_user() { "$@"; }
+  HERMES_HOME="$CFG_DIR2"
+  source "$APPLY_FUNC"
+  _hermes_apply_mcp_servers "$CFG_DIR2/does-not-exist.yaml" "$CFG_DIR2/config.yaml"
+)
+grep -q '^mcp_servers: {}$' "$CFG_DIR2/config.yaml" \
+  || _fail "_hermes_apply_mcp_servers did not degrade to mcp_servers: {} when the source file is missing:
+$(cat "$CFG_DIR2/config.yaml")"
+_ok "_hermes_apply_mcp_servers: a missing source file (hermes off, or no entry opted in) degrades config.yaml's block to mcp_servers: {} rather than leaving stale entries"
+
+REGEN_FUNC="$TMPBASE/regen_all_body.sh"
+_validator_body "$INSTALL_DIR/templates/generators.sh" regen_all > "$REGEN_FUNC"
+grep -q "gen_hermes_mcp_servers_into" "$REGEN_FUNC" \
+  || _fail "regen_all no longer calls gen_hermes_mcp_servers_into when CBOX_HERMES=on"
+_ok "regen_all calls gen_hermes_mcp_servers_into alongside gen_hermes_managed_into"
+
+grep -q "_hermes_apply_mcp_servers /etc/cbox/hermes-managed/mcp_servers.yaml" "$INSTALL_DIR/entrypoint.sh" \
+  || _fail "entrypoint.sh hermes branch no longer calls _hermes_apply_mcp_servers"
+_ok "entrypoint.sh hermes branch applies mcp_servers.yaml on every cbox run hermes"
+
+grep -q '_hermes_session_prompt="\$(_hermes_kernel_preamble)"' "$INSTALL_DIR/entrypoint.sh" \
+  || _fail "entrypoint.sh hermes branch no longer seeds _hermes_session_prompt from _hermes_kernel_preamble"
+_ok "entrypoint.sh hermes branch seeds the session prompt with the conduct kernel and session core before any operator prompt or memory handoff"
+
+_extract_kernel_preamble_func() {
+  awk '
+    /^_hermes_kernel_preamble\(\) \{/ { grab=1 }
+    grab { print }
+    grab && /^\}/ { exit }
+  ' "$INSTALL_DIR/entrypoint.sh"
+}
+
+PREAMBLE_FUNC="$TMPBASE/preamble_func.sh"
+_extract_kernel_preamble_func > "$PREAMBLE_FUNC"
+[ -s "$PREAMBLE_FUNC" ] || _fail "could not extract _hermes_kernel_preamble from entrypoint.sh"
+
+HOOKS_BOTH="$TMPBASE/hooks_both"
+mkdir -p "$HOOKS_BOTH/.claude/hooks"
+printf 'KERNEL TEXT\n' > "$HOOKS_BOTH/.claude/hooks/conduct-kernel.txt"
+printf 'CORE TEXT\n' > "$HOOKS_BOTH/.claude/hooks/session-core.txt"
+PREAMBLE_OUT="$(
+  HOST_HOME="$HOOKS_BOTH"
+  source "$PREAMBLE_FUNC"
+  _hermes_kernel_preamble
+)"
+printf '%s' "$PREAMBLE_OUT" | grep -q '^KERNEL TEXT$' \
+  || _fail "_hermes_kernel_preamble dropped the conduct-kernel.txt content:
+$PREAMBLE_OUT"
+printf '%s' "$PREAMBLE_OUT" | grep -q '^CORE TEXT$' \
+  || _fail "_hermes_kernel_preamble dropped the session-core.txt content:
+$PREAMBLE_OUT"
+KERNEL_LINE="$(printf '%s\n' "$PREAMBLE_OUT" | grep -n '^KERNEL TEXT$' | head -n1 | cut -d: -f1)"
+CORE_LINE="$(printf '%s\n' "$PREAMBLE_OUT" | grep -n '^CORE TEXT$' | head -n1 | cut -d: -f1)"
+[ "$KERNEL_LINE" -lt "$CORE_LINE" ] \
+  || _fail "_hermes_kernel_preamble must carry the conduct kernel before the session core:
+$PREAMBLE_OUT"
+_ok "_hermes_kernel_preamble: joins conduct-kernel.txt and session-core.txt, kernel first"
+
+HOOKS_MISSING="$TMPBASE/hooks_missing"
+mkdir -p "$HOOKS_MISSING/.claude/hooks"
+MISSING_ERR="$TMPBASE/preamble_missing.err"
+PREAMBLE_MISSING_OUT="$(
+  HOST_HOME="$HOOKS_MISSING"
+  source "$PREAMBLE_FUNC"
+  _hermes_kernel_preamble 2>"$MISSING_ERR"
+)"
+[ -z "$PREAMBLE_MISSING_OUT" ] \
+  || _fail "_hermes_kernel_preamble should render empty when both source files are absent, got:
+$PREAMBLE_MISSING_OUT"
+grep -q "conduct-kernel.txt missing" "$MISSING_ERR" \
+  || _fail "_hermes_kernel_preamble did not warn about a missing conduct-kernel.txt:
+$(cat "$MISSING_ERR")"
+grep -q "session-core.txt missing" "$MISSING_ERR" \
+  || _fail "_hermes_kernel_preamble did not warn about a missing session-core.txt:
+$(cat "$MISSING_ERR")"
+_ok "_hermes_kernel_preamble: missing source files degrade to an empty preamble with a stderr warning, not a crash"
+
+REAL_KERNEL="$INSTALL_DIR/etc/hooks/conduct-kernel.txt"
+REAL_CORE="$INSTALL_DIR/etc/hooks/session-core.txt"
+[ -f "$REAL_KERNEL" ] || _fail "missing $REAL_KERNEL"
+[ -f "$REAL_CORE" ] || _fail "missing $REAL_CORE"
+HOOKS_REAL="$TMPBASE/hooks_real"
+mkdir -p "$HOOKS_REAL/.claude/hooks"
+cp "$REAL_KERNEL" "$HOOKS_REAL/.claude/hooks/conduct-kernel.txt"
+cp "$REAL_CORE" "$HOOKS_REAL/.claude/hooks/session-core.txt"
+PREAMBLE_REAL_OUT="$(
+  HOST_HOME="$HOOKS_REAL"
+  source "$PREAMBLE_FUNC"
+  _hermes_kernel_preamble
+)"
+printf '%s' "$PREAMBLE_REAL_OUT" | grep -q 'DELEGATE WRITE BOUNDARY' \
+  || _fail "_hermes_kernel_preamble real render lost the conduct kernel's delegate write boundary rule"
+printf '%s' "$PREAMBLE_REAL_OUT" | grep -q 'a delegate returns the question upward\|DELEGATE IS A LEAF\|LEAF' \
+  || _fail "_hermes_kernel_preamble real render is missing the delegate-is-a-leaf rule (add it to conduct-kernel.txt):
+$PREAMBLE_REAL_OUT"
+_ok "_hermes_kernel_preamble: real conduct-kernel.txt + session-core.txt render carries the delegate write boundary and the leaf rule"
+
+FI_MANIFEST="$TMPBASE/fi_manifest"
+mkdir -p "$FI_MANIFEST/etc/hooks" "$FI_MANIFEST/etc/claude" "$FI_MANIFEST/etc/mcp" "$FI_MANIFEST/generated/codex" "$FI_MANIFEST/templates" "$FI_MANIFEST/lib"
+cp "$INSTALL_DIR/_common.sh" "$FI_MANIFEST/_common.sh"
+cp "$INSTALL_DIR/lib/portable.sh" "$FI_MANIFEST/lib/portable.sh"
+cp "$INSTALL_DIR/lib/cbox_host.py" "$FI_MANIFEST/lib/cbox_host.py"
+cp "$INSTALL_DIR/templates/generators.sh" "$FI_MANIFEST/templates/generators.sh"
+cp "$INSTALL_DIR/etc/hooks/conduct-kernel.txt" "$FI_MANIFEST/etc/hooks/conduct-kernel.txt"
+cp "$INSTALL_DIR/etc/hooks/session-core.txt" "$FI_MANIFEST/etc/hooks/session-core.txt"
+cp "$INSTALL_DIR/etc/hooks/continuity_session_start.py" "$FI_MANIFEST/etc/hooks/continuity_session_start.py"
+cp "$INSTALL_DIR/etc/claude/CLAUDE.md" "$FI_MANIFEST/etc/claude/CLAUDE.md"
+cp "$INSTALL_DIR/etc/claude/settings.merge.json" "$FI_MANIFEST/etc/claude/settings.merge.json"
+cp "$INSTALL_DIR/etc/mcp/codex_mcp_shim.py" "$FI_MANIFEST/etc/mcp/codex_mcp_shim.py"
+: > "$FI_MANIFEST/generated/codex/AGENTS.override.md"
+cp "$INSTALL_DIR/entrypoint.sh" "$FI_MANIFEST/entrypoint.sh"
+(
+  INSTALL_DIR="$FI_MANIFEST"
+  export INSTALL_DIR
+  export HOME="$FI_MANIFEST/home"
+  mkdir -p "$HOME"
+  source "$FI_MANIFEST/_common.sh"
+  source "$FI_MANIFEST/templates/generators.sh"
+  gen_context_manifest_into "$FI_MANIFEST/generated"
+)
+grep -q '"hermes_entrypoint"' "$FI_MANIFEST/generated/context-manifest.json" \
+  || _fail "gen_context_manifest_into no longer writes a hermes_entrypoint digest:
+$(cat "$FI_MANIFEST/generated/context-manifest.json")"
+_ok "gen_context_manifest_into: context-manifest.json carries a hermes_entrypoint digest"
+
+(
+  INSTALL_DIR="$FI_MANIFEST"
+  export INSTALL_DIR
+  export HOME="$FI_MANIFEST/home"
+  source "$FI_MANIFEST/_common.sh"
+  source "$FI_MANIFEST/templates/generators.sh"
+  _cbox_context_manifest_verify "$FI_MANIFEST/generated"
+)
+_ok "_cbox_context_manifest_verify: clean tree passes with the hermes_entrypoint digest included"
+
+printf '\n' >> "$FI_MANIFEST/entrypoint.sh"
+if (
+  INSTALL_DIR="$FI_MANIFEST"
+  export INSTALL_DIR
+  export HOME="$FI_MANIFEST/home"
+  source "$FI_MANIFEST/_common.sh"
+  source "$FI_MANIFEST/templates/generators.sh"
+  _cbox_context_manifest_verify "$FI_MANIFEST/generated"
+) 2>/dev/null; then
+  _fail "_cbox_context_manifest_verify did not catch a silent edit to entrypoint.sh (hermes channel drift)"
+fi
+_ok "_cbox_context_manifest_verify: a silent entrypoint.sh edit is caught as hermes_entrypoint drift"
 
 echo "PASS: all hermes_gen checks"
