@@ -483,6 +483,10 @@
     "templates/validator_lib.sh": {
       "layer": "host",
       "purpose": "sourced by cbox/setup.sh on the host"
+    },
+    "lib/test_user_mcp_layer.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
     }
   },
   "generated_by": "step 0 of the multiplatform migration (cbox/docs/MULTIPLATFORM_DESIGN.md section 4)",

@@ -326,6 +326,9 @@ _cbox_reg_validate_var_dispatch() {
     CBOX_KERNEL_LANG_REASONING)
       _cbox_val_named_kernel_lang "$val" || return 1
       ;;
+    CBOX_USER_DIR)
+      _cbox_val_kind_path_or_empty "$val" || return 1
+      ;;
     *)
       printf 'no validator registered for %s' "$key"; return 1
       ;;

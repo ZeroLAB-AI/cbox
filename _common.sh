@@ -60,8 +60,9 @@ mcp_all_names() {
   local target="${1:-claude}"
   local etc="${ETC_DIR:-$INSTALL_DIR/etc}"
   [ -f "$etc/mcp/delegates.json" ] || return 0
+  local user_dir="${CBOX_USER_DIR-$HOME/.config/cbox/user}"
   local rendered
-  rendered="$(python3 "$etc/mcp/render_mcp.py" "$etc/mcp/delegates.json" all "$HOME/.claude/hooks" off "$target")" \
+  rendered="$(python3 "$etc/mcp/render_mcp.py" "$etc/mcp/delegates.json" all "$HOME/.claude/hooks" off "$target" "$user_dir")" \
     || die "mcp_all_names: render_mcp.py rejected $etc/mcp/delegates.json (malformed registry entry - see stderr above)"
   python3 -c '
 import json

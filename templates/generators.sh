@@ -253,12 +253,13 @@ _cbox_hermes_delegate_defaults() {
 
 _cbox_render_mcp_for_target() {
   local servers_file="$1" expanded="$2" hooks_dir="$3" progress_flag="$4" target="$5"
+  local user_dir="${CBOX_USER_DIR-$HOME/.config/cbox/user}"
   if [ "$target" = codex ]; then
     CBOX_DELEGATION_DEPTH_FOR_CODEX_CHILD=1 \
-      python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$servers_file" "$expanded" "$hooks_dir" "$progress_flag" "$target"
+      python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$servers_file" "$expanded" "$hooks_dir" "$progress_flag" "$target" "$user_dir"
   else
     CBOX_DELEGATION_DEPTH_FOR_CODEX_CHILD= \
-      python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$servers_file" "$expanded" "$hooks_dir" "$progress_flag" "$target"
+      python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$servers_file" "$expanded" "$hooks_dir" "$progress_flag" "$target" "$user_dir"
   fi
 }
 
@@ -1097,6 +1098,12 @@ EOF
       - hermes-bins:/opt/hermes:ro
       - hermes-home:\${HOST_HOME}/.hermes-cbox
       - $INSTALL_DIR/generated/hermes:/etc/cbox/hermes-managed:ro
+EOF
+  fi
+  local user_dir="${CBOX_USER_DIR-$HOME/.config/cbox/user}"
+  if [ -n "$user_dir" ]; then
+    cat >> "$tmp" <<EOF
+      - $user_dir:/etc/cbox/user:ro
 EOF
   fi
   if ! _cbox_proxy_active; then
@@ -2239,7 +2246,7 @@ _gen_claude_cbox_json_seed_render() {
   _cbox_hermes_delegate_defaults
   expanded="$(canonical_expand "${CBOX_MCP_SERVERS:-all}" "$(mcp_all_names)")"
   mcp_json="$(_cbox_render_mcp_for_target "$servers_file" "$expanded" "$hooks_dir" "$progress_flag" claude)"
-  out="$(python3 - "$mcp_json" "$target" <<'PY'
+  out="$(python3 - "$mcp_json" "$target" "$servers_file" <<'PY'
 import json
 import sys
 
@@ -2255,8 +2262,20 @@ except (OSError, ValueError):
     cur = {}
 if not isinstance(cur, dict):
     cur = {}
+try:
+    with open(sys.argv[3], "r", encoding="utf-8") as fh:
+        known_cbox = set(json.load(fh).keys())
+except (OSError, ValueError):
+    known_cbox = set()
+existing = cur.get("mcpServers")
+if not isinstance(existing, dict):
+    existing = {}
+for name in list(existing):
+    if name in known_cbox and name not in mcp:
+        existing.pop(name, None)
+existing.update(mcp)
 cur["hasCompletedOnboarding"] = True
-cur["mcpServers"] = mcp
+cur["mcpServers"] = existing
 sys.stdout.write(json.dumps(cur, separators=(",", ":")))
 PY
 )"

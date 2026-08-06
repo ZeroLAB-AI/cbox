@@ -747,6 +747,14 @@ behavior change on a healthy Linux host:
   docker), since a real bash-3.2 interpreter is not available to run this
   suite in a container without a docker socket.
 
+### user-layer
+
+User extension layer (`CBOX_USER_DIR`, default `~/.config/cbox/user`). A host directory bind-mounted read-only into the container at `/etc/cbox/user`, letting you add your own MCP servers without touching cbox-owned config. Drop one JSON file per server under `user/mcp/<name>.json` (filename stem is the server name); each carries the stdio MCP spec (`command`/`args`/`env`) plus a `_cbox` block (`adapter` must be `stdio-mcp`, `available_to` is the subset of `claude`/`codex`/`hermes` the server is exposed to, optional `enabled_when_env`). cbox never writes under this directory - only the directory itself is created if missing - and never overwrites your entries: they are unioned with cbox's own delegates at render time, surviving every rebuild.
+
+Per-entry targeting is yours: an entry with `available_to: ["claude"]` reaches only Claude, not codex or hermes - the wizard shows exactly where each user server lands, so a server you added for one engine is not silently assumed everywhere. cbox delegate names win on collision (a user server named like a cbox delegate is refused - rename it), and the `codex-`/`cbox-` name prefixes are reserved. Recreate-class change (adds a mount).
+
+A user entry is refused (excluded from all renders, named on stderr, the rebuild still completes) if it would weaken cbox's trust boundary: a non-`stdio-mcp` adapter, an `env` key that is a loader/proxy variable (`LD_*`, `PYTHON*`, `PATH`, `NODE_*`, `BASH_ENV`, `*_PROXY`, ...) or a cbox/claude/anthropic/codex/hermes-scoped key, an `env` value with an `@VAR@` host-environment placeholder (host-secret exfiltration), a command or argument path that resolves under cbox's trusted hooks directory, `..` path traversal, or an escalation token (`--dangerously`, `danger-full-access`, `bypassPermissions`, `--ignore-rules`, ...). The user layer is input, never authority: nothing under it can disable or reconfigure a cbox guard.
+
 ### Track P1: the portable waist
 
 `lib/portable.sh` holds thin bash-3.2-clean entry points; `lib/cbox_host.py`

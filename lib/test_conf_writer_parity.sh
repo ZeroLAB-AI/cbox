@@ -207,7 +207,8 @@ _strip_container_exec_tool_line() {
     | grep -v '^CBOX_SSHD_PORT=' \
     | grep -v '^CBOX_WG_FORWARDS=' \
     | grep -v '^CBOX_KERNEL_LANG_OUTPUT=' \
-    | grep -v '^CBOX_KERNEL_LANG_REASONING=' > "$out"
+    | grep -v '^CBOX_KERNEL_LANG_REASONING=' \
+    | grep -v '^CBOX_USER_DIR=' > "$out"
 }
 
 for fx in default full isolated special_chars; do
@@ -233,6 +234,8 @@ for fx in default full isolated special_chars; do
     || _fail "conf_save output for fixture '$fx' is missing the new CBOX_KERNEL_LANG_OUTPUT='' line"
   grep -q '^CBOX_KERNEL_LANG_REASONING=' "$TMPBASE/new_$fx.conf" \
     || _fail "conf_save output for fixture '$fx' is missing the new CBOX_KERNEL_LANG_REASONING= line"
+  grep -q '^CBOX_USER_DIR=' "$TMPBASE/new_$fx.conf" \
+    || _fail "conf_save output for fixture '$fx' is missing the new CBOX_USER_DIR= line"
   _strip_container_exec_tool_line "$TMPBASE/new_$fx.conf" "$TMPBASE/new_stripped_$fx.conf"
   cmp -s "$TMPBASE/old_$fx.conf" "$TMPBASE/new_stripped_$fx.conf" \
     || _fail "conf_save output diverged for fixture '$fx' beyond the new CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING lines:

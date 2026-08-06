@@ -369,6 +369,16 @@
       "scope": "project",
       "dependencies": [],
       "doctor_rows": []
+    },
+    {
+      "id": "user-layer",
+      "title": "User extension layer",
+      "description": "Host directory mounted read-only into the container at /etc/cbox/user, letting a user drop their own MCP server declarations (user/mcp/*.json) without touching cbox-owned config. cbox never writes under this directory - only the directory itself is created if missing.",
+      "apply_class": "recreate",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": []
     }
   ],
   "dependency_text": {
@@ -2017,6 +2027,22 @@
       "prompt": null,
       "help": "Reasoning language rendered into the deployed conduct kernel when CBOX_KERNEL_LANG_OUTPUT is set. Only takes effect together with an output language - reasoning and output language are independent settings.",
       "validator": "kernel-lang"
+    },
+    {
+      "key": "CBOX_USER_DIR",
+      "section": "user-layer",
+      "type": {
+        "kind": "path-or-empty"
+      },
+      "default": {
+        "kind": "literal",
+        "value": "$HOME/.config/cbox/user"
+      },
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Host directory mounted read-only at /etc/cbox/user, holding user/mcp/*.json MCP server declarations. Empty disables the mount.",
+      "validator": null
     }
   ]
 }

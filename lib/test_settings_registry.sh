@@ -169,49 +169,56 @@ ADOPTION_DELTA_PY="$TMPBASE/adoption_delta.py"
 cat > "$ADOPTION_DELTA_PY" << 'EOF'
 import ast, sys
 
-NEW_SECTIONS = ["autoupdate", "dns", "clipboard", "kernel-lang"]
+NEW_SECTIONS = ["autoupdate", "dns", "clipboard", "kernel-lang", "user-layer"]
 DELTA = {
     "SEC_TITLE": {
         "autoupdate": "Engine autoupdate",
         "dns": "DNS",
         "clipboard": "Clipboard image bridge",
         "kernel-lang": "Conduct kernel language rule",
+        "user-layer": "User extension layer",
     },
     "SEC_DESC": {
         "autoupdate": "Host-side engine autoupdate for channel targets (claude stable/latest, codex latest, hermes latest): re-runs the vendor installer once the TTL elapses.",
         "dns": "DNS resolution inside the container when egress is enabled: Docker embedded DNS, public resolvers, or a host-stable stub resolver IP.",
         "clipboard": "Host clipboard image bridge over a unix socket answering Claude Code's Ctrl+V image paste inside the container.",
         "kernel-lang": "Two-part language rule rendered into the deployed conduct kernel: reason in one language, answer in another. Off (output language empty) by default - the rule is not rendered until an output language is set.",
+        "user-layer": "Host directory mounted read-only into the container at /etc/cbox/user, letting a user drop their own MCP server declarations (user/mcp/*.json) without touching cbox-owned config. cbox never writes under this directory - only the directory itself is created if missing.",
     },
     "SEC_VARS": {
         "autoupdate": "CBOX_AUTOUPDATE CBOX_AUTOUPDATE_TTL_HOURS",
         "dns": "CBOX_DNS_MODE CBOX_DNS_SERVERS CBOX_DNS_STUB_IP",
         "clipboard": "CBOX_CLIPBOARD_MODE",
         "kernel-lang": "CBOX_KERNEL_LANG_OUTPUT CBOX_KERNEL_LANG_REASONING",
+        "user-layer": "CBOX_USER_DIR",
     },
     "SEC_APPLY": {
         "autoupdate": "none",
         "dns": "recreate",
         "clipboard": "recreate",
         "kernel-lang": "none",
+        "user-layer": "recreate",
     },
     "SEC_PROFILE": {
         "autoupdate": "skip",
         "dns": "skip",
         "clipboard": "skip",
         "kernel-lang": "skip",
+        "user-layer": "skip",
     },
     "SEC_SCOPE": {
         "autoupdate": "project",
         "dns": "project",
         "clipboard": "project",
         "kernel-lang": "project",
+        "user-layer": "project",
     },
     "SEC_DOCTOR_ROWS": {
         "autoupdate": "",
         "dns": "",
         "clipboard": "",
         "kernel-lang": "",
+        "user-layer": "",
     },
 }
 
@@ -272,8 +279,8 @@ _ok "sections command lists section ids"
 VARS="$(python3 "$PY" vars "$REG")"
 [ -n "$VARS" ] || _fail "vars command returned nothing"
 VAR_COUNT="$(printf '%s\n' "$VARS" | grep -c .)"
-[ "$VAR_COUNT" -eq 105 ] || _fail "expected 105 variables in the registry, got $VAR_COUNT"
-_ok "vars command lists all 105 variables"
+[ "$VAR_COUNT" -eq 106 ] || _fail "expected 106 variables in the registry, got $VAR_COUNT"
+_ok "vars command lists all 106 variables"
 
 W="$TMPBASE/reg"
 mkdir -p "$W"

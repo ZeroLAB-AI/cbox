@@ -967,9 +967,10 @@ merge_mcp_json() {
   local progress_flag="off"
   [ "$shim_mode" = shim ] && progress_flag="on"
   local hooks_dir="$shim_home/.claude/hooks"
+  local user_dir="${CBOX_USER_DIR-$HOME/.config/cbox/user}"
   local rendered_file
   rendered_file="$(mktemp)"
-  python3 "$ETC_DIR/mcp/render_mcp.py" "$servers" "$selected" "$hooks_dir" "$progress_flag" claude > "$rendered_file" \
+  python3 "$ETC_DIR/mcp/render_mcp.py" "$servers" "$selected" "$hooks_dir" "$progress_flag" claude "$user_dir" > "$rendered_file" \
     || { rm -f "$rendered_file"; die "render_mcp.py failed for $servers"; }
   python3 - "$target" "$selected" "$out" "$rendered_file" "$servers" <<'PYEOF'
 import json, os, sys
@@ -2148,6 +2149,12 @@ codex_profile_precreate_host_files() {
   [ -e "$CBOX_CODEX_PATH/AGENTS.md" ] || : > "$CBOX_CODEX_PATH/AGENTS.md"
 }
 
+user_dir_precreate_host() {
+  local user_dir="${CBOX_USER_DIR-$HOME/.config/cbox/user}"
+  [ -n "$user_dir" ] || return 0
+  mkdir -p "$user_dir/mcp"
+}
+
 codex_host_profile_render() {
   local outdir="$1" mode="${2:-global}" root="${3:-}" stage
   stage="$(mktemp -d)"
@@ -2881,6 +2888,7 @@ run_phase() {
   if [ "${CBOX_MODE:-global}" = isolated ] && [ "$CBOX_NETACCESS_MODE" != off ]; then
     CBOX_NETACCESS_APPLIED=1
   fi
+  user_dir_precreate_host
   conf_save
   regen_all
   conf_load
@@ -3086,6 +3094,7 @@ run_rebless() {
   [ -f "$CONF_FILE" ] || die "no $CONF_FILE; run ./setup.sh first"
   conf_load
   load_generators
+  user_dir_precreate_host
   regen_all
   conf_load
   note "templates re-blessed (CBOX_TPL_SHA updated) and artifacts regenerated"
@@ -3119,6 +3128,7 @@ run_update() {
       fi
       ;;
   esac
+  user_dir_precreate_host
   conf_save
   regen_all
   conf_load
@@ -3180,6 +3190,7 @@ run_config() {
   if [ "$CBOX_CODEX_MODE" = mount ]; then
     note "codex managed profile host files (~/.codex/cbox-container.config.toml, AGENTS.override.md, cbox-host.config.toml) are skipped in --config mode; apply with ./setup.sh update hooks"
   fi
+  user_dir_precreate_host
   conf_save
   regen_all
   conf_load

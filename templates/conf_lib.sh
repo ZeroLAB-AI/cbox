@@ -103,6 +103,7 @@ _cbox_reg_conf_defaults() {
   : "${CBOX_CLIPBOARD_MODE:=off}"
   : "${CBOX_KERNEL_LANG_OUTPUT:=}"
   : "${CBOX_KERNEL_LANG_REASONING:=slovencina bez diakritiky}"
+  : "${CBOX_USER_DIR:=$HOME/.config/cbox/user}"
   if [ -z "${CBOX_WORKDIR:-}" ]; then
     CBOX_WORKDIR="${CBOX_WORKSPACES%% *}"
     [ -n "$CBOX_WORKDIR" ] || CBOX_WORKDIR="$HOME"
@@ -253,6 +254,7 @@ _cbox_reg_conf_write_whitelist() {
     printf 'CBOX_CLIPBOARD_MODE=%q\n' "${CBOX_CLIPBOARD_MODE-}"
     printf 'CBOX_KERNEL_LANG_OUTPUT=%q\n' "${CBOX_KERNEL_LANG_OUTPUT-}"
     printf 'CBOX_KERNEL_LANG_REASONING=%q\n' "${CBOX_KERNEL_LANG_REASONING-}"
+    printf 'CBOX_USER_DIR=%q\n' "${CBOX_USER_DIR-}"
     if [ -n "$preserve_from" ]; then
       _cbox_config_preserve_extra_lines "$preserve_from"
     fi
@@ -373,6 +375,7 @@ _cbox_reg_conf_write_legacy() {
     printf 'CBOX_CONTEXT_PROFILE=%q\n' "$CBOX_CONTEXT_PROFILE"
     printf 'CBOX_KERNEL_LANG_OUTPUT=%q\n' "$CBOX_KERNEL_LANG_OUTPUT"
     printf 'CBOX_KERNEL_LANG_REASONING=%q\n' "$CBOX_KERNEL_LANG_REASONING"
+    printf 'CBOX_USER_DIR=%q\n' "$CBOX_USER_DIR"
   } > "$tmp"
   chmod 0644 "$tmp"
   mv "$tmp" "$out"

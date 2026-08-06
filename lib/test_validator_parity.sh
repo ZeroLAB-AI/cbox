@@ -500,6 +500,10 @@ _new_case CBOX_KERNEL_LANG_REASONING "$(python3 -c "print('x' * 65)")" reject
 _new_case CBOX_KERNEL_LANG_REASONING "{NAME}" reject
 _new_case CBOX_KERNEL_LANG_REASONING "$(printf 'Fran\xc3\xa7ais')" reject
 
+_new_case CBOX_USER_DIR "" accept
+_new_case CBOX_USER_DIR "/home/user/.config/cbox/user" accept
+_new_case CBOX_USER_DIR "~/cbox-user" accept
+
 while IFS=$'\t' read -r key val want; do
   CASE_COUNT=$((CASE_COUNT + 1))
   [ "$val" != '<EMPTY>' ] || val=''
