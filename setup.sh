@@ -3411,6 +3411,7 @@ run_local() {
   digest="$(_cbox_resolve_base_digest ubuntu:24.04)" || die "cannot resolve base image digest and no local image - network required for first build"
   cp "$INSTALL_DIR/entrypoint.sh" "$eff/entrypoint.sh"
   cp "$INSTALL_DIR/install-bins.sh" "$eff/install-bins.sh"
+  gen_session_entry_into "$eff"
   gen_image_inputs "$eff" "$digest"
   local img_hash img_tag
   img_hash="$(_cbox_image_hash "$eff")"

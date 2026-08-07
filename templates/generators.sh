@@ -2815,6 +2815,7 @@ regen_all() {
   local _digest
   _digest="$(_cbox_resolve_base_digest ubuntu:24.04)" || die "cannot resolve base image digest and no local image - network required for first build"
   gen_dockerfile_into "$INSTALL_DIR" "$_digest"
+  gen_session_entry_into "$INSTALL_DIR"
   gen_image_inputs "$INSTALL_DIR" "$_digest"
   gen_dockerignore
   gen_compose
