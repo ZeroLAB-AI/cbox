@@ -412,15 +412,15 @@ _cbox_manifest_verify_conf() {
   conf="$eff/cbox.conf"; mf="$eff/manifest.sha256"
   local want_ws want_conf want_gen have_conf have_gen
   [ -f "$conf" ] || die "no effective config in $eff"
-  [ -f "$mf" ] || die "effective config drifted (manifest missing) - re-bless with setup.sh --local $root"
-  want_ws="$(_cbox_manifest_field "$mf" workspace)" || die "effective config drifted (manifest malformed) - re-bless with setup.sh --local $root"
+  [ -f "$mf" ] || die "effective config drifted (manifest missing) - re-bless with cbox setup --local $root"
+  want_ws="$(_cbox_manifest_field "$mf" workspace)" || die "effective config drifted (manifest malformed) - re-bless with cbox setup --local $root"
   [ "$want_ws" = "$root" ] || die "path-hash collision or moved project for $root (effective dir claims $want_ws); remove $eff after review"
-  want_conf="$(_cbox_manifest_field "$mf" conf)" || die "effective config drifted (manifest malformed) - re-bless with setup.sh --local $root"
-  want_gen="$(_cbox_manifest_field "$mf" generators)" || die "effective config drifted (manifest malformed) - re-bless with setup.sh --local $root"
+  want_conf="$(_cbox_manifest_field "$mf" conf)" || die "effective config drifted (manifest malformed) - re-bless with cbox setup --local $root"
+  want_gen="$(_cbox_manifest_field "$mf" generators)" || die "effective config drifted (manifest malformed) - re-bless with cbox setup --local $root"
   have_conf="$(_cbox_sha256 "$conf")"
   have_gen="$(_cbox_tpl_sha)"
-  [ "$have_conf" = "$want_conf" ] || die "effective config drifted - re-bless with setup.sh --local $root"
-  [ "$have_gen" = "$want_gen" ] || die "templates changed since last generation - re-bless with setup.sh --local $root"
+  [ "$have_conf" = "$want_conf" ] || die "effective config drifted - re-bless with cbox setup --local $root"
+  [ "$have_gen" = "$want_gen" ] || die "templates changed since last generation - re-bless with cbox setup --local $root"
 }
 
 _cbox_manifest_status() {
@@ -892,6 +892,21 @@ _cbox_dns_into() {
   set +f
 }
 
+_cbox_user_policies_files() {
+  local dir="$1" f base
+  [ -d "$dir" ] || return 0
+  for f in "$dir"/*.md; do
+    [ -e "$f" ] || continue
+    [ -f "$f" ] || continue
+    base="$(basename "$f")"
+    if [[ "$base" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.md$ ]]; then
+      printf '%s\n' "$f"
+    else
+      printf "cbox: user policy '%s' skipped - unsupported filename (allowed: letters, digits, dot, dash, underscore)\n" "$base" >&2
+    fi
+  done | LC_ALL=C sort
+}
+
 gen_compose() {
   local name="${CBOX_NAME:-cbox}"
   local policy="${CBOX_RESTART_POLICY:-no}"
@@ -982,6 +997,7 @@ EOF
   fi
   _cbox_extra_hosts_into "$tmp"
   printf '    volumes:\n' >> "$tmp"
+  local user_policies_upd="${CBOX_USER_DIR-$HOME/.config/cbox/user}"
   _cbox_clip_mounts_into "$tmp" "$name"
   _cbox_container_exec_mounts_into "$tmp" "$name"
   _cbox_sshd_mounts_into "$tmp" "$INSTALL_DIR"
@@ -1006,6 +1022,13 @@ EOF
       - $claude_path/CLAUDE.md:\${HOST_HOME}/.claude/CLAUDE.md:ro
       - $claude_path/agents:\${HOST_HOME}/.claude/agents:ro
       - $claude_path/policies:\${HOST_HOME}/.claude/policies:ro
+EOF
+    if [ -n "$user_policies_upd" ] && [ -d "$user_policies_upd/policies" ]; then
+      cat >> "$tmp" <<EOF
+      - $user_policies_upd/policies:\${HOST_HOME}/.claude/policies/user:ro
+EOF
+    fi
+    cat >> "$tmp" <<EOF
       - $claude_path/templates:\${HOST_HOME}/.claude/templates:ro
       - $INSTALL_DIR/generated/claude-config:\${HOST_HOME}/.claude-cbox:rw
       - $claude_path/projects:\${HOST_HOME}/.claude-cbox/projects:rw
@@ -1037,6 +1060,13 @@ EOF
       - $INSTALL_DIR/generated/claude/CLAUDE.md:\${HOST_HOME}/.claude/CLAUDE.md:ro
       - $INSTALL_DIR/generated/claude/agents:\${HOST_HOME}/.claude/agents:ro
       - $INSTALL_DIR/generated/claude/policies:\${HOST_HOME}/.claude/policies:ro
+EOF
+    if [ -n "$user_policies_upd" ] && [ -d "$user_policies_upd/policies" ]; then
+      cat >> "$tmp" <<EOF
+      - $user_policies_upd/policies:\${HOST_HOME}/.claude/policies/user:ro
+EOF
+    fi
+    cat >> "$tmp" <<EOF
       - $INSTALL_DIR/generated/claude/templates:\${HOST_HOME}/.claude/templates:ro
 EOF
   fi
@@ -1101,7 +1131,7 @@ EOF
 EOF
   fi
   local user_dir="${CBOX_USER_DIR-$HOME/.config/cbox/user}"
-  if [ -n "$user_dir" ]; then
+  if [ -n "$user_dir" ] && [ -d "$user_dir" ]; then
     cat >> "$tmp" <<EOF
       - $user_dir:/etc/cbox/user:ro
 EOF
@@ -1312,6 +1342,7 @@ EOF
     printf '      - CBOX_SCOPE_ROOT=%s\n' "$root" >> "$tmp"
     printf '      - CBOX_SCOPE_SLUG=%s\n' "$slug" >> "$tmp"
     printf '      - CBOX_LIMIT_AUTORESUME=%s\n' "${CBOX_LIMIT_AUTORESUME:-off}" >> "$tmp"
+    printf '      - CBOX_SAFEGUARD_AUTOCONFIRM=%s\n' "${CBOX_SAFEGUARD_AUTOCONFIRM:-off}" >> "$tmp"
     printf '      - CBOX_LIMIT_RESUME_DELAY=%s\n' "${CBOX_LIMIT_RESUME_DELAY:-300}" >> "$tmp"
     printf '      - CBOX_LIMIT_RESUME_PROMPT=%s\n' "$resume_prompt" >> "$tmp"
     printf '      - CBOX_LIMIT_RESUME_STAGGER=%s\n' "${CBOX_LIMIT_RESUME_STAGGER:-30}" >> "$tmp"
@@ -1343,6 +1374,7 @@ EOF
   fi
   _cbox_extra_hosts_into "$tmp"
   printf '    volumes:\n' >> "$tmp"
+  local user_policies_upd="${CBOX_USER_DIR-$HOME/.config/cbox/user}"
   _cbox_clip_mounts_into "$tmp" "p$p_hash"
   _cbox_container_exec_mounts_into "$tmp" "p$p_hash"
   _cbox_sshd_mounts_into "$tmp" "$eff"
@@ -1366,6 +1398,13 @@ EOF
       - $claude_path/CLAUDE.md:\${HOST_HOME}/.claude/CLAUDE.md:ro
       - $claude_path/agents:\${HOST_HOME}/.claude/agents:ro
       - $claude_path/policies:\${HOST_HOME}/.claude/policies:ro
+EOF
+    if [ -n "$user_policies_upd" ] && [ -d "$user_policies_upd/policies" ]; then
+      cat >> "$tmp" <<EOF
+      - $user_policies_upd/policies:\${HOST_HOME}/.claude/policies/user:ro
+EOF
+    fi
+    cat >> "$tmp" <<EOF
       - $claude_path/templates:\${HOST_HOME}/.claude/templates:ro
       - $eff/claude-config:\${HOST_HOME}/.claude-cbox:rw
       - $claude_path/commands:\${HOST_HOME}/.claude-cbox/commands:ro
@@ -1394,6 +1433,13 @@ EOF
       - $INSTALL_DIR/generated/claude/CLAUDE.md:\${HOST_HOME}/.claude/CLAUDE.md:ro
       - $INSTALL_DIR/generated/claude/agents:\${HOST_HOME}/.claude/agents:ro
       - $INSTALL_DIR/generated/claude/policies:\${HOST_HOME}/.claude/policies:ro
+EOF
+    if [ -n "$user_policies_upd" ] && [ -d "$user_policies_upd/policies" ]; then
+      cat >> "$tmp" <<EOF
+      - $user_policies_upd/policies:\${HOST_HOME}/.claude/policies/user:ro
+EOF
+    fi
+    cat >> "$tmp" <<EOF
       - $INSTALL_DIR/generated/claude/templates:\${HOST_HOME}/.claude/templates:ro
 EOF
   fi
@@ -1486,6 +1532,12 @@ EOF
       - hermes-bins:/opt/hermes:ro
       - hermes-home:\${HOST_HOME}/.hermes-cbox
       - $eff/hermes:/etc/cbox/hermes-managed:ro
+EOF
+  fi
+  local user_dir="${CBOX_USER_DIR-$HOME/.config/cbox/user}"
+  if [ -n "$user_dir" ] && [ -d "$user_dir" ]; then
+    cat >> "$tmp" <<EOF
+      - $user_dir:/etc/cbox/user:ro
 EOF
   fi
   if ! _cbox_proxy_active; then
@@ -2603,16 +2655,65 @@ gen_codex_agents_into() {
     cat "$src" >> "$tmp"
     printf '\n\n===== end fold-in from host %s =====\n\n' "$src" >> "$tmp"
   fi
-  _cbox_codex_agents_preamble >> "$tmp"
-  printf '\n' >> "$tmp"
-  local kernel_rendered
+  local tail_tmp kernel_rendered
+  tail_tmp="$(mktemp "$outdir/.cbox.XXXXXX")"
+  _cbox_codex_agents_preamble >> "$tail_tmp"
+  printf '\n' >> "$tail_tmp"
   kernel_rendered="$(mktemp "$outdir/.cbox.XXXXXX")"
   _cbox_apply_name_substitution "$kernel_src" "$kernel_rendered"
   _cbox_apply_kernel_lang_rule "$kernel_rendered"
-  cat "$kernel_rendered" >> "$tmp"
+  cat "$kernel_rendered" >> "$tail_tmp"
   rm -f "$kernel_rendered"
-  printf '\n' >> "$tmp"
-  _cbox_codex_agents_delegate_boundary >> "$tmp"
+  printf '\n' >> "$tail_tmp"
+  _cbox_codex_agents_delegate_boundary >> "$tail_tmp"
+  local cur_size tail_size banner_begin banner_end banner_size budget
+  cur_size="$(wc -c < "$tmp")"
+  tail_size="$(wc -c < "$tail_tmp")"
+  banner_begin="===== cbox user policies =====
+"
+  banner_end="
+===== end cbox user policies =====
+
+"
+  banner_size="$((${#banner_begin} + ${#banner_end}))"
+  budget="$((64000 - cur_size - tail_size - banner_size))"
+  local user_policies_dir="${CBOX_USER_DIR-$HOME/.config/cbox/user}/policies"
+  local -a included=()
+  local pf pf_base pf_size sep_size
+  if [ "$budget" -gt 0 ]; then
+    while IFS= read -r pf; do
+      [ -n "$pf" ] || continue
+      pf_base="$(basename "$pf")"
+      pf_size="$(wc -c < "$pf")"
+      sep_size=0
+      [ "${#included[@]}" -gt 0 ] && sep_size=1
+      if [ "$((pf_size + sep_size))" -lt "$budget" ]; then
+        included+=("$pf")
+        budget="$((budget - pf_size - sep_size))"
+      else
+        printf "gen_codex_agents_into: user policy '%s' (%s bytes) skipped - AGENTS.override.md 64000 byte cap\n" "$pf_base" "$pf_size" >&2
+      fi
+    done < <(_cbox_user_policies_files "$user_policies_dir")
+  else
+    while IFS= read -r pf; do
+      [ -n "$pf" ] || continue
+      pf_base="$(basename "$pf")"
+      pf_size="$(wc -c < "$pf")"
+      printf "gen_codex_agents_into: user policy '%s' (%s bytes) skipped - AGENTS.override.md 64000 byte cap\n" "$pf_base" "$pf_size" >&2
+    done < <(_cbox_user_policies_files "$user_policies_dir")
+  fi
+  if [ "${#included[@]}" -gt 0 ]; then
+    printf '%s' "$banner_begin" >> "$tmp"
+    local first=1
+    for pf in "${included[@]}"; do
+      [ "$first" = 1 ] || printf '\n' >> "$tmp"
+      first=0
+      cat "$pf" >> "$tmp"
+    done
+    printf '%s' "$banner_end" >> "$tmp"
+  fi
+  cat "$tail_tmp" >> "$tmp"
+  rm -f "$tail_tmp"
   size="$(wc -c < "$tmp")"
   if [ "$size" -ge 64000 ]; then
     rm -f "$tmp"
@@ -2655,18 +2756,20 @@ gen_hooks_dir() {
   gen_scope_json
 }
 
+_cbox_bashrc_wants() {
+  local sel="${CBOX_BASHRC_COMMANDS:-all}" name="$1"
+  case " $sel " in
+    *" none "*) return 1 ;;
+    *" all "*) return 0 ;;
+    *" $name "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 gen_bashrc() {
   printf 'export CBOX_DIR="%s"\n' "$INSTALL_DIR"
   printf 'export CBOX_SERVICE="cbox"\n\n'
   cat <<'EOF'
-claude() {
-  "$CBOX_DIR/cbox" run claude "$@"
-}
-
-codex() {
-  "$CBOX_DIR/cbox" run codex "$@"
-}
-
 cbox-stop() {
   "$CBOX_DIR/cbox" down
 }
@@ -2679,7 +2782,23 @@ cbox() {
   "$CBOX_DIR/cbox" "$@"
 }
 EOF
-  if [ "${CBOX_HERMES:-off}" = on ]; then
+  if _cbox_bashrc_wants claude; then
+    cat <<'EOF'
+
+claude() {
+  "$CBOX_DIR/cbox" run claude "$@"
+}
+EOF
+  fi
+  if _cbox_bashrc_wants codex; then
+    cat <<'EOF'
+
+codex() {
+  "$CBOX_DIR/cbox" run codex "$@"
+}
+EOF
+  fi
+  if [ "${CBOX_HERMES:-off}" = on ] && _cbox_bashrc_wants hermes; then
     cat <<'EOF'
 
 hermes() {
@@ -2786,7 +2905,7 @@ sys.exit(0)
     "$(_cbox_context_manifest_sha "$shim_src")" \
     "$(_cbox_context_manifest_sha "$hooks_json")" \
     "$(_cbox_context_manifest_sha "$hermes_entrypoint")" \
-    || die "context manifest drifted - regenerate with ./setup.sh update claude-md (or the relevant section)"
+    || die "context manifest drifted - regenerate with cbox setup update claude-md (or the relevant section)"
 }
 
 _cbox_conf_set_tpl_sha() {
@@ -2807,6 +2926,41 @@ _cbox_conf_set_tpl_sha() {
   fi
   chmod 0644 "$tmp"
   mv "$tmp" "$conf"
+  _cbox_conf_write_manifest "$conf"
+}
+
+_cbox_conf_manifest_path() {
+  local conf="${1:-$INSTALL_DIR/cbox.conf}"
+  printf '%s/.cbox-conf-manifest' "$(dirname "$conf")"
+}
+
+_cbox_conf_write_manifest() {
+  local conf="${1:-$INSTALL_DIR/cbox.conf}" mf tmp sha
+  [ -f "$conf" ] || return 0
+  mf="$(_cbox_conf_manifest_path "$conf")"
+  sha="$(_cbox_sha256 "$conf")"
+  tmp="$(mktemp "$(dirname "$mf")/.cbox-cm.XXXXXX")" || return 0
+  {
+    printf 'schema=1\n'
+    printf 'conf=%s\n' "$sha"
+  } > "$tmp"
+  chmod 0644 "$tmp"
+  mv "$tmp" "$mf" 2>/dev/null || rm -f "$tmp"
+}
+
+_cbox_conf_manifest_status() {
+  local conf="${1:-$INSTALL_DIR/cbox.conf}" mf want have
+  [ -f "$conf" ] || { printf 'missing'; return 0; }
+  mf="$(_cbox_conf_manifest_path "$conf")"
+  [ -f "$mf" ] || { printf 'unstamped'; return 0; }
+  want="$(grep -m1 '^conf=' "$mf")" || { printf 'malformed'; return 0; }
+  want="${want#conf=}"
+  have="$(_cbox_sha256 "$conf")"
+  if [ "$have" = "$want" ]; then
+    printf 'ok'
+  else
+    printf 'drifted'
+  fi
 }
 
 regen_all() {

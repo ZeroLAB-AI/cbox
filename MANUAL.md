@@ -4,7 +4,7 @@ Complete reference for installing, configuring, and operating cbox. Start with t
 
 ## Setup wizard sections
 
-Run `./setup.sh` to open the interactive wizard. Each section configures part of the cbox environment. Navigate with Enter (next), `b` (back), `j` (jump), `q` (save and quit). Re-run individual sections later with `./setup.sh update <name>`.
+Run `cbox setup` to open the interactive wizard. Each section configures part of the cbox environment. Navigate with Enter (next), `b` (back), `j` (jump), `q` (save and quit). Re-run individual sections later with `cbox setup update <name>`.
 
 ### mode
 
@@ -61,7 +61,7 @@ This regenerates the CDI specification, sets `CBOX_GPU=1` in the config, and res
 
 Optional domain-filtered egress proxy (tinyproxy sidecar on an internal network). The container has no direct internet; all HTTP/HTTPS is filtered.
 
-The wizard only ever ADDS domains to the allowlist or blocklist. To remove, edit `etc/egress-allowlist.txt` or `etc/egress-blocklist.txt` directly and re-run `./setup.sh update egress`.
+The wizard only ever ADDS domains to the allowlist or blocklist. To remove, edit `etc/egress-allowlist.txt` or `etc/egress-blocklist.txt` directly and re-run `cbox setup update egress`.
 
 What breaks under egress: SSH-based git remotes (unless SSH is enabled), direct DNS, and any tool ignoring `HTTP_PROXY`/`HTTPS_PROXY`.
 
@@ -73,7 +73,7 @@ DNS resolution mode (`CBOX_DNS_MODE`), applied only when egress is enabled (in e
 - **public** - Compose `dns:` entries from `CBOX_DNS_SERVERS` (default "1.1.1.1 8.8.8.8"). Immune to host network changes but bypasses VPN/LAN split-horizon DNS.
 - **stub** - Compose `dns:` pointing at `CBOX_DNS_STUB_IP`, a host-stable resolver such as a systemd-resolved DNSStubListenerExtra address or dnsmasq on the docker bridge. Follows host DNS AND survives wifi changes; host resolver setup is a manual host-side step.
 
-Apply via `./setup.sh update egress` (compose re-render + container recreate).
+Apply via `cbox setup update egress` (compose re-render + container recreate).
 
 ### netaccess
 
@@ -145,7 +145,7 @@ The wizard writes `~/.bashrc-cbox` and sources it from `~/.bashrc`. This install
 - `cbox` - `$CBOX_DIR/cbox "$@"` (so bare `cbox` reaches the hub without the full install path)
 - `hermes` - `cbox run hermes`, emitted only when `CBOX_HERMES=on` at the time `~/.bashrc-cbox` was generated
 
-`hermes()` does not appear retroactively when hermes is turned on later: `~/.bashrc-cbox` is a host file only `./setup.sh update bashrc` (or the full wizard) rewrites - a bare `./setup.sh update` re-renders in-repo/generated artifacts and re-blesses templates but does not touch host files, and `./setup.sh update hermes` alone regenerates the hermes-managed config, not the bashrc functions. Run `./setup.sh update bashrc` after enabling hermes to get the helper function.
+`hermes()` does not appear retroactively when hermes is turned on later: `~/.bashrc-cbox` is a host file only `cbox setup update bashrc` (or the full wizard) rewrites - a bare `cbox setup update` re-renders in-repo/generated artifacts and re-blesses templates but does not touch host files, and `cbox setup update hermes` alone regenerates the hermes-managed config, not the bashrc functions. Run `cbox setup update bashrc` after enabling hermes to get the helper function.
 
 ### mcp-servers
 
@@ -187,11 +187,11 @@ Turning off `CBOX_HISTORY` disables the whole continuity system.
 
 Install global policies and templates into `~/.claude/policies/` and `~/.claude/templates/` and append @import lines to `~/.claude/CLAUDE.md`. Pulled from `~/.claude/templates/` and `~/.claude/policies/` (via `~/.claude/`). The wizard stages changes, shows diffs, and asks for confirmation before writing.
 
-Policies are read-only inside the container (mounted read-only in both mount and volume mode) to prevent prompt injection. Manage policies on the host via `./setup.sh update claude-md`.
+Policies are read-only inside the container (mounted read-only in both mount and volume mode) to prevent prompt injection. Manage policies on the host via `cbox setup update claude-md`.
 
 ### kernel-lang
 
-Two-part language rule rendered into the deployed conduct kernel: `CBOX_KERNEL_LANG_OUTPUT` (free text, default empty) and `CBOX_KERNEL_LANG_REASONING` (free text, default `slovencina bez diakritiky`). Empty output language means the rule is not rendered at all - no language is imposed unless one is set. When an output language is set, one line is added to the kernel: reason and think in the reasoning language, answer and write every output in the output language. Values are bounded to 64 ASCII characters, no control characters, no leading/trailing spaces, no `{`/`}`; non-ASCII input is refused, not transliterated. Set via `cbox config` or `./setup.sh update claude-md` (`apply_class: none`, `profile: skip` - no interactive wizard prompt).
+Two-part language rule rendered into the deployed conduct kernel: `CBOX_KERNEL_LANG_OUTPUT` (free text, default empty) and `CBOX_KERNEL_LANG_REASONING` (free text, default `slovencina bez diakritiky`). Empty output language means the rule is not rendered at all - no language is imposed unless one is set. When an output language is set, one line is added to the kernel: reason and think in the reasoning language, answer and write every output in the output language. Values are bounded to 64 ASCII characters, no control characters, no leading/trailing spaces, no `{`/`}`; non-ASCII input is refused, not transliterated. Set via `cbox config` or `cbox setup update claude-md` (`apply_class: none`, `profile: skip` - no interactive wizard prompt).
 
 ### settings
 
@@ -217,11 +217,13 @@ Enable session-limit auto-resume: `cbox run claude` sessions wrapped in tmux sur
 
 `CBOX_SESSION_MULTIPLEX` (default `off`) wraps the interactive session in a named tmux session (`cbox-<engine>-<random>`) whenever a real TTY is attached, for all three engines (claude, codex, hermes) - not just claude. This is the precondition for attaching to a running cbox session from elsewhere: a bare process cannot be adopted by a multiplexer after the fact, so the session must start under tmux. `CBOX_LIMIT_AUTORESUME=on` already implies this wrap for claude even when `CBOX_SESSION_MULTIPLEX` is off; set `CBOX_SESSION_MULTIPLEX=on` to get the same wrap (and therefore the same attach precondition) for codex and hermes, or for claude without turning on auto-resume. Both variables require a TTY on stdin and stdout; the non-interactive exec path (`cbox exec`, scripted invocations) never wraps.
 
+`CBOX_SAFEGUARD_AUTOCONFIRM` (default `off`) lets the same watchdog answer the model-safeguard switch dialog for you. When claude flags a message under its safety classifier it shows a blocking confirmation to switch to a fallback model and retry; unattended that dialog stalls the session for hours and the prompt cache expires. With this on, the watchdog reads the wrapped claude pane, and only when the visible screen carries both a safeguard/switch phrase and an actual option menu (numbered or bracketed) does it send the confirm keystroke, then re-reads the pane to log whether the dialog cleared. The two-signal match on the visible screen (never scrollback) is deliberate: a substring anywhere would let ordinary output that merely mentions the dialog trigger a keystroke into whatever prompt actually has focus. The match is deliberately strict: the safeguard phrase and the option menu must appear as one coherent block (the menu within a few lines after the phrase), and a screen that also carries a foreign confirmation prompt ("Do you want to proceed", "Do you trust the files", the permission ask's own decline wording) is refused outright - so ordinary output that merely mentions the words cannot turn a permission prompt into an auto-approval. A per-pane cooldown (`CBOX_SAFEGUARD_COOLDOWN`, default 20s) and daily cap (`CBOX_SAFEGUARD_MAX_PER_DAY`, default 40) bound it - both also enforced in-process, so a failed state write disables the pane for the run rather than lifting the cap - and every injection is logged to `watchdog.log`. It implies the tmux wrap for claude (like auto-resume) and needs the same isolated session scope + claude mount mode. The dialog phrase and the confirm key (Enter) are pinned in code, not user-tunable; re-verify them after a Claude Code upgrade, since the dialog is a TUI modal with no settings hook and its wording can change. This covers claude sessions running inside cbox under the wrap; host-side claude sessions outside a cbox container are not reached.
+
 Remote session access is three layers stacked in the owner's order, and all three must be satisfied before a remote viewer sees a single byte: **(1) WireGuard** - the peer has to be a configured tunnel peer (`cbox wg peer add`, see the wireguard section above) before it can reach this container's sshd port at all; without the tunnel up, the port is not on any network the peer can route to. **(2) an ssh key** - the peer's public key has to be in this container's `authorized_keys` (`cbox session-broker key add`, below); WireGuard reachability alone does not authenticate anyone. **(3) the runtime allow** - even a peer who is on the tunnel and holds a trusted key gets nothing until the owner opens the access level and, optionally, a time window (`cbox session-broker access`/`window`, below). Losing any one of the three closes the door; all three are host-side decisions, never made by the connecting peer.
 
 The container runs its own `sshd` (`AllowUsers <container user>`, `PermitRootLogin no`, no password/keyboard-interactive auth, no TCP/agent/stream-local/X11 forwarding, no tunneling, `PermitOpen none`) with a single `ForceCommand /opt/cbox/cbox-session-entry.py` - every connection, regardless of what the client asks for, runs this one program with the client's request available only as the `SSH_ORIGINAL_COMMAND` environment string (`ForceCommand` always wins over any `command=` an authorized_keys line might also carry). The entry program never execs a shell with that string: it matches it against a strict allow-list (`list`, `attach <session>`, `spawn <engine>`) before doing anything, rejects anything shaped like a flag or a path, and builds every downstream `tmux` argv itself - the caller supplies only a session or engine name, never a flag position, so a connection cannot smuggle `-CC`, `send-keys`, or any other tmux argv regardless of what it sends as its "command".
 
-`CBOX_SESSION_BROKER_MODE` (default `disabled`; per-container setup.sh default, see the wizard) is the access level: `disabled` renders nothing at all (see Inert default below); `viewer` and `full-attach` render the sshd config, generate host keys once, and mount everything needed. The entry program reads this level fresh from `/etc/cbox-sshd/access.level` on every single connection, before evaluating even a `list` request, and there is also a companion optional time window at `/etc/cbox-sshd/access.window` (an epoch deadline, or empty meaning open indefinitely) checked the same way - so opening or closing access takes effect for an already-running container without any recreate, which is the entire point of resolving it per connection rather than once at container start. Both files are mounted `:ro` into the container and are always written host-side.
+`CBOX_SESSION_BROKER_MODE` (default `disabled`; per-container `cbox setup` default, see the wizard) is the access level: `disabled` renders nothing at all (see Inert default below); `viewer` and `full-attach` render the sshd config, generate host keys once, and mount everything needed. The entry program reads this level fresh from `/etc/cbox-sshd/access.level` on every single connection, before evaluating even a `list` request, and there is also a companion optional time window at `/etc/cbox-sshd/access.window` (an epoch deadline, or empty meaning open indefinitely) checked the same way - so opening or closing access takes effect for an already-running container without any recreate, which is the entire point of resolving it per connection rather than once at container start. Both files are mounted `:ro` into the container and are always written host-side.
 
 `viewer` allows `list` and a read-only `attach`: the entry program builds `tmux attach-session -r -f read-only,ignore-size -t <session>` itself, and independently of tmux honouring `-r`, the entry program's own byte-relay loop only ever forwards stdin bytes into the tmux pty when `tier == full-attach` - a compromised or buggy client cannot regain write access by asking for a different tmux flag, because it never controls the flags at all. `full-attach` allows a writable attach (no `-r`) and is also required for `spawn`, which generates a brand-new session name itself (`cbox-<engine>-<16 hex chars>`, matching the shape `entrypoint.sh`'s own session multiplexing already uses) and starts it under the container's own tmux server; a `viewer`-tier `spawn` request is refused. `list` runs a bounded `tmux list-sessions` and returns only sessions matching that `cbox-<engine>-<hex>` shape.
 
@@ -271,7 +273,7 @@ Clipboard image bridge (`CBOX_CLIPBOARD_MODE`, default `off`, or `bridge`). In `
 
 ### local-model
 
-Off by default (absent from the rendered MCP server list and refused by `cbox ai`) until configured. Wires an OpenAI-compatible endpoint (ollama, llama.cpp llama-server, vllm, or compatible) as: (1) `local-qwen`, a text-only MCP delegate exposing one tool, and (2) `local-qwen`, a `cbox ai` engine that drives `codex --oss --local-provider ollama` against the same endpoint. Set `CBOX_LOCAL_MODEL=on` plus `CBOX_LOCAL_MODEL_URL` and `CBOX_LOCAL_MODEL_NAME` via this wizard section, `./setup.sh update local-model`, or `--config`; `cbox doctor` reports ACTIVE/CONFIG-ONLY/OFF. The endpoint always runs outside cbox (no GPU/CDI grant). The delegate health probe is `GET /v1/models`. See etc/docs/LOCAL_MODEL_RUNBOOK.md for the two setup paths (sibling container vs host process) and open decisions left to the operator.
+Off by default (absent from the rendered MCP server list and refused by `cbox ai`) until configured. Wires an OpenAI-compatible endpoint (ollama, llama.cpp llama-server, vllm, or compatible) as: (1) `local-qwen`, a text-only MCP delegate exposing one tool, and (2) `local-qwen`, a `cbox ai` engine that drives `codex --oss --local-provider ollama` against the same endpoint. Set `CBOX_LOCAL_MODEL=on` plus `CBOX_LOCAL_MODEL_URL` and `CBOX_LOCAL_MODEL_NAME` via this wizard section, `cbox setup update local-model`, or `--config`; `cbox doctor` reports ACTIVE/CONFIG-ONLY/OFF. The endpoint always runs outside cbox (no GPU/CDI grant). The delegate health probe is `GET /v1/models`. See etc/docs/LOCAL_MODEL_RUNBOOK.md for the two setup paths (sibling container vs host process) and open decisions left to the operator.
 
 ### hermes
 
@@ -279,7 +281,7 @@ Off by default. The third console engine, alongside `claude` and `codex`: [Herme
 
 Installed into the shared bins volume `cbox-bins-hermes`, exactly like the claude and codex CLIs: the host-side install container recreates the venv at `/opt/hermes` from scratch, runs `pip install hermes-agent[==<CBOX_HERMES_VERSION>]`, then reseeds the delegate template home at `/opt/hermes/delegate-home`. Because `pip install` executes arbitrary package build code, hermes always gets its own install container - it never runs alongside the writable claude/codex bins volumes - and the venv, pip, and `hermes setup` all run as the host user, not root; only the final 0555/0444 hardening of the seed is done as root. The venv is never reused across installs, so a previously planted `pip` or interpreter cannot re-execute itself on the next refresh, and the volume's integrity stamp is a tree digest over every file under `/opt/hermes`. The volume is mounted read-only in the running container and the image only prepares the mountpoint plus the `/usr/local/bin/hermes` symlink, so the image is hermes-invariant - toggling hermes or moving its version target never rebuilds the image. Supply-chain exception (explicit, v1 only): transitive pip dependencies are NOT pinned, and with the `latest` target the `hermes-agent` release itself moves on its own - a compromised or yanked release could change behavior without an explicit version bump here; pin an exact `x.y.z` to opt out.
 
-Set `CBOX_HERMES=on` plus `CBOX_HERMES_VERSION` (default `latest`, or an exact `x.y[.z[.w]]` pin), `CBOX_HERMES_PROVIDER` (`local`, `nous`, `openrouter`, `openai`, or `anthropic`; default `local`), and for `local` provider `CBOX_HERMES_MODEL_URL` plus `CBOX_HERMES_MODEL_NAME` via this wizard section, `./setup.sh update hermes`, or `--config`. This is a recreate-class change (`SEC_APPLY[hermes]=recreate`): compose recreates the container, and the binary itself lands via `cbox reinstall-bins` or the next autoupdate pass.
+Set `CBOX_HERMES=on` plus `CBOX_HERMES_VERSION` (default `latest`, or an exact `x.y[.z[.w]]` pin), `CBOX_HERMES_PROVIDER` (`local`, `nous`, `openrouter`, `openai`, or `anthropic`; default `local`), and for `local` provider `CBOX_HERMES_MODEL_URL` plus `CBOX_HERMES_MODEL_NAME` via this wizard section, `cbox setup update hermes`, or `--config`. This is a recreate-class change (`SEC_APPLY[hermes]=recreate`): compose recreates the container, and the binary itself lands via `cbox reinstall-bins` or the next autoupdate pass.
 
 Managed-keys ownership: provider, base URL (local provider only; `/v1` appended if missing), and model name are re-applied on every `cbox run hermes` via the official `hermes config set model.provider|base_url|default` CLI - never a copy-if-absent seed, never a hand-written YAML merge for these three keys. Any other key in `~/.hermes-cbox/config.yaml` that the user or hermes itself sets is left untouched between starts, with one more managed exception: `mcp_servers` (see below), which is a hand-written top-level block replace precisely because `hermes config set`'s dotted-key CLI cannot express a nested mapping (its own model names contain dots, which collide with the dotted-key syntax) and `hermes mcp add` has no non-interactive flag for env maps, timeouts, or the enabled switch. Secrets (`.env` under `HERMES_HOME`) and Nous OAuth login are manual, host-operator steps: `cbox shell` into the running container, then run the relevant `hermes` auth/config command by hand.
 
@@ -289,7 +291,7 @@ Degraded toolset note: the image ships the `hermes-agent` pip package only - no 
 
 Refresh safety: when `cbox reinstall-bins` or autoupdate refreshes the hermes venv, a failed refresh restores the previous venv from an in-volume backup (rollback via a `.prev` directory). A successful install removes the backup.
 
-First use: enable this section (`./setup.sh update hermes` or the wizard), then run `cbox reinstall-bins` on the host to install hermes into the shared bins volume. Recreate the container with `cbox up` (or the next `cbox run hermes`), then `cbox run hermes`.
+First use: enable this section (`cbox setup update hermes` or the wizard), then run `cbox reinstall-bins` on the host to install hermes into the shared bins volume. Recreate the container with `cbox up` (or the next `cbox run hermes`), then `cbox run hermes`.
 
 `cbox doctor` reports ACTIVE/CONFIG-ONLY/OFF for this section.
 
@@ -297,7 +299,7 @@ First use: enable this section (`./setup.sh update hermes` or the wizard), then 
 
 Off by default. A zero-cost local-model tier callable by `claude` and `codex`: an MCP delegate tool (`hermes-local`) that shells out to one `hermes -z "<prompt>"` subprocess per tool call (plus up to three short-lived `hermes config set` subprocesses when a provider/base_url/model is configured - see Subprocess hygiene below). This is a separate concern from the `hermes` console engine above - `hermes mcp serve` (which exposes hermes's own messaging state) is not involved at all; the delegate is a small stdio MCP server (`etc/mcp/hermes_delegate_mcp.py`) modeled on the existing `local-qwen` delegate. When enabled, Claude receives a hermes-local relay subagent, and Codex receives a hermes-local entry in its MCP servers (rendered into the codex profile as `[mcp_servers.hermes-local]` when `CBOX_CODEX_MCP=1` and `CBOX_HERMES_DELEGATE=on`).
 
-Requires the `hermes` console engine (`CBOX_HERMES=on`); `SEC_DEPS[hermes-delegate]=disable:hermes-off` forces `CBOX_HERMES_DELEGATE=off` whenever the console engine is off, both in the wizard and in `cbox config set`'s dep-gate. Set `CBOX_HERMES_DELEGATE=on` plus optional `CBOX_HERMES_DELEGATE_PROVIDER`, `CBOX_HERMES_DELEGATE_BASE_URL`, and `CBOX_HERMES_DELEGATE_MODEL` (default-inherited from the console engine's own `CBOX_HERMES_PROVIDER`/`CBOX_HERMES_MODEL_URL`/`CBOX_HERMES_MODEL_NAME` at ask-time, but stored and applied independently) via this wizard section, `./setup.sh update hermes-delegate`, or `--config`. This is a restart-class change (`SEC_APPLY[hermes-delegate]=restart`), same as the other MCP delegates.
+Requires the `hermes` console engine (`CBOX_HERMES=on`); `SEC_DEPS[hermes-delegate]=disable:hermes-off` forces `CBOX_HERMES_DELEGATE=off` whenever the console engine is off, both in the wizard and in `cbox config set`'s dep-gate. Set `CBOX_HERMES_DELEGATE=on` plus optional `CBOX_HERMES_DELEGATE_PROVIDER`, `CBOX_HERMES_DELEGATE_BASE_URL`, and `CBOX_HERMES_DELEGATE_MODEL` (default-inherited from the console engine's own `CBOX_HERMES_PROVIDER`/`CBOX_HERMES_MODEL_URL`/`CBOX_HERMES_MODEL_NAME` at ask-time, but stored and applied independently) via this wizard section, `cbox setup update hermes-delegate`, or `--config`. This is a restart-class change (`SEC_APPLY[hermes-delegate]=restart`), same as the other MCP delegates.
 
 Ephemeral-home isolation (the core security property): every tool call creates a fresh `mktemp` directory, seeds it from a root-owned read-only template built at install time (`/opt/hermes/delegate-home` inside the bins volume, produced by `hermes setup --non-interactive` with skills/auth/db files stripped and permissions locked to 0555/0444), applies the configured provider/base_url/model to that ephemeral copy via `hermes config set` (the provider is mandatory, and `local` additionally requires a base URL - falling back to the console engine's `CBOX_HERMES_*` values; with neither set the server refuses the call rather than letting the endpoint come from a template the hermes package seeded for itself) (never a hand-parsed YAML write - an unparseable template can never poison the call), runs exactly one `hermes -z` subprocess against it, then removes the ephemeral directory in a `finally` block. `HERMES_HOME` for the delegate is never the console engine's `$HOME/.hermes-cbox` - the two never share a `state.db` or contend for one. At startup the server refuses to run unless the template is verified root-owned, non-group/other-writable, and symlink-free (`CBOX_HERMES_DELEGATE_HOME_TEMPLATE` is env-overridable, so this is checked at runtime, not just trusted from the image build); seeding itself also refuses (raises before any file is copied) if the template contains a `skills/` directory, `auth.json`, `mcp.json`, `.env`, or a `*.db`/`*.sqlite*` file, and never dereferences a symlink nested inside a template subdirectory.
 
@@ -317,7 +319,7 @@ First use: enable `hermes` (`CBOX_HERMES=on`) and run `cbox reinstall-bins` so `
 
 Off by default (`CBOX_OLLAMA_MODE=off|on`). Machine-scoped infra service, not a per-project one: `SEC_SCOPE[ollama]=machine` (every other section is `project`-scoped). Ollama runs in its own owner compose project, `cbox-infra-u<uid>`, rendered under the user config dir at `config/cbox/infra/ollama` and labeled `cbox.kind=infra` / `cbox.component=ollama` - never embedded inside a generated cbox project, so it is never torn down by a per-project `compose down --remove-orphans` and there is exactly one instance per machine, not one per project.
 
-Because the section is machine-scoped: the isolated per-project wizard (`run_local_wizard_subset`) never calls `step_ollama`, `setup.sh --local <root>` never asks about it and never writes `CBOX_OLLAMA_*` into a project's effective `cbox.conf` (the isolated derivation path strips those keys after `conf_save`), and `cbox config set` refuses `CBOX_OLLAMA_*` from inside an isolated project - run it from the global scope instead. The isolated runtime path (`cbox run`/`cbox shell` in an isolated project) re-reads `CBOX_OLLAMA_*` from the machine-level `cbox.conf` after sourcing the per-project file, so every project observes the same live value rather than a stale per-project copy.
+Because the section is machine-scoped: the isolated per-project wizard (`run_local_wizard_subset`) never calls `step_ollama`, `cbox setup --local <root>` never asks about it and never writes `CBOX_OLLAMA_*` into a project's effective `cbox.conf` (the isolated derivation path strips those keys after `conf_save`), and `cbox config set` refuses `CBOX_OLLAMA_*` from inside an isolated project - run it from the global scope instead. The isolated runtime path (`cbox run`/`cbox shell` in an isolated project) re-reads `CBOX_OLLAMA_*` from the machine-level `cbox.conf` after sourcing the per-project file, so every project observes the same live value rather than a stale per-project copy.
 
 Vars: `CBOX_OLLAMA_MODE` (`off|on`, default `off`), `CBOX_OLLAMA_IMAGE` (pinned image reference, default `ollama/ollama:0.32.5`), `CBOX_OLLAMA_GPU` (`off|cdi`, default `off` - a separate reservation from `CBOX_GPU`, targeting only the ollama service), `CBOX_OLLAMA_STORE` (`dedicated|shared`, default `dedicated` - a cbox-owned named volume/directory; `shared` mounts only the `models/` subdirectory of a host ollama directory read-write and refuses to start while a host ollama daemon is detected), `CBOX_OLLAMA_STORE_PATH` (host path, shared mode only, default empty), `CBOX_OLLAMA_PORT` (default `11434`; informational only - it is never published on the host, it is only the port the shared-store host-daemon probe checks), `CBOX_OLLAMA_NUM_PARALLEL` (default `1`).
 
@@ -343,7 +345,7 @@ Vars: `CBOX_WG_MODE` (`off|server|client|both`, default `off`), `CBOX_WG_IMPL` (
 
 The three legacy `CBOX_WG_PEER_*` scalars are kept working as an alias for exactly one client-role peer: `gen_wireguard_conf_into` (`templates/generators.sh`) still renders a `[Peer]` stanza from them whenever any of the three is non-empty, alongside whatever client-role peers now live in the peer store - so an existing single-remote client setup that predates the peer store needs no migration.
 
-Because the section is machine-scoped, the same rules apply as for `ollama`: the isolated per-project wizard never calls `step_wireguard`, `setup.sh --local <root>` never writes `CBOX_WG_*` into a project's effective `cbox.conf`, and `cbox config set` refuses `CBOX_WG_*` from inside an isolated project.
+Because the section is machine-scoped, the same rules apply as for `ollama`: the isolated per-project wizard never calls `step_wireguard`, `cbox setup --local <root>` never writes `CBOX_WG_*` into a project's effective `cbox.conf`, and `cbox config set` refuses `CBOX_WG_*` from inside an isolated project.
 
 Key material lives under `~/.config/cbox/infra/wireguard` on the host: `privatekey` (created at mode 0600 before any content is written, never world- or group-readable), `publickey` (0644), and `peers` (0600, one line per peer: `name|pubkey|allowed-address|endpoint|capability`). None of these files are ever mounted into a workspace container, only read-only into the sidecar. If `wg` (wireguard-tools) is not installed on the host, key generation fails naming the missing package rather than writing a placeholder key. Every peer's allowed address must be a single host (`/32`); a wider `AllowedIPs` is refused because it would let one peer claim other peers' addresses. Generating a peer's own key locally is optional - generating it on the peer itself is the documented preference; a peer configuration handed to the other machine contains only public material (plus that peer's own private key only if cbox generated it locally).
 
@@ -440,7 +442,7 @@ Inside the container, these are always mounted read-only:
 
 This prevents prompt injection: subagent bodies are executed as system prompts, so a writable agent file is a persistent injection foothold.
 
-Consequence: the global #shortcut in Claude Code does not work inside the container. Manage policies on the host via `./setup.sh update claude-md`.
+Consequence: the global #shortcut in Claude Code does not work inside the container. Manage policies on the host via `cbox setup update claude-md`.
 
 Project-local files in `./.claude/` of a mounted workspace stay writable (same as the rest of the workspace). Runtime state (`~/.claude/projects/`, `~/.claude/agent-memory/`, credentials) remains writable.
 
@@ -450,11 +452,11 @@ The container runs with CLAUDE_CONFIG_DIR=~/.claude-cbox, so its live state file
 
 After the initial wizard run:
 
-- `./setup.sh update <section>` re-runs one section and regenerates related outputs.
-- `./setup.sh update` (no section) re-renders all artifacts and re-blesses the templates (CBOX_TPL_SHA) without changing configuration. This is the standard step after deploying new cbox files; the blessing now covers both `_common.sh` and `templates/generators.sh`, so a deploy of either requires the re-bless.
+- `cbox setup update <section>` re-runs one section and regenerates related outputs.
+- `cbox setup update` (no section) re-renders all artifacts and re-blesses the templates (CBOX_TPL_SHA) without changing configuration. This is the standard step after deploying new cbox files; the blessing now covers both `_common.sh` and `templates/generators.sh`, so a deploy of either requires the re-bless.
 - `cbox install-hooks` stages and diffs hook scripts, then confirms before installing to the host.
 - `cbox restart` reloads configuration and restarts the container.
-- `./setup.sh update --config <file>` replicates a saved `cbox.conf` on another machine (non-interactive; skips host-side writes).
+- `cbox setup update --config <file>` replicates a saved `cbox.conf` on another machine (non-interactive; skips host-side writes).
 
 For continuity migration (moving project brain from `~/.claude/` to `./.cbox/`):
 
@@ -553,7 +555,7 @@ In global mode selecting an engine or shell row ends the python hub loop after t
 
 ```
 cbox/                           # Install directory
-  setup.sh                        # Wizard entry point
+  setup.sh                        # Wizard entry point (now `cbox setup` verb, lib/cbox-setup.sh)
   cbox                            # Wrapper script (docker run, lifecycle)
   docker-compose.yml              # Generated compose file (global mode)
   cbox.conf                       # Generated configuration
@@ -731,7 +733,7 @@ behavior change on a healthy Linux host:
   instead of reporting a false pass; the gate is real only on a docker-capable
   host or CI.
 - `lib/portable_preflight.sh` is sourced as the first executable code in both
-  `cbox` and `setup.sh`, before `templates/sections.sh` or
+  `cbox` and the `cbox setup` verb (lib/cbox-setup.sh), before `templates/sections.sh` or
   `templates/generators.sh` are referenced (the latter is not bash-3.2-clean
   today). Two conditions refuse to run: a bash below the floor (currently
   4.2, dropping to 3.2 after track P of the design) and macOS during the
@@ -749,18 +751,22 @@ behavior change on a healthy Linux host:
 
 ### user-layer
 
-User extension layer (`CBOX_USER_DIR`, default `~/.config/cbox/user`). A host directory bind-mounted read-only into the container at `/etc/cbox/user`, letting you add your own MCP servers without touching cbox-owned config. Drop one JSON file per server under `user/mcp/<name>.json` (filename stem is the server name); each carries the stdio MCP spec (`command`/`args`/`env`) plus a `_cbox` block (`adapter` must be `stdio-mcp`, `available_to` is the subset of `claude`/`codex`/`hermes` the server is exposed to, optional `enabled_when_env`). cbox never writes under this directory - only the directory itself is created if missing - and never overwrites your entries: they are unioned with cbox's own delegates at render time, surviving every rebuild.
+User extension layer (`CBOX_USER_DIR`, default `~/.config/cbox/user`). A host directory bind-mounted read-only into the container at `/etc/cbox/user`, letting you add your own MCP servers without touching cbox-owned config. Drop one JSON file per server under `user/mcp/<name>.json` (filename stem is the server name); each carries the stdio MCP spec (`command`/`args`/`env`) plus a `_cbox` block (`adapter` must be `stdio-mcp`, `available_to` is the subset of `claude`/`codex`/`hermes` the server is exposed to, optional `enabled_when_env`). cbox never writes under this directory - only the directory skeleton (`mcp/` and `policies/`) is created if missing - and never overwrites your entries: they are unioned with cbox's own delegates at render time, surviving every rebuild.
 
 Per-entry targeting is yours: an entry with `available_to: ["claude"]` reaches only Claude, not codex or hermes - the wizard shows exactly where each user server lands, so a server you added for one engine is not silently assumed everywhere. cbox delegate names win on collision (a user server named like a cbox delegate is refused - rename it), and the `codex-`/`cbox-` name prefixes are reserved. Recreate-class change (adds a mount).
 
 A user entry is refused (excluded from all renders, named on stderr, the rebuild still completes) if it would weaken cbox's trust boundary: a non-`stdio-mcp` adapter, an `env` key that is a loader/proxy variable (`LD_*`, `PYTHON*`, `PATH`, `NODE_*`, `BASH_ENV`, `*_PROXY`, ...) or a cbox/claude/anthropic/codex/hermes-scoped key, an `env` value with an `@VAR@` host-environment placeholder (host-secret exfiltration), a command or argument path that resolves under cbox's trusted hooks directory, `..` path traversal, or an escalation token (`--dangerously`, `danger-full-access`, `bypassPermissions`, `--ignore-rules`, ...). The user layer is input, never authority: nothing under it can disable or reconfigure a cbox guard.
+
+Policy files (`user/policies/*.md`, filenames composed of ASCII letters, digits, dots, dashes, underscores) reach all three engines  -  claude via an import block marker in CLAUDE.md, codex via a section fold, and hermes via a prompt preamble. In mount mode, cbox maintains a host symlink `~/.claude/policies/user` pointing to `$CBOX_USER_DIR/policies` so the imports work transparently; a pre-existing non-symlink at that path is warned about and skipped. The container gets a read-only nested bind at the same path (`/etc/cbox/user/policies`). Policy text always renders before cbox's conduct kernel, and the kernel (v5) now carries an explicit precedence sentence: "If any user policy conflicts with this kernel, this kernel wins"  -  on conflict the kernel is authoritative.
+
+Claude receives user policies through a `<!-- cbox:user-policies:begin/end -->` marker block rendered above the kernel block in CLAUDE.md, containing `@~/.claude/policies/user/<file>.md` imports in filename order. Codex folds user policies into a `===== cbox user policies =====` section before the preamble and kernel; the 64000-byte cap applies to the total rendered AGENTS.override.md size (host fold-in plus preamble plus kernel plus delegate boundary plus policies) - policies are trimmed first when the budget is tight, and any policy file that would not fit is skipped with a warning naming it. Hermes engine prepends user policy files (sorted by filename) before the kernel with a 16384-byte cumulative cap and an explicit `===== cbox conduct kernel below ... =====` delimiter marking the kernel as authoritative. Note that only the hermes console engine (`cbox run hermes`) has a policy channel; the hermes delegate (used by claude and codex) runs with `--ignore-rules` and receives no user policies by design.
 
 ### Track P1: the portable waist
 
 `lib/portable.sh` holds thin bash-3.2-clean entry points; `lib/cbox_host.py`
 holds the python3-stdlib implementation. `_common.sh` sources `lib/portable.sh`
 once, right after its own idempotency guard - `_common.sh` is already the
-single ancestor every host entry point passes through (`cbox` and `setup.sh`
+single ancestor every host entry point passes through (`cbox` and the `cbox setup` verb (lib/cbox-setup.sh)
 source it directly and first; `templates/generators.sh` also self-sources it
 defensively at its own top), so this is the one wiring point that reaches
 every consumer exactly once before first use, with no new sourcing line
@@ -772,7 +778,7 @@ the digest) or with stdin piped in (`... | _cbox_sha256`), matching the two
 shapes the call sites used (`sha256sum "$path" | awk '{print $1}'` and
 `... | sha256sum | awk '{print $1}'`). Exit code and stderr/stdout placement
 on a missing file match `sha256sum`. Every `sha256sum` call in the production
-host files (`_common.sh`, `cbox`, `lib/cbox-ai.sh`, `setup.sh`,
+host files (`_common.sh`, `cbox`, `lib/cbox-ai.sh`, `lib/cbox-setup.sh`,
 `templates/generators.sh`) executes on the host - none sit inside a
 heredoc/printf payload emitted for the container - so all of them convert;
 none stay pinned. `lib/test_cbox_sha256_oracle.sh` feeds identical inputs
@@ -923,7 +929,7 @@ special-cases the empty string ahead of any `os.path.realpath` call in both
 modes to match GNU rather than Python's default.
 
 All 25 production `realpath` invocations named by the denylist baseline
-(`_common.sh`, `cbox`, `setup.sh`, `templates/generators.sh`) execute on the
+(`_common.sh`, `cbox`, `lib/cbox-setup.sh`, `templates/generators.sh`) execute on the
 host - none sit inside a heredoc/printf payload emitted for the container -
 so all convert; the denylist's `raw_realpath` count drops from 25 to 0, and
 no site stays pinned. `lib/test_cbox_realpath_oracle.sh` runs both forms
@@ -1168,9 +1174,9 @@ are cheaper than what they replaced.
 
 **Container won't start:** Run `cbox verify` to check configuration. Look at `cbox logs` for exact errors.
 
-**Stale seed warning:** After `./setup.sh update` (re-bless), re-run `claude` once on the host to regenerate `~/.claude.json`.
+**Stale seed warning:** After `cbox setup update` (re-bless), re-run `claude` once on the host to regenerate `~/.claude.json`.
 
-**TTY requirement for interactive sections:** The wizard requires a TTY for mounts, workspaces, and project prompts. If running non-interactively, use `./setup.sh --config <file>` instead.
+**TTY requirement for interactive sections:** The wizard requires a TTY for mounts, workspaces, and project prompts. If running non-interactively, use `cbox setup --config <file>` instead.
 
 **Old binary volumes still present:** `cbox gc` sweeps orphaned containers and old per-project binary volumes after migration to shared volumes.
 

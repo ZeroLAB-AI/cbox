@@ -31,7 +31,7 @@ fully audited.
 ## Quick start
 
 ```bash
-./setup.sh          # one-time wizard, stages all setup
+cbox setup          # one-time wizard, stages all setup
 ```
 
 Open a new shell (or `source ~/.bashrc`) after setup so the shortcuts load, then,

@@ -15,7 +15,7 @@ freezes the container's environment at `create` time (see step 2).
 
 | # | Step | Mandatory before next wave | Optional / verification only |
 |---|------|------|------|
-| 1 | Re-bless templates (`./setup.sh update`) | yes | |
+| 1 | Re-bless templates (`cbox setup update`) | yes | |
 | 2 | Recreate the container (`cbox down && cbox run`) | yes | |
 | 3 | `update hooks` / `update agents` (only if changed) | yes, if touched | |
 | 4 | netaccess: sockd runs foreground under supervisor | | yes |
@@ -37,10 +37,10 @@ freezes the container's environment at `create` time (see step 2).
 
 ```bash
 cd <cbox install dir>
-./setup.sh update
+cbox setup update
 ```
 
-This is `run_rebless` (setup.sh) - it does not require a TTY (only
+This is `run_rebless` (lib/cbox-setup.sh) - it does not require a TTY (only
 `--config <file>` and bare `update` skip the TTY gate; `update <section>`
 does not). It reloads `cbox.conf`, regenerates every artifact under
 `generated/`, and stamps a new `CBOX_TPL_SHA`.
@@ -52,7 +52,7 @@ templates re-blessed (CBOX_TPL_SHA updated) and artifacts regenerated
 restart containers to pick the changes up: cbox down && cbox run <bin>; isolated projects re-bless interactively on their next cbox run
 ```
 
-If it dies with `no <conf file>; run ./setup.sh first`, the host has no
+If it dies with `no <conf file>; run cbox setup first`, the host has no
 installed config yet - this is a fresh-install path, not a re-bless; run the
 interactive wizard instead. Any other non-zero exit means a template failed
 to render; re-run with the section name from the error to see the wizard
@@ -104,8 +104,8 @@ docker socket, because they are interactive wizard steps that diff and ask
 for confirmation before writing.
 
 ```bash
-./setup.sh update hooks
-./setup.sh update agents
+cbox setup update hooks
+cbox setup update agents
 ```
 
 Expected: a diff view per changed file, then a y/n confirmation, then
@@ -114,10 +114,10 @@ untouched and the container mount stays on the old version - the container
 mounts are read-only precisely so a compromised agent cannot rewrite them
 (MANUAL.md, "hooks" / "agents" sections).
 
-`./setup.sh update bashrc` is a related, separate step: turning on hermes
+`cbox setup update bashrc` is a related, separate step: turning on hermes
 does not retroactively add the `hermes()` shell alias to `~/.bashrc-cbox` -
-a bare `./setup.sh update` does not touch host files, only in-repo/generated
-artifacts. Run `./setup.sh update bashrc` once after enabling hermes.
+a bare `cbox setup update` does not touch host files, only in-repo/generated
+artifacts. Run `cbox setup update bashrc` once after enabling hermes.
 
 ## 4-10. netaccess live verification
 
@@ -242,7 +242,7 @@ that something is reachable or not.
 
 ```bash
 cbox netaccess allow <granted-target>     # from step 6, still applied
-./setup.sh update netaccess                # or: cbox config set CBOX_NETACCESS_MODE=off
+cbox setup update netaccess                # or: cbox config set CBOX_NETACCESS_MODE=off
 cbox down
 docker network ls --filter label=cbox.kind=proxy-net
 ```

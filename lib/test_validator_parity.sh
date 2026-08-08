@@ -27,8 +27,13 @@ set -uo pipefail
 INSTALL_DIR="$INSTALL_DIR"
 source "\$INSTALL_DIR/templates/generators.sh"
 source "$OLD_SNAPSHOT"
-_cbox_config_validate_var "\$1" "\$2" >/dev/null 2>&1
-exit "\$?"
+while IFS= read -r -d '' _key && IFS= read -r -d '' _val; do
+  if _cbox_config_validate_var "\$_key" "\$_val" >/dev/null 2>&1; then
+    printf 'accept\n'
+  else
+    printf 'reject\n'
+  fi
+done
 EOF
 chmod +x "$OLD_RUNNER"
 
@@ -40,8 +45,13 @@ INSTALL_DIR="$INSTALL_DIR"
 source "\$INSTALL_DIR/templates/generators.sh"
 source "\$INSTALL_DIR/templates/validator_lib.sh"
 source "\$INSTALL_DIR/templates/validator_dispatch.sh"
-_cbox_reg_validate_var "\$1" "\$2" >/dev/null 2>&1
-exit "\$?"
+while IFS= read -r -d '' _key && IFS= read -r -d '' _val; do
+  if _cbox_reg_validate_var "\$_key" "\$_val" >/dev/null 2>&1; then
+    printf 'accept\n'
+  else
+    printf 'reject\n'
+  fi
+done
 EOF
 chmod +x "$NEW_RUNNER"
 
@@ -454,6 +464,10 @@ _new_case CBOX_SESSION_MULTIPLEX off accept
 _new_case CBOX_SESSION_MULTIPLEX on accept
 _new_case CBOX_SESSION_MULTIPLEX bogus reject
 
+_new_case CBOX_SAFEGUARD_AUTOCONFIRM off accept
+_new_case CBOX_SAFEGUARD_AUTOCONFIRM on accept
+_new_case CBOX_SAFEGUARD_AUTOCONFIRM bogus reject
+
 _new_case CBOX_WG_FORWARDS "" accept
 _new_case CBOX_WG_FORWARDS "11434:ollama:11434" accept
 _new_case CBOX_WG_FORWARDS "11434:ollama:11434 11500:other-svc:11500" accept
@@ -504,33 +518,58 @@ _new_case CBOX_USER_DIR "" accept
 _new_case CBOX_USER_DIR "/home/user/.config/cbox/user" accept
 _new_case CBOX_USER_DIR "~/cbox-user" accept
 
+_new_case CBOX_BASHRC_COMMANDS "all" accept
+_new_case CBOX_BASHRC_COMMANDS "claude codex" accept
+_new_case CBOX_BASHRC_COMMANDS "anything goes; no validator" accept
+
+NEW_STREAM="$TMPBASE/new_stream.nul"
+: > "$NEW_STREAM"
+while IFS=$'\t' read -r key val want; do
+  [ "$val" != '<EMPTY>' ] || val=''
+  printf '%s\0%s\0' "$key" "$val" >> "$NEW_STREAM"
+done < "$NEW_CASES_FILE"
+
+NEW_VERDICTS="$TMPBASE/new_verdicts.txt"
+"$NEW_RUNNER" < "$NEW_STREAM" > "$NEW_VERDICTS"
+
+exec 9< "$NEW_VERDICTS"
 while IFS=$'\t' read -r key val want; do
   CASE_COUNT=$((CASE_COUNT + 1))
   [ "$val" != '<EMPTY>' ] || val=''
-  new_rc=0
-  "$NEW_RUNNER" "$key" "$val" || new_rc=$?
-  new_verdict="reject"; [ "$new_rc" -eq 0 ] && new_verdict="accept"
+  IFS= read -r new_verdict <&9 || new_verdict='<none>'
   if [ "$new_verdict" != "$want" ]; then
     FAIL_COUNT=$((FAIL_COUNT + 1))
     _fail "new-section validator: $key='$val' expected=$want got=$new_verdict"
   fi
 done < "$NEW_CASES_FILE"
-_ok "new-section validators (autoupdate/dns/clipboard/CBOX_NAME/CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING): verdicts match intended semantics for $(wc -l < "$NEW_CASES_FILE" | tr -d ' ') cases"
+exec 9<&-
+_ok "new-section validators (autoupdate/dns/clipboard/CBOX_NAME/CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_SAFEGUARD_AUTOCONFIRM/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING): verdicts match intended semantics for $(wc -l < "$NEW_CASES_FILE" | tr -d ' ') cases"
+
+PARITY_STREAM="$TMPBASE/parity_stream.nul"
+: > "$PARITY_STREAM"
+while IFS=$'\t' read -r key val; do
+  printf '%s\0%s\0' "$key" "$val" >> "$PARITY_STREAM"
+done < "$CASES_FILE"
+
+OLD_VERDICTS="$TMPBASE/old_verdicts.txt"
+NEW_PARITY_VERDICTS="$TMPBASE/new_parity_verdicts.txt"
+"$OLD_RUNNER" < "$PARITY_STREAM" > "$OLD_VERDICTS"
+"$NEW_RUNNER" < "$PARITY_STREAM" > "$NEW_PARITY_VERDICTS"
 
 DIVERGENCES=0
+exec 8< "$OLD_VERDICTS"
+exec 9< "$NEW_PARITY_VERDICTS"
 while IFS=$'\t' read -r key val; do
   CASE_COUNT=$((CASE_COUNT + 1))
-  old_rc=0
-  "$OLD_RUNNER" "$key" "$val" || old_rc=$?
-  new_rc=0
-  "$NEW_RUNNER" "$key" "$val" || new_rc=$?
-  old_verdict="reject"; [ "$old_rc" -eq 0 ] && old_verdict="accept"
-  new_verdict="reject"; [ "$new_rc" -eq 0 ] && new_verdict="accept"
+  IFS= read -r old_verdict <&8 || old_verdict='<none>'
+  IFS= read -r new_verdict <&9 || new_verdict='<none>'
   if [ "$old_verdict" != "$new_verdict" ]; then
     DIVERGENCES=$((DIVERGENCES + 1))
     _fail "divergence: $key='$val' old=$old_verdict new=$new_verdict"
   fi
 done < "$CASES_FILE"
+exec 8<&-
+exec 9<&-
 
 if [ "$DIVERGENCES" -eq 0 ]; then
   _ok "validator parity: $CASE_COUNT (key,value) cases, old and new verdicts identical for every case"

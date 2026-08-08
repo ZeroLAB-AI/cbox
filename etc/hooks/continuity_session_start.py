@@ -24,20 +24,21 @@ SHARED_MEMORY_BODY_BYTE_CAP = 12000
 WAVE_MARKER = "## "
 RESUME_MARKER = "RESUME"
 
-SESSION_CORE_VERSION = "session-core v1"
+SESSION_CORE_VERSION = "session-core v3"
 SESSION_CORE_VERSION_RE = re.compile(r"^Version:\s*(session-core v[0-9A-Za-z.]+)\s*$", re.MULTILINE)
 
 LIGHT_CORE = """SESSION CORE (light profile) - minimal driver floor.
 
 DELEGATE WRITE BOUNDARY: subagents and MCP delegates never write the project brain files directly - they return a distillate, and you (the driver) decide what is durable and write it yourself.
 ONE-ACTIVE-WRITER: exactly one driver writes the shared brain at a time. Update LEDGER.md before switching phases and after accepting verified work.
+PROCEED, DO NOT BLOCK: when there is work to do, do it - resolve ambiguity yourself and ask once only what genuinely gates the build; fan out ~5 peer independent tasks as multiple Agent tool uses in a single message so they run concurrently. When the owner says continue, a blocking question is a failure.
 SECURITY FLOOR: before committing changes that touch auth, API endpoints, or input handling, run the security-reviewer subagent; CRITICAL/HIGH findings block the commit.
-Full orchestration detail (fan-out/workflow, routing, cross-engine delegation, limit resume) is on disk in the session-core source; consult it before an unusual delegation. This light profile omits it to save context.
+Full orchestration detail (routing, cross-engine delegation, limit resume) is on disk in the session-core source; consult it before an unusual delegation. This light profile omits it to save context.
 """
 
 RESUME_KERNEL = """SESSION CORE (resume) - short driver kernel for a resumed/compacted session.
 
-Reconstitute from the ledger below before acting. Update LEDGER.md before switching phases and after accepting verified work. Delegates never write the brain directly - they return a distillate, you write it.
+Reconstitute from the ledger below, then PROCEED, DO NOT BLOCK: continue the queue immediately without asking - a resume nudge is the instruction to act, not a prompt to ask. Accept and commit work that already passed its gate; relaunch only unfinished work, fanning out independent peer tasks concurrently. Update LEDGER.md before switching phases and after accepting verified work. Delegates never write the brain directly - they return a distillate, you write it.
 SECURITY FLOOR: before committing changes that touch auth, API endpoints, or input handling, run the security-reviewer subagent; CRITICAL/HIGH findings block the commit.
 """
 

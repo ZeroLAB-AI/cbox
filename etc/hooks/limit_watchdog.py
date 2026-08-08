@@ -28,6 +28,24 @@ DELAY = int_env("CBOX_LIMIT_RESUME_DELAY", 300)
 PROMPT = os.environ.get("CBOX_LIMIT_RESUME_PROMPT", "pokracuj") or "pokracuj"
 STAGGER = int_env("CBOX_LIMIT_RESUME_STAGGER", 30)
 MAX_PER_DAY = int_env("CBOX_LIMIT_RESUME_MAX_PER_DAY", 10)
+
+SAFEGUARD = os.environ.get("CBOX_SAFEGUARD_AUTOCONFIRM", "off") == "on"
+SAFEGUARD_TAIL_LINES = int_env("CBOX_SAFEGUARD_TAIL_LINES", 24)
+SAFEGUARD_COOLDOWN = int_env("CBOX_SAFEGUARD_COOLDOWN", 20)
+SAFEGUARD_MAX_PER_DAY = int_env("CBOX_SAFEGUARD_MAX_PER_DAY", 40)
+SAFEGUARD_CONFIRM_KEY = "Enter"
+SAFEGUARD_CHROME_WINDOW = 4
+SAFEGUARD_ANCHOR_RE = re.compile(
+    r"safety\s+safeguards?\s+(?:triggered|switch)"
+    r"|switch(?:ing)?\s+to\s+\w+\s+(?:and\s+)?retry"
+    r"|model\s+safeguards?\s+(?:switch|triggered)", re.I)
+SAFEGUARD_CHROME_RE = re.compile(
+    r"^\s*(?:[^\w\s]\s+)?(?:\d+[.)]|\[[^\]]+\])\s")
+SAFEGUARD_FOREIGN_RE = re.compile(
+    r"do you want to proceed"
+    r"|do you trust the files"
+    r"|tell claude what to do differently"
+    r"|no,?\s+(?:and\s+)?(?:tell|keep|exit)", re.I)
 HOSTNAME = socket.gethostname()
 PANE_RE = re.compile(r"^%\d+$")
 POLL = 15
@@ -257,6 +275,132 @@ def inject(pane):
             return repr(exc)
         raise
     return None
+
+
+def capture_pane_tail(pane, lines):
+    try:
+        out = subprocess.run(
+            ["tmux", "capture-pane", "-p", "-t", pane],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        text = out.stdout.decode("utf-8", "replace")
+    except Exception:
+        return None
+    rows = text.splitlines()
+    while rows and not rows[-1].strip():
+        rows.pop()
+    return rows[-max(lines, 1):]
+
+
+def safeguard_dialog_present(pane):
+    rows = capture_pane_tail(pane, SAFEGUARD_TAIL_LINES)
+    if not rows:
+        return False
+    joined = "\n".join(rows)
+    if SAFEGUARD_FOREIGN_RE.search(joined):
+        return False
+    anchor_idx = None
+    for i, row in enumerate(rows):
+        if SAFEGUARD_ANCHOR_RE.search(row):
+            anchor_idx = i
+            break
+    if anchor_idx is None:
+        return False
+    window = rows[anchor_idx + 1:anchor_idx + 1 + SAFEGUARD_CHROME_WINDOW]
+    for row in window:
+        if SAFEGUARD_CHROME_RE.search(row):
+            return True
+    return False
+
+
+def safeguard_confirm(pane):
+    try:
+        subprocess.run(["tmux", "send-keys", "-t", pane, SAFEGUARD_CONFIRM_KEY],
+                       check=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return repr(exc)
+    return None
+
+
+_SAFEGUARD_MEM = {}
+
+
+def safeguard_pass():
+    if not os.path.isdir(PANES):
+        return
+    now = time.time()
+    today = time.strftime("%Y-%m-%d")
+    for name in sorted(farm.entries(PANES)):
+        if not name.endswith(".json"):
+            continue
+        sid = name[:-5]
+        if not farm.SID_RE.match(sid):
+            continue
+        pane = pane_for(sid)
+        if not pane or pane.get("container") != HOSTNAME:
+            continue
+        pane_id = pane.get("pane")
+        if not pane_id or not PANE_RE.match(pane_id) or not pane_alive(pane_id):
+            continue
+        try:
+            _safeguard_pane_pass(sid, pane_id, now, today)
+        except Exception as exc:
+            log("safeguard pane pass error: session=%s pane=%s %r" % (sid, pane_id, exc))
+
+
+def _safeguard_num(value):
+    return value if isinstance(value, (int, float)) else 0
+
+
+def _safeguard_pane_pass(sid, pane_id, now, today):
+    mem = _SAFEGUARD_MEM.get(sid) or {}
+    if mem.get("disabled"):
+        return
+    state_path = os.path.join(WATCH, "safeguard", sid + ".json")
+    st = load_json(state_path)
+    if not isinstance(st, dict):
+        st = {}
+    last = max(_safeguard_num(st.get("last")), _safeguard_num(mem.get("last")))
+    if now - last < SAFEGUARD_COOLDOWN:
+        return
+    if st.get("day") != today:
+        st = {"day": today, "count": 0}
+    if mem.get("day") != today:
+        mem = {"day": today, "count": 0}
+    count = max(_safeguard_num(st.get("count")), _safeguard_num(mem.get("count")))
+    if count >= SAFEGUARD_MAX_PER_DAY:
+        return
+    if not safeguard_dialog_present(pane_id):
+        return
+    err = safeguard_confirm(pane_id)
+    count += 1
+    st["last"] = now
+    st["count"] = count
+    mem = {"day": today, "count": count, "last": now}
+    _SAFEGUARD_MEM[sid] = mem
+    try:
+        os.makedirs(os.path.dirname(state_path), exist_ok=True)
+        tmp = state_path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(st, fh)
+        os.replace(tmp, state_path)
+    except OSError as exc:
+        mem["disabled"] = True
+        _SAFEGUARD_MEM[sid] = mem
+        log("safeguard state write failed, disabling session for this run: session=%s %r" % (sid, exc))
+    if err:
+        log("safeguard confirm send failed: session=%s pane=%s %s" % (sid, pane_id, err))
+        return
+    time.sleep(1)
+    if safeguard_dialog_present(pane_id):
+        log("safeguard dialog still present after confirm: session=%s pane=%s" % (sid, pane_id))
+    else:
+        log("safeguard dialog auto-confirmed: session=%s pane=%s" % (sid, pane_id))
 
 
 def marker_owns_transcript(marker, sid):
@@ -490,8 +634,9 @@ def daemon():
         return 0
     os.makedirs(MARKERS, exist_ok=True)
     os.makedirs(PANES, exist_ok=True)
-    log("watchdog started (autoresume=%s delay=%ss stagger=%ss cap=%s/day)" % (
-        "on" if AUTORESUME else "off", DELAY, STAGGER, MAX_PER_DAY))
+    log("watchdog started (autoresume=%s safeguard=%s delay=%ss stagger=%ss cap=%s/day)" % (
+        "on" if AUTORESUME else "off", "on" if SAFEGUARD else "off",
+        DELAY, STAGGER, MAX_PER_DAY))
     offsets = {}
     while True:
         try:
@@ -509,6 +654,11 @@ def daemon():
             prune()
         except Exception as exc:
             log("loop error (scan/resume/prune): %r" % exc)
+        if SAFEGUARD:
+            try:
+                safeguard_pass()
+            except Exception as exc:
+                log("loop error (safeguard): %r" % exc)
         time.sleep(POLL)
 
 

@@ -54,14 +54,14 @@ if [ "$MAPFILE_AVAILABLE" = 1 ]; then
     fi
   done
 
-  old_off=(claude)
-  mapfile -t -O "${#old_off[@]}" old_off < <(_gen_multi)
-  new_off=(claude)
+  old_off=(stale seed values)
+  mapfile -t old_off < <(_gen_multi)
+  new_off=(stale seed values)
   _cbox_readarray new_off < <(_gen_multi)
   if _array_eq old_off new_off; then
-    _ok "mapfile/offset_append: _cbox_readarray onto a pre-seeded array matches mapfile -t -O"
+    _ok "mapfile/reuse: _cbox_readarray onto a pre-seeded array replaces it, matching mapfile -t (no leftover stale entries)"
   else
-    _fail "mapfile/offset_append: mismatch old=(${old_off[*]}) new=(${new_off[*]})"
+    _fail "mapfile/reuse: mismatch old=(${old_off[*]}) new=(${new_off[*]})"
   fi
 else
   echo "SKIP: mapfile not available in this bash - the mapfile oracle needs it as counterparty, this run proves nothing about mapfile parity"
@@ -217,7 +217,7 @@ spec.loader.exec_module(mod)
 
 targets = {
     "lib/cbox-ai.sh": {"mapfile"},
-    "setup.sh": {"mapfile", "caret_expansion", "sed_i"},
+    "lib/cbox-setup.sh": {"mapfile", "caret_expansion", "sed_i"},
     "templates/generators.sh": {"caret_expansion"},
     "cbox": {"xargs_r"},
 }
@@ -233,7 +233,7 @@ PYEOF
   if [ -n "$hits" ]; then
     _fail "converted sites still trip the denylist:\n$hits"
   fi
-  _ok "denylist: mapfile/caret_expansion/sed_i/xargs_r are gone from the converted sites (cbox, setup.sh, lib/cbox-ai.sh, templates/generators.sh)"
+  _ok "denylist: mapfile/caret_expansion/sed_i/xargs_r are gone from the converted sites (cbox, lib/cbox-setup.sh, lib/cbox-ai.sh, templates/generators.sh)"
 else
   echo "SKIP: lib/portability_denylist.py not found"
 fi

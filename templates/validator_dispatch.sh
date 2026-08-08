@@ -122,6 +122,9 @@ _cbox_reg_validate_var_dispatch() {
     CBOX_BASHRC)
       _cbox_val_kind_enum "$val" '0' '1' || return 1
       ;;
+    CBOX_BASHRC_COMMANDS)
+      _cbox_val_named_no_validator "$val" || return 1
+      ;;
     CBOX_MCP_SERVERS)
       _cbox_val_named_no_validator "$val" || return 1
       ;;
@@ -237,6 +240,9 @@ _cbox_reg_validate_var_dispatch() {
       _cbox_val_kind_enum "$val" 'off' 'on' || return 1
       ;;
     CBOX_SESSION_MULTIPLEX)
+      _cbox_val_kind_enum "$val" 'off' 'on' || return 1
+      ;;
+    CBOX_SAFEGUARD_AUTOCONFIRM)
       _cbox_val_kind_enum "$val" 'off' 'on' || return 1
       ;;
     CBOX_SESSION_BROKER_MODE)

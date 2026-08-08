@@ -137,7 +137,7 @@ _dep_gate_body() {
     /^_cbox_dep_condition\(\) \{/ { infunc=1 }
     infunc { print }
     infunc && /^\}/ { infunc=0; exit }
-  ' "$INSTALL_DIR/setup.sh"
+  ' "$INSTALL_DIR/lib/cbox-setup.sh"
 }
 
 python3 -c "

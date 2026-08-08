@@ -160,6 +160,10 @@
       "layer": "host",
       "purpose": "sourced by cbox on the host (cbox:14)"
     },
+    "lib/cbox-setup.sh": {
+      "layer": "host",
+      "purpose": "the setup wizard body, sourced by cbox on the host under the 'cbox setup' verb"
+    },
     "lib/cbox_host.py": {
       "layer": "host",
       "purpose": "python3-stdlib implementation backing lib/portable.sh (the P1 waist skeleton, cbox/docs/MULTIPLATFORM_DESIGN.md section 3); sourced/invoked host-side only"
@@ -460,10 +464,6 @@
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
-    "setup.sh": {
-      "layer": "host",
-      "purpose": "the setup wizard entry point"
-    },
     "templates/conf_lib.sh": {
       "layer": "host",
       "purpose": "sourced by cbox and setup.sh on the host"
@@ -487,6 +487,30 @@
     "lib/test_user_mcp_layer.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_user_policies_layer.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_image_inputs_materialization.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_safeguard_autoconfirm.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_bashrc_chooser.sh": {
+      "layer": "test",
+      "purpose": "bash+zsh shell-rc chooser: marker-block install into both rc files, mandatory cbox wrapper, refuse-on-duplicate-marker, uninstall from both"
+    },
+    "lib/test_conf_manifest.sh": {
+      "layer": "test",
+      "purpose": "global conf-sha manifest (Q3): write/status/drift/unstamped/missing/malformed - closes the global-vs-isolated conf-drift asymmetry"
+    },
+    "lib/test_code_hygiene_guard.sh": {
+      "layer": "test",
+      "purpose": "code_hygiene_guard: non-ASCII denied in code AND docs (.md/.txt), comment/model-name checks code-only, markdown headings allowed"
     }
   },
   "generated_by": "step 0 of the multiplatform migration (cbox/docs/MULTIPLATFORM_DESIGN.md section 4)",

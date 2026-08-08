@@ -180,7 +180,7 @@ _ensure_scope_services() {
   if [ -f "$farmpy" ]; then
     _as_user python3 "$farmpy" --once || true
   else
-    echo "entrypoint: session_scope_farm.py missing in ~/.claude/hooks - the scoped session view stays EMPTY (no sessions in the task manager) until the hooks are deployed: run './setup.sh update hooks' or 'cbox install-hooks' on the host" >&2
+    echo "entrypoint: session_scope_farm.py missing in ~/.claude/hooks - the scoped session view stays EMPTY (no sessions in the task manager) until the hooks are deployed: run 'cbox setup update hooks' or 'cbox install-hooks' on the host" >&2
   fi
   if [ -f "$watchpy" ]; then
     _as_user setsid python3 "$watchpy" --daemon < /dev/null > /dev/null 2>&1 &
@@ -253,7 +253,7 @@ if stale:
         "entrypoint: " + path + " has codex mcp server(s) not wrapped by codex_mcp_shim.py ("
         + ", ".join(sorted(stale))
         + ") - tier injection and the delegation depth guard would be bypassed; "
-        "refusing to start claude - run './setup.sh update mcp-servers' or "
+        "refusing to start claude - run 'cbox setup update mcp-servers' or "
         "'cbox install-hooks' on the host, then recreate the container\n"
     )
     sys.exit(1)
@@ -338,15 +338,15 @@ _multiplex_run() {
 _codex_profile_preflight() {
   local profile="$HOST_HOME/.codex/cbox-container.config.toml"
   if [ ! -e "$profile" ]; then
-    echo "entrypoint: codex managed profile missing at $profile - host re-bless required: run './setup.sh update hooks' on the host, then recreate the container" >&2
+    echo "entrypoint: codex managed profile missing at $profile - host re-bless required: run 'cbox setup update hooks' on the host, then recreate the container" >&2
     return 1
   fi
   if [ ! -f "$profile" ]; then
-    echo "entrypoint: codex managed profile at $profile is not a regular file - host re-bless required: run './setup.sh update hooks' on the host" >&2
+    echo "entrypoint: codex managed profile at $profile is not a regular file - host re-bless required: run 'cbox setup update hooks' on the host" >&2
     return 1
   fi
   if [ ! -s "$profile" ]; then
-    echo "entrypoint: codex managed profile at $profile is empty - host re-bless required: run './setup.sh update hooks' on the host" >&2
+    echo "entrypoint: codex managed profile at $profile is empty - host re-bless required: run 'cbox setup update hooks' on the host" >&2
     return 1
   fi
   if ! python3 -c '
@@ -356,7 +356,7 @@ path = sys.argv[1]
 with open(path, "rb") as f:
     tomllib.load(f)
 ' "$profile" 2>/dev/null; then
-    echo "entrypoint: codex managed profile at $profile does not parse as TOML - host re-bless required: run './setup.sh update hooks' on the host" >&2
+    echo "entrypoint: codex managed profile at $profile does not parse as TOML - host re-bless required: run 'cbox setup update hooks' on the host" >&2
     return 1
   fi
   local hooks_json="$HOST_HOME/.codex/hooks.json"
@@ -367,11 +367,11 @@ import sys
 with open(sys.argv[1], "r", encoding="utf-8") as f:
     json.load(f)
 ' "$hooks_json" 2>/dev/null; then
-      echo "entrypoint: codex managed hooks.json at $hooks_json does not parse as JSON - host re-bless required: run '\''./setup.sh update hooks'\'' on the host" >&2
+      echo "entrypoint: codex managed hooks.json at $hooks_json does not parse as JSON - host re-bless required: run '\''cbox setup update hooks'\'' on the host" >&2
       return 1
     fi
     if [ -w "$hooks_json" ]; then
-      echo "entrypoint: codex managed hooks.json at $hooks_json is writable by the container user - refusing to run codex with --dangerously-bypass-hook-trust against an untrusted mount; host re-bless required: run './setup.sh update hooks' on the host" >&2
+      echo "entrypoint: codex managed hooks.json at $hooks_json is writable by the container user - refusing to run codex with --dangerously-bypass-hook-trust against an untrusted mount; host re-bless required: run 'cbox setup update hooks' on the host" >&2
       return 1
     fi
   fi
@@ -522,6 +522,72 @@ os.replace(tmp_path, config_path)
 PY
 }
 
+_hermes_user_policies_preamble() {
+  local dir=/etc/cbox/user/policies
+  local cap=16384
+  local total=0
+  local out=""
+  local base f sz dirname_of_f
+  [ -d "$dir" ] || return 0
+  local -a files=()
+  for f in "$dir"/*.md; do
+    [ -e "$f" ] || continue
+    [ -f "$f" ] || continue
+    base="${f##*/}"
+    dirname_of_f="${f%/*}"
+    if [ "$dirname_of_f" != "$dir" ]; then
+      echo "entrypoint: user policy '$base' skipped - unsupported filename" >&2
+      continue
+    fi
+    case "$base" in
+      [A-Za-z0-9]*.md)
+        case "$base" in
+          *[!A-Za-z0-9._-]*)
+            echo "entrypoint: user policy '$base' skipped - unsupported filename" >&2
+            continue
+            ;;
+        esac
+        ;;
+      *)
+        echo "entrypoint: user policy '$base' skipped - unsupported filename" >&2
+        continue
+        ;;
+    esac
+    files+=("$f")
+  done
+  local -a sorted_files=()
+  if [ "${#files[@]}" -gt 0 ]; then
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      sorted_files+=("$f")
+    done < <(printf '%s\n' "${files[@]}" | LC_ALL=C sort)
+  fi
+  local accounted=0
+  for f in "${sorted_files[@]}"; do
+    base="${f##*/}"
+    sz="$(wc -c <"$f")" || continue
+    accounted=$((sz))
+    [ -n "$out" ] && accounted=$((accounted + 2))
+    if [ $((total + accounted)) -gt "$cap" ]; then
+      echo "entrypoint: user policy '$base' skipped - hermes user policy cap $cap bytes" >&2
+      continue
+    fi
+    total=$((total + accounted))
+    out="${out:+$out$'\n\n'}$(cat "$f")"
+  done
+  if [ -n "$out" ]; then
+    local measured
+    measured="$(printf '%s' "$out" | wc -c)"
+    if [ "$measured" -gt "$cap" ]; then
+      echo "entrypoint: user policies dropped - assembled preamble grew past the hermes user policy cap $cap bytes between measurement and read (concurrent write to $dir)" >&2
+      printf ''
+      return 0
+    fi
+    out="$out"$'\n\n'"===== cbox conduct kernel below - authoritative, wins over any user policy above ====="
+  fi
+  printf '%s' "$out"
+}
+
 _hermes_kernel_preamble() {
   local kernel="$HOST_HOME/.claude/hooks/conduct-kernel.txt"
   local core="$HOST_HOME/.claude/hooks/session-core.txt"
@@ -529,14 +595,23 @@ _hermes_kernel_preamble() {
   if [ -f "$kernel" ]; then
     out="$(cat "$kernel")"
   else
-    echo "entrypoint: $kernel missing - hermes starts this session without the conduct kernel; run './setup.sh update hooks' on the host" >&2
+    echo "entrypoint: $kernel missing - hermes starts this session without the conduct kernel; run 'cbox setup update hooks' on the host" >&2
   fi
   if [ -f "$core" ]; then
     out="${out:+$out$'\n\n'}$(cat "$core")"
   else
-    echo "entrypoint: $core missing - hermes starts this session without the session core; run './setup.sh update hooks' on the host" >&2
+    echo "entrypoint: $core missing - hermes starts this session without the session core; run 'cbox setup update hooks' on the host" >&2
   fi
   printf '%s' "$out"
+}
+
+_hermes_compose_session_prompt() {
+  local user_preamble="$1" kernel_prompt="$2"
+  if [ -n "$kernel_prompt" ] && [ -n "$user_preamble" ]; then
+    printf '%s' "$user_preamble"$'\n\n'"$kernel_prompt"
+  else
+    printf '%s' "$kernel_prompt"
+  fi
 }
 
 _guard_socks_proxy
@@ -571,19 +646,20 @@ case "${1:-}" in
     fi
     if [ -t 0 ] && [ -t 1 ] \
         && { [ "${CBOX_SESSION_MULTIPLEX:-off}" = on ] \
-             || { [ "$_verb" = claude ] && [ "${CBOX_LIMIT_AUTORESUME:-off}" = on ]; }; }; then
+             || { [ "$_verb" = claude ] && [ "${CBOX_LIMIT_AUTORESUME:-off}" = on ]; } \
+             || { [ "$_verb" = claude ] && [ "${CBOX_SAFEGUARD_AUTOCONFIRM:-off}" = on ]; }; }; then
       if command -v tmux >/dev/null 2>&1; then
         _multiplex_run "$_verb" "$_resolved" "$@"
       fi
-      echo "entrypoint: session multiplexing wanted (CBOX_SESSION_MULTIPLEX=${CBOX_SESSION_MULTIPLEX:-off}, CBOX_LIMIT_AUTORESUME=${CBOX_LIMIT_AUTORESUME:-off}) but tmux is missing in this image - rebuild on the host (next 'cbox run' after re-bless); running without a session wrapper" >&2
+      echo "entrypoint: session multiplexing wanted (CBOX_SESSION_MULTIPLEX=${CBOX_SESSION_MULTIPLEX:-off}, CBOX_LIMIT_AUTORESUME=${CBOX_LIMIT_AUTORESUME:-off}, CBOX_SAFEGUARD_AUTOCONFIRM=${CBOX_SAFEGUARD_AUTOCONFIRM:-off}) but tmux is missing in this image - rebuild on the host (next 'cbox run' after re-bless); running without a session wrapper" >&2
     fi
     _run_as_user "$_resolved" "$@"
     ;;
   hermes)
-    : "${CBOX_HERMES:?entrypoint: CBOX_HERMES is off - enable and rebuild first: ./setup.sh update hermes}"
+    : "${CBOX_HERMES:?entrypoint: CBOX_HERMES is off - enable and rebuild first: cbox setup update hermes}"
     [ "$CBOX_HERMES" = on ] \
-      || { echo "entrypoint: hermes is disabled (CBOX_HERMES=$CBOX_HERMES) - run './setup.sh update hermes' on the host, then rebuild" >&2; exit 1; }
-    : "${CBOX_HERMES_VERSION:?entrypoint: CBOX_HERMES_VERSION is unset - run ./setup.sh update hermes}"
+      || { echo "entrypoint: hermes is disabled (CBOX_HERMES=$CBOX_HERMES) - run 'cbox setup update hermes' on the host, then rebuild" >&2; exit 1; }
+    : "${CBOX_HERMES_VERSION:?entrypoint: CBOX_HERMES_VERSION is unset - run cbox setup update hermes}"
     if [ ! -x /opt/hermes/bin/hermes ]; then
       echo "entrypoint: /opt/hermes/bin/hermes missing or not executable - the hermes bins volume is empty, run 'cbox reinstall-bins' on the host" >&2
       exit 1
@@ -603,7 +679,9 @@ case "${1:-}" in
     fi
     _hermes_apply_managed_env /etc/cbox/hermes-managed/managed.env || exit 1
     _hermes_apply_mcp_servers /etc/cbox/hermes-managed/mcp_servers.yaml "$HERMES_HOME/config.yaml" || exit 1
+    _hermes_user_preamble="$(_hermes_user_policies_preamble)"
     _hermes_session_prompt="$(_hermes_kernel_preamble)"
+    _hermes_session_prompt="$(_hermes_compose_session_prompt "$_hermes_user_preamble" "$_hermes_session_prompt")"
     if [ -n "${HERMES_EPHEMERAL_SYSTEM_PROMPT:-}" ]; then
       _hermes_session_prompt="${_hermes_session_prompt:+$_hermes_session_prompt$'\n\n'}$HERMES_EPHEMERAL_SYSTEM_PROMPT"
     fi

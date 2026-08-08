@@ -51,8 +51,20 @@ def engines_from_registry(install_dir):
 
 
 class Probe(object):
-    def __init__(self, ctx):
+    def __init__(self, ctx, install_dir=None):
         self.ctx = ctx
+        self._argv1_cache = {}
+        self._engines = {}
+        if install_dir:
+            reg = os.path.join(install_dir, "etc", "engines", "engines.json")
+            try:
+                with open(reg, encoding="utf-8") as fh:
+                    data = json.load(fh)
+                eng = data.get("engines")
+                if isinstance(eng, dict):
+                    self._engines = eng
+            except (OSError, ValueError):
+                self._engines = {}
 
     def container_id(self):
         compose = self.ctx.get("compose_argv")
@@ -97,8 +109,48 @@ class Probe(object):
             return dict((n, "unknown") for n in names)
         result = {}
         for n in names:
-            result[n] = "unknown"
+            argv1 = self._probe_argv1(n)
+            result[n] = self._scan_one(cid, argv1)
         return result
+
+    def _probe_argv1(self, name):
+        argv1 = self._argv1_cache.get(name)
+        if argv1 is not None:
+            return argv1
+        argv1 = name
+        meta = self._engines.get(name)
+        if isinstance(meta, dict):
+            probe = meta.get("probe")
+            if isinstance(probe, dict) and probe.get("kind") == "canonical-paths":
+                cand = probe.get("argv1")
+                if isinstance(cand, list) and cand:
+                    argv1 = cand[0]
+        self._argv1_cache[name] = argv1
+        return argv1
+
+    def _scan_one(self, cid, argv1):
+        script = (
+            'for p in /proc/[0-9]*/cmdline; do\n'
+            '  [ -e "$p" ] || continue\n'
+            '  a0="$(tr "\\0" "\\n" < "$p" 2>/dev/null | sed -n 1p)"\n'
+            '  a1="$(tr "\\0" "\\n" < "$p" 2>/dev/null | sed -n 2p)"\n'
+            '  case "$a0" in\n'
+            '    */entrypoint.sh) [ "$a1" = "$1" ] && exit 0 ;;\n'
+            '    "$1") exit 0 ;;\n'
+            '  esac\n'
+            'done\n'
+            'exit 1\n'
+        )
+        try:
+            out = subprocess.run(
+                ["docker", "exec", cid, "sh", "-c", script, "sh", argv1],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return "unknown"
+        return "running" if out.returncode == 0 else "down"
 
 
 class NullProbe(object):
@@ -293,12 +345,14 @@ def main(argv):
         return 1
 
     ctx = context_from_cbox(install_dir, cbox_path)
-    if ctx is None or ctx.get("mode") not in ("global", "isolated"):
+    if ctx is None:
         sys.stdout.write(usage_text(cbox_path))
         sys.stdout.write("cbox: 'cbox ls' lists RUNNING isolated projects only, not every configured project\n")
         return 1
+    if ctx.get("mode") not in ("global", "isolated"):
+        return HUB_NO_CONFIG_EXIT
 
-    probe = Probe(ctx)
+    probe = Probe(ctx, install_dir)
     try:
         return hub_loop(install_dir, cbox_path, ctx, probe, sys.stdin, stderr_write)
     except KeyboardInterrupt:
@@ -307,6 +361,7 @@ def main(argv):
 
 
 HUB_CORE_FAILURE_EXIT = 97
+HUB_NO_CONFIG_EXIT = 96
 
 
 if __name__ == "__main__":

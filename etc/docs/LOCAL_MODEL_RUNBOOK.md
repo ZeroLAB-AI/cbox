@@ -32,7 +32,7 @@ Ollama runs in a separate owner compose project under ~/.config/cbox/infra/ollam
 automatically managed by cbox. This is the primary path: simple, ephemeral, and
 survives per-project container lifecycle.
 
-1. Run `./setup.sh update ollama` (or the interactive wizard, section "ollama")
+1. Run `cbox setup update ollama` (or the interactive wizard, section "ollama")
    and set `CBOX_OLLAMA_MODE=on`. Optionally set `CBOX_OLLAMA_GPU=cdi` if GPU
    access is available, `CBOX_OLLAMA_IMAGE` to pin a different image tag, or
    other variables (see cbox/MANUAL.md section "ollama" for full configuration).
@@ -41,8 +41,8 @@ survives per-project container lifecycle.
    server before pulling (so the pull endpoint receives egress permission once
    then loses it), and restarts the server afterward.
 3. Set `CBOX_LOCAL_MODEL_URL=http://ollama:11434` and `CBOX_LOCAL_MODEL_NAME=qwen2.5:7b`.
-4. Run `./setup.sh update local-model` to persist the local-model settings,
-   then `./setup.sh update mcp-servers` or restart the container so the MCP
+4. Run `cbox setup update local-model` to persist the local-model settings,
+   then `cbox setup update mcp-servers` or restart the container so the MCP
    server list picks up local-qwen.
 
 The cbox-managed owner project (`cbox-infra-u<uid>`) is machine-scoped: every
@@ -60,7 +60,7 @@ it is absent from the list entirely. With the default CBOX_MCP_SERVERS=all
 this self-heals: configuring local-model afterward calls mcp_apply_selection
 automatically and picks it up with no extra step. If CBOX_MCP_SERVERS was
 narrowed to an explicit subset before local-model was configured, re-run
-`./setup.sh update mcp-servers` once after setting the URL to add local-qwen
+`cbox setup update mcp-servers` once after setting the URL to add local-qwen
 to that subset.
 
 ## Path B: Manual sibling container (deprecated; use Path A)
@@ -78,7 +78,7 @@ If you choose this path:
 3. Configure netaccess to join cbox to the model server container's network
    (not a wizard setting - cbox netaccess allow <docker-network> on the host).
 4. Set `CBOX_LOCAL_MODEL_URL=http://ollama:11434` and `CBOX_LOCAL_MODEL_NAME=qwen2.5:7b`.
-5. Run `./setup.sh update local-model`, then `./setup.sh update mcp-servers` or restart.
+5. Run `cbox setup update local-model`, then `cbox setup update mcp-servers` or restart.
 
 ## Path C: ollama as a host process (via host-route gateway)
 
@@ -88,10 +88,10 @@ raw host-network mount.
 
 1. On the host: ensure ollama listens beyond 127.0.0.1 (e.g. `OLLAMA_HOST=0.0.0.0:11434 ollama serve`).
 2. Pull the model: `ollama pull qwen2.5:7b` (pick a qwen variant that fits available VRAM/RAM).
-3. Enable host-route via `./setup.sh update hostroute`: set `CBOX_HOST_ROUTE_MODE=host-proxy` and optionally `CBOX_HOST_GATEWAY_ALIAS=on` (renders `extra_hosts: host.docker.internal` for `http://host.docker.internal:11434` URLs inside the container).
+3. Enable host-route via `cbox setup update hostroute`: set `CBOX_HOST_ROUTE_MODE=host-proxy` and optionally `CBOX_HOST_GATEWAY_ALIAS=on` (renders `extra_hosts: host.docker.internal` for `http://host.docker.internal:11434` URLs inside the container).
 4. Set `CBOX_LOCAL_MODEL_URL=http://host.docker.internal:11434` (or use the explicit proxy URL if `CBOX_HOST_GATEWAY_ALIAS` is off; the exact URL depends on `CBOX_HOST_PROXY_ADDR_MODE`).
 5. Set `CBOX_LOCAL_MODEL_NAME=qwen2.5:7b`.
-6. Run `./setup.sh update local-model` to persist the settings, then `./setup.sh update mcp-servers` or restart the container so the MCP server list picks up local-qwen.
+6. Run `cbox setup update local-model` to persist the settings, then `cbox setup update mcp-servers` or restart the container so the MCP server list picks up local-qwen.
 
 Caveat: the host process must listen beyond 127.0.0.1. If listening only on the loopback, the container cannot reach it even through the proxy. Under rootless docker the host-gateway alias does not work; use an explicit host tunnel interface IP (e.g. a wireguard tunnel IP) instead.
 
@@ -105,7 +105,7 @@ tunnel IP of the remote machine.
 2. Establish a wireguard tunnel to that machine (setup and join are host OS steps, outside cbox scope).
 3. On the host running cbox: note the tunnel IP of the remote machine (e.g. `10.0.0.5`).
 4. Set `CBOX_LOCAL_MODEL_URL=http://10.0.0.5:11434` and `CBOX_LOCAL_MODEL_NAME=qwen2.5:7b` (or appropriate model name).
-5. Run `./setup.sh update local-model` to persist the settings, then `./setup.sh update mcp-servers` or restart the container.
+5. Run `cbox setup update local-model` to persist the settings, then `cbox setup update mcp-servers` or restart the container.
 
 Caveat under egress lockdown or SOCKS mode: the remote endpoint must be explicitly allowed in the egress allowlist, or those modes must be turned off entirely for the wireguard path to work.
 

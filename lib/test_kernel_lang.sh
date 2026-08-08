@@ -185,22 +185,22 @@ _render_claude_md_kernel_block() {
       /^kernel_lang_rule_line\(\) \{/ { infunc=1 }
       infunc { print }
       infunc && /^\}/ { infunc=0 }
-    ' "$INSTALL_DIR/setup.sh")"
+    ' "$INSTALL_DIR/lib/cbox-setup.sh")"
     eval "$(awk '
       /^apply_kernel_lang_rule\(\) \{/ { infunc=1 }
       infunc { print }
       infunc && /^\}/ { infunc=0 }
-    ' "$INSTALL_DIR/setup.sh")"
+    ' "$INSTALL_DIR/lib/cbox-setup.sh")"
     eval "$(awk '
       /^claude_md_container_exec_paragraph\(\) \{/ { infunc=1 }
       infunc { print }
       infunc && /^\}/ { infunc=0 }
-    ' "$INSTALL_DIR/setup.sh")"
+    ' "$INSTALL_DIR/lib/cbox-setup.sh")"
     eval "$(awk '
       /^claude_md_kernel_block_file\(\) \{/ { infunc=1 }
       infunc { print }
       infunc && /^\}/ { infunc=0 }
-    ' "$INSTALL_DIR/setup.sh")"
+    ' "$INSTALL_DIR/lib/cbox-setup.sh")"
     claude_md_kernel_block_file "$out"
   )
 }

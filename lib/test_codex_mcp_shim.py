@@ -355,5 +355,137 @@ class KernelPathTests(unittest.TestCase):
         self.assertNotEqual(SHIM.kernel_path(), "/tmp/attacker-kernel.txt")
 
 
+class DescribeFilterTests(unittest.TestCase):
+    def test_skip_types_return_none(self):
+        for t in SHIM.SKIP:
+            self.assertIsNone(SHIM.describe({"type": t}), t)
+
+    def test_delta_types_return_none(self):
+        for t in ("agent_message_content_delta", "exec_command_output_delta",
+                  "reasoning_content_delta", "plan_delta"):
+            self.assertIsNone(SHIM.describe({"type": t}), t)
+
+    def test_milestone_types_describe_nonempty(self):
+        self.assertEqual(SHIM.describe({"type": "task_started"}), "task started")
+        self.assertEqual(SHIM.describe({"type": "task_complete"}), "task complete")
+        self.assertTrue(SHIM.describe(
+            {"type": "exec_command_begin", "command": ["ls", "-la"]}).startswith("exec: ls"))
+        self.assertEqual(
+            SHIM.describe({"type": "agent_message", "message": "hi there"}), "msg: hi there")
+
+    def test_non_string_type_returns_none(self):
+        self.assertIsNone(SHIM.describe({"type": None}))
+        self.assertIsNone(SHIM.describe({}))
+
+
+class ProgressStreamTests(unittest.TestCase):
+    def _relay(self, progress_on=True):
+        r = SHIM.Relay(
+            tier="test", model="test", effort="test", progress_on=progress_on,
+            child_argv=[sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+            log_path="", depth_stub=False, kernel_text="test",
+        )
+        self.addCleanup(self._teardown, r)
+        return r
+
+    def _teardown(self, r):
+        child = r.child
+        if child.poll() is None:
+            child.terminate()
+            child.wait(timeout=5)
+        child.stdin.close()
+        child.stdout.close()
+
+    def _event(self, rid, etype, **fields):
+        params = {"_meta": {"requestId": rid}, "msg": dict(type=etype, **fields)}
+        return json.dumps({"jsonrpc": "2.0", "method": "codex/event", "params": params})
+
+    def _tools_call(self, rid, token):
+        return {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                "params": {"name": "other-tool", "_meta": {"progressToken": token},
+                           "arguments": {}}}
+
+    def test_progresstoken_registered_on_tools_call(self):
+        r = self._relay()
+        r.on_up(json.dumps(self._tools_call(7, "tok7")).encode() + b"\n")
+        self.assertIn(7, r.progress_calls)
+        self.assertEqual(r.progress_calls[7][0], "tok7")
+
+    def test_eviction_pops_paired_progress_calls(self):
+        r = self._relay()
+        for i in range(SHIM.MAX_CALLS + 5):
+            r.on_up(json.dumps(self._tools_call(i, "t%d" % i)).encode() + b"\n")
+        self.assertEqual(len(r.calls), SHIM.MAX_CALLS)
+        self.assertLessEqual(len(r.progress_calls), SHIM.MAX_CALLS,
+                             "progress_calls leaked past MAX_CALLS - eviction did not pop the pair")
+        self.assertEqual(set(r.calls), set(r.progress_calls),
+                         "calls and progress_calls diverged after eviction")
+
+    def test_milestone_event_synthesizes_progress(self):
+        r = self._relay()
+        r.progress_calls[9] = ["tok9", 0]
+        out = r.on_down(self._event(9, "task_started"))
+        self.assertEqual(len(out), 2, "expected [raw, synthetic-progress] pair")
+        note = json.loads(out[1])
+        self.assertEqual(note["method"], "notifications/progress")
+        self.assertEqual(note["params"]["progressToken"], "tok9")
+        self.assertEqual(note["params"]["message"], "task started")
+        self.assertEqual(r.progress_calls[9][1], 1)
+
+    def test_delta_event_passes_raw_only_no_progress(self):
+        r = self._relay()
+        r.progress_calls[9] = ["tok9", 0]
+        out = r.on_down(self._event(9, "agent_message_content_delta", delta="tok"))
+        self.assertEqual(len(out), 1, "delta must not synthesize a progress note")
+
+    def test_missing_progresstoken_entry_passes_raw_only(self):
+        r = self._relay()
+        out = r.on_down(self._event(123, "task_started"))
+        self.assertEqual(len(out), 1,
+                         "event with no registered progressToken must pass raw with no progress")
+
+    def test_progress_suppressed_when_progress_off(self):
+        r = self._relay(progress_on=False)
+        r.progress_calls[9] = ["tok9", 0]
+        out = r.on_down(self._event(9, "task_started"))
+        self.assertEqual(len(out), 1)
+
+    def test_string_meta_rid_coerces_to_int_entry(self):
+        r = self._relay()
+        r.progress_calls[9] = ["tok9", 0]
+        out = r.on_down(self._event("9", "task_started"))
+        self.assertEqual(len(out), 2, "string requestId must resolve the int-keyed entry")
+        self.assertEqual(json.loads(out[1])["params"]["progressToken"], "tok9")
+
+    def test_int_meta_rid_coerces_to_string_entry(self):
+        r = self._relay()
+        r.progress_calls["9"] = ["tok9s", 0]
+        out = r.on_down(self._event(9, "task_started"))
+        self.assertEqual(len(out), 2, "int requestId must resolve the string-keyed entry")
+        self.assertEqual(json.loads(out[1])["params"]["progressToken"], "tok9s")
+
+    def test_single_active_fallback_routes_when_meta_rid_absent(self):
+        r = self._relay()
+        r.progress_calls[9] = ["tok9", 0]
+        params = {"msg": {"type": "task_started"}}
+        raw = json.dumps({"jsonrpc": "2.0", "method": "codex/event", "params": params})
+        out = r.on_down(raw)
+        self.assertEqual(len(out), 2,
+                         "with exactly one tracked call and no requestId, the single-active "
+                         "fallback must route progress to it")
+        self.assertEqual(json.loads(out[1])["params"]["progressToken"], "tok9")
+
+    def test_no_fallback_when_multiple_active_and_meta_rid_absent(self):
+        r = self._relay()
+        r.progress_calls[9] = ["tok9", 0]
+        r.progress_calls[10] = ["tok10", 0]
+        params = {"msg": {"type": "task_started"}}
+        raw = json.dumps({"jsonrpc": "2.0", "method": "codex/event", "params": params})
+        out = r.on_down(raw)
+        self.assertEqual(len(out), 1,
+                         "with 2+ tracked calls and no requestId, progress must NOT be "
+                         "guessed - raw passes through with no synthetic note")
+
+
 if __name__ == "__main__":
     unittest.main()

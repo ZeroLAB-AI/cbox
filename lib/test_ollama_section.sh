@@ -145,7 +145,7 @@ _load_setup_functions() {
     /^_cbox_strip_machine_scoped_vars\(\) \{/ { infunc=1 }
     infunc { print }
     infunc && /^\}/ { infunc=0 }
-  ' "$INSTALL_DIR/setup.sh" > "$TMPBASE/setup_functions.sh"
+  ' "$INSTALL_DIR/lib/cbox-setup.sh" > "$TMPBASE/setup_functions.sh"
   source "$TMPBASE/setup_functions.sh"
 }
 _load_setup_functions
@@ -213,20 +213,20 @@ grep -q '^CBOX_MODE=set-value' "$STRIPCONF" || _fail "isolated-derivation skip: 
 grep -q '^CBOX_NAME=myprofile' "$STRIPCONF" || _fail "isolated-derivation skip: an untouched non-whitelisted line should survive the strip"
 _ok "isolated-derivation skip: _cbox_strip_machine_scoped_vars removes exactly the ollama lines, leaves everything else"
 
-run_local_line="$(grep -n '_cbox_strip_machine_scoped_vars "\$eff/cbox.conf"' "$INSTALL_DIR/setup.sh" | head -1)"
+run_local_line="$(grep -n '_cbox_strip_machine_scoped_vars "\$eff/cbox.conf"' "$INSTALL_DIR/lib/cbox-setup.sh" | head -1)"
 [ -n "$run_local_line" ] || _fail "wiring: run_local (isolated derivation) does not call _cbox_strip_machine_scoped_vars on \$eff/cbox.conf"
-save_line_no="$(grep -n 'conf_save "\$eff/cbox.conf"' "$INSTALL_DIR/setup.sh" | head -1 | cut -d: -f1)"
+save_line_no="$(grep -n 'conf_save "\$eff/cbox.conf"' "$INSTALL_DIR/lib/cbox-setup.sh" | head -1 | cut -d: -f1)"
 strip_line_no="${run_local_line%%:*}"
 [ "$strip_line_no" -gt "$save_line_no" ] || _fail "wiring: _cbox_strip_machine_scoped_vars must run after conf_save \$eff/cbox.conf, not before"
 _ok "wiring: run_local calls _cbox_strip_machine_scoped_vars right after conf_save \$eff/cbox.conf (line $strip_line_no > $save_line_no)"
 
-run_local_wizard_subset="$(awk '/^run_local_wizard_subset\(\) \{/,/^}$/' "$INSTALL_DIR/setup.sh")"
+run_local_wizard_subset="$(awk '/^run_local_wizard_subset\(\) \{/,/^}$/' "$INSTALL_DIR/lib/cbox-setup.sh")"
 case "$run_local_wizard_subset" in
   *step_ollama*) _fail "wiring: run_local_wizard_subset (isolated per-project wizard) must never call step_ollama" ;;
 esac
 _ok "wiring: the isolated per-project wizard never calls step_ollama (machine-scoped section is never asked per-project)"
 
-step_ollama_body="$(awk '/^step_ollama\(\) \{/,/^}$/' "$INSTALL_DIR/setup.sh")"
+step_ollama_body="$(awk '/^step_ollama\(\) \{/,/^}$/' "$INSTALL_DIR/lib/cbox-setup.sh")"
 [ -n "$step_ollama_body" ] || _fail "wiring: step_ollama function not found in setup.sh"
 _ok "wiring: step_ollama wizard function exists in setup.sh"
 

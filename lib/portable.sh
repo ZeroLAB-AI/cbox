@@ -67,6 +67,7 @@ _cbox_is_darwin() {
 _cbox_readarray() {
   local _cbox_readarray_var="$1"
   local _cbox_readarray_line
+  eval "$_cbox_readarray_var=()"
   while IFS= read -r _cbox_readarray_line || [ -n "$_cbox_readarray_line" ]; do
     eval "$_cbox_readarray_var+=(\"\$_cbox_readarray_line\")"
   done

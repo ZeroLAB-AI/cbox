@@ -13,6 +13,9 @@
     "lib/cbox-session.sh": {
       "proc_path": 3
     },
+    "lib/cbox_hub.py": {
+      "proc_path": 1
+    },
     "templates/generators.sh": {
       "proc_path": 1
     }
@@ -21,7 +24,7 @@
   "schema_version": 1,
   "totals": {
     "ip_route": 1,
-    "proc_path": 8,
+    "proc_path": 9,
     "raw_timeout": 2,
     "stat_c": 2
   }

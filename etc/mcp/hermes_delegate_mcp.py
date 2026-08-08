@@ -439,7 +439,7 @@ def _apply_config(ephemeral_home, env_base):
         return ("refusing to delegate: neither " + PROVIDER_VAR + " nor " + CONSOLE_PROVIDER_VAR
                 + " is set, so the endpoint would come from the template home that the hermes"
                 " package seeds for itself - set one on the host with"
-                " './setup.sh update hermes-delegate' or"
+                " 'cbox setup update hermes-delegate' or"
                 " 'cbox config set " + PROVIDER_VAR + "=<provider>'")
     if not _validate_provider(provider):
         return ("invalid " + PROVIDER_VAR + " - expected one of %r"

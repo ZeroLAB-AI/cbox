@@ -33,10 +33,10 @@ None of this has been executed live from the build environment, so a live test o
 
 ### Step 1: Enable cbox-managed ollama on Machine A
 
-Run `./setup.sh` on Machine A and enable the ollama section:
+Run `cbox setup` on Machine A and enable the ollama section:
 
 ```bash
-./setup.sh update ollama
+cbox setup update ollama
 ```
 
 When prompted, set `CBOX_OLLAMA_MODE=on`. Optionally set `CBOX_OLLAMA_GPU=cdi` if you have GPU access. Accept other defaults or customize as needed.
@@ -67,10 +67,10 @@ Should report `OFF` (sidecar not yet enabled) but the keys will be present and r
 
 ### Step 4: Enable WireGuard server role on Machine A
 
-Run `./setup.sh` and go to the wireguard section:
+Run `cbox setup` and go to the wireguard section:
 
 ```bash
-./setup.sh update wireguard
+cbox setup update wireguard
 ```
 
 When prompted:
@@ -138,10 +138,10 @@ Share this value with the operator of Machine A (out-of-band).
 
 ### Step 2: Enable WireGuard client role on Machine B
 
-Run `./setup.sh` and go to the wireguard section:
+Run `cbox setup` and go to the wireguard section:
 
 ```bash
-./setup.sh update wireguard
+cbox setup update wireguard
 ```
 
 When prompted:
@@ -177,7 +177,7 @@ Should report `ACTIVE: kernel` (or `userspace`), and the peer handshake timestam
 Set up a local model that points to the remote ollama via the tunnel:
 
 ```bash
-./setup.sh update local-model
+cbox setup update local-model
 ```
 
 When prompted:
@@ -212,7 +212,7 @@ You should see the list of models available on Machine A's ollama. If the endpoi
 
 ### Switching from server to client (or vice versa)
 
-Edit `cbox.conf` manually or use `./setup.sh update wireguard` to change `CBOX_WG_MODE`. Then reconcile:
+Edit `cbox.conf` manually or use `cbox setup update wireguard` to change `CBOX_WG_MODE`. Then reconcile:
 
 ```bash
 cbox ollama reconcile
@@ -225,7 +225,7 @@ The sidecar reconfigures in place.
 Set `CBOX_WG_MODE=off`:
 
 ```bash
-./setup.sh update wireguard
+cbox setup update wireguard
 # or manually edit ~/.config/cbox/cbox.conf: CBOX_WG_MODE=off
 ```
 

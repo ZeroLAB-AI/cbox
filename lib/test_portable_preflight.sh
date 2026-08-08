@@ -23,7 +23,7 @@ grep -Eq '\bmapfile\b' "$PREFLIGHT" && _fail "portable_preflight.sh contains map
 ! grep -Eq '\$\{[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?(\^|,,?)' "$PREFLIGHT" || _fail "portable_preflight.sh contains a bash-4 case-conversion expansion (must be bash-3.2 safe)"
 _ok "portable_preflight.sh source text carries no bash-4-only construct (declare -A / mapfile / \${var^})"
 
-for f in "$INSTALL_DIR/cbox" "$INSTALL_DIR/setup.sh"; do
+for f in "$INSTALL_DIR/cbox"; do
   name="$(basename "$f")"
   first_nonshebang_line="$(sed -n '2p' "$f")"
   case "$first_nonshebang_line" in

@@ -161,7 +161,7 @@ _load_setup_functions() {
     /^_cbox_strip_machine_scoped_vars\(\) \{/ { infunc=1 }
     infunc { print }
     infunc && /^\}/ { infunc=0 }
-  ' "$INSTALL_DIR/setup.sh" > "$TMPBASE/setup_functions.sh"
+  ' "$INSTALL_DIR/lib/cbox-setup.sh" > "$TMPBASE/setup_functions.sh"
   source "$TMPBASE/setup_functions.sh"
 }
 _load_setup_functions
@@ -234,13 +234,13 @@ done
 grep -q '^CBOX_GPU=set-value' "$STRIPCONF" || _fail "isolated-derivation skip: an unrelated project-scoped var (CBOX_GPU) should survive the strip"
 _ok "isolated-derivation skip: _cbox_strip_machine_scoped_vars removes exactly the wireguard lines too, leaves everything else"
 
-run_local_wizard_subset="$(awk '/^run_local_wizard_subset\(\) \{/,/^}$/' "$INSTALL_DIR/setup.sh")"
+run_local_wizard_subset="$(awk '/^run_local_wizard_subset\(\) \{/,/^}$/' "$INSTALL_DIR/lib/cbox-setup.sh")"
 case "$run_local_wizard_subset" in
   *step_wireguard*) _fail "wiring: run_local_wizard_subset (isolated per-project wizard) must never call step_wireguard" ;;
 esac
 _ok "wiring: the isolated per-project wizard never calls step_wireguard (machine-scoped section is never asked per-project)"
 
-step_wireguard_body="$(awk '/^step_wireguard\(\) \{/,/^}$/' "$INSTALL_DIR/setup.sh")"
+step_wireguard_body="$(awk '/^step_wireguard\(\) \{/,/^}$/' "$INSTALL_DIR/lib/cbox-setup.sh")"
 [ -n "$step_wireguard_body" ] || _fail "wiring: step_wireguard function not found in setup.sh"
 _ok "wiring: step_wireguard wizard function exists in setup.sh"
 

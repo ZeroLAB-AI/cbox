@@ -36,13 +36,27 @@ _cbox_compose_refresh_gpu() {
 
 _cbox_compose_refresh_gpu
 
+_cbox_offer_setup() {
+  local msg="$1"
+  if [ -t 0 ] && [ -t 1 ]; then
+    printf '%scbox: %s\n  [y] run '\''cbox setup'\'' now   [n] cancel\n> ' "" "$msg" >&2
+    local ans
+    read -r ans
+    case "$ans" in
+      y|Y) exec "$INSTALL_DIR/cbox" setup ;;
+      *) echo "cbox: cancelled" >&2; exit 1 ;;
+    esac
+  fi
+  echo "cbox: $msg - run 'cbox setup' on the host" >&2
+  exit 1
+}
+
 require_global_conf() {
-  [ "$HAVE_GLOBAL_CONF" = 1 ] || { echo "cbox: $CONF not found - run ./setup.sh first" >&2; exit 1; }
+  [ "$HAVE_GLOBAL_CONF" = 1 ] || _cbox_offer_setup "no cbox configuration yet"
 }
 
 die_no_conf() {
-  echo "cbox: no configuration applies to $PWD - run ./setup.sh (global) or ./setup.sh --local <root> (isolated) first" >&2
-  exit 1
+  _cbox_offer_setup "no configuration applies to $PWD"
 }
 
 check_tpl_sha() {
@@ -50,7 +64,7 @@ check_tpl_sha() {
   local cur
   cur="$(_cbox_tpl_sha)"
   if [ "$cur" != "${CBOX_TPL_SHA:-}" ]; then
-    echo "cbox: templates changed since last generation - run $INSTALL_DIR/setup.sh update to re-bless"
+    echo "cbox: templates changed since last generation - run 'cbox setup update' to re-bless"
     exit 1
   fi
 }
@@ -563,7 +577,7 @@ netaccess_cmd() {
     isolated)
       root="$(_cbox_workspace_root)" || die "refusing to run in $PWD (home, /, or a mount root)"
       eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
-      [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run codex' or 'setup.sh --local $root' first"
+      [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run codex' or 'cbox setup --local $root' first"
       (
         set -e
         unset CBOX_NETACCESS_SCOPE CBOX_NETACCESS_NETWORKS CBOX_NETACCESS_CIDRS
@@ -1617,6 +1631,7 @@ _run_global() {
     _clip_bridge_stop
     return 1
   }
+  _cbox_probe_exes_seed "$INSTALL_DIR" "$("${COMPOSE[@]}" ps -q "$SERVICE" 2>/dev/null | head -n1)"
   _cbox_netaccess_socks_exec_env
   local workdir="$CBOX_WORKDIR"
   for w in "${workspaces[@]}"; do
@@ -1634,7 +1649,7 @@ _run_global() {
 _first_run_init() {
   local root="$1" eff="$2" ans rc
   if ! { [ -t 0 ] && [ -t 1 ]; }; then
-    echo "cbox: no effective config for $root and no TTY - run 'cbox run codex' interactively or 'setup.sh --local $root' first" >&2
+    echo "cbox: no effective config for $root and no TTY - run 'cbox run codex' interactively or 'cbox setup --local $root' first" >&2
     return 1
   fi
   mkdir -p "$HOME/.config/cbox/projects"
@@ -1648,8 +1663,8 @@ _first_run_init() {
   read -r ans
   rc=0
   case "$ans" in
-    n) "$INSTALL_DIR/setup.sh" --local "$root" || rc=$? ;;
-    d) "$INSTALL_DIR/setup.sh" --local "$root" --from-global || rc=$? ;;
+    n) "$INSTALL_DIR/cbox" setup --local "$root" || rc=$? ;;
+    d) "$INSTALL_DIR/cbox" setup --local "$root" --from-global || rc=$? ;;
     *) echo "cbox: cancelled" >&2; exec 7>&-; return 1 ;;
   esac
   exec 7>&-
@@ -1980,7 +1995,7 @@ reinstall_bins() {
       local root eff
       root="$(_cbox_workspace_root)" || die "refusing to run in $PWD (home, /, or a mount root)"
       eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
-      [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run codex' or 'setup.sh --local $root' first"
+      [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run codex' or 'cbox setup --local $root' first"
       (
         set -e
         unset CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL CBOX_CODEX_TARGET
@@ -2008,6 +2023,7 @@ reinstall_bins() {
           _ensure_bins "$img_tag" "$force"
         fi
       )
+      _cbox_probe_exes_seed "$eff" "" 1
       ;;
     global)
       require_global_conf
@@ -2034,6 +2050,7 @@ reinstall_bins() {
         fi
       fi
       _ensure_bins "$img_tag" "$force"
+      _cbox_probe_exes_seed "$INSTALL_DIR" "" 1
       ;;
     *)
       die_no_conf
@@ -2103,8 +2120,8 @@ _write_mirror() {
 }
 
 _CBOX_PROBE_SH='
-cp="$(sed -n 2p "$HOST_HOME/.local/.cbox-stamp" 2>/dev/null)"
-xp="$(sed -n 2p "$HOST_HOME/.codex/packages/.cbox-stamp" 2>/dev/null)"
+cp="${CBOX_PROBE_CP:-}"
+xp="${CBOX_PROBE_XP:-}"
 n=0
 for p in /proc/[0-9]*/exe; do
   e="$(readlink "$p" 2>/dev/null)" || continue
@@ -2140,8 +2157,59 @@ done
 printf %s "$n"
 '
 
+_cbox_probe_exes_file() {
+  local eff="$1"
+  [ -n "$eff" ] || return 1
+  printf '%s/probe-exes' "$eff"
+}
+
+_cbox_probe_exes_refresh() {
+  local eff="$1" cid="$2" f cp xp cp_rc xp_rc tmp
+  f="$(_cbox_probe_exes_file "$eff")" || return 1
+  cp="$(docker exec "$cid" sh -c 'sed -n 2p "$HOME/.local/.cbox-stamp" 2>/dev/null' 2>/dev/null)"; cp_rc=$?
+  xp="$(docker exec "$cid" sh -c 'sed -n 2p "$HOME/.codex/packages/.cbox-stamp" 2>/dev/null' 2>/dev/null)"; xp_rc=$?
+  if [ "$cp_rc" -ne 0 ] || [ "$xp_rc" -ne 0 ]; then
+    return 1
+  fi
+  case "$cp" in *$'\n'*) cp="" ;; esac
+  case "$xp" in *$'\n'*) xp="" ;; esac
+  if [ -z "$cp" ] && [ -z "$xp" ]; then
+    return 1
+  fi
+  tmp="$f.tmp.$$"
+  printf '%s\n%s\n' "$cp" "$xp" > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+  mv "$tmp" "$f" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+  return 0
+}
+
+_cbox_probe_exes_seed() {
+  local eff="$1" cid="${2:-}" force="${3:-0}" f
+  [ -n "$eff" ] || return 0
+  if [ "$force" != 1 ]; then
+    f="$(_cbox_probe_exes_file "$eff" 2>/dev/null)" || f=""
+    [ -n "$f" ] && [ -f "$f" ] && return 0
+  fi
+  if [ -z "$cid" ]; then
+    cid="$(_compose_p "$eff" ps -q cbox 2>/dev/null)" || cid=""
+  fi
+  [ -n "$cid" ] || return 0
+  _cbox_probe_exes_refresh "$eff" "$cid" || true
+}
+
 _probe() {
-  docker exec "$1" sh -c "$_CBOX_PROBE_SH"
+  local cid="$1" eff="${2:-}" f cp xp
+  f="$(_cbox_probe_exes_file "$eff" 2>/dev/null)" || f=""
+  if [ -z "$f" ] || [ ! -f "$f" ]; then
+    printf 'unknown'
+    return 0
+  fi
+  cp="$(sed -n 1p "$f" 2>/dev/null)"
+  xp="$(sed -n 2p "$f" 2>/dev/null)"
+  if [ -z "$cp" ] && [ -z "$xp" ]; then
+    printf 'unknown'
+    return 0
+  fi
+  docker exec -e CBOX_PROBE_CP="$cp" -e CBOX_PROBE_XP="$xp" "$cid" sh -c "$_CBOX_PROBE_SH"
 }
 
 _reap() {
@@ -2156,11 +2224,11 @@ _reap() {
     exec 9>&-
     return 0
   fi
-  n="$(_probe "$cid" 2>/dev/null)" || n=unknown
+  n="$(_probe "$cid" "$eff" 2>/dev/null)" || n=unknown
   case "$n" in ''|*[!0-9]*) n=unknown ;; esac
   if [ "$n" = unknown ]; then
     sleep 1
-    n="$(_probe "$cid" 2>/dev/null)" || n=unknown
+    n="$(_probe "$cid" "$eff" 2>/dev/null)" || n=unknown
     case "$n" in ''|*[!0-9]*) n=unknown ;; esac
   fi
   if [ "$n" = unknown ]; then
@@ -2321,6 +2389,7 @@ _session_run() {
     return 1
   }
   _cbox_ollama_reconcile_networks || echo "cbox: run: ollama per-scope network reconciliation reported an error - run 'cbox ollama reconcile'" >&2
+  _cbox_probe_exes_seed "$eff"
   if [ -n "$pre_hook" ]; then
     "$pre_hook" || true
   fi
@@ -2355,7 +2424,7 @@ _cbox_rebless_local() {
   mkdir -p "$HOME/.config/cbox/projects"
   exec 7> "$HOME/.config/cbox/projects/.init.lock"
   _cbox_flock -w 60 7 || { echo "cbox: another init is running" >&2; exec 7>&-; return 1; }
-  "$INSTALL_DIR/setup.sh" --local "$root" --from-global || rc=$?
+  "$INSTALL_DIR/cbox" setup --local "$root" --from-global || rc=$?
   exec 7>&-
   [ "$rc" -eq 0 ] && [ -f "$eff/cbox.conf" ]
 }
@@ -2457,7 +2526,7 @@ _project_eff_from_cwd() {
   root="$(_cbox_workspace_root)" || die "refusing to operate in $PWD (home, /, or a mount root)"
   P="$(_cbox_path_hash "$root")"
   eff="$HOME/.config/cbox/projects/$P"
-  [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run codex' or 'setup.sh --local $root' first"
+  [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run codex' or 'cbox setup --local $root' first"
   printf '%s' "$eff"
 }
 
@@ -2492,7 +2561,7 @@ down_project() {
   if [ "$ps_rc" -ne 0 ]; then
     n=unknown
   elif [ -n "$cid" ]; then
-    n="$(_probe "$cid" 2>/dev/null)" || n=unknown
+    n="$(_probe "$cid" "$eff" 2>/dev/null)" || n=unknown
   else
     n=0
   fi
@@ -2541,6 +2610,7 @@ shell_isolated() {
     return 1
   }
   _cbox_ollama_reconcile_networks || echo "cbox: shell: ollama per-scope network reconciliation reported an error - run 'cbox ollama reconcile'" >&2
+  _cbox_probe_exes_seed "$eff"
   _cbox_netaccess_socks_exec_env
   if [ -t 0 ] && [ -t 1 ]; then
     _compose_p "$eff" exec -it "${CBOX_CONTAINER_EXEC_ENV[@]}" "${CBOX_SOCKS_EXEC_ENV[@]}" cbox /entrypoint.sh bash || rc=$?
@@ -2573,13 +2643,13 @@ gc() {
       exec 9>&-
       continue
     fi
-    n1="$(_probe "$cid" 2>/dev/null)" || n1=unknown
+    n1="$(_probe "$cid" "$eff" 2>/dev/null)" || n1=unknown
     if [ "$n1" = 0 ]; then
       exec 9>&-
       sleep 10
       exec 9> "$eff/session.lock"
       if _cbox_flock -n -x 9; then
-        n2="$(_probe "$cid" 2>/dev/null)" || n2=unknown
+        n2="$(_probe "$cid" "$eff" 2>/dev/null)" || n2=unknown
         if [ "$n2" = 0 ]; then
           _compose_p "$eff" down --remove-orphans >/dev/null 2>&1 || docker stop "$cid" >/dev/null 2>&1 || true
         fi
@@ -2762,6 +2832,7 @@ up() {
     chmod 0700 "$(_cbox_container_exec_dir "${CBOX_NAME:-cbox}")" "$(_cbox_container_exec_dir "${CBOX_NAME:-cbox}")/sockets"
   fi
   _cbox_compose_up "$HOME/.config/cbox/compose.up.stamp" "${COMPOSE[@]}"
+  _cbox_probe_exes_seed "$INSTALL_DIR" "$("${COMPOSE[@]}" ps -q "$SERVICE" 2>/dev/null | head -n1)"
   _cbox_netaccess_apply_global || {
     echo "cbox: up: netaccess apply failed - the container is running but its session exec is skipped; run 'cbox netaccess status' then 'cbox run'" >&2
     return 1
@@ -2791,7 +2862,7 @@ down() {
   if [ "$ps_rc" -ne 0 ]; then
     n=unknown
   elif [ -n "$cid" ]; then
-    n="$(_probe "$cid" 2>/dev/null)" || n=unknown
+    n="$(_probe "$cid" "$INSTALL_DIR" 2>/dev/null)" || n=unknown
   else
     n=0
   fi
@@ -2865,7 +2936,7 @@ install_hooks() {
   )
   local s f i stage target ans changed=0
   for s in "${srcs[@]}"; do
-    [ -f "$s" ] || { echo "cbox: $s missing - run ./setup.sh first"; return 1; }
+    [ -f "$s" ] || { echo "cbox: $s missing - run 'cbox setup' first"; return 1; }
   done
   stage="$(mktemp -d)"
   trap 'rm -rf "$stage"' RETURN
@@ -3325,7 +3396,7 @@ case "$("$p" --version 2>&1)" in *"$v"*) exit 0;; *) exit 1;; esac
     if "${X[@]}" sh -c '[ -n "$(ls -A "$HOME/.claude/agents" 2>/dev/null)" ] && [ -n "$(ls -A "$HOME/.claude/policies" 2>/dev/null)" ]' >/dev/null 2>&1; then
       v_ok
     else
-      v_fail "empty - run ./setup.sh update agents / update claude-md"
+      v_fail "empty - run cbox setup update agents / update claude-md"
     fi
 
     v_t "CLAUDE.md imports resolve"
@@ -3339,7 +3410,7 @@ case "$("$p" --version 2>&1)" in *"$v"*) exit 0;; *) exit 1;; esac
     if "${X[@]}" sh -c 'grep -qF "cbox:conduct-kernel:begin" "$HOME/.claude/CLAUDE.md" && grep -qF "cbox:conduct-kernel:end" "$HOME/.claude/CLAUDE.md" && grep -qF "CONDUCT KERNEL" "$HOME/.claude/CLAUDE.md"' >/dev/null 2>&1; then
       v_ok
     else
-      v_fail "kernel block missing - run ./setup.sh update claude-md"
+      v_fail "kernel block missing - run cbox setup update claude-md"
     fi
 
     v_t "context manifest digests match rendered artifacts"
@@ -3419,13 +3490,13 @@ case "$("$p" --version 2>&1)" in *"$v"*) exit 0;; *) exit 1;; esac
     if "${X[@]}" sh -c 'grep -q "^\[mcp_servers\.claude\]" "$HOME/.codex/config.toml"' >/dev/null 2>&1; then
       v_ok
     else
-      v_fail "run ./setup.sh update codex-mcp"
+      v_fail "run cbox setup update codex-mcp"
     fi
   fi
 
   if [ "${CBOX_EGRESS_MODE:-off}" != off ] && [ "${CBOX_EGRESS_APPLIED:-0}" != 1 ]; then
     v_t "egress topology"
-    v_skip "configured but not applied - run ./setup.sh update egress"
+    v_skip "configured but not applied - run cbox setup update egress"
   elif [ "${CBOX_EGRESS_MODE:-off}" != off ]; then
     v_t "egress proxy allows api.anthropic.com"
     if "${X[@]}" curl -s -o /dev/null --connect-timeout 10 -x http://proxy:8888 https://api.anthropic.com >/dev/null 2>&1; then
@@ -3909,10 +3980,10 @@ verify_isolated() {
   cid="$(_compose_p "$eff" ps -q cbox 2>/dev/null)" || cid=""
 
   v_t "v10 mirror tamper ignored"
-  if [ -f "$root/.cbox/runtime/docker-compose.yml" ]; then
+  if [ -f "$root/.cbox/runtime/docker-compose.mirror.yml" ]; then
     local before after
     before="$(_cbox_sha256 "$eff/docker-compose.yml")"
-    printf 'tampered: this line must never be read\n' >> "$root/.cbox/runtime/docker-compose.yml"
+    printf 'tampered: this line must never be read\n' >> "$root/.cbox/runtime/docker-compose.mirror.yml"
     _compose_p "$eff" config >/dev/null 2>&1 || true
     after="$(_cbox_sha256 "$eff/docker-compose.yml")"
     if [ "$before" = "$after" ]; then v_ok "effdir compose unchanged"; else v_fail "effdir compose mutated"; fi
@@ -3922,7 +3993,7 @@ verify_isolated() {
 
   v_t "v11 SIGKILL-then-gc reap"
   if [ -n "$cid" ] && [ -z "${CBOX_VERIFY_NO_KILL:-}" ]; then
-    n="$(_probe "$cid" 2>/dev/null)" || n=unknown
+    n="$(_probe "$cid" "$eff" 2>/dev/null)" || n=unknown
     if [ "$n" = 0 ]; then
       docker kill "$cid" >/dev/null 2>&1 || true
       gc >/dev/null 2>&1 || true
@@ -3958,10 +4029,10 @@ verify_isolated() {
 
   v_t "v15 agent-copies-binary still stops (B-2)"
   if [ -n "$cid" ]; then
-    n="$(_probe "$cid" 2>/dev/null)" || n=unknown
+    n="$(_probe "$cid" "$eff" 2>/dev/null)" || n=unknown
     if [ "$n" = 0 ]; then
       if docker exec "$cid" sh -c 'cp "$HOME/.local/bin/claude" /tmp/.cbox-verify-copy 2>/dev/null && /tmp/.cbox-verify-copy --version' >/dev/null 2>&1; then
-        n="$(_probe "$cid" 2>/dev/null)" || n=unknown
+        n="$(_probe "$cid" "$eff" 2>/dev/null)" || n=unknown
         docker exec "$cid" sh -c 'rm -f /tmp/.cbox-verify-copy' >/dev/null 2>&1 || true
         if [ "$n" = 0 ]; then v_ok "copy not counted"; else v_fail "copy inflated probe count to $n"; fi
       else
@@ -4426,7 +4497,7 @@ doctor() {
     elif [ -f "$lm_seed" ] && grep -q '"local-qwen"' "$lm_seed" 2>/dev/null; then
       _cbox_doctor_row "local-model" ACTIVE "CBOX_LOCAL_MODEL=on, url and name set, local-qwen present in the rendered seed"
     else
-      _cbox_doctor_row "local-model" CONFIG-ONLY "CBOX_LOCAL_MODEL=on but local-qwen absent from the rendered seed - regenerate (cbox up or ./setup.sh update local-model)"
+      _cbox_doctor_row "local-model" CONFIG-ONLY "CBOX_LOCAL_MODEL=on but local-qwen absent from the rendered seed - regenerate (cbox up or cbox setup update local-model)"
     fi
   elif [ "${CBOX_LOCAL_MODEL:-off}" = on ]; then
     _cbox_doctor_row "local-model" CONFIG-ONLY "CBOX_LOCAL_MODEL=on but CBOX_LOCAL_MODEL_URL or CBOX_LOCAL_MODEL_NAME unset - delegate absent from render"
@@ -4446,7 +4517,7 @@ doctor() {
     elif [ -f "$ce_seed" ] && grep -q '"container-exec"' "$ce_seed" 2>/dev/null; then
       _cbox_doctor_row "container-exec-tool" ACTIVE "CBOX_CONTAINER_EXEC_TOOL=on, container-exec present in the rendered seed"
     else
-      _cbox_doctor_row "container-exec-tool" CONFIG-ONLY "CBOX_CONTAINER_EXEC_TOOL=on but container-exec absent from the rendered seed - regenerate (cbox up or ./setup.sh update netaccess)"
+      _cbox_doctor_row "container-exec-tool" CONFIG-ONLY "CBOX_CONTAINER_EXEC_TOOL=on but container-exec absent from the rendered seed - regenerate (cbox up or cbox setup update netaccess)"
     fi
   else
     _cbox_doctor_row "container-exec-tool" OFF "CBOX_CONTAINER_EXEC_TOOL unset or off (default) - the exec bridge, if up, is reachable only via cbox-container by hand, not as an agent-callable MCP tool"
@@ -4460,7 +4531,7 @@ doctor() {
     fi
     if { [ "${CBOX_HERMES_PROVIDER:-local}" = local ] && [ -z "${CBOX_HERMES_MODEL_URL:-}" ]; } \
       || [ -z "${CBOX_HERMES_MODEL_NAME:-}" ] || [ ! -f "$hermes_managed" ]; then
-      _cbox_doctor_row "hermes" CONFIG-ONLY "CBOX_HERMES=on but provider/url/name incomplete or $hermes_managed missing - regenerate (cbox up or ./setup.sh update hermes)"
+      _cbox_doctor_row "hermes" CONFIG-ONLY "CBOX_HERMES=on but provider/url/name incomplete or $hermes_managed missing - regenerate (cbox up or cbox setup update hermes)"
     else
       _cbox_doctor_row "hermes" ACTIVE "CBOX_HERMES=on, provider=${CBOX_HERMES_PROVIDER:-local}, target=${CBOX_HERMES_VERSION:-latest}, installed=${hermes_installed:-none - run cbox reinstall-bins}"
     fi
@@ -4483,7 +4554,7 @@ doctor() {
       elif [ -f "$hd_seed" ] && grep -q '"hermes-local"' "$hd_seed" 2>/dev/null; then
         _cbox_doctor_row "hermes-delegate" ACTIVE "CBOX_HERMES_DELEGATE=on, hermes-local present in the rendered seed"
       else
-        _cbox_doctor_row "hermes-delegate" CONFIG-ONLY "CBOX_HERMES_DELEGATE=on but hermes-local absent from the rendered seed - regenerate (cbox up or ./setup.sh update hermes-delegate)"
+        _cbox_doctor_row "hermes-delegate" CONFIG-ONLY "CBOX_HERMES_DELEGATE=on but hermes-local absent from the rendered seed - regenerate (cbox up or cbox setup update hermes-delegate)"
       fi
     fi
   else
@@ -4634,7 +4705,7 @@ sys.exit(0 if 'SessionStart' not in ('',) and hooks else 1)
       _cbox_doctor_row "context-manifest" MISSING "generated/context-manifest.json present but not valid JSON"
     fi
   else
-    _cbox_doctor_row "context-manifest" MISSING "no generated/context-manifest.json - run ./setup.sh update"
+    _cbox_doctor_row "context-manifest" MISSING "no generated/context-manifest.json - run cbox setup update"
   fi
 
   local sess_root sess_dir
@@ -4790,7 +4861,7 @@ _cbox_config_get() {
       die_no_conf
       ;;
   esac
-  [ -f "$conf" ] || { echo "cbox: no configuration at $conf yet - run ./setup.sh first" >&2; return 1; }
+  [ -f "$conf" ] || { echo "cbox: no configuration at $conf yet - run 'cbox setup' first" >&2; return 1; }
 
   _cbox_config_load_sections
   local arg="${1:-}"
@@ -4922,7 +4993,7 @@ _cbox_config_print_report() {
     local _a="$(sec_get SEC_APPLY "$s")"
     printf '  %-16s %-10s %s\n' "$s" "${_a:-none}" "$(_cbox_config_apply_cmd_for "${_a:-none}")"
     if _cbox_config_section_has_dictate "$s"; then
-      printf '    note: %s has wizard-only auto-deploy behavior (hook install/removal) that headless config set does not perform - run setup.sh to match wizard state if this section flipped on/off\n' "$s"
+      printf '    note: %s has wizard-only auto-deploy behavior (hook install/removal) that headless config set does not perform - run cbox setup to match wizard state if this section flipped on/off\n' "$s"
     fi
   done
 }
@@ -5015,17 +5086,17 @@ _cbox_config_set_isolated() {
   local root eff
   root="$(_cbox_workspace_root)" || die "refusing to operate in $PWD (home, /, or a mount root)"
   eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
-  [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run codex' or 'setup.sh --local $root' first"
+  [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run codex' or 'cbox setup --local $root' first"
 
   local status
   status="$(_cbox_manifest_status "$eff" "$root")"
   case "$status" in
     malformed|collision)
-      echo "cbox: refusing - effective config manifest is $status; re-derive with setup.sh --local --from-global $root" >&2
+      echo "cbox: refusing - effective config manifest is $status; re-derive with cbox setup --local --from-global $root" >&2
       return 1
       ;;
     drifted)
-      echo "cbox: refusing - effective config has drifted; re-derive with setup.sh --local --from-global $root" >&2
+      echo "cbox: refusing - effective config has drifted; re-derive with cbox setup --local --from-global $root" >&2
       return 1
       ;;
   esac
@@ -5135,6 +5206,7 @@ _cbox_config_set_global() {
     . "$conf"
     _cbox_reg_export_vars
     _cbox_config_regen_global
+    _cbox_conf_write_manifest "$conf"
   ) || rc=$?
 
   if [ "$rc" -ne 0 ]; then
@@ -5869,7 +5941,7 @@ hub() {
       usage
       ;;
     *)
-      usage
+      _cbox_offer_setup "no cbox configuration yet on this machine"
       ;;
   esac
 }
@@ -5888,9 +5960,6 @@ _hub_context_json() {
     isolated)
       root="$(_cbox_workspace_root)" || { printf '{"mode": "none"}\n'; return 0; }
       eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
-      if [ ! -f "$eff/cbox.conf" ]; then
-        _first_run_init "$root" "$eff" || return 1
-      fi
       [ -f "$eff/cbox.conf" ] || { printf '{"mode": "none"}\n'; return 0; }
       conf="$eff/cbox.conf"
       egress="$(
@@ -5995,6 +6064,13 @@ case "${1:-}" in
     fi
     ;;
   doctor) shift; doctor "$@";;
+  setup)
+    shift
+    ! _cbox_config_in_container || die "cbox setup is host-only - it writes host config and shell-rc; run it on the host, not inside the container"
+    [ -f "$INSTALL_DIR/lib/cbox-setup.sh" ] || die "$INSTALL_DIR/lib/cbox-setup.sh missing"
+    . "$INSTALL_DIR/lib/cbox-setup.sh"
+    _cbox_setup_main "$@"
+    ;;
   config)
     shift
     [ -f "$INSTALL_DIR/templates/sections.sh" ] || die "$INSTALL_DIR/templates/sections.sh missing"
@@ -6027,6 +6103,8 @@ case "${1:-}" in
         if [ "$_hub_run_rc" = 97 ]; then
           echo "cbox: python hub core failed at runtime - falling back to the bash hub" >&2
           hub
+        elif [ "$_hub_run_rc" = 96 ]; then
+          _cbox_offer_setup "no cbox configuration yet on this machine"
         elif [ "$_hub_run_rc" != 0 ]; then
           exit "$_hub_run_rc"
         fi

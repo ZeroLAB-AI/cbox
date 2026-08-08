@@ -548,7 +548,10 @@ class Relay:
             if rid is not None:
                 with self.lock:
                     while len(self.calls) >= MAX_CALLS:
-                        self.calls.pop(next(iter(self.calls)))
+                        evicted = next(iter(self.calls))
+                        self.calls.pop(evicted)
+                        self.progress_calls.pop(evicted, None)
+                        self.mismatched.discard(evicted)
                     self.calls[rid] = {"active": True}
                     if token is not None:
                         self.progress_calls[rid] = [token, 0]

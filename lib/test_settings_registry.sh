@@ -226,8 +226,9 @@ MODIFIED = {
     "SEC_VARS": {
         "netaccess": "CBOX_NETACCESS_MODE CBOX_NETACCESS_APPLIED CBOX_NETACCESS_SCOPE CBOX_NETACCESS_NETWORKS CBOX_NETACCESS_CIDRS CBOX_NETACCESS_SOCKS_PORT CBOX_NETACCESS_EXEC_MODE CBOX_NETACCESS_EXEC_WORKSPACE_GUARD CBOX_NETACCESS_EXEC_TIMEOUT CBOX_NETACCESS_EXEC_MAX_BYTES CBOX_CONTAINER_EXEC_TOOL",
         "mounts": "CBOX_CLAUDE_MODE CBOX_CLAUDE_PATH CBOX_CLAUDE_BACKUP CBOX_CODEX_MODE CBOX_CODEX_PATH CBOX_CODEX_BACKUP CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG",
-        "autoresume": "CBOX_LIMIT_AUTORESUME CBOX_SESSION_MULTIPLEX CBOX_SESSION_BROKER_MODE CBOX_SSHD_LISTEN_ADDR CBOX_SSHD_PORT CBOX_LIMIT_RESUME_DELAY CBOX_LIMIT_RESUME_PROMPT CBOX_LIMIT_RESUME_STAGGER CBOX_LIMIT_RESUME_MAX_PER_DAY",
+        "autoresume": "CBOX_LIMIT_AUTORESUME CBOX_SESSION_MULTIPLEX CBOX_SAFEGUARD_AUTOCONFIRM CBOX_SESSION_BROKER_MODE CBOX_SSHD_LISTEN_ADDR CBOX_SSHD_PORT CBOX_LIMIT_RESUME_DELAY CBOX_LIMIT_RESUME_PROMPT CBOX_LIMIT_RESUME_STAGGER CBOX_LIMIT_RESUME_MAX_PER_DAY",
         "wireguard": "CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE CBOX_WG_FORWARDS",
+        "bashrc": "CBOX_BASHRC CBOX_BASHRC_COMMANDS",
     },
     "SEC_DESC": {
         "autoresume": "Wrap interactive sessions in tmux and let a per-container watchdog type the resume prompt after a usage-limit window resets (isolated session scope + claude mount only). Also carries the in-container sshd remote-attach feature (disabled by default): three layers - WireGuard, an ssh key, and this container's access level - gate list/attach/spawn against the tmux sessions the wrap creates.",
@@ -270,7 +271,7 @@ EOF
 python3 "$ADOPTION_DELTA_PY" "$TMPBASE/old_norm.txt" "$TMPBASE/new_norm.txt" 2> "$TMPBASE/parity_diff.txt" \
   || _fail "SEC_* arrays differ from the pre-registry snapshot by MORE than the declared shadow-setting adoption (sections autoupdate/dns/clipboard with their six variables, plus the netaccess CBOX_CONTAINER_EXEC_TOOL variable/doctor-row addition, plus the mounts CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG variable addition, plus the autoresume CBOX_SESSION_MULTIPLEX variable addition, plus the wireguard CBOX_WG_FORWARDS variable addition, plus the autoresume CBOX_SESSION_BROKER_MODE variable and session-broker doctor-row addition, plus the autoresume CBOX_SSHD_LISTEN_ADDR and CBOX_SSHD_PORT variable additions and updated SEC_DESC for the in-container sshd ForceCommand entry, plus the new kernel-lang section with its two CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING variables):
 $(cat "$TMPBASE/parity_diff.txt")"
-_ok "parity gate: generated sections.sh equals the pre-registry snapshot plus exactly the declared adoption delta (autoupdate/dns/clipboard sections, six variables, skip profile, project scope, empty doctor rows; plus CBOX_CONTAINER_EXEC_TOOL added to the existing netaccess section and its container-exec-tool doctor row; plus CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG added to the existing mounts section; plus CBOX_SESSION_MULTIPLEX added to the existing autoresume section; plus CBOX_WG_FORWARDS added to the existing wireguard section; plus CBOX_SESSION_BROKER_MODE added to the existing autoresume section and its session-broker doctor row; plus CBOX_SSHD_LISTEN_ADDR and CBOX_SSHD_PORT added to the existing autoresume section with its SEC_DESC updated for sshd; plus the new kernel-lang section (CBOX_KERNEL_LANG_OUTPUT, CBOX_KERNEL_LANG_REASONING), apply_class none, skip profile, project scope, empty doctor rows) - nothing else moved"
+_ok "parity gate: generated sections.sh equals the pre-registry snapshot plus exactly the declared adoption delta (autoupdate/dns/clipboard sections, six variables, skip profile, project scope, empty doctor rows; plus CBOX_CONTAINER_EXEC_TOOL added to the existing netaccess section and its container-exec-tool doctor row; plus CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG added to the existing mounts section; plus CBOX_SESSION_MULTIPLEX added to the existing autoresume section; plus CBOX_SAFEGUARD_AUTOCONFIRM added to the existing autoresume section; plus CBOX_WG_FORWARDS added to the existing wireguard section; plus CBOX_SESSION_BROKER_MODE added to the existing autoresume section and its session-broker doctor row; plus CBOX_SSHD_LISTEN_ADDR and CBOX_SSHD_PORT added to the existing autoresume section with its SEC_DESC updated for sshd; plus the new kernel-lang section (CBOX_KERNEL_LANG_OUTPUT, CBOX_KERNEL_LANG_REASONING), apply_class none, skip profile, project scope, empty doctor rows) - nothing else moved"
 
 NAMES="$(python3 "$PY" sections "$REG")"
 [ -n "$NAMES" ] || _fail "sections command returned nothing"
@@ -279,8 +280,8 @@ _ok "sections command lists section ids"
 VARS="$(python3 "$PY" vars "$REG")"
 [ -n "$VARS" ] || _fail "vars command returned nothing"
 VAR_COUNT="$(printf '%s\n' "$VARS" | grep -c .)"
-[ "$VAR_COUNT" -eq 106 ] || _fail "expected 106 variables in the registry, got $VAR_COUNT"
-_ok "vars command lists all 106 variables"
+[ "$VAR_COUNT" -eq 108 ] || _fail "expected 108 variables in the registry, got $VAR_COUNT"
+_ok "vars command lists all 108 variables"
 
 W="$TMPBASE/reg"
 mkdir -p "$W"

@@ -21,6 +21,11 @@ def is_code(path):
     return ext in CODE_EXT
 
 
+def is_text(path):
+    _, ext = os.path.splitext(path)
+    return ext in CODE_EXT or ext in DOC_EXT
+
+
 def added_lines(ti, tool):
     if tool == "Write":
         return (ti.get("content") or "").splitlines()
@@ -67,14 +72,17 @@ def main():
         return
     ti = data.get("tool_input") or {}
     path = ti.get("file_path") or ""
-    if not is_code(path):
+    if not is_text(path):
         return
+    code = is_code(path)
     for line in added_lines(ti, tool):
-        if comment_line(line, path):
-            deny("coding policy: no comments in code - remove '%s' and put explanation in separate docs" % line.strip()[:60])
         for ch in line:
             if ord(ch) > 127:
-                deny("coding policy: no non-ASCII in code - remove '%s' from %s (use ASCII, keep diacritics out of source)" % (ch, os.path.basename(path)))
+                deny("coding policy: no non-ASCII in committed text - remove '%s' from %s (use ASCII: ' - ' for dashes, straight quotes, no smart punctuation or emoji unless explicitly requested)" % (ch, os.path.basename(path)))
+        if not code:
+            continue
+        if comment_line(line, path):
+            deny("coding policy: no comments in code - remove '%s' and put explanation in separate docs" % line.strip()[:60])
         for m in MODEL_RE.finditer(line):
             frag = line[max(0, m.start() - 20):m.end() + 20]
             if ALLOW_MODEL.search(frag):

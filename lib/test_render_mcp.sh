@@ -92,7 +92,7 @@ test_merge_mcp_json_call_site() {
     /^merge_mcp_json\(\) \{/ { infunc=1 }
     infunc { print }
     infunc && /^\}/ { infunc=0 }
-  ' "$INSTALL_DIR/setup.sh" > "$extracted"
+  ' "$INSTALL_DIR/lib/cbox-setup.sh" > "$extracted"
   die() { echo "die: $*" >&2; exit 1; }
   ETC_DIR="$INSTALL_DIR/etc"
   source "$extracted"
@@ -281,7 +281,7 @@ test_no_dangling_mcp_servers_json_refs() {
     || _fail "etc/mcp/delegates.json missing - migration to delegates.json incomplete"
   local hits
   hits="$(grep -rl "etc/mcp/mcp-servers\.json\|mcp/mcp-servers\.json" \
-    "$INSTALL_DIR/setup.sh" "$INSTALL_DIR/templates" "$INSTALL_DIR/entrypoint.sh" \
+    "$INSTALL_DIR/lib/cbox-setup.sh" "$INSTALL_DIR/templates" "$INSTALL_DIR/entrypoint.sh" \
     2>/dev/null || true)"
   [ -z "$hits" ] || _fail "dangling reference(s) to the old mcp-servers.json path: $hits"
   echo "PASS: no dangling references to the old mcp-servers.json path"
@@ -566,7 +566,7 @@ print(" ".join(gates))
     case " $reg_export_vars " in
       *" $gate "*) reachable_via_reg=1 ;;
     esac
-    for f in "$INSTALL_DIR/setup.sh" "$INSTALL_DIR/cbox"; do
+    for f in "$INSTALL_DIR/lib/cbox-setup.sh" "$INSTALL_DIR/cbox"; do
       local direct=0 calls_reg=0
       grep -Eq "^[[:space:]]*export[[:space:]]+([A-Z0-9_]+[[:space:]]+)*${gate}([[:space:]]|\$)" "$f" && direct=1
       grep -Eq "_cbox_reg_export_vars" "$f" && calls_reg=1

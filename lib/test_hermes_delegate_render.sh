@@ -233,7 +233,7 @@ _dep_gate_body() {
     /^_cbox_dep_condition\(\) \{/ { infunc=1 }
     infunc { print }
     infunc && /^\}/ { infunc=0; exit }
-  ' "$INSTALL_DIR/setup.sh"
+  ' "$INSTALL_DIR/lib/cbox-setup.sh"
 }
 
 SECFUNC="$TMPBASE/sections.sh"
@@ -245,7 +245,7 @@ DEPFUNC="$TMPBASE/dep_gate.sh"
     /^section_dep_gate\(\) \{/ { infunc=1 }
     infunc { print }
     infunc && /^\}/ { infunc=0; exit }
-  ' "$INSTALL_DIR/setup.sh"
+  ' "$INSTALL_DIR/lib/cbox-setup.sh"
 } > "$DEPFUNC"
 
 DEP_RESULT="$(

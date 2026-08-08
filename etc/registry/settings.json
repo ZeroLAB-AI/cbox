@@ -1000,6 +1000,20 @@
       "validator": null
     },
     {
+      "key": "CBOX_BASHRC_COMMANDS",
+      "section": "bashrc",
+      "type": {
+        "kind": "canonical-name-list",
+        "escape_hatch": "no-validator"
+      },
+      "default": "all",
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Which shell wrappers to install (claude/codex/hermes); cbox is always installed.",
+      "validator": null
+    },
+    {
       "key": "CBOX_MCP_SERVERS",
       "section": "mcp-servers",
       "type": {
@@ -1585,6 +1599,23 @@
       "export": false,
       "prompt": null,
       "help": "Wrap claude, codex and hermes sessions in a named tmux session whenever a TTY is present, independent of auto-resume; the precondition for attaching to a running session remotely. CBOX_LIMIT_AUTORESUME=on implies this wrap for claude even when this variable is off.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_SAFEGUARD_AUTOCONFIRM",
+      "section": "autoresume",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: auto-confirm the model-safeguard switch dialog (tmux-wrapped claude sessions, watchdog answers it so work does not stall)",
+      "help": "When claude shows the safety-refusal model-switch confirmation, a per-container watchdog confirms it automatically so an unattended session does not block. Requires a tmux-wrapped claude session (implies the wrap for claude even when auto-resume is off).",
       "validator": null
     },
     {

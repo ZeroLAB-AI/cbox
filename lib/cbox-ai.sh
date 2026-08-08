@@ -432,11 +432,11 @@ _cbox_ai_local_qwen_container_cmd() {
 _cbox_ai_host_codex_preflight() {
   local profile="$HOME/.codex/cbox-host.config.toml"
   if [ ! -f "$profile" ]; then
-    echo "cbox ai: codex managed host profile missing at $profile - run './setup.sh update codex-mcp' (or './setup.sh') on the host first" >&2
+    echo "cbox ai: codex managed host profile missing at $profile - run 'cbox setup update codex-mcp' (or 'cbox setup') on the host first" >&2
     return 1
   fi
   if [ ! -s "$profile" ]; then
-    echo "cbox ai: codex managed host profile at $profile is empty - run './setup.sh update codex-mcp' on the host" >&2
+    echo "cbox ai: codex managed host profile at $profile is empty - run 'cbox setup update codex-mcp' on the host" >&2
     return 1
   fi
   if ! command -v python3 >/dev/null 2>&1; then
@@ -449,7 +449,7 @@ import tomllib
 with open(sys.argv[1], "rb") as f:
     tomllib.load(f)
 ' "$profile" 2>/dev/null; then
-    echo "cbox ai: codex managed host profile at $profile does not parse as TOML - run './setup.sh update codex-mcp' on the host" >&2
+    echo "cbox ai: codex managed host profile at $profile does not parse as TOML - run 'cbox setup update codex-mcp' on the host" >&2
     return 1
   fi
   return 0

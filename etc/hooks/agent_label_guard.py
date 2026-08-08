@@ -76,5 +76,13 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
-        pass
+    except Exception as exc:
+        if os.environ.get("CBOX_AGENT_MODEL_DENY"):
+            print(json.dumps({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": "agent_label_guard could not evaluate the spawn (%s); the model deny pattern is active, so the spawn is refused rather than allowed unchecked - fix the agent definition or payload and retry" % exc,
+                }
+            }))
+        sys.exit(0)
