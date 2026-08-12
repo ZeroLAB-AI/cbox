@@ -1,0 +1,4 @@
+# m3 oracle host AGENTS.override.md fixture
+
+pinned host fold-in body for the frozen pre-M3 oracle - do not edit, this
+text is hashed into cbox/lib/fixtures/m3_oracle/digests.txt.

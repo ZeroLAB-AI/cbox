@@ -1,0 +1,14 @@
+{
+  "provenance": "spec",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "rm -rf *"
+  },
+  "session_id": "spec-session-0001",
+  "turn_id": "spec-turn-0001",
+  "tool_use_id": "spec-tooluse-0001",
+  "cwd": "/workspace/project",
+  "transcript_path": null,
+  "model": "gpt-5.6-terra"
+}

@@ -522,6 +522,25 @@ _new_case CBOX_BASHRC_COMMANDS "all" accept
 _new_case CBOX_BASHRC_COMMANDS "claude codex" accept
 _new_case CBOX_BASHRC_COMMANDS "anything goes; no validator" accept
 
+_new_case CBOX_CODEX_HOOKS off accept
+_new_case CBOX_CODEX_HOOKS on accept
+_new_case CBOX_CODEX_HOOKS bogus reject
+
+_new_case CBOX_HERMES_HOOKS off accept
+_new_case CBOX_HERMES_HOOKS on accept
+_new_case CBOX_HERMES_HOOKS bogus reject
+
+_new_case CBOX_WORKSPACES "$INSTALL_DIR" reject
+_new_case CBOX_WORKSPACES "$INSTALL_DIR/templates" reject
+_new_case CBOX_WORKSPACES "$HOME/.config/cbox" reject
+_new_case CBOX_WORKSPACES "$HOME/.config/cbox/projects" reject
+_new_case CBOX_WORKSPACES "$HOME/.config" reject
+_new_case CBOX_WORKSPACES "~/.config/cbox" reject
+_new_case CBOX_WORKSPACES "$HOME/" reject
+_new_case CBOX_WORKSPACES "/" reject
+_new_case CBOX_WORKSPACES "$INSTALL_DIR/" reject
+_new_case CBOX_WORKSPACES "/srv/project" accept
+
 NEW_STREAM="$TMPBASE/new_stream.nul"
 : > "$NEW_STREAM"
 while IFS=$'\t' read -r key val want; do
@@ -543,7 +562,7 @@ while IFS=$'\t' read -r key val want; do
   fi
 done < "$NEW_CASES_FILE"
 exec 9<&-
-_ok "new-section validators (autoupdate/dns/clipboard/CBOX_NAME/CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_SAFEGUARD_AUTOCONFIRM/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING): verdicts match intended semantics for $(wc -l < "$NEW_CASES_FILE" | tr -d ' ') cases"
+_ok "new-section validators (autoupdate/dns/clipboard/CBOX_NAME/CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_SAFEGUARD_AUTOCONFIRM/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING/CBOX_CODEX_HOOKS/CBOX_HERMES_HOOKS): verdicts match intended semantics for $(wc -l < "$NEW_CASES_FILE" | tr -d ' ') cases"
 
 PARITY_STREAM="$TMPBASE/parity_stream.nul"
 : > "$PARITY_STREAM"

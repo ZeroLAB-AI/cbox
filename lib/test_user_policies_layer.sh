@@ -16,7 +16,8 @@ _ok() {
 
 _make_fake_install() {
   local dir="$1"
-  mkdir -p "$dir/etc/mcp" "$dir/etc/hooks" "$dir/etc/claude" "$dir/etc/container" "$dir/lib" "$dir/templates" "$dir/generated"
+  mkdir -p "$dir/etc/mcp" "$dir/etc/hooks" "$dir/etc/claude" "$dir/etc/container" \
+    "$dir/etc/adapters" "$dir/lib" "$dir/templates" "$dir/generated"
   cp "$INSTALL_DIR/_common.sh" "$dir/_common.sh"
   cp "$INSTALL_DIR/lib/portable.sh" "$dir/lib/portable.sh"
   cp "$INSTALL_DIR/lib/cbox_host.py" "$dir/lib/cbox_host.py"
@@ -25,6 +26,9 @@ _make_fake_install() {
   cp "$INSTALL_DIR/etc/mcp/render_mcp.py" "$dir/etc/mcp/render_mcp.py"
   cp "$INSTALL_DIR/etc/mcp/delegates.json" "$dir/etc/mcp/delegates.json"
   cp "$INSTALL_DIR/etc/container/cbox-session-entry.py" "$dir/etc/container/cbox-session-entry.py"
+  if [ -d "$INSTALL_DIR/etc/adapters" ]; then
+    cp "$INSTALL_DIR"/etc/adapters/*.py "$dir/etc/adapters/" 2>/dev/null || true
+  fi
   printf 'schema=1\nbase=ubuntu:24.04@sha256:deadbeef\n' > "$dir/image.inputs"
 }
 

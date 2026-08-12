@@ -280,7 +280,8 @@ _ok "_multiplex_session_name: cbox-<engine>-<hex> shape, unique across repeated 
 
 if command -v tmux >/dev/null 2>&1; then
   E2E_DIR="$TMPBASE/e2e"
-  mkdir -p "$E2E_DIR"
+  E2E_MULTIPLEX_BASE="$TMPBASE/multiplex_base"
+  mkdir -p "$E2E_DIR" "$E2E_MULTIPLEX_BASE"
   E2E_SCRIPT="$E2E_DIR/run.sh"
   cat > "$E2E_SCRIPT" <<INNER
 #!/usr/bin/env bash
@@ -288,6 +289,7 @@ set -euo pipefail
 HOST_UID=\$(id -u)
 HOST_GID=\$(id -g)
 CBOX_ROOTLESS=1
+CBOX_MULTIPLEX_BASE="$E2E_MULTIPLEX_BASE"
 source "$FUNCDIR/multiplex_funcs.sh"
 _as_user() { "\$@"; }
 _run_as_user() { exec "\$@"; }
@@ -312,8 +314,8 @@ INNER
   [ "$RC3" = 200 ] || _fail "end-to-end multiplex run: expected exit 200 (high-but-valid byte), got $RC3"
   _ok "end-to-end: _multiplex_run under a real tmux propagates the wrapped command's real exit status (0, 37, 200), not tmux client status 0"
 
-  LEFTOVER="$( { find /run/cbox/multiplex -mindepth 1 -maxdepth 1 2>/dev/null || true; } | wc -l)"
-  [ "$LEFTOVER" = 0 ] || _fail "end-to-end multiplex run left $LEFTOVER stale per-session status dir(s) under /run/cbox/multiplex"
+  LEFTOVER="$( { find "$E2E_MULTIPLEX_BASE" -mindepth 1 -maxdepth 1 2>/dev/null || true; } | wc -l)"
+  [ "$LEFTOVER" = 0 ] || _fail "end-to-end multiplex run left $LEFTOVER stale per-session status dir(s) under $E2E_MULTIPLEX_BASE"
   _ok "end-to-end: per-session private status directory is removed after the run (no leftovers)"
 else
   _ok "(skipped end-to-end tmux propagation check - tmux(1) not found in this environment; wrap-decision and status-read logic above are still exercised)"

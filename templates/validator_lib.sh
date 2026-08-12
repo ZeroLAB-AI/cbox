@@ -112,10 +112,44 @@ _cbox_val_kind_string() {
   return 0
 }
 
+_cbox_val_path_list_expand() {
+  case "$1" in
+    '~') printf '%s' "${HOME:-}" ;;
+    '~/'*) printf '%s/%s' "${HOME:-}" "${1#\~/}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+_cbox_val_path_list_protected() {
+  local w="$1" p
+  while [ "${w%/}" != "$w" ] && [ -n "${w%/}" ]; do w="${w%/}"; done
+  [ "$w" = "/" ] && return 0
+  for p in "${INSTALL_DIR:-}" "${HOME:-}/.config/cbox"; do
+    [ -n "$p" ] || continue
+    while [ "${p%/}" != "$p" ] && [ -n "${p%/}" ]; do p="${p%/}"; done
+    case "$w" in
+      "$p")
+        return 0
+        ;;
+      "$p"/*)
+        return 0
+        ;;
+    esac
+    case "$p" in
+      "$w"/*)
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
 _cbox_val_kind_path_list() {
-  local val="$1" w
+  local val="$1" w x
   for w in $val; do
     _cbox_val_path "$w" || { printf 'workspace entries must be absolute paths: %s' "$w"; return 1; }
+    x="$(_cbox_val_path_list_expand "$w")"
+    _cbox_val_path_list_protected "$x" && { printf 'workspace entries must not be or contain the cbox install/config tree: %s' "$w"; return 1; }
   done
   return 0
 }

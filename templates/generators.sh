@@ -2124,56 +2124,13 @@ gen_hermes_mcp_servers_into() {
     expanded="$(canonical_expand "$sel" "$(mcp_all_names hermes)")"
   fi
   mcp_json="$(_cbox_render_mcp_for_target "$servers_file" "$expanded" "$hooks_dir" off hermes)"
-  python3 -c '
-import json
-import sys
+  ( set -o pipefail; python3 "$INSTALL_DIR/etc/adapters/hermes.py" mcp-servers-yaml "$mcp_json" | _cbox_write "$target" ) || return 1
+}
 
-rendered = json.loads(sys.argv[1])
-
-
-def yaml_scalar(v):
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    if isinstance(v, int):
-        return str(v)
-    return json.dumps(v)
-
-
-def yaml_block(name, spec, indent):
-    pad = "  " * indent
-    lines = ["%s%s:" % (pad, yaml_scalar(name))]
-    lines.append("%s  command: %s" % (pad, yaml_scalar(spec["command"])))
-    args = spec.get("args") or []
-    if args:
-        lines.append("%s  args:" % pad)
-        for a in args:
-            lines.append("%s    - %s" % (pad, yaml_scalar(a)))
-    else:
-        lines.append("%s  args: []" % pad)
-    env = spec.get("env")
-    if env:
-        lines.append("%s  env:" % pad)
-        for k in sorted(env.keys()):
-            lines.append("%s    %s: %s" % (pad, yaml_scalar(k), yaml_scalar(env[k])))
-    if "timeout" in spec:
-        lines.append("%s  timeout: %s" % (pad, yaml_scalar(spec["timeout"])))
-    if "connect_timeout" in spec:
-        lines.append(
-            "%s  connect_timeout: %s" % (pad, yaml_scalar(spec["connect_timeout"]))
-        )
-    if "enabled" in spec:
-        lines.append("%s  enabled: %s" % (pad, yaml_scalar(spec["enabled"])))
-    return lines
-
-
-out = ["mcp_servers:"]
-if rendered:
-    for name in sorted(rendered.keys()):
-        out.extend(yaml_block(name, rendered[name], 1))
-else:
-    out[-1] = "mcp_servers: {}"
-sys.stdout.write("\n".join(out) + "\n")
-' "$mcp_json" | _cbox_write "$target"
+gen_hermes_hooks_into() {
+  local target="$1"
+  local hooks_dir="$HOME/.claude/hooks"
+  ( set -o pipefail; python3 "$INSTALL_DIR/etc/adapters/hermes.py" hooks-yaml "$hooks_dir" | _cbox_write "$target" ) || return 1
 }
 
 gen_claude_json_seed() {
@@ -2191,77 +2148,20 @@ gen_claude_json_seed() {
   _cbox_hermes_delegate_defaults
   expanded="$(canonical_expand "${CBOX_MCP_SERVERS:-all}" "$(mcp_all_names)")"
   mcp_json="$(_cbox_render_mcp_for_target "$servers_file" "$expanded" "$hooks_dir" "$progress_flag" claude)"
-  out="$(python3 - "$mcp_json" "${CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG:-}" <<'PY'
-import json
-import sys
-
-mcp = json.loads(sys.argv[1])
-flag = sys.argv[2]
-seed = {"hasCompletedOnboarding": True, "mcpServers": mcp}
-if flag in ("on", "off"):
-    seed["switchModelsOnFlag"] = flag == "on"
-sys.stdout.write(json.dumps(seed, separators=(",", ":")))
-PY
-)"
+  out="$(python3 "$INSTALL_DIR/etc/adapters/claude.py" json-seed "$mcp_json" "${CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG:-}")" || return 1
   printf '%s\n' "$out" | _cbox_write "$target"
 }
 
 _cbox_claude_json_switch_flag_merge() {
   local target="$1" flag="${CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG:-}" out
   [ "$flag" = on ] || [ "$flag" = off ] || return 0
-  out="$(python3 - "$target" "$flag" <<'PY'
-import json
-import os
-import sys
-
-target, flag = sys.argv[1], sys.argv[2]
-try:
-    fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(fd, "r", encoding="utf-8") as fh:
-        cur = json.load(fh)
-except (OSError, ValueError):
-    sys.exit(0)
-if not isinstance(cur, dict):
-    sys.exit(0)
-if "switchModelsOnFlag" in cur:
-    sys.exit(0)
-cur["switchModelsOnFlag"] = flag == "on"
-sys.stdout.write(json.dumps(cur, separators=(",", ":")))
-PY
-)" || return 0
+  out="$(python3 "$INSTALL_DIR/etc/adapters/claude.py" switch-flag-merge "$target" "$flag")" || return 0
   [ -n "$out" ] || return 0
   printf '%s\n' "$out" | _cbox_write "$target"
 }
 
 _cbox_seed_adopt_nofollow() {
-  python3 - "$1" "$2" <<'PY'
-import errno
-import json
-import os
-import sys
-
-migrate, target = sys.argv[1], sys.argv[2]
-try:
-    fd = os.open(migrate, os.O_RDONLY | os.O_NOFOLLOW)
-except OSError:
-    sys.exit(0)
-try:
-    with os.fdopen(fd, "r", encoding="utf-8") as fh:
-        data = json.load(fh)
-except (OSError, ValueError):
-    sys.exit(0)
-if not isinstance(data, dict):
-    sys.exit(0)
-body = json.dumps(data, separators=(",", ":")).encode("utf-8")
-try:
-    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-except OSError as e:
-    if e.errno == errno.ELOOP:
-        sys.exit(0)
-    sys.exit(0)
-with os.fdopen(fd, "wb") as fh:
-    fh.write(body)
-PY
+  python3 "$INSTALL_DIR/etc/adapters/claude.py" seed-adopt-nofollow "$1" "$2" || return 1
 }
 
 gen_claude_cbox_json_seed_into() {
@@ -2298,39 +2198,7 @@ _gen_claude_cbox_json_seed_render() {
   _cbox_hermes_delegate_defaults
   expanded="$(canonical_expand "${CBOX_MCP_SERVERS:-all}" "$(mcp_all_names)")"
   mcp_json="$(_cbox_render_mcp_for_target "$servers_file" "$expanded" "$hooks_dir" "$progress_flag" claude)"
-  out="$(python3 - "$mcp_json" "$target" "$servers_file" <<'PY'
-import json
-import sys
-
-import os
-
-mcp = json.loads(sys.argv[1])
-cur = {}
-try:
-    fd = os.open(sys.argv[2], os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(fd, "r", encoding="utf-8") as fh:
-        cur = json.load(fh)
-except (OSError, ValueError):
-    cur = {}
-if not isinstance(cur, dict):
-    cur = {}
-try:
-    with open(sys.argv[3], "r", encoding="utf-8") as fh:
-        known_cbox = set(json.load(fh).keys())
-except (OSError, ValueError):
-    known_cbox = set()
-existing = cur.get("mcpServers")
-if not isinstance(existing, dict):
-    existing = {}
-for name in list(existing):
-    if name in known_cbox and name not in mcp:
-        existing.pop(name, None)
-existing.update(mcp)
-cur["hasCompletedOnboarding"] = True
-cur["mcpServers"] = existing
-sys.stdout.write(json.dumps(cur, separators=(",", ":")))
-PY
-)"
+  out="$(python3 "$INSTALL_DIR/etc/adapters/claude.py" cbox-json-seed-merge "$mcp_json" "$target" "$servers_file")" || return 1
   printf '%s\n' "$out" | _cbox_write "$target"
 }
 
@@ -2379,18 +2247,7 @@ gen_settings_volume() {
     echo "gen_settings_volume: missing $src" >&2
     return 1
   fi
-  out="$(python3 - "$src" "$HOME" <<'PY'
-import json
-import sys
-
-src, home = sys.argv[1], sys.argv[2]
-with open(src) as fh:
-    text = fh.read()
-text = text.replace("@HOME@", home)
-settings = json.loads(text)
-sys.stdout.write(json.dumps(settings, separators=(",", ":")))
-PY
-)"
+  out="$(python3 "$INSTALL_DIR/etc/adapters/claude.py" settings-merge "$src" "$HOME")" || return 1
   printf '%s\n' "$out" | _cbox_write "$INSTALL_DIR/generated/settings.json"
 }
 
@@ -2414,18 +2271,7 @@ gen_managed_settings() {
     echo "gen_managed_settings: missing $src" >&2
     return 1
   fi
-  out="$(python3 - "$src" "$HOME" <<'PY'
-import json
-import sys
-
-src, home = sys.argv[1], sys.argv[2]
-with open(src) as fh:
-    text = fh.read()
-text = text.replace("@HOME@", home)
-settings = json.loads(text)
-sys.stdout.write(json.dumps(settings, separators=(",", ":")))
-PY
-)"
+  out="$(python3 "$INSTALL_DIR/etc/adapters/claude.py" settings-merge "$src" "$HOME")" || return 1
   printf '%s\n' "$out" | _cbox_write "$target"
 }
 
@@ -2479,48 +2325,7 @@ _cbox_codex_mcp_claude_entry() {
 _cbox_codex_mcp_toml_blocks() {
   local rendered="$1"
   [ -n "$rendered" ] || return 0
-  python3 -c '
-import json
-import sys
-
-rendered = json.loads(sys.argv[1])
-
-
-def toml_string(v):
-    return json.dumps(v)
-
-
-def toml_value(v):
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    if isinstance(v, (int, float)):
-        return str(v)
-    if isinstance(v, str):
-        return toml_string(v)
-    if isinstance(v, list):
-        return "[" + ", ".join(toml_value(item) for item in v) + "]"
-    if isinstance(v, dict):
-        pairs = ", ".join(
-            "%s = %s" % (toml_string(k), toml_value(val))
-            for k, val in v.items()
-        )
-        return "{ " + pairs + " }"
-    raise SystemExit(
-        "gen_codex_profile_into: delegate field of unsupported type %r"
-        % type(v).__name__
-    )
-
-
-table_key_overrides = {"ask-claude": "claude"}
-for name in sorted(rendered.keys()):
-    spec = rendered[name]
-    table = table_key_overrides.get(name, name)
-    print()
-    print("[mcp_servers.%s]" % table)
-    for field in ("command", "args", "env", "startup_timeout_sec", "tool_timeout_sec"):
-        if field in spec:
-            print("%s = %s" % (field, toml_value(spec[field])))
-' "$rendered"
+  python3 "$INSTALL_DIR/etc/adapters/codex.py" mcp-toml-blocks "$rendered"
 }
 
 gen_codex_profile_into() {
@@ -2554,6 +2359,10 @@ gen_codex_profile_into() {
       codex_delegates="$(_cbox_codex_mcp_claude_entry "$hooks_path")"
       _cbox_codex_mcp_toml_blocks "$codex_delegates"
     fi
+    if [ "${CBOX_CODEX_HOOKS:-off}" = on ]; then
+      printf '\n[features]\n'
+      printf 'codex_hooks = true\n'
+    fi
   } > "$tmp"
   chmod 0644 "$tmp"
   mv "$tmp" "$outdir/cbox-container.config.toml"
@@ -2565,21 +2374,7 @@ gen_codex_hooks_json_into() {
   mkdir -p "$outdir"
   local tmp
   tmp="$(mktemp "$outdir/.cbox.XXXXXX")"
-  python3 -c '
-import json
-import sys
-
-hooks_path = sys.argv[1]
-command = "python3 " + hooks_path + "/continuity_session_start.py"
-doc = {
-    "hooks": {
-        "SessionStart": [
-            {"hooks": [{"type": "command", "command": command}]}
-        ]
-    }
-}
-sys.stdout.write(json.dumps(doc, indent=2) + "\n")
-' "$hooks_path" > "$tmp"
+  python3 "$INSTALL_DIR/etc/adapters/codex.py" hooks-json "$hooks_path" "${CBOX_CODEX_HOOKS:-off}" > "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 0644 "$tmp"
   mv "$tmp" "$outdir/hooks.json"
 }
@@ -2731,6 +2526,8 @@ gen_hooks_dir() {
   _cbox_write "$INSTALL_DIR/generated/hooks/rm_glob_guard.py" < "$INSTALL_DIR/etc/hooks/rm_glob_guard.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/spawn_gate.py" < "$INSTALL_DIR/etc/hooks/spawn_gate.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/commit_guard.py" < "$INSTALL_DIR/etc/hooks/commit_guard.py"
+  _cbox_write "$INSTALL_DIR/generated/hooks/codex_guard_bridge.py" < "$INSTALL_DIR/etc/hooks/codex_guard_bridge.py"
+  _cbox_write "$INSTALL_DIR/generated/hooks/hermes_guard_bridge.py" < "$INSTALL_DIR/etc/hooks/hermes_guard_bridge.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/continuity_commit_log.py" < "$INSTALL_DIR/etc/hooks/continuity_commit_log.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/continuity_ledger_sweep.py" < "$INSTALL_DIR/etc/hooks/continuity_ledger_sweep.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/continuity_session_digest.py" < "$INSTALL_DIR/etc/hooks/continuity_session_digest.py"
@@ -2848,6 +2645,108 @@ gen_context_manifest_into() {
   } > "$tmp"
   chmod 0644 "$tmp"
   mv "$tmp" "$outdir/context-manifest.json"
+}
+
+CBOX_CAPABILITY_MANIFEST_VERSION=1
+
+gen_capability_manifest_into() {
+  local outdir="$1"
+  mkdir -p "$outdir"
+  local reg_src="$INSTALL_DIR/etc/capabilities/capabilities.json"
+  local reg_val="$INSTALL_DIR/etc/capabilities/capability_registry.py"
+  local val_err=""
+  if [ -f "$reg_val" ] && [ -f "$reg_src" ]; then
+    val_err="$(python3 "$reg_val" validate "$reg_src" 2>&1 1>/dev/null)" || val_err="${val_err:-capabilities registry invalid}"
+  elif [ ! -f "$reg_src" ]; then
+    val_err="capabilities.json absent"
+  fi
+  local tmp
+  tmp="$(mktemp "$outdir/.cbox.XXXXXX")"
+  python3 - "$CBOX_CAPABILITY_MANIFEST_VERSION" "$reg_src" "$INSTALL_DIR" "$val_err" > "$tmp" <<'PYEOF'
+import hashlib
+import json
+import sys
+
+version = int(sys.argv[1])
+reg_path = sys.argv[2]
+install_dir = sys.argv[3]
+val_err = sys.argv[4] if len(sys.argv) > 4 else ""
+
+
+def sha256_of(path):
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return ""
+
+
+def load_registry(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    caps = data.get("capabilities")
+    if not isinstance(caps, dict):
+        return {}
+    return caps
+
+
+def build_matrix(caps):
+    matrix = {}
+    for cap_id in sorted(caps.keys()):
+        spec = caps.get(cap_id)
+        if not isinstance(spec, dict):
+            continue
+        bindings = spec.get("bindings")
+        if not isinstance(bindings, dict):
+            continue
+        engine_out = {}
+        for engine in sorted(bindings.keys()):
+            binding = bindings.get(engine)
+            if not isinstance(binding, dict):
+                continue
+            entry = {}
+            mechanism = binding.get("mechanism")
+            if isinstance(mechanism, str):
+                entry["mechanism"] = mechanism
+            status = binding.get("status")
+            if isinstance(status, str):
+                entry["status"] = status
+            artifact = binding.get("artifact")
+            if isinstance(artifact, str) and artifact:
+                artifact_path = artifact
+                if not artifact_path.startswith("/"):
+                    artifact_path = install_dir.rstrip("/") + "/" + artifact_path
+                entry["artifact_digest"] = sha256_of(artifact_path)
+            engine_out[engine] = entry
+        matrix[cap_id] = engine_out
+    return matrix
+
+
+if val_err:
+    manifest = {
+        "version": version,
+        "capabilities": {},
+        "error": val_err,
+    }
+else:
+    capabilities = load_registry(reg_path)
+    manifest = {
+        "version": version,
+        "capabilities": build_matrix(capabilities),
+    }
+json.dump(manifest, sys.stdout, indent=2, sort_keys=True)
+sys.stdout.write("\n")
+PYEOF
+  chmod 0644 "$tmp"
+  mv "$tmp" "$outdir/capability-manifest.json"
 }
 
 _cbox_context_manifest_verify() {
@@ -2996,11 +2895,18 @@ regen_all() {
   if [ "${CBOX_HERMES:-off}" = on ]; then
     gen_hermes_managed_into "$INSTALL_DIR/generated/hermes/managed.env"
     gen_hermes_mcp_servers_into "$INSTALL_DIR/generated/hermes/mcp_servers.yaml"
+    if [ "${CBOX_HERMES_HOOKS:-off}" = on ]; then
+      gen_hermes_hooks_into "$INSTALL_DIR/generated/hermes/hooks.yaml"
+    else
+      rm -f "$INSTALL_DIR/generated/hermes/hooks.yaml"
+    fi
   else
     rm -f "$INSTALL_DIR/generated/hermes/managed.env"
     rm -f "$INSTALL_DIR/generated/hermes/mcp_servers.yaml"
+    rm -f "$INSTALL_DIR/generated/hermes/hooks.yaml"
   fi
   gen_context_manifest_into "$INSTALL_DIR/generated"
+  gen_capability_manifest_into "$INSTALL_DIR/generated"
   _cbox_conf_set_tpl_sha
 }
 

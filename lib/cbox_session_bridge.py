@@ -2,6 +2,7 @@
 import argparse
 import collections
 import datetime
+import fcntl
 import glob
 import hashlib
 import json
@@ -708,6 +709,196 @@ def render_memory(doc):
     return raw[-limit:].decode("utf-8", "ignore") + suffix
 
 
+MINED_PROVENANCE = "mined from %s native history (lower fidelity than inline hooks: chat narrative only, not commit/edit/tool-outcome events)"
+MINE_TARGET_RE = re.compile(r"^(PROGRESS_[0-9]{4}_[0-9]{2}_[0-9]{2}\.md|CHANGELOG\.md)$")
+
+
+def ascii_safe(text):
+    if not isinstance(text, str):
+        return ""
+    return text.encode("ascii", "replace").decode("ascii")
+
+
+def mine_safe_field(text):
+    field = ascii_safe(compact_title(text))
+    return field.replace("[", "(").replace("]", ")")
+
+
+def mine_marker(engine, native_id, cursor):
+    cursor = cursor or {}
+    return "[cbox-mined engine=%s native=%s cursor=%s:%s]" % (
+        engine, native_id, cursor.get("kind") or "none", cursor.get("value") if cursor.get("value") is not None else 0,
+    )
+
+
+def mine_records(root, engine, native_id, cursor):
+    delta = extract(root, engine, native_id, cursor)
+    messages = delta["messages"]
+    marker = mine_marker(engine, native_id, delta["cursor"])
+    if not messages:
+        return {
+            "schemaVersion": 1,
+            "engine": engine,
+            "nativeSessionId": native_id,
+            "cursor": delta["cursor"],
+            "marker": marker,
+            "messageCount": 0,
+            "block": "",
+        }
+    user_count = sum(1 for m in messages if m["role"] == "user")
+    assistant_count = sum(1 for m in messages if m["role"] == "assistant")
+    first_stamp = mine_safe_field(messages[0]["timestamp"] or "") or "unknown"
+    last_stamp = mine_safe_field(messages[-1]["timestamp"] or "") or "unknown"
+    topic = ""
+    for m in messages:
+        if m["role"] == "user":
+            topic = mine_safe_field(m["text"])
+            if topic:
+                break
+    topic = topic or "(no user topic text captured)"
+    lines = []
+    lines.append(marker)
+    lines.append("(%s)" % (MINED_PROVENANCE % engine))
+    lines.append(
+        "- %s session %s: %d turns (%d user / %d assistant), %s to %s - topic: %s"
+        % (engine, native_id, len(messages), user_count, assistant_count, first_stamp, last_stamp, topic)
+    )
+    block = "\n".join(lines)
+    return {
+        "schemaVersion": 1,
+        "engine": engine,
+        "nativeSessionId": native_id,
+        "cursor": delta["cursor"],
+        "marker": marker,
+        "messageCount": len(messages),
+        "block": block,
+    }
+
+
+def mine_target_path(root, target):
+    base = os.path.basename(target)
+    if target != base or not MINE_TARGET_RE.fullmatch(base):
+        raise ValueError("mine-records --target must be a bare PROGRESS_YYYY_MM_DD.md or CHANGELOG.md filename (never LEDGER/OPEN_QUESTIONS/DIARY)")
+    try:
+        os.close(open_brain_dir(root))
+    except FileNotFoundError:
+        pass
+    path = os.path.join(root, ".cbox", base)
+    if os.path.islink(path):
+        raise ValueError("mine-records refuses a symlinked target")
+    return path
+
+
+def open_brain_dir(root):
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        next_fd = os.open(".cbox", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+    except FileNotFoundError:
+        os.close(fd)
+        raise
+    except OSError:
+        os.close(fd)
+        raise ValueError("mine-records refuses a .cbox parent that is not a real directory under the project root (symlink or non-directory)")
+    os.close(fd)
+    return next_fd
+
+
+def mine_target_header(base):
+    if base == "CHANGELOG.md":
+        return "# CHANGELOG\n\n## [Unmerged]\n"
+    stem = base[:-3]
+    if stem.startswith("PROGRESS_"):
+        stem = stem[len("PROGRESS_"):]
+    return "# PROGRESS %s\n\n" % stem.replace("_", "-")
+
+
+def mine_insert_under_unmerged(existing, block):
+    lines = existing.splitlines(True)
+    header_idx = None
+    for i, line in enumerate(lines):
+        if line.strip() == "## [Unmerged]":
+            header_idx = i
+            break
+    if header_idx is not None:
+        insert_idx = header_idx + 1
+        while insert_idx < len(lines) and lines[insert_idx].strip() == "":
+            insert_idx += 1
+        head = "".join(lines[: header_idx + 1])
+        if not head.endswith("\n"):
+            head += "\n"
+        tail = "".join(lines[insert_idx:])
+        return head + "\n" + block + "\n\n" + tail
+
+    if lines and lines[0].startswith("# "):
+        head = lines[0]
+        if not head.endswith("\n"):
+            head += "\n"
+        rest = "".join(lines[1:]).lstrip("\n")
+        return head + "\n## [Unmerged]\n\n" + block + "\n\n" + rest
+
+    return "## [Unmerged]\n\n" + block + "\n\n" + existing
+
+
+def mine_append(root, path, result):
+    if not result["block"]:
+        return False
+    base = os.path.basename(path)
+    try:
+        dirfd = open_brain_dir(root)
+    except FileNotFoundError:
+        try:
+            os.mkdir(os.path.join(root, ".cbox"))
+        except FileExistsError:
+            pass
+        dirfd = open_brain_dir(root)
+    try:
+        lock_name = base + ".lock"
+        lock_fd = os.open(lock_name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644, dir_fd=dirfd)
+        lock_fh = os.fdopen(lock_fd, "a+")
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX)
+            marker = result["marker"]
+            existing = ""
+            try:
+                fd = os.open(base, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dirfd)
+            except FileNotFoundError:
+                fd = None
+            except OSError:
+                raise ValueError("mine-records refuses a symlinked target")
+            if fd is not None:
+                with os.fdopen(fd, "r", encoding="utf-8") as fh:
+                    existing = fh.read()
+            if any(line.startswith(marker) for line in existing.splitlines()):
+                return False
+            if base == "CHANGELOG.md":
+                if not existing:
+                    existing = mine_target_header(base)
+                existing = mine_insert_under_unmerged(existing, result["block"])
+            else:
+                if not existing:
+                    existing = mine_target_header(base)
+                if not existing.endswith("\n"):
+                    existing += "\n"
+                if not existing.endswith("\n\n"):
+                    existing += "\n"
+                existing += result["block"] + "\n"
+            tmp_name = base + (".%d.tmp" % os.getpid())
+            try:
+                os.unlink(tmp_name, dir_fd=dirfd)
+            except FileNotFoundError:
+                pass
+            tmp_fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644, dir_fd=dirfd)
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+                fh.write(existing)
+            os.replace(tmp_name, base, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+            return True
+        finally:
+            fcntl.flock(lock_fh, fcntl.LOCK_UN)
+            lock_fh.close()
+    finally:
+        os.close(dirfd)
+
+
 def load_json_file(path):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(fd, "r", encoding="utf-8") as fh:
@@ -758,6 +949,13 @@ def main(argv=None):
     p.add_argument("--root")
     p.add_argument("--ref")
 
+    p = sub.add_parser("mine-records")
+    p.add_argument("--root", required=True)
+    p.add_argument("--engine", choices=("claude", "codex", "hermes"), required=True)
+    p.add_argument("--native-id", required=True)
+    p.add_argument("--cursor", default="")
+    p.add_argument("--target", default="")
+
     args = parser.parse_args(argv)
     if args.command == "discover":
         value = discover(normalized_root(args.root), args.engine)
@@ -785,6 +983,16 @@ def main(argv=None):
         else:
             raise ValueError("render requires either path or --root with --ref")
         sys.stdout.write(render_memory(value) + "\n")
+    elif args.command == "mine-records":
+        root = normalized_root(args.root)
+        result = mine_records(root, args.engine, args.native_id, args.cursor)
+        if args.target:
+            path = mine_target_path(root, args.target)
+            appended = mine_append(root, path, result)
+            result = dict(result)
+            result["targetPath"] = os.path.relpath(path, root)
+            result["appended"] = appended
+        write_json(result)
     return 0
 
 

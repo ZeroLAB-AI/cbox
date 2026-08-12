@@ -165,6 +165,8 @@ Safety: recursion limit (Claude refuses further hops when invoked over MCP), rea
 
 Each call runs Claude Code in headless print mode (`claude -p ... --output-format json`), so it can carry a real `--fallback-model` chain: a comma-separated list Claude Code tries in order if the requested model is overloaded or not available. This is a genuine multi-step chain, but it is scoped to this one-shot delegate call, not to an interactive Claude Code session - `--fallback-model` only works with `--print`, and it covers "overloaded or not available", not a safety-rules refusal. An interactive session only has `switchModelsOnFlag`, a single automatic switch (see the mounts section above); there is no native three-step interactive chain, and cbox does not pretend otherwise. Set `ASK_CLAUDE_FALLBACK_MODEL` to a comma-separated override list (empty string disables the chain entirely); leave it unset for a built-in default chain keyed on the requested `model` (defined in `etc/codex/ask_claude_fallback_models.json`, deployed alongside `ask_claude_mcp.py`). Every entry in the chain, override or default, passes the same validation as `model` itself: non-empty, no leading `-`, no whitespace; a malformed override entry refuses the call before Claude Code is invoked.
 
+`CBOX_CODEX_HOOKS` (enum `off`/`on`, default `off`) is an experiment gate. `on` renders `[features].codex_hooks=true` into the codex profile and a PreToolUse Bash entry into `generated/codex/hooks.json` pointing at `codex_guard_bridge.py`, which translates codex's Bash-tool payload to the claude-shaped guards (rm-glob denies; commit is advisory; code-hygiene/agent-label/spawn/codex-mode have no codex analog under a Bash-only PreToolUse). `off` (default) keeps today's codex profile and hooks.json byte-for-byte (proven by the M3 frozen oracle). The binding stays `gated:codex-hooks-experiment` until the host runbook (`docs/M4_GUARD_EXPERIMENTS_RUNBOOK.md`) records real payloads and proves deny actually blocks.
+
 ### codex-progress
 
 Enable live progress relay: MCP calls show live Claude Code UI activity during Codex delegation instead of a bare spinner. The relay (`~/.claude/hooks/codex_mcp_shim.py`) translates Codex events to standard MCP progress notifications. Requires claude mount mode and staged hook install (`cbox install-hooks`).
@@ -294,6 +296,8 @@ Refresh safety: when `cbox reinstall-bins` or autoupdate refreshes the hermes ve
 First use: enable this section (`cbox setup update hermes` or the wizard), then run `cbox reinstall-bins` on the host to install hermes into the shared bins volume. Recreate the container with `cbox up` (or the next `cbox run hermes`), then `cbox run hermes`.
 
 `cbox doctor` reports ACTIVE/CONFIG-ONLY/OFF for this section.
+
+`CBOX_HERMES_HOOKS` (enum `off`/`on`, default `off`) is an experiment gate. `on` renders the cbox `hooks:` block into the hermes config via a block-replace apply and stages `hermes_guard_bridge.py` (an armored wrapper: any internal error degrades to allow-with-stderr, since hermes fails open on crash). The `_hermes_hooks_preflight` refuses `hooks_auto_accept` when the rendered block or any referenced guard script is container-writable (adapter law). `off` (default) keeps today's hermes config byte-for-byte. The binding stays `gated:hermes-hooks-experiment` until the host runbook verifies the pinned hermes version honors block-JSON and confirms crash=allow.
 
 ### hermes-delegate
 

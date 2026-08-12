@@ -1,0 +1,11 @@
+{
+  "provenance": "spec",
+  "hook_event_name": "pre_tool_call",
+  "tool_name": "terminal",
+  "tool_input": {
+    "command": "git status"
+  },
+  "session_id": "spec-session-h0002",
+  "cwd": "/workspace/project",
+  "timestamp": "2026-08-09T00:00:00Z"
+}

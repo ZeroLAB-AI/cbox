@@ -20,6 +20,22 @@
       "layer": "container",
       "purpose": "container entrypoint, Linux forever per section 3"
     },
+    "etc/adapters/claude.py": {
+      "layer": "host",
+      "purpose": "M3 per-engine render adapter: claude json-seed, switch-flag-merge, seed-adopt-nofollow, cbox-json-seed-merge, settings-merge subcommands, invoked host-side by templates/generators.sh shims"
+    },
+    "etc/adapters/codex.py": {
+      "layer": "host",
+      "purpose": "M3 per-engine render adapter: codex hooks-json and mcp-toml-blocks subcommands, invoked host-side by templates/generators.sh shims"
+    },
+    "etc/adapters/hermes.py": {
+      "layer": "host",
+      "purpose": "M3 per-engine render adapter: hermes mcp-servers-yaml and (M4) hooks-yaml subcommands, invoked host-side by templates/generators.sh shims"
+    },
+    "etc/capabilities/capability_registry.py": {
+      "layer": "host",
+      "purpose": "capability registry validator (load/validate/names/get), mirrors etc/engines/engines_registry.py idiom for etc/capabilities/capabilities.json"
+    },
     "etc/clipboard/clip_bridge.py": {
       "layer": "host",
       "purpose": "executed directly by cbox on the host (cbox:2172)"
@@ -68,9 +84,17 @@
       "layer": "template-generating-container-content",
       "purpose": "copied into generated/hooks, staged into container claude hooks"
     },
+    "etc/hooks/codex_guard_bridge.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "M4 codex dialect wrapper: Bash-only deny-only translator for codex experimental PreToolUse (spec-based payload shape), runs rm_glob_guard.py/commit_guard.py unmodified and denies when they deny; gated behind CBOX_CODEX_HOOKS=on (default off), copied into generated/hooks, staged into container claude hooks"
+    },
     "etc/hooks/commit_guard.py": {
       "layer": "template-generating-container-content",
       "purpose": "copied into generated/hooks, staged into container claude hooks"
+    },
+    "etc/hooks/hermes_guard_bridge.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "M4 gated (CBOX_HERMES_HOOKS): translates hermes pre_tool_call payloads to the claude-shaped stdin commit_guard.py/rm_glob_guard.py expect, emits {\"decision\":\"block\"} on rm-glob deny, armored to degrade to allow on any internal exception (hermes fails open on crash); copied into generated/hooks, staged into container claude hooks"
     },
     "etc/hooks/continuity_commit_log.py": {
       "layer": "template-generating-container-content",
@@ -224,9 +248,21 @@
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
+    "lib/test_bashrc_chooser.sh": {
+      "layer": "test",
+      "purpose": "bash+zsh shell-rc chooser: marker-block install into both rc files, mandatory cbox wrapper, refuse-on-duplicate-marker, uninstall from both"
+    },
+    "lib/test_capabilities_registry.sh": {
+      "layer": "test",
+      "purpose": "M1 referential-integrity test for capabilities.json: engine/env/delegate cross-references, hook-command coverage, projection-aware dispatch-site inventory, null-history and two-live-mains negative fixtures"
+    },
     "lib/test_cbox_ai_local_qwen.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_codex_guard_bridge.sh": {
+      "layer": "test",
+      "purpose": "M4 codex guard dialect bridge test: DENY on a spec-based rm-glob PreToolUse fixture, allow on an innocuous fixture, no-crash degrade-to-allow on malformed input, confirms test_m3_oracle.sh verify still passes (knob off = byte-identical default render), and a CBOX_CODEX_HOOKS=on render assertion for [features].codex_hooks and the PreToolUse bridge entry"
     },
     "lib/test_cbox_config.sh": {
       "layer": "test",
@@ -276,9 +312,17 @@
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
+    "lib/test_code_hygiene_guard.sh": {
+      "layer": "test",
+      "purpose": "code_hygiene_guard: non-ASCII denied in code AND docs (.md/.txt), comment/model-name checks code-only, markdown headings allowed"
+    },
     "lib/test_codex_mcp_shim.py": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_conf_manifest.sh": {
+      "layer": "test",
+      "purpose": "global conf-sha manifest (Q3): write/status/drift/unstamped/missing/malformed - closes the global-vs-isolated conf-drift asymmetry"
     },
     "lib/test_conf_save_coverage.sh": {
       "layer": "test",
@@ -332,6 +376,10 @@
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
+    "lib/test_hermes_guard_bridge.sh": {
+      "layer": "test",
+      "purpose": "M4 hermes guard dialect bridge test: block on a spec-based rm-glob pre_tool_call fixture, allow on an innocuous fixture, no-crash degrade-to-allow on malformed input (fail-open armor proof), confirms test_m3_oracle.sh/test_hermes_gen.sh still pass (knob off = byte-identical default render), a CBOX_HERMES_HOOKS=on render assertion for the hooks: pre_tool_call block, and _hermes_hooks_preflight refuse/pass observations under an unprivileged runner (setpriv+nobody, since root bypasses chmod bits)"
+    },
     "lib/test_hermes_gen.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
@@ -341,6 +389,10 @@
       "purpose": "host-side test harness under the lib/test_* suite"
     },
     "lib/test_hub_menu.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_image_inputs_materialization.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
@@ -359,6 +411,10 @@
     "lib/test_local_model_mcp.py": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_m3_oracle.sh": {
+      "layer": "test",
+      "purpose": "the frozen pre-M3 adapter-extraction oracle: renders the moved capability-brain surfaces from lib/fixtures/m3_oracle/install_dir_snapshot into a scratch dir, freeze mode writes lib/fixtures/m3_oracle/digests.txt, verify mode (default) byte-compares against it and includes a mutation-check self-test proving the compare actually fires on a changed byte"
     },
     "lib/test_netaccess_runtime.sh": {
       "layer": "test",
@@ -401,6 +457,10 @@
       "purpose": "host-side test harness under the lib/test_* suite"
     },
     "lib/test_rm_glob_guard.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_safeguard_autoconfirm.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
@@ -448,6 +508,14 @@
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
+    "lib/test_user_mcp_layer.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_user_policies_layer.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
     "lib/test_validator_parity.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
@@ -483,34 +551,6 @@
     "templates/validator_lib.sh": {
       "layer": "host",
       "purpose": "sourced by cbox/setup.sh on the host"
-    },
-    "lib/test_user_mcp_layer.sh": {
-      "layer": "test",
-      "purpose": "host-side test harness under the lib/test_* suite"
-    },
-    "lib/test_user_policies_layer.sh": {
-      "layer": "test",
-      "purpose": "host-side test harness under the lib/test_* suite"
-    },
-    "lib/test_image_inputs_materialization.sh": {
-      "layer": "test",
-      "purpose": "host-side test harness under the lib/test_* suite"
-    },
-    "lib/test_safeguard_autoconfirm.sh": {
-      "layer": "test",
-      "purpose": "host-side test harness under the lib/test_* suite"
-    },
-    "lib/test_bashrc_chooser.sh": {
-      "layer": "test",
-      "purpose": "bash+zsh shell-rc chooser: marker-block install into both rc files, mandatory cbox wrapper, refuse-on-duplicate-marker, uninstall from both"
-    },
-    "lib/test_conf_manifest.sh": {
-      "layer": "test",
-      "purpose": "global conf-sha manifest (Q3): write/status/drift/unstamped/missing/malformed - closes the global-vs-isolated conf-drift asymmetry"
-    },
-    "lib/test_code_hygiene_guard.sh": {
-      "layer": "test",
-      "purpose": "code_hygiene_guard: non-ASCII denied in code AND docs (.md/.txt), comment/model-name checks code-only, markdown headings allowed"
     }
   },
   "generated_by": "step 0 of the multiplatform migration (cbox/docs/MULTIPLATFORM_DESIGN.md section 4)",

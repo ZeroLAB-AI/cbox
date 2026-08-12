@@ -1,0 +1,10 @@
+{
+  "hasCompletedOnboarding": true,
+  "mcpServers": {
+    "user-own-server": {
+      "type": "stdio",
+      "command": "user-own-binary",
+      "args": []
+    }
+  }
+}

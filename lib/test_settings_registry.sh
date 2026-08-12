@@ -229,6 +229,8 @@ MODIFIED = {
         "autoresume": "CBOX_LIMIT_AUTORESUME CBOX_SESSION_MULTIPLEX CBOX_SAFEGUARD_AUTOCONFIRM CBOX_SESSION_BROKER_MODE CBOX_SSHD_LISTEN_ADDR CBOX_SSHD_PORT CBOX_LIMIT_RESUME_DELAY CBOX_LIMIT_RESUME_PROMPT CBOX_LIMIT_RESUME_STAGGER CBOX_LIMIT_RESUME_MAX_PER_DAY",
         "wireguard": "CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE CBOX_WG_FORWARDS",
         "bashrc": "CBOX_BASHRC CBOX_BASHRC_COMMANDS",
+        "hermes": "CBOX_HERMES CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME CBOX_HERMES_HOOKS",
+        "codex-mcp": "CBOX_CODEX_MCP CBOX_CODEX_HOOKS",
     },
     "SEC_DESC": {
         "autoresume": "Wrap interactive sessions in tmux and let a per-container watchdog type the resume prompt after a usage-limit window resets (isolated session scope + claude mount only). Also carries the in-container sshd remote-attach feature (disabled by default): three layers - WireGuard, an ssh key, and this container's access level - gate list/attach/spawn against the tmux sessions the wrap creates.",
@@ -257,6 +259,11 @@ for name, kind, payload in old:
         payload = [
             (k, MODIFIED[name].get(k, v)) for k, v in payload
         ]
+    if name == "RAW" and kind == "raw":
+        payload = payload.replace(
+            'DOCTOR_EXTRA_ROWS="codex-profile context-manifest local-model local-model-egress managed-dirs config-pending sessions"',
+            'DOCTOR_EXTRA_ROWS="codex-profile context-manifest local-model local-model-egress managed-dirs config-pending sessions capabilities"',
+        )
     expected.append((name, kind, payload))
 
 if expected != new:
@@ -269,9 +276,9 @@ if expected != new:
 EOF
 
 python3 "$ADOPTION_DELTA_PY" "$TMPBASE/old_norm.txt" "$TMPBASE/new_norm.txt" 2> "$TMPBASE/parity_diff.txt" \
-  || _fail "SEC_* arrays differ from the pre-registry snapshot by MORE than the declared shadow-setting adoption (sections autoupdate/dns/clipboard with their six variables, plus the netaccess CBOX_CONTAINER_EXEC_TOOL variable/doctor-row addition, plus the mounts CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG variable addition, plus the autoresume CBOX_SESSION_MULTIPLEX variable addition, plus the wireguard CBOX_WG_FORWARDS variable addition, plus the autoresume CBOX_SESSION_BROKER_MODE variable and session-broker doctor-row addition, plus the autoresume CBOX_SSHD_LISTEN_ADDR and CBOX_SSHD_PORT variable additions and updated SEC_DESC for the in-container sshd ForceCommand entry, plus the new kernel-lang section with its two CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING variables):
+  || _fail "SEC_* arrays differ from the pre-registry snapshot by MORE than the declared shadow-setting adoption (sections autoupdate/dns/clipboard with their six variables, plus the netaccess CBOX_CONTAINER_EXEC_TOOL variable/doctor-row addition, plus the mounts CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG variable addition, plus the autoresume CBOX_SESSION_MULTIPLEX variable addition, plus the wireguard CBOX_WG_FORWARDS variable addition, plus the autoresume CBOX_SESSION_BROKER_MODE variable and session-broker doctor-row addition, plus the autoresume CBOX_SSHD_LISTEN_ADDR and CBOX_SSHD_PORT variable additions and updated SEC_DESC for the in-container sshd ForceCommand entry, plus the new kernel-lang section with its two CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING variables, plus the capabilities doctor-extra-row addition to DOCTOR_EXTRA_ROWS, plus the hermes CBOX_HERMES_HOOKS variable addition, plus the codex-mcp CBOX_CODEX_HOOKS variable addition):
 $(cat "$TMPBASE/parity_diff.txt")"
-_ok "parity gate: generated sections.sh equals the pre-registry snapshot plus exactly the declared adoption delta (autoupdate/dns/clipboard sections, six variables, skip profile, project scope, empty doctor rows; plus CBOX_CONTAINER_EXEC_TOOL added to the existing netaccess section and its container-exec-tool doctor row; plus CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG added to the existing mounts section; plus CBOX_SESSION_MULTIPLEX added to the existing autoresume section; plus CBOX_SAFEGUARD_AUTOCONFIRM added to the existing autoresume section; plus CBOX_WG_FORWARDS added to the existing wireguard section; plus CBOX_SESSION_BROKER_MODE added to the existing autoresume section and its session-broker doctor row; plus CBOX_SSHD_LISTEN_ADDR and CBOX_SSHD_PORT added to the existing autoresume section with its SEC_DESC updated for sshd; plus the new kernel-lang section (CBOX_KERNEL_LANG_OUTPUT, CBOX_KERNEL_LANG_REASONING), apply_class none, skip profile, project scope, empty doctor rows) - nothing else moved"
+_ok "parity gate: generated sections.sh equals the pre-registry snapshot plus exactly the declared adoption delta (autoupdate/dns/clipboard sections, six variables, skip profile, project scope, empty doctor rows; plus CBOX_CONTAINER_EXEC_TOOL added to the existing netaccess section and its container-exec-tool doctor row; plus CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG added to the existing mounts section; plus CBOX_SESSION_MULTIPLEX added to the existing autoresume section; plus CBOX_SAFEGUARD_AUTOCONFIRM added to the existing autoresume section; plus CBOX_WG_FORWARDS added to the existing wireguard section; plus CBOX_SESSION_BROKER_MODE added to the existing autoresume section and its session-broker doctor row; plus CBOX_SSHD_LISTEN_ADDR and CBOX_SSHD_PORT added to the existing autoresume section with its SEC_DESC updated for sshd; plus the new kernel-lang section (CBOX_KERNEL_LANG_OUTPUT, CBOX_KERNEL_LANG_REASONING), apply_class none, skip profile, project scope, empty doctor rows; plus the capabilities doctor-extra-row added to DOCTOR_EXTRA_ROWS; plus CBOX_HERMES_HOOKS added to the existing hermes section (M4 experiment gate, default off); plus CBOX_CODEX_HOOKS added to the existing codex-mcp section (M4 experiment gate, default off)) - nothing else moved"
 
 NAMES="$(python3 "$PY" sections "$REG")"
 [ -n "$NAMES" ] || _fail "sections command returned nothing"
@@ -280,8 +287,8 @@ _ok "sections command lists section ids"
 VARS="$(python3 "$PY" vars "$REG")"
 [ -n "$VARS" ] || _fail "vars command returned nothing"
 VAR_COUNT="$(printf '%s\n' "$VARS" | grep -c .)"
-[ "$VAR_COUNT" -eq 108 ] || _fail "expected 108 variables in the registry, got $VAR_COUNT"
-_ok "vars command lists all 108 variables"
+[ "$VAR_COUNT" -eq 110 ] || _fail "expected 110 variables in the registry, got $VAR_COUNT"
+_ok "vars command lists all 110 variables"
 
 W="$TMPBASE/reg"
 mkdir -p "$W"

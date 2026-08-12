@@ -471,11 +471,11 @@ test_local_qwen_explicit_selection_unconfigured_fails_loud() {
     python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
     "$INSTALL_DIR/etc/mcp/delegates.json" local-qwen "/home/x/.claude/hooks" off claude \
     >/dev/null 2>"$err"; then
-    _fail "render_mcp.py accepted an explicit local-qwen selection with CBOX_LOCAL_MODEL_URL unset"
+    _fail "render_mcp.py accepted an explicit local-qwen selection with CBOX_LOCAL_MODEL_URL and CBOX_LOCAL_MODEL_NAME unset"
   fi
-  grep -q "explicitly selected but CBOX_LOCAL_MODEL_URL is not set" "$err" \
-    || _fail "render_mcp.py refusal message missing for unconfigured explicit local-qwen selection"
-  echo "PASS: render_mcp.py refuses an explicit unconfigured local-qwen selection loudly"
+  grep -q "explicitly selected but CBOX_LOCAL_MODEL_URL, CBOX_LOCAL_MODEL_NAME is not set" "$err" \
+    || _fail "render_mcp.py refusal message missing both unmet compound-gate vars for unconfigured explicit local-qwen selection"
+  echo "PASS: render_mcp.py refuses an explicit unconfigured local-qwen selection loudly, naming both unmet compound-gate vars"
 }
 
 test_local_qwen_present_and_env_substituted_when_configured() {
@@ -535,6 +535,117 @@ test_local_qwen_invisible_to_boot_gate_when_configured() {
   echo "PASS: local-qwen is invisible to the entrypoint boot gate (not named codex-*) once configured"
 }
 
+test_local_qwen_compound_gate_url_set_name_empty_not_rendered() {
+  local rendered="$TMPBASE/local_qwen_url_only_claude.json"
+  CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="" \
+    python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
+    "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$rendered"
+  python3 -c '
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+assert "local-qwen" not in data, data.keys()
+' "$rendered"
+
+  local rendered_codex="$TMPBASE/local_qwen_url_only_codex.json"
+  CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="" \
+    python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
+    "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off codex > "$rendered_codex"
+  python3 -c '
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+assert "local-qwen" not in data, data.keys()
+' "$rendered_codex"
+
+  local rendered_hermes="$TMPBASE/local_qwen_url_only_hermes.json"
+  CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="" \
+    python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
+    "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off hermes > "$rendered_hermes"
+  python3 -c '
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+assert data["local-qwen"]["enabled"] is False, data["local-qwen"]
+' "$rendered_hermes"
+  echo "PASS: local-qwen with CBOX_LOCAL_MODEL_URL set but CBOX_LOCAL_MODEL_NAME empty is NOT rendered as an enabled tool for any target (compound gate closes the advertised-but-broken-at-call-time hole)"
+}
+
+test_local_qwen_compound_gate_explicit_selection_url_only_fails_loud() {
+  local err="$TMPBASE/local_qwen_url_only_explicit.err"
+  if CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="" \
+    python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
+    "$INSTALL_DIR/etc/mcp/delegates.json" local-qwen "/home/x/.claude/hooks" off claude \
+    >/dev/null 2>"$err"; then
+    _fail "render_mcp.py accepted an explicit local-qwen selection with only CBOX_LOCAL_MODEL_URL set"
+  fi
+  grep -q "explicitly selected but CBOX_LOCAL_MODEL_NAME is not set" "$err" \
+    || _fail "render_mcp.py refusal message missing the unmet CBOX_LOCAL_MODEL_NAME var for a partially-configured explicit local-qwen selection"
+  echo "PASS: render_mcp.py refuses an explicit local-qwen selection loudly when only one half of the compound gate is set, naming the unmet var"
+}
+
+test_local_qwen_compound_gate_both_set_renders() {
+  local rendered="$TMPBASE/local_qwen_both_set.json"
+  CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="qwen2.5:7b" \
+    python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
+    "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$rendered"
+  python3 -c '
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+assert "local-qwen" in data, data.keys()
+' "$rendered"
+  echo "PASS: local-qwen renders when both halves of the compound gate (CBOX_LOCAL_MODEL_URL and CBOX_LOCAL_MODEL_NAME) are set"
+}
+
+test_single_string_enabled_when_env_still_works() {
+  local fixture="$TMPBASE/single_string_gate.json"
+  echo '{"fixture-tool":{"type":"stdio","command":"fixture-tool-bin","args":["--serve"],"_cbox":{"adapter":"stdio-mcp","available_to":["claude"],"backend":"fixture-tool-bin","side_effects":["none"],"enabled_when_env":"CBOX_FIXTURE_SINGLE_GATE"}}}' > "$fixture"
+
+  local rendered_off="$TMPBASE/single_string_gate_off.json"
+  env -u CBOX_FIXTURE_SINGLE_GATE \
+    python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$fixture" all "/home/x/.claude/hooks" off claude > "$rendered_off"
+  python3 -c '
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+assert "fixture-tool" not in data, data.keys()
+' "$rendered_off"
+
+  local rendered_on="$TMPBASE/single_string_gate_on.json"
+  CBOX_FIXTURE_SINGLE_GATE=on \
+    python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$fixture" all "/home/x/.claude/hooks" off claude > "$rendered_on"
+  python3 -c '
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+assert "fixture-tool" in data, data.keys()
+' "$rendered_on"
+  echo "PASS: a single-string enabled_when_env gate still works (back-compat with the pre-list form)"
+}
+
+test_local_qwen_gate_agrees_with_capabilities_registry() {
+  python3 -c '
+import json
+
+delegates = json.load(open("'"$INSTALL_DIR"'/etc/mcp/delegates.json"))
+caps = json.load(open("'"$INSTALL_DIR"'/etc/capabilities/capabilities.json"))["capabilities"]
+
+d_gate = delegates["local-qwen"]["_cbox"]["enabled_when_env"]
+if isinstance(d_gate, str):
+    d_gate = [d_gate]
+c_gate = caps["local-qwen"]["enabled_when_env"]
+assert sorted(d_gate) == sorted(c_gate), (d_gate, c_gate)
+'
+  echo "PASS: delegates.json local-qwen enabled_when_env agrees with capabilities.json local-qwen enabled_when_env (both require CBOX_LOCAL_MODEL_URL and CBOX_LOCAL_MODEL_NAME)"
+}
+
 test_enabled_when_env_gates_are_exported_everywhere() {
   local gates
   gates="$(python3 -c '
@@ -542,14 +653,18 @@ import json
 import sys
 
 data = json.load(open(sys.argv[1]))
-gates = sorted({
-    s["_cbox"]["enabled_when_env"]
-    for s in data.values()
-    if isinstance(s, dict)
-    and isinstance(s.get("_cbox"), dict)
-    and s["_cbox"].get("enabled_when_env")
-})
-print(" ".join(gates))
+found = set()
+for s in data.values():
+    if not isinstance(s, dict) or not isinstance(s.get("_cbox"), dict):
+        continue
+    ewe = s["_cbox"].get("enabled_when_env")
+    if not ewe:
+        continue
+    if isinstance(ewe, str):
+        found.add(ewe)
+    else:
+        found.update(ewe)
+print(" ".join(sorted(found)))
 ' "$INSTALL_DIR/etc/mcp/delegates.json")"
   [ -n "$gates" ] || _fail "no enabled_when_env gates found in delegates.json - test fixture assumption broken"
   local conf_lib="$INSTALL_DIR/templates/conf_lib.sh"
@@ -764,6 +879,11 @@ test_local_qwen_explicit_selection_unconfigured_fails_loud
 test_local_qwen_present_and_env_substituted_when_configured
 test_local_qwen_available_to_codex_when_configured
 test_local_qwen_invisible_to_boot_gate_when_configured
+test_local_qwen_compound_gate_url_set_name_empty_not_rendered
+test_local_qwen_compound_gate_explicit_selection_url_only_fails_loud
+test_local_qwen_compound_gate_both_set_renders
+test_single_string_enabled_when_env_still_works
+test_local_qwen_gate_agrees_with_capabilities_registry
 test_fixture_stdio_mcp_renders_plain_for_claude
 test_fixture_stdio_mcp_absent_for_codex
 test_fixture_stdio_mcp_invisible_to_boot_gate

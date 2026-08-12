@@ -256,7 +256,7 @@ sec_get() {
           printf '%s\n' 'CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME'
           ;;
         hermes)
-          printf '%s\n' 'CBOX_HERMES CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME'
+          printf '%s\n' 'CBOX_HERMES CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME CBOX_HERMES_HOOKS'
           ;;
         hermes-delegate)
           printf '%s\n' 'CBOX_HERMES_DELEGATE CBOX_HERMES_DELEGATE_PROVIDER CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL CBOX_HERMES_DELEGATE_MAX_CONCURRENCY CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC CBOX_HERMES_DELEGATE_LOCK_DIR OLLAMA_NUM_PARALLEL CBOX_HERMES_DELEGATE_MODE CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS'
@@ -274,7 +274,7 @@ sec_get() {
           printf '%s\n' 'CBOX_AGENTS'
           ;;
         codex-mcp)
-          printf '%s\n' 'CBOX_CODEX_MCP'
+          printf '%s\n' 'CBOX_CODEX_MCP CBOX_CODEX_HOOKS'
           ;;
         continuity)
           printf '%s\n' 'CBOX_HISTORY CBOX_GIT CBOX_DIARY CBOX_OPEN_QUESTIONS CBOX_CONTEXT_PROFILE'
@@ -897,4 +897,4 @@ sec_keys() {
   esac
 }
 
-DOCTOR_EXTRA_ROWS='codex-profile context-manifest local-model local-model-egress managed-dirs config-pending sessions'
+DOCTOR_EXTRA_ROWS='codex-profile context-manifest local-model local-model-egress managed-dirs config-pending sessions capabilities'

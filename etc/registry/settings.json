@@ -396,7 +396,8 @@
     "local-model-egress",
     "managed-dirs",
     "config-pending",
-    "sessions"
+    "sessions",
+    "capabilities"
   ],
   "variables": [
     {
@@ -1167,6 +1168,23 @@
       "validator": null
     },
     {
+      "key": "CBOX_HERMES_HOOKS",
+      "section": "hermes",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Experiment gate, off by default: when on, renders the cbox hooks: block into the hermes config.yaml so hermes gets the same PreToolUse guard coverage claude has natively. Off reproduces today's hermes config byte-for-byte.",
+      "validator": null
+    },
+    {
       "key": "CBOX_HERMES_DELEGATE",
       "section": "hermes-delegate",
       "type": {
@@ -1744,6 +1762,23 @@
       "export": false,
       "prompt": "setup: register claude as a codex mcp tool (reverse orchestration via ask-claude)",
       "help": "Register claude as an MCP tool inside codex for reverse orchestration.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_CODEX_HOOKS",
+      "section": "codex-mcp",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Experiment gate, off by default: when on, renders [features].codex_hooks=true into the codex profile and the PreToolUse guard entries into the codex hooks.json, giving codex the same guard coverage claude has natively. Off reproduces today's codex profile and hooks.json byte-for-byte.",
       "validator": null
     },
     {

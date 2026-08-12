@@ -374,8 +374,9 @@ grep -qx '      - /run/user/7/cbox-clip-pXYZ:/run/cbox-clip' "$DNSOUT" || _fail 
 _ok "generators: dns and clipboard emission correct"
 
 MANAGED="$TMPBASE/managed"
-mkdir -p "$MANAGED/etc/claude" "$MANAGED/generated/managed-settings.json"
+mkdir -p "$MANAGED/etc/claude" "$MANAGED/etc/adapters" "$MANAGED/generated/managed-settings.json"
 cp "$INSTALL_DIR/etc/claude/managed-settings.merge.json" "$MANAGED/etc/claude/managed-settings.merge.json"
+cp "$INSTALL_DIR/etc/adapters/claude.py" "$MANAGED/etc/adapters/claude.py"
 (
   INSTALL_DIR="$MANAGED"
   HOME=/home/x

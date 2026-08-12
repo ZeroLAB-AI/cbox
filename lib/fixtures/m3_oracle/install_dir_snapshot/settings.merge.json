@@ -4,15 +4,33 @@
     "pr": ""
   },
   "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
+  "autoMode": {
     "allow": [
-      "mcp__codex-luna",
-      "mcp__codex-terra",
-      "mcp__codex-terra-light",
-      "mcp__codex-sol"
-    ],
-    "deny": []
+      "$defaults",
+      "Cbox Codex Delegation: Calling the cbox codex MCP delegates (mcp__codex-sol, mcp__codex-terra, mcp__codex-terra-light, mcp__codex-luna) with approval-policy=never and sandbox=danger-full-access is NOT Create Unsafe Agents when Claude Code runs inside the cbox container. The container is the security boundary, not the codex sandbox: bubblewrap cannot create namespaces inside it, so read-only and workspace-write both fail the moment codex runs any shell command, and on-request would make codex elicit a human Accept/Decline answer that an unattended run hangs on forever. Every such call is independently gated by the codex_mode_guard.py PreToolUse hook on an in-scope git-worktree cwd, a one-hop delegation depth limit, and a bytewise audit log. This exception is scoped to those four MCP tools inside the container and clears nothing else."
+    ]
+  },
+  "env": {
+    "DISABLE_ERROR_REPORTING": "1",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5[1m]",
+    "CBOX_AGENT_MODEL_DENY": "opus-4",
+    "IS_SANDBOX": "1"
   },
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/continuity_session_start.py",
+            "timeout": 10,
+            "statusMessage": "continuity session start"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "mcp__codex-.*",
@@ -81,28 +99,38 @@
         ]
       }
     ],
-    "SessionStart": [
+    "PostToolUse": [
       {
-        "matcher": "",
+        "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 @HOME@/.claude/hooks/session_pane_map.py",
+            "command": "python3 @HOME@/.claude/hooks/continuity_commit_log.py",
             "timeout": 10,
-            "statusMessage": "session scope map"
+            "statusMessage": "continuity commit log"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/continuity_ledger_sweep.py",
+            "timeout": 10,
+            "statusMessage": "continuity ledger sweep"
           }
         ]
       }
     ],
     "SessionEnd": [
       {
-        "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 @HOME@/.claude/hooks/session_pane_map.py",
+            "command": "python3 @HOME@/.claude/hooks/continuity_session_digest.py",
             "timeout": 10,
-            "statusMessage": "session scope unmap"
+            "statusMessage": "continuity session digest"
           }
         ]
       }

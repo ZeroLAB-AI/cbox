@@ -128,7 +128,7 @@ _want_string() {
   local name="$1"
   case "$name" in
     claude) printf '%s' "$CBOX_CLAUDE_TARGET" ;;
-    codex) printf '%s|%s' "$CBOX_CODEX_VERSION" "$CBOX_CODEX_TARGET" ;;
+    codex) printf '%s' "$CBOX_CODEX_VERSION" ;;
     hermes) printf '%s' "$CBOX_HERMES_VERSION" ;;
   esac
 }

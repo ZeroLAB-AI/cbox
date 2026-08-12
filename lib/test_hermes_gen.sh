@@ -332,10 +332,13 @@ _render_hermes_mcp_servers() {
 
 _make_fake_install_with_delegates() {
   local dir="$1" delegates_json="$2"
-  mkdir -p "$dir/etc/mcp" "$dir/generated/hermes" "$dir/templates"
+  mkdir -p "$dir/etc/mcp" "$dir/etc/adapters" "$dir/generated/hermes" "$dir/templates"
   cp "$INSTALL_DIR/_common.sh" "$dir/_common.sh"
   cp "$INSTALL_DIR/templates/generators.sh" "$dir/templates/generators.sh"
   cp "$INSTALL_DIR/etc/mcp/render_mcp.py" "$dir/etc/mcp/render_mcp.py"
+  if [ -d "$INSTALL_DIR/etc/adapters" ]; then
+    cp "$INSTALL_DIR"/etc/adapters/*.py "$dir/etc/adapters/" 2>/dev/null || true
+  fi
   printf '%s' "$delegates_json" > "$dir/etc/mcp/delegates.json"
 }
 
@@ -516,13 +519,48 @@ grep -q "gen_hermes_mcp_servers_into" "$REGEN_FUNC" \
   || _fail "regen_all no longer calls gen_hermes_mcp_servers_into when CBOX_HERMES=on"
 _ok "regen_all calls gen_hermes_mcp_servers_into alongside gen_hermes_managed_into"
 
-grep -q "_hermes_apply_mcp_servers /etc/cbox/hermes-managed/mcp_servers.yaml" "$INSTALL_DIR/entrypoint.sh" \
+for RUNTIME_FN in _global_prepare _cbox_global_prepare_locked _gen_effective; do
+  RUNTIME_BODY="$TMPBASE/${RUNTIME_FN}_body.sh"
+  _validator_body "$INSTALL_DIR/cbox" "$RUNTIME_FN" > "$RUNTIME_BODY"
+  [ -s "$RUNTIME_BODY" ] || _fail "could not extract $RUNTIME_FN from cbox - has it moved or been renamed?"
+  grep -q "gen_hermes_mcp_servers_into" "$RUNTIME_BODY" \
+    || _fail "$RUNTIME_FN (runtime prepare path in cbox) does not call gen_hermes_mcp_servers_into when CBOX_HERMES=on - global/isolated hermes would get mcp_servers: {} (zero delegate tools) outside of cbox setup"
+  grep -q "gen_hermes_hooks_into" "$RUNTIME_BODY" \
+    || _fail "$RUNTIME_FN (runtime prepare path in cbox) does not call gen_hermes_hooks_into behind CBOX_HERMES_HOOKS - drifts from regen_all's gate structure"
+  _ok "$RUNTIME_FN: runtime prepare path wires gen_hermes_mcp_servers_into and gen_hermes_hooks_into (mirrors regen_all, closes the setup-only gap)"
+done
+
+_extract_hermes_arm() {
+  awk '
+    /^  hermes\)$/ { grab=1 }
+    grab { print }
+    grab && /^    ;;$/ { exit }
+  ' "$INSTALL_DIR/entrypoint.sh"
+}
+
+HERMES_ARM="$TMPBASE/hermes_arm.sh"
+_extract_hermes_arm > "$HERMES_ARM"
+[ -s "$HERMES_ARM" ] || _fail "could not extract the hermes) case arm from entrypoint.sh"
+
+grep -q "_hermes_apply_mcp_servers /etc/cbox/hermes-managed/mcp_servers.yaml" "$HERMES_ARM" \
   || _fail "entrypoint.sh hermes branch no longer calls _hermes_apply_mcp_servers"
 _ok "entrypoint.sh hermes branch applies mcp_servers.yaml on every cbox run hermes"
 
-grep -q '_hermes_session_prompt="\$(_hermes_kernel_preamble)"' "$INSTALL_DIR/entrypoint.sh" \
+grep -q '_hermes_session_prompt="\$(_hermes_kernel_preamble)"' "$HERMES_ARM" \
   || _fail "entrypoint.sh hermes branch no longer seeds _hermes_session_prompt from _hermes_kernel_preamble"
-_ok "entrypoint.sh hermes branch seeds the session prompt with the conduct kernel and session core before any operator prompt or memory handoff"
+_ok "entrypoint.sh hermes branch seeds the session prompt with the conduct kernel before any operator prompt or brain payload"
+
+grep -q 'continuity_session_start.py' "$HERMES_ARM" \
+  || _fail "entrypoint.sh hermes branch no longer calls continuity_session_start.py - session-core and brain payloads would be dropped (statically checked; live hermes render is a host step)"
+_ok "entrypoint.sh hermes branch calls the one brain loader (continuity_session_start.py) - statically checked; live hermes render is a host step"
+
+grep -q 'cbox_session_bridge.py render' "$HERMES_ARM" \
+  && _fail "entrypoint.sh hermes branch still calls cbox_session_bridge.py render - the bridge-render block should be removed, the loader supersedes it"
+_ok "entrypoint.sh hermes branch no longer renders the shared-memory bridge directly - the loader supersedes it"
+
+grep -q 'cbox_session_bridge.py render' "$INSTALL_DIR/entrypoint.sh" \
+  && _fail "entrypoint.sh still calls cbox_session_bridge.py render somewhere - the bridge-render block should be fully removed, the loader supersedes it"
+_ok "entrypoint.sh carries no cbox_session_bridge.py render call anywhere, not just outside the hermes arm"
 
 _extract_kernel_preamble_func() {
   awk '
@@ -549,14 +587,9 @@ printf '%s' "$PREAMBLE_OUT" | grep -q '^KERNEL TEXT$' \
   || _fail "_hermes_kernel_preamble dropped the conduct-kernel.txt content:
 $PREAMBLE_OUT"
 printf '%s' "$PREAMBLE_OUT" | grep -q '^CORE TEXT$' \
-  || _fail "_hermes_kernel_preamble dropped the session-core.txt content:
+  && _fail "_hermes_kernel_preamble must be kernel-only - session-core now comes from the loader exactly once, not from the preamble too:
 $PREAMBLE_OUT"
-KERNEL_LINE="$(printf '%s\n' "$PREAMBLE_OUT" | grep -n '^KERNEL TEXT$' | head -n1 | cut -d: -f1)"
-CORE_LINE="$(printf '%s\n' "$PREAMBLE_OUT" | grep -n '^CORE TEXT$' | head -n1 | cut -d: -f1)"
-[ "$KERNEL_LINE" -lt "$CORE_LINE" ] \
-  || _fail "_hermes_kernel_preamble must carry the conduct kernel before the session core:
-$PREAMBLE_OUT"
-_ok "_hermes_kernel_preamble: joins conduct-kernel.txt and session-core.txt, kernel first"
+_ok "_hermes_kernel_preamble: kernel-only, session-core.txt content is not read here (the loader supplies it)"
 
 HOOKS_MISSING="$TMPBASE/hooks_missing"
 mkdir -p "$HOOKS_MISSING/.claude/hooks"
@@ -572,19 +605,13 @@ $PREAMBLE_MISSING_OUT"
 grep -q "conduct-kernel.txt missing" "$MISSING_ERR" \
   || _fail "_hermes_kernel_preamble did not warn about a missing conduct-kernel.txt:
 $(cat "$MISSING_ERR")"
-grep -q "session-core.txt missing" "$MISSING_ERR" \
-  || _fail "_hermes_kernel_preamble did not warn about a missing session-core.txt:
-$(cat "$MISSING_ERR")"
-_ok "_hermes_kernel_preamble: missing source files degrade to an empty preamble with a stderr warning, not a crash"
+_ok "_hermes_kernel_preamble: a missing conduct-kernel.txt degrades to an empty preamble with a stderr warning, not a crash"
 
 REAL_KERNEL="$INSTALL_DIR/etc/hooks/conduct-kernel.txt"
-REAL_CORE="$INSTALL_DIR/etc/hooks/session-core.txt"
 [ -f "$REAL_KERNEL" ] || _fail "missing $REAL_KERNEL"
-[ -f "$REAL_CORE" ] || _fail "missing $REAL_CORE"
 HOOKS_REAL="$TMPBASE/hooks_real"
 mkdir -p "$HOOKS_REAL/.claude/hooks"
 cp "$REAL_KERNEL" "$HOOKS_REAL/.claude/hooks/conduct-kernel.txt"
-cp "$REAL_CORE" "$HOOKS_REAL/.claude/hooks/session-core.txt"
 PREAMBLE_REAL_OUT="$(
   HOST_HOME="$HOOKS_REAL"
   source "$PREAMBLE_FUNC"
@@ -595,7 +622,7 @@ printf '%s' "$PREAMBLE_REAL_OUT" | grep -q 'DELEGATE WRITE BOUNDARY' \
 printf '%s' "$PREAMBLE_REAL_OUT" | grep -q 'a delegate returns the question upward\|DELEGATE IS A LEAF\|LEAF' \
   || _fail "_hermes_kernel_preamble real render is missing the delegate-is-a-leaf rule (add it to conduct-kernel.txt):
 $PREAMBLE_REAL_OUT"
-_ok "_hermes_kernel_preamble: real conduct-kernel.txt + session-core.txt render carries the delegate write boundary and the leaf rule"
+_ok "_hermes_kernel_preamble: real conduct-kernel.txt render carries the delegate write boundary and the leaf rule"
 
 FI_MANIFEST="$TMPBASE/fi_manifest"
 mkdir -p "$FI_MANIFEST/etc/hooks" "$FI_MANIFEST/etc/claude" "$FI_MANIFEST/etc/mcp" "$FI_MANIFEST/generated/codex" "$FI_MANIFEST/templates" "$FI_MANIFEST/lib"

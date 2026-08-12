@@ -1691,8 +1691,16 @@ _gen_effective() {
   gen_codex_hooks_json_into "$eff/codex"
   if [ "${CBOX_HERMES:-off}" = on ]; then
     gen_hermes_managed_into "$eff/hermes/managed.env"
+    gen_hermes_mcp_servers_into "$eff/hermes/mcp_servers.yaml"
+    if [ "${CBOX_HERMES_HOOKS:-off}" = on ]; then
+      gen_hermes_hooks_into "$eff/hermes/hooks.yaml"
+    else
+      rm -f "$eff/hermes/hooks.yaml"
+    fi
   else
     rm -f "$eff/hermes/managed.env"
+    rm -f "$eff/hermes/mcp_servers.yaml"
+    rm -f "$eff/hermes/hooks.yaml"
   fi
 }
 
@@ -1723,7 +1731,7 @@ _bins_want() {
   local tool="$1"
   case "$tool" in
     claude) printf '%s' "${CBOX_CLAUDE_TARGET:-stable}" ;;
-    codex) printf '%s|%s' "${CBOX_CODEX_VERSION:-latest}" "${CBOX_CODEX_TARGET:-}" ;;
+    codex) printf '%s' "${CBOX_CODEX_VERSION:-latest}" ;;
     hermes) printf '%s' "${CBOX_HERMES_VERSION:-latest}" ;;
   esac
 }
@@ -2682,6 +2690,10 @@ net_refresh() {
 
 _gc_legacy_bins_volumes() {
   local v
+  if ! docker volume ls >/dev/null 2>&1; then
+    echo "cbox: gc: docker daemon unreachable - skipped legacy volume cleanup" >&2
+    return 0
+  fi
   docker volume ls --format '{{.Name}}' 2>/dev/null | while IFS= read -r v; do
     case "$v" in
       cbox-i[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-local|cbox-i[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-codex-packages)
@@ -2779,8 +2791,16 @@ _global_prepare() {
   if [ "${CBOX_HERMES:-off}" = on ]; then
     mkdir -p "$INSTALL_DIR/generated/hermes"
     gen_hermes_managed_into "$INSTALL_DIR/generated/hermes/managed.env"
+    gen_hermes_mcp_servers_into "$INSTALL_DIR/generated/hermes/mcp_servers.yaml"
+    if [ "${CBOX_HERMES_HOOKS:-off}" = on ]; then
+      gen_hermes_hooks_into "$INSTALL_DIR/generated/hermes/hooks.yaml"
+    else
+      rm -f "$INSTALL_DIR/generated/hermes/hooks.yaml"
+    fi
   else
     rm -f "$INSTALL_DIR/generated/hermes/managed.env"
+    rm -f "$INSTALL_DIR/generated/hermes/mcp_servers.yaml"
+    rm -f "$INSTALL_DIR/generated/hermes/hooks.yaml"
   fi
   _ensure_image "$INSTALL_DIR"
 }
@@ -2807,8 +2827,16 @@ _cbox_global_prepare_locked() {
   if [ "${CBOX_HERMES:-off}" = on ]; then
     mkdir -p "$INSTALL_DIR/generated/hermes"
     gen_hermes_managed_into "$INSTALL_DIR/generated/hermes/managed.env"
+    gen_hermes_mcp_servers_into "$INSTALL_DIR/generated/hermes/mcp_servers.yaml"
+    if [ "${CBOX_HERMES_HOOKS:-off}" = on ]; then
+      gen_hermes_hooks_into "$INSTALL_DIR/generated/hermes/hooks.yaml"
+    else
+      rm -f "$INSTALL_DIR/generated/hermes/hooks.yaml"
+    fi
   else
     rm -f "$INSTALL_DIR/generated/hermes/managed.env"
+    rm -f "$INSTALL_DIR/generated/hermes/mcp_servers.yaml"
+    rm -f "$INSTALL_DIR/generated/hermes/hooks.yaml"
   fi
   exec 8>&-
   _ensure_image "$INSTALL_DIR"
@@ -3271,7 +3299,7 @@ verify() {
   fi
 
   v_t "codex stamp present and want matches pin"
-  want="${CBOX_CODEX_VERSION:-latest}|${CBOX_CODEX_TARGET:-}"
+  want="${CBOX_CODEX_VERSION:-latest}"
   if got="$("${X[@]}" sh -c 'sed -n 1p "$HOME/.codex/packages/.cbox-stamp"' 2>/dev/null)" && [ "$got" = "$want" ]; then
     v_ok "$got"
   else
@@ -3975,7 +4003,7 @@ verify_isolated() {
   local eff_scope eff_claude_target eff_codex_want
   eff_scope="$( unset CBOX_SESSION_SCOPE; . "$eff/cbox.conf" 2>/dev/null; printf '%s' "${CBOX_SESSION_SCOPE:-isolated}" )"
   eff_claude_target="$( unset CBOX_CLAUDE_TARGET; . "$eff/cbox.conf" 2>/dev/null; printf '%s' "${CBOX_CLAUDE_TARGET:-stable}" )"
-  eff_codex_want="$( unset CBOX_CODEX_VERSION CBOX_CODEX_TARGET; . "$eff/cbox.conf" 2>/dev/null; printf '%s|%s' "${CBOX_CODEX_VERSION:-latest}" "${CBOX_CODEX_TARGET:-}" )"
+  eff_codex_want="$( unset CBOX_CODEX_VERSION; . "$eff/cbox.conf" 2>/dev/null; printf '%s' "${CBOX_CODEX_VERSION:-latest}" )"
 
   cid="$(_compose_p "$eff" ps -q cbox 2>/dev/null)" || cid=""
 
@@ -4251,6 +4279,22 @@ _cbox_doctor_file() {
 
 _cbox_doctor_nonempty() {
   [ -s "$1" ]
+}
+
+_cbox_doctor_session_live_entry() {
+  local root="$1" sid="$2" am pid pstart
+  (
+    set +e
+    am="$(_cbox_session_field_get "$root" "$sid" activeMain 2>/dev/null)" || exit 1
+    am="${am%\"}"; am="${am#\"}"
+    case "$am" in ""|null) exit 1 ;; esac
+    pid="$(_cbox_runtime_leg_read_field "$root" "$sid" pid 2>/dev/null)" || exit 1
+    pstart="$(_cbox_runtime_leg_read_field "$root" "$sid" procStart 2>/dev/null)" || exit 1
+    [ -n "$pid" ] || exit 1
+    [ -n "$pstart" ] || exit 1
+    _cbox_proc_live "$pid" "$pstart" || exit 1
+    printf '%s (%s)' "$sid" "$am"
+  )
 }
 
 _cbox_doctor_netaccess_detail() {
@@ -4708,10 +4752,29 @@ sys.exit(0 if 'SessionStart' not in ('',) and hooks else 1)
     _cbox_doctor_row "context-manifest" MISSING "no generated/context-manifest.json - run cbox setup update"
   fi
 
+  local cap_manifest="$INSTALL_DIR/generated/capability-manifest.json"
+  if [ "$in_container" = 1 ]; then
+    _cbox_doctor_row "capabilities" HOST-CHECK "generated/capability-manifest.json is a host-side setup artifact, not mounted into the container"
+  elif [ -f "$cap_manifest" ]; then
+    local cap_err
+    if cap_err="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('error','') if isinstance(d,dict) else 'manifest not an object')" "$cap_manifest" 2>&1)"; then
+      if [ -n "$cap_err" ]; then
+        _cbox_doctor_row "capabilities" WARN "capability-manifest generated over invalid capabilities.json: $cap_err"
+      else
+        _cbox_doctor_row "capabilities" ACTIVE "generated/capability-manifest.json present and valid"
+      fi
+    else
+      _cbox_doctor_row "capabilities" MISSING "generated/capability-manifest.json present but not valid JSON"
+    fi
+  else
+    _cbox_doctor_row "capabilities" OFF "no generated/capability-manifest.json yet - not generated in this scope"
+  fi
+
   local sess_root sess_dir
   if sess_root="$(_cbox_workspace_root 2>/dev/null)" && [ -d "$(_cbox_session_root "$sess_root")" ]; then
     sess_dir="$(_cbox_session_root "$sess_root")"
     local sid open_n=0 idle_n=0 closed_n=0 total=0 st
+    local live_n=0 live_sid="" live_line
     while IFS= read -r sid; do
       [ -n "$sid" ] || continue
       total=$((total + 1))
@@ -4722,8 +4785,21 @@ sys.exit(0 if 'SessionStart' not in ('',) and hooks else 1)
         idle) idle_n=$((idle_n + 1)) ;;
         closed) closed_n=$((closed_n + 1)) ;;
       esac
+      [ "$st" = open ] || continue
+      live_line="$(_cbox_doctor_session_live_entry "$sess_root" "$sid" 2>/dev/null)" || continue
+      [ -n "$live_line" ] || continue
+      live_n=$((live_n + 1))
+      if [ -z "$live_sid" ]; then
+        live_sid="$live_line"
+      else
+        live_sid="$live_sid, $live_line"
+      fi
     done < <(_cbox_session_list_ids "$sess_root")
-    _cbox_doctor_row "sessions" ACTIVE "$total session(s): open=$open_n idle=$idle_n closed=$closed_n"
+    if [ "$live_n" -gt 1 ]; then
+      _cbox_doctor_row "sessions" WARN "$total session(s): open=$open_n idle=$idle_n closed=$closed_n - multiple live session mains in one project scope: $live_sid"
+    else
+      _cbox_doctor_row "sessions" ACTIVE "$total session(s): open=$open_n idle=$idle_n closed=$closed_n"
+    fi
   else
     _cbox_doctor_row "sessions" OFF "no .cbox/sessions/ - no cbox session created yet in this scope"
   fi

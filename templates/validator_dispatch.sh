@@ -155,6 +155,9 @@ _cbox_reg_validate_var_dispatch() {
     CBOX_HERMES_MODEL_NAME)
       _cbox_val_named_no_validator "$val" || return 1
       ;;
+    CBOX_HERMES_HOOKS)
+      _cbox_val_kind_enum "$val" 'off' 'on' || return 1
+      ;;
     CBOX_HERMES_DELEGATE)
       _cbox_val_kind_enum "$val" 'off' 'on' || return 1
       ;;
@@ -271,6 +274,9 @@ _cbox_reg_validate_var_dispatch() {
       ;;
     CBOX_CODEX_MCP)
       _cbox_val_kind_enum "$val" '0' '1' || return 1
+      ;;
+    CBOX_CODEX_HOOKS)
+      _cbox_val_kind_enum "$val" 'off' 'on' || return 1
       ;;
     CBOX_HISTORY)
       _cbox_val_kind_enum "$val" '0' '1' || return 1

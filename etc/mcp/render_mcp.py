@@ -187,11 +187,28 @@ def render_hermes_entry(name, spec, cbox, hooks_dir, shim_mode, adapter, enabled
 FALSY_GATE_VALUES = ("", "off", "0", "false", "no")
 
 
+def _gate_vars(gate):
+    if isinstance(gate, str):
+        return [gate]
+    return list(gate)
+
+
+def _var_set(var):
+    return os.environ.get(var, "").strip().lower() not in FALSY_GATE_VALUES
+
+
 def _env_gate_satisfied(cbox):
     gate = cbox.get("enabled_when_env")
     if not gate:
         return True
-    return os.environ.get(gate, "").strip().lower() not in FALSY_GATE_VALUES
+    return all(_var_set(var) for var in _gate_vars(gate))
+
+
+def _unmet_gate_vars(cbox):
+    gate = cbox.get("enabled_when_env")
+    if not gate:
+        return []
+    return [var for var in _gate_vars(gate) if not _var_set(var)]
 
 
 def render(delegates, selection, hooks_dir, shim_mode, target, explicit=None):
@@ -220,13 +237,13 @@ def render(delegates, selection, hooks_dir, shim_mode, target, explicit=None):
             continue
         gate_ok = _env_gate_satisfied(cbox)
         if not gate_ok:
-            gate = cbox.get("enabled_when_env")
             if explicit is not None and name in explicit:
+                unmet = ", ".join(_unmet_gate_vars(cbox))
                 raise DelegateEntryError(
                     "render_mcp.py: delegate entry %r was explicitly "
                     "selected but %s is not set - it cannot run "
                     "unconfigured; see cbox/etc/docs/LOCAL_MODEL_RUNBOOK.md"
-                    % (name, gate)
+                    % (name, unmet)
                 )
             if target != "hermes":
                 continue

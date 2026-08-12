@@ -118,7 +118,10 @@
       "side_effects": [
         "text-only"
       ],
-      "enabled_when_env": "CBOX_LOCAL_MODEL_URL"
+      "enabled_when_env": [
+        "CBOX_LOCAL_MODEL_URL",
+        "CBOX_LOCAL_MODEL_NAME"
+      ]
     }
   },
   "container-exec": {

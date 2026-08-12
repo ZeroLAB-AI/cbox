@@ -84,7 +84,7 @@ _bins_ready() {
   local name="$1" want stamp link cur_want p resolved
   case "$name" in
     claude) want="$CBOX_CLAUDE_TARGET"; stamp="$CLROOT/.cbox-stamp"; link="$CLROOT/bin/claude" ;;
-    codex) want="$CBOX_CODEX_VERSION|$CBOX_CODEX_TARGET"; stamp="$CXPKG/.cbox-stamp"; link="$CLROOT/bin/codex" ;;
+    codex) want="$CBOX_CODEX_VERSION"; stamp="$CXPKG/.cbox-stamp"; link="$CLROOT/bin/codex" ;;
   esac
   cur_want="$(_stamp_field "$stamp" 1)" || return 1
   [ "$cur_want" = "$want" ] || return 1
@@ -282,7 +282,7 @@ _multiplex_session_name() {
 }
 
 _multiplex_status_dir_new() {
-  local base="/run/cbox/multiplex" dir
+  local base="${CBOX_MULTIPLEX_BASE:-/run/cbox/multiplex}" dir
   _no_symlinks "$base"
   mkdir -p "$base" 2>/dev/null || return 1
   chmod 0755 "$base" 2>/dev/null || true
@@ -373,6 +373,17 @@ with open(sys.argv[1], "r", encoding="utf-8") as f:
     if [ -w "$hooks_json" ]; then
       echo "entrypoint: codex managed hooks.json at $hooks_json is writable by the container user - refusing to run codex with --dangerously-bypass-hook-trust against an untrusted mount; host re-bless required: run 'cbox setup update hooks' on the host" >&2
       return 1
+    fi
+    if grep -q "codex_guard_bridge.py" "$hooks_json" 2>/dev/null; then
+      local bridge="$HOST_HOME/.claude/hooks/codex_guard_bridge.py"
+      if [ ! -f "$bridge" ]; then
+        echo "entrypoint: codex hooks.json references codex_guard_bridge.py but $bridge is missing - the guard would silently not fire; host re-bless required: run 'cbox setup update hooks' on the host" >&2
+        return 1
+      fi
+      if [ -w "$bridge" ]; then
+        echo "entrypoint: codex guard bridge at $bridge is writable by the container user - refusing to run codex with --dangerously-bypass-hook-trust against an untrusted guard script; host re-bless required: run 'cbox setup update hooks' on the host" >&2
+        return 1
+      fi
     fi
   fi
   return 0
@@ -522,6 +533,101 @@ os.replace(tmp_path, config_path)
 PY
 }
 
+_hermes_apply_hooks() {
+  local srcfile="$1" configfile="$2"
+  [ -f "$srcfile" ] || return 0
+  _as_user env HERMES_HOME="$HERMES_HOME" python3 - "$srcfile" "$configfile" <<'PY'
+import os
+import sys
+
+src_path, config_path = sys.argv[1], sys.argv[2]
+
+try:
+    fd = os.open(src_path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "r", encoding="utf-8") as fh:
+        text = fh.read()
+except OSError:
+    sys.exit(0)
+if not text.strip():
+    sys.exit(0)
+block_lines = text.rstrip("\n").split("\n")
+
+try:
+    fd = os.open(config_path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "r", encoding="utf-8") as fh:
+        cur_lines = fh.read().split("\n")
+except OSError:
+    cur_lines = [""]
+
+out_lines = []
+skipping = False
+inserted = False
+for line in cur_lines:
+    if line.startswith("hooks:"):
+        skipping = True
+        out_lines.extend(block_lines)
+        inserted = True
+        continue
+    if skipping:
+        if line.startswith((" ", "\t")) or line == "":
+            continue
+        skipping = False
+    out_lines.append(line)
+
+if not inserted:
+    while out_lines and out_lines[-1] == "":
+        out_lines.pop()
+    out_lines.append("")
+    out_lines.extend(block_lines)
+
+body = "\n".join(out_lines)
+if not body.endswith("\n"):
+    body += "\n"
+
+tmp_path = config_path + ".cbox-hooks.tmp"
+try:
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+except OSError as e:
+    sys.stderr.write("entrypoint: cannot write %s: %s\n" % (tmp_path, e))
+    sys.exit(1)
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    fh.write(body)
+os.replace(tmp_path, config_path)
+PY
+}
+
+_hermes_hooks_preflight() {
+  local hooks_src="$1"; shift
+  local script
+  if [ ! -e "$hooks_src" ]; then
+    echo "entrypoint: hermes managed hooks block missing at $hooks_src - host re-bless required: run 'cbox setup update hooks' on the host, then recreate the container" >&2
+    return 1
+  fi
+  if [ ! -f "$hooks_src" ]; then
+    echo "entrypoint: hermes managed hooks block at $hooks_src is not a regular file - host re-bless required: run 'cbox setup update hooks' on the host" >&2
+    return 1
+  fi
+  if [ -w "$hooks_src" ]; then
+    echo "entrypoint: hermes managed hooks block at $hooks_src is writable by the container user - refusing to auto-accept hermes hooks against an untrusted mount; host re-bless required: run 'cbox setup update hooks' on the host" >&2
+    return 1
+  fi
+  for script in "$@"; do
+    if [ ! -e "$script" ]; then
+      echo "entrypoint: hermes guard script missing at $script - host re-bless required: run 'cbox setup update hooks' on the host, then recreate the container" >&2
+      return 1
+    fi
+    if [ ! -f "$script" ]; then
+      echo "entrypoint: hermes guard script at $script is not a regular file - host re-bless required: run 'cbox setup update hooks' on the host" >&2
+      return 1
+    fi
+    if [ -w "$script" ]; then
+      echo "entrypoint: hermes guard script at $script is writable by the container user - refusing to auto-accept hermes hooks against an untrusted mount; host re-bless required: run 'cbox setup update hooks' on the host" >&2
+      return 1
+    fi
+  done
+  return 0
+}
+
 _hermes_user_policies_preamble() {
   local dir=/etc/cbox/user/policies
   local cap=16384
@@ -590,17 +696,11 @@ _hermes_user_policies_preamble() {
 
 _hermes_kernel_preamble() {
   local kernel="$HOST_HOME/.claude/hooks/conduct-kernel.txt"
-  local core="$HOST_HOME/.claude/hooks/session-core.txt"
   local out=""
   if [ -f "$kernel" ]; then
     out="$(cat "$kernel")"
   else
     echo "entrypoint: $kernel missing - hermes starts this session without the conduct kernel; run 'cbox setup update hooks' on the host" >&2
-  fi
-  if [ -f "$core" ]; then
-    out="${out:+$out$'\n\n'}$(cat "$core")"
-  else
-    echo "entrypoint: $core missing - hermes starts this session without the session core; run 'cbox setup update hooks' on the host" >&2
   fi
   printf '%s' "$out"
 }
@@ -622,7 +722,7 @@ case "${1:-}" in
     if ! _resolved="$(_bins_ready "$1")"; then
       case "$1" in
         claude) _want="$CBOX_CLAUDE_TARGET" ;;
-        codex) _want="$CBOX_CODEX_VERSION|$CBOX_CODEX_TARGET" ;;
+        codex) _want="$CBOX_CODEX_VERSION" ;;
       esac
       echo "entrypoint: $1 not installed or does not match the pinned version (want $_want) - run 'cbox reinstall-bins' on the host" >&2
       exit 1
@@ -679,27 +779,30 @@ case "${1:-}" in
     fi
     _hermes_apply_managed_env /etc/cbox/hermes-managed/managed.env || exit 1
     _hermes_apply_mcp_servers /etc/cbox/hermes-managed/mcp_servers.yaml "$HERMES_HOME/config.yaml" || exit 1
+    if [ -f /etc/cbox/hermes-managed/hooks.yaml ]; then
+      _hermes_hooks_preflight /etc/cbox/hermes-managed/hooks.yaml \
+        "$HOST_HOME/.claude/hooks/hermes_guard_bridge.py" \
+        "$HOST_HOME/.claude/hooks/commit_guard.py" \
+        "$HOST_HOME/.claude/hooks/rm_glob_guard.py" \
+        || exit 1
+      _hermes_apply_hooks /etc/cbox/hermes-managed/hooks.yaml "$HERMES_HOME/config.yaml" || exit 1
+      HERMES_ACCEPT_HOOKS=1
+      export HERMES_ACCEPT_HOOKS
+    fi
     _hermes_user_preamble="$(_hermes_user_policies_preamble)"
     _hermes_session_prompt="$(_hermes_kernel_preamble)"
     _hermes_session_prompt="$(_hermes_compose_session_prompt "$_hermes_user_preamble" "$_hermes_session_prompt")"
     if [ -n "${HERMES_EPHEMERAL_SYSTEM_PROMPT:-}" ]; then
       _hermes_session_prompt="${_hermes_session_prompt:+$_hermes_session_prompt$'\n\n'}$HERMES_EPHEMERAL_SYSTEM_PROMPT"
     fi
-    if [ -n "${CBOX_SESSION_MEMORY_FILE:-}" ] && [ -f "${CBOX_SESSION_MEMORY_FILE:-}" ] \
-        && [ -f /opt/cbox/cbox_session_bridge.py ]; then
-      _cbox_root="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" || _cbox_root=""
-      _cbox_ref="${CBOX_SESSION_MEMORY_FILE#"$_cbox_root"/}"
-      _cbox_memory=""
-      case "$_cbox_ref" in
-        ".cbox/sessions/${CBOX_SESSION_ID:-invalid}/distillates/"handoff-[0-9][0-9][0-9][0-9][0-9][0-9].json) _cbox_ref_ok=1 ;;
-        *) _cbox_ref_ok=0 ;;
-      esac
-      if [ -n "$_cbox_root" ] && [ "$_cbox_ref" != "$CBOX_SESSION_MEMORY_FILE" ] && [ "$_cbox_ref_ok" = 1 ]; then
-        _cbox_memory="$(_as_user python3 /opt/cbox/cbox_session_bridge.py render --root "$_cbox_root" --ref "$_cbox_ref" 2>/dev/null)" || _cbox_memory=""
+    _cbox_loader="$HOST_HOME/.claude/hooks/continuity_session_start.py"
+    if [ -f "$_cbox_loader" ]; then
+      _cbox_brain="$(_as_user python3 "$_cbox_loader" < /dev/null)" || _cbox_brain=""
+      if [ -n "$_cbox_brain" ]; then
+        _hermes_session_prompt="${_hermes_session_prompt:+$_hermes_session_prompt$'\n\n'}$_cbox_brain"
       fi
-      if [ -n "$_cbox_memory" ]; then
-        _hermes_session_prompt="${_hermes_session_prompt:+$_hermes_session_prompt$'\n\n'}$_cbox_memory"
-      fi
+    else
+      echo "entrypoint: $_cbox_loader missing - hermes starts this session without the session core or brain payloads; run 'cbox setup update hooks' on the host" >&2
     fi
     if [ -t 0 ] && [ -t 1 ] && [ "${CBOX_SESSION_MULTIPLEX:-off}" = on ]; then
       if command -v tmux >/dev/null 2>&1; then
