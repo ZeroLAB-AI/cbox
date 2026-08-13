@@ -50,7 +50,8 @@ _cbox_apply_kernel_lang_rule() {
   [ -n "$line" ] || return 0
   tmp="$(mktemp "$(dirname "$file")/.cbox.XXXXXX")"
   if grep -qF 'Version: conduct-kernel' "$file"; then
-    awk -v ins="$line" '
+    CBOX_KERNEL_LANG_INS="$line" awk '
+      BEGIN { ins = ENVIRON["CBOX_KERNEL_LANG_INS"] }
       /^Version: conduct-kernel/ && !done { print ins; print ""; done = 1 }
       { print }
     ' "$file" > "$tmp"

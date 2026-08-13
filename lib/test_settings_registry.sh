@@ -448,4 +448,28 @@ TWO_DEP_VAL="$(. "$W/two_dep_sections.sh"; sec_get SEC_DEPS gpu)"
   || _fail "generator does not space-join a section's multiple dependency tokens into one SEC_DEPS entry: got [$TWO_DEP_VAL]"
 _ok "a section with two dependencies generates one space-joined SEC_DEPS entry"
 
+(
+  CBOX_SSH_AGENT_DIR=/tmp/agent-dir-preset
+  CBOX_USER_DIR=""
+  CBOX_KERNEL_LANG_REASONING=""
+  CBOX_CLAUDE_PATH=""
+  . "$INSTALL_DIR/templates/conf_lib.sh"
+  _cbox_reg_conf_defaults
+  [ -z "$CBOX_USER_DIR" ] || { echo "CBOX_USER_DIR reset to [$CBOX_USER_DIR]" >&2; exit 1; }
+  [ -z "$CBOX_KERNEL_LANG_REASONING" ] || { echo "CBOX_KERNEL_LANG_REASONING reset to [$CBOX_KERNEL_LANG_REASONING]" >&2; exit 1; }
+  [ -z "$CBOX_CLAUDE_PATH" ] || { echo "CBOX_CLAUDE_PATH reset to [$CBOX_CLAUDE_PATH]" >&2; exit 1; }
+) || _fail "conf defaults clobber explicitly-empty values - an empty (disabled) setting does not survive conf_load (colon-equals regression)"
+_ok "conf defaults preserve explicitly-empty values (empty CBOX_USER_DIR stays disabled across save/load)"
+
+(
+  unset CBOX_USER_DIR CBOX_KERNEL_LANG_REASONING CBOX_MODE 2>/dev/null || true
+  CBOX_SSH_AGENT_DIR=/tmp/agent-dir-preset
+  . "$INSTALL_DIR/templates/conf_lib.sh"
+  _cbox_reg_conf_defaults
+  [ "$CBOX_USER_DIR" = "$HOME/.config/cbox/user" ] || { echo "unset CBOX_USER_DIR default broken: [$CBOX_USER_DIR]" >&2; exit 1; }
+  [ "$CBOX_KERNEL_LANG_REASONING" = "slovencina bez diakritiky" ] || { echo "unset CBOX_KERNEL_LANG_REASONING default broken: [$CBOX_KERNEL_LANG_REASONING]" >&2; exit 1; }
+  [ "$CBOX_MODE" = "global" ] || { echo "unset CBOX_MODE default broken: [$CBOX_MODE]" >&2; exit 1; }
+) || _fail "conf defaults no longer apply to unset variables"
+_ok "conf defaults still apply to unset variables (unset CBOX_USER_DIR gets the shipped default)"
+
 echo "PASS: all settings_registry checks"

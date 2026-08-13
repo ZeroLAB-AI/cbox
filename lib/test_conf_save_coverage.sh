@@ -28,7 +28,7 @@ for section in "${SECTIONS[@]}"; do
     if ! grep -q "printf '$var=%q" "$TMPBASE/conf_save.txt"; then
       missing_save="$missing_save $section/$var"
     fi
-    if ! grep -qE "(\\\$\{$var:=|^[[:space:]]*$var=)" "$TMPBASE/conf_defaults.txt"; then
+    if ! grep -qE "(\\\$\{$var:?=|^[[:space:]]*$var=)" "$TMPBASE/conf_defaults.txt"; then
       missing_default="$missing_default $section/$var"
     fi
   done

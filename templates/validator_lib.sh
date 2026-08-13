@@ -328,6 +328,7 @@ _cbox_val_named_kernel_lang() {
   esac
   case "$val" in
     *'{'*|*'}'*) printf 'must not contain { or }'; return 1 ;;
+    *'\'*) printf 'must not contain a backslash (awk would expand it as an escape sequence)'; return 1 ;;
     ' '*|*' ') printf 'must not have leading or trailing spaces'; return 1 ;;
   esac
   return 0

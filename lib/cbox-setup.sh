@@ -2311,7 +2311,8 @@ apply_kernel_lang_rule() {
   [ -n "$line" ] || return 0
   tmp="$(mktemp "$(dirname "$file")/.cbox.XXXXXX")"
   if grep -qF 'Version: conduct-kernel' "$file"; then
-    awk -v ins="$line" '
+    CBOX_KERNEL_LANG_INS="$line" awk '
+      BEGIN { ins = ENVIRON["CBOX_KERNEL_LANG_INS"] }
       /^Version: conduct-kernel/ && !done { print ins; print ""; done = 1 }
       { print }
     ' "$file" > "$tmp"
@@ -2665,7 +2666,7 @@ step_hooks() {
   fi
   gen_hooks_dir
   if [ "$CBOX_CLAUDE_MODE" = mount ]; then
-    staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py orchestrator-global.txt conduct-kernel.txt session-core.txt codex_scope.container.json ask_claude_mcp.py ask_claude_fallback_models.json codex_notify.py codex_bump_probe.sh codex_mcp_shim.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py continuity_session_start.py session_scope_farm.py limit_watchdog.py session_pane_map.py || true
+    staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py rm_glob_guard.py spawn_gate.py codex_guard_bridge.py hermes_guard_bridge.py orchestrator-global.txt conduct-kernel.txt session-core.txt codex_scope.container.json ask_claude_mcp.py ask_claude_fallback_models.json codex_notify.py codex_bump_probe.sh codex_mcp_shim.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py continuity_session_start.py session_scope_farm.py limit_watchdog.py session_pane_map.py || true
   else
     note "volume mode: hooks are served read-only from $GEN_DIR/hooks (synced)"
   fi
@@ -2869,6 +2870,72 @@ step_clipboard() {
   note "bridge = a per-session host helper serves the host clipboard's image content read-only over a unix socket, answering Ctrl+V image paste inside the container; off = no bridge"
   ask_choice "setup: clipboard image bridge" "$CBOX_CLIPBOARD_MODE" off bridge
   CBOX_CLIPBOARD_MODE="$ASK_VALUE"
+}
+
+step_kernel_lang() {
+  echo "== section: kernel-lang =="
+  if [ "$SEC_AUTO" = 1 ]; then
+    note "auto: keeping CBOX_KERNEL_LANG_OUTPUT=${CBOX_KERNEL_LANG_OUTPUT-} CBOX_KERNEL_LANG_REASONING=$CBOX_KERNEL_LANG_REASONING"
+    return 0
+  fi
+  note "two-part language rule rendered into the deployed conduct kernel: reason in one language, answer in another; empty output language (default) = the rule is not rendered"
+  note "values are free text rendered verbatim into the kernel line: plain ASCII, at most 64 characters, no { or }"
+  local msg
+  while :; do
+    ask "setup: kernel output language (empty = rule off): " "$CBOX_KERNEL_LANG_OUTPUT"
+    if msg="$(_cbox_reg_validate_var CBOX_KERNEL_LANG_OUTPUT "$ASK_VALUE")"; then
+      CBOX_KERNEL_LANG_OUTPUT="$ASK_VALUE"
+      break
+    fi
+    warn "invalid output language: $msg"
+  done
+  if [ -z "$CBOX_KERNEL_LANG_OUTPUT" ]; then
+    note "output language empty; the language rule stays off (CBOX_KERNEL_LANG_REASONING=$CBOX_KERNEL_LANG_REASONING is kept but inert)"
+    return 0
+  fi
+  while :; do
+    ask "setup: kernel reasoning language (empty = same as output): " "$CBOX_KERNEL_LANG_REASONING"
+    if msg="$(_cbox_reg_validate_var CBOX_KERNEL_LANG_REASONING "$ASK_VALUE")"; then
+      CBOX_KERNEL_LANG_REASONING="$ASK_VALUE"
+      break
+    fi
+    warn "invalid reasoning language: $msg"
+  done
+  note "rendered rule: $(kernel_lang_rule_line)"
+  note "deploy: cbox setup update claude-md re-renders the conduct kernel block in CLAUDE.md; cbox setup update hooks refreshes conduct-kernel.txt"
+}
+
+step_user_layer() {
+  echo "== section: user-layer =="
+  if [ "$SEC_AUTO" = 1 ]; then
+    note "auto: keeping CBOX_USER_DIR=${CBOX_USER_DIR-$HOME/.config/cbox/user}"
+    return 0
+  fi
+  note "host directory mounted read-only at /etc/cbox/user; user MCP declarations live in mcp/*.json and user policies in policies/*.md under it"
+  note "cbox never writes user content under this directory - only the directory itself (with mcp/ and policies/) is created if missing"
+  local w overlap
+  while :; do
+    if ! path_input "setup: host user-layer directory (empty = disable the mount): " "${CBOX_USER_DIR-$HOME/.config/cbox/user}" 0; then
+      CBOX_USER_DIR=""
+      note "user layer disabled; no /etc/cbox/user mount is rendered"
+      return 0
+    fi
+    if reserved_path_conflict "$PATH_VALUE"; then
+      continue
+    fi
+    overlap=0
+    for w in $CBOX_WORKSPACES; do
+      if _path_is_within "$PATH_VALUE" "$w" || _path_is_within "$w" "$PATH_VALUE"; then
+        warn "user-layer directory overlaps workspace $w - a container-writable user layer would let in-container output flow into host-rendered CLAUDE.md/AGENTS.override.md; pick a path outside every workspace"
+        overlap=1
+        break
+      fi
+    done
+    [ "$overlap" = 1 ] && continue
+    CBOX_USER_DIR="$PATH_VALUE"
+    user_dir_precreate_host
+    return 0
+  done
 }
 
 

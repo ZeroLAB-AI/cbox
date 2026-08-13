@@ -128,6 +128,21 @@ def _sq(val):
     return "'" + val.replace("'", "'\\''") + "'"
 
 
+EMPTY_OK_KINDS = frozenset((
+    "path-or-empty",
+    "url-or-empty",
+    "enum-or-empty",
+    "uint-or-empty",
+    "string",
+))
+
+
+def _default_op(var, expr):
+    if expr and var["type"]["kind"] in EMPTY_OK_KINDS:
+        return "="
+    return ":="
+
+
 def _default_expr(var):
     default = var["default"]
     if isinstance(default, dict):
@@ -150,12 +165,13 @@ def _emit_defaults(data, lines):
                 continue
             if name == "ssh_agent_dir_default":
                 lines.append(
-                    '  : "${%s:=$(_cbox_xdg_runtime_dir)/cbox-ssh}"' % key
+                    '  : "${%s%s$(_cbox_xdg_runtime_dir)/cbox-ssh}"'
+                    % (key, _default_op(var, "x"))
                 )
                 continue
             raise ValueError("unbound resolver %s for %s" % (name, key))
         expr = _default_expr(var)
-        lines.append('  : "${%s:=%s}"' % (key, expr))
+        lines.append('  : "${%s%s%s}"' % (key, _default_op(var, expr), expr))
     lines.append('  if [ -z "${CBOX_WORKDIR:-}" ]; then')
     lines.append('    CBOX_WORKDIR="${CBOX_WORKSPACES%% *}"')
     lines.append('    [ -n "$CBOX_WORKDIR" ] || CBOX_WORKDIR="$HOME"')
