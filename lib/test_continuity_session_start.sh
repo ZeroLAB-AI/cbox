@@ -342,8 +342,80 @@ JSON
   echo "PASS: distillate-embedded fence forgery is neutralized (exactly 1 parseable core fence)"
 }
 
+test_section_concat_equals_noarg() {
+  local d="$TMPBASE/section-concat" noarg concat sec
+  _make_repo "$d"
+  mkdir -p "$d/.cbox"
+  printf '# LEDGER\n\n## VLNA A\nlive wave line\n' > "$d/.cbox/LEDGER.md"
+  printf '# PROGRESS\n\nstep one\n' > "$d/.cbox/PROGRESS_2026_01_01.md"
+  noarg="$(python3 "$HOOK" <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+  concat=""
+  for sec in core memory ledger progress; do
+    part="$(python3 "$HOOK" --section "$sec" <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+    [ -z "$part" ] || concat="${concat:+$concat
+}$part"
+  done
+  [ "$concat" = "$noarg" ] || _fail "section concat: concatenated per-section outputs differ from no-arg output"
+  echo "PASS: concatenated --section outputs are byte-identical to the no-arg output"
+}
+
+test_section_bogus_falls_back_with_warning() {
+  local d="$TMPBASE/section-bogus" out err
+  _make_repo "$d"
+  mkdir -p "$d/.cbox"
+  printf '# LEDGER\n\n## VLNA A\nlive wave line\n' > "$d/.cbox/LEDGER.md"
+  out="$(python3 "$HOOK" --section bogus 2>"$TMPBASE/section-bogus.err" <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+  err="$(cat "$TMPBASE/section-bogus.err")"
+  case "$out" in
+    *"PAYLOAD core BEGIN"*) : ;;
+    *) _fail "bogus section: core fence missing - fallback to all sections broken" ;;
+  esac
+  case "$out" in
+    *"PAYLOAD bounded-ledger BEGIN"*) : ;;
+    *) _fail "bogus section: bounded-ledger fence missing - fallback to all sections broken" ;;
+  esac
+  case "$err" in
+    *"section filter"*) : ;;
+    *) _fail "bogus section: no stderr warning about unrecognized argv" ;;
+  esac
+  echo "PASS: unrecognized --section falls back to all sections and warns on stderr"
+}
+
+test_section_emissions_under_persist_threshold() {
+  local d="$TMPBASE/section-cap" sec n
+  _make_repo "$d"
+  mkdir -p "$d/.cbox"
+  python3 - "$d/.cbox/LEDGER.md" "$d/.cbox/PROGRESS_2026_01_01.md" <<'PY'
+import sys
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    f.write("# LEDGER\n\n## VLNA A\n" + ("x" * 200 + "\n") * 400)
+with open(sys.argv[2], "w", encoding="utf-8") as f:
+    f.write("# PROGRESS\n\n" + ("y" * 200 + "\n") * 400)
+PY
+  for sec in core memory ledger progress; do
+    n="$(python3 "$HOOK" --section "$sec" <<JSON | wc -c
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+    [ "$n" -le 8500 ] || _fail "section $sec: emission $n B exceeds 8500 B persist-safety ceiling"
+  done
+  echo "PASS: every single-section emission stays under the 8500 B persist-safety ceiling"
+}
+
 test_reference_payload_cap
 test_core_payload_cap
+test_section_concat_equals_noarg
+test_section_bogus_falls_back_with_warning
+test_section_emissions_under_persist_threshold
 test_light_profile_has_security_floor
 test_resume_profile_has_security_floor
 test_shared_session_memory_injection

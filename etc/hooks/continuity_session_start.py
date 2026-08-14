@@ -20,7 +20,8 @@ LEDGER_BYTE_CAP = 6000
 # raise this with the core cap without re-measuring adversarial text.
 CORE_PAYLOAD_BODY_BYTE_CAP = 7000
 REFERENCE_PAYLOAD_BODY_BYTE_CAP = 4000
-SHARED_MEMORY_BODY_BYTE_CAP = 16000
+SHARED_MEMORY_BODY_BYTE_CAP = 7000
+VALID_SECTIONS = ("core", "memory", "ledger", "progress")
 WAVE_MARKER = "## "
 RESUME_MARKER = "RESUME"
 
@@ -229,6 +230,17 @@ def _profile():
     return v
 
 
+def _selected_sections(argv):
+    if not argv:
+        return VALID_SECTIONS
+    if len(argv) == 2 and argv[0] == "--section":
+        v = argv[1].strip().lower()
+        if v in VALID_SECTIONS:
+            return (v,)
+    _warn("section filter", "unrecognized argv %r, emitting all sections" % (argv,))
+    return VALID_SECTIONS
+
+
 def _source_kind(payload):
     v = payload.get("source")
     if v in ("startup", "resume", "clear", "compact"):
@@ -328,6 +340,7 @@ def _shared_memory(root):
 
 
 def main():
+    sections = _selected_sections(sys.argv[1:])
     payload = _read_stdin_payload()
     root = _resolve_git_root(payload)
     brain_dir = _select_brain_dir(root) if root else None
@@ -336,24 +349,25 @@ def main():
     source = _source_kind(payload)
     hooks_dir = _hooks_dir()
 
-    if profile == "light":
-        core_label = "SESSION CORE"
-        core_version = "%s light" % SESSION_CORE_VERSION
-        core_body = LIGHT_CORE
-    elif source in ("startup", "clear"):
-        session_core_path = os.path.join(hooks_dir, "session-core.txt")
-        core_text = _read_session_core(session_core_path)
-        core_label = "SESSION CORE"
-        core_version = _derive_core_version(core_text)
-        core_body = core_text
-    else:
-        core_label = "SESSION CORE"
-        core_version = "%s resume" % SESSION_CORE_VERSION
-        core_body = RESUME_KERNEL
+    if "core" in sections:
+        if profile == "light":
+            core_label = "SESSION CORE"
+            core_version = "%s light" % SESSION_CORE_VERSION
+            core_body = LIGHT_CORE
+        elif source in ("startup", "clear"):
+            session_core_path = os.path.join(hooks_dir, "session-core.txt")
+            core_text = _read_session_core(session_core_path)
+            core_label = "SESSION CORE"
+            core_version = _derive_core_version(core_text)
+            core_body = core_text
+        else:
+            core_label = "SESSION CORE"
+            core_version = "%s resume" % SESSION_CORE_VERSION
+            core_body = RESUME_KERNEL
 
-    _write_payload("core", core_label, core_version, core_body)
+        _write_payload("core", core_label, core_version, core_body)
 
-    if root:
+    if root and "memory" in sections:
         memory_path, memory_body = _shared_memory(root)
         if memory_body:
             _write_payload(
@@ -366,25 +380,26 @@ def main():
     if not brain_dir:
         sys.exit(0)
 
-    ledger_path = os.path.join(brain_dir, "LEDGER.md")
-    ledger_text = None
-    if os.path.isfile(ledger_path):
-        try:
-            with open(ledger_path, "r", encoding="utf-8") as f:
-                ledger_text = f.read()
-        except Exception as exc:
-            _warn("ledger read (%s)" % ledger_path, str(exc))
+    if "ledger" in sections:
+        ledger_path = os.path.join(brain_dir, "LEDGER.md")
+        ledger_text = None
+        if os.path.isfile(ledger_path):
+            try:
+                with open(ledger_path, "r", encoding="utf-8") as f:
+                    ledger_text = f.read()
+            except Exception as exc:
+                _warn("ledger read (%s)" % ledger_path, str(exc))
 
-    if ledger_text is not None:
-        if profile == "light" or source in ("resume", "compact"):
-            body = _extract_resume_block(ledger_text)
-            label = "LEDGER RESUME"
-        else:
-            body = _bound_ledger(ledger_text)
-            label = "LEDGER"
-        _write_payload("bounded-ledger", "DATA %s" % ledger_path, label, body)
+        if ledger_text is not None:
+            if profile == "light" or source in ("resume", "compact"):
+                body = _extract_resume_block(ledger_text)
+                label = "LEDGER RESUME"
+            else:
+                body = _bound_ledger(ledger_text)
+                label = "LEDGER"
+            _write_payload("bounded-ledger", "DATA %s" % ledger_path, label, body)
 
-    if profile == "full" and source in ("startup", "clear"):
+    if "progress" in sections and profile == "full" and source in ("startup", "clear"):
         progress_path = _newest_progress_path(brain_dir)
         if progress_path:
             tail_text = _tail_lines(progress_path, PROGRESS_TAIL_LINES)
