@@ -2251,6 +2251,11 @@ _clip_bridge_start() {
   [ "${CBOX_CLIPBOARD_MODE:-off}" = bridge ] || return 0
   local dir="$1"
   [ -f "$INSTALL_DIR/etc/clipboard/clip_bridge.py" ] || return 0
+  local backend=""
+  backend="$(python3 "$INSTALL_DIR/etc/clipboard/clip_bridge.py" --probe 2>/dev/null || true)"
+  if [ "$backend" != wayland ] && [ "$backend" != x11 ]; then
+    echo "cbox: clipboard bridge: no host clipboard backend - install wl-clipboard (Wayland) or xclip (X11) on the host, or run cbox setup section clipboard; image paste stays broken until then" >&2
+  fi
   mkdir -p -m 0700 "$dir" 2>/dev/null || true
   python3 "$INSTALL_DIR/etc/clipboard/clip_bridge.py" --sock-dir "$dir" --parent-pid "${BASHPID:-$$}" >/dev/null 2>&1 &
   _CBOX_CLIP_PID=$!

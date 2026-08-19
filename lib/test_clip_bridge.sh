@@ -145,4 +145,71 @@ set -e
 [ "$RC" -ne 0 ] || _fail "bridge: symlinked sock-dir should have been refused"
 _ok "bridge: symlinked sock-dir refused"
 
+PROBE_BIN="$TMPBASE/probebin"
+mkdir -p "$PROBE_BIN"
+for tool in wl-paste xclip; do
+  printf '#!/bin/sh\nexit 0\n' > "$PROBE_BIN/$tool"
+  chmod +x "$PROBE_BIN/$tool"
+done
+
+BASEBIN="$TMPBASE/basebin"
+mkdir -p "$BASEBIN"
+ln -s "$(command -v python3)" "$BASEBIN/python3"
+PYTHON3_BIN="$(command -v python3)"
+BASH_BIN="${BASH:-/bin/bash}"
+
+_probe() {
+  env -i PATH="$1:$BASEBIN" WAYLAND_DISPLAY="${2:-}" DISPLAY="${3:-}" "$PYTHON3_BIN" "$BRIDGE" --probe
+}
+
+[ "$(_probe "$PROBE_BIN" wayland-0 "")" = wayland ] || _fail "probe: wayland session with wl-paste must report wayland"
+[ "$(_probe "$PROBE_BIN" "" :0)" = x11 ] || _fail "probe: x11 session with xclip must report x11"
+[ "$(_probe "$TMPBASE/nonexistent" wayland-0 :0)" = none ] || _fail "probe: no tool on PATH must report none"
+[ "$(_probe "$PROBE_BIN" "" "")" = none ] || _fail "probe: no display env must report none"
+_ok "probe: backend verdict matches the bridge's own per-connection decision"
+
+XONLY="$TMPBASE/xonly"
+mkdir -p "$XONLY"
+cp "$PROBE_BIN/xclip" "$XONLY/xclip"
+[ "$(_probe "$XONLY" wayland-0 :0)" = x11 ] || _fail "probe: wayland session without wl-paste must fall through to x11"
+_ok "probe: wayland session falls through to xclip when wl-paste is absent"
+
+INSTALL_FN="$(awk '$0 == "_clip_install_cmd() {" , $0 == "}"' "$INSTALL_DIR/lib/cbox-setup.sh")"
+PKG_FN="$(awk '$0 == "_clip_missing_pkg() {" , $0 == "}"' "$INSTALL_DIR/lib/cbox-setup.sh")"
+[ -n "$INSTALL_FN" ] || _fail "cannot extract _clip_install_cmd"
+[ -n "$PKG_FN" ] || _fail "cannot extract _clip_missing_pkg"
+
+_mgr_case() {
+  local mgr="$1" want="$2" bin="$TMPBASE/mgr-$1" got
+  mkdir -p "$bin"
+  printf '#!/bin/sh\nexit 0\n' > "$bin/$mgr"
+  chmod +x "$bin/$mgr"
+  got="$(PATH="$bin" "$BASH_BIN" -c "$INSTALL_FN"'
+_clip_install_cmd wl-clipboard')"
+  [ "$got" = "$want" ] || _fail "install cmd for $mgr: got '$got' want '$want'"
+}
+
+_mgr_case apt-get "apt-get install -y wl-clipboard"
+_mgr_case dnf "dnf install -y wl-clipboard"
+_mgr_case pacman "pacman -S --noconfirm wl-clipboard"
+_mgr_case zypper "zypper install -y wl-clipboard"
+_mgr_case apk "apk add wl-clipboard"
+EMPTYBIN="$TMPBASE/nomgr"
+mkdir -p "$EMPTYBIN"
+[ -z "$(PATH="$EMPTYBIN" "$BASH_BIN" -c "$INSTALL_FN"'
+_clip_install_cmd wl-clipboard')" ] || _fail "install cmd must be empty with no known package manager"
+_ok "setup: install command per package manager, empty when none is known"
+
+[ "$(WAYLAND_DISPLAY=wayland-0 DISPLAY=:0 "$BASH_BIN" -c "$PKG_FN"'
+_clip_missing_pkg')" = wl-clipboard ] || _fail "package pick: wayland session must ask for wl-clipboard"
+[ "$(WAYLAND_DISPLAY= DISPLAY=:0 "$BASH_BIN" -c "$PKG_FN"'
+_clip_missing_pkg')" = xclip ] || _fail "package pick: x11 session must ask for xclip"
+[ -z "$(WAYLAND_DISPLAY= DISPLAY= "$BASH_BIN" -c "$PKG_FN"'
+_clip_missing_pkg')" ] || _fail "package pick: headless session must ask for nothing"
+_ok "setup: package pick follows the session type"
+
+grep -q -- '--probe' "$INSTALL_DIR/cbox" || _fail "cbox up must probe the host backend before starting the bridge"
+grep -q "no host clipboard backend" "$INSTALL_DIR/cbox" || _fail "cbox up must warn when the bridge starts without a host backend"
+_ok "cbox: bridge start warns instead of failing silently at the first paste"
+
 echo "PASS: clip bridge"

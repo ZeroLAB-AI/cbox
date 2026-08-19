@@ -212,9 +212,15 @@ def serve(sock_path, parent_pid, sock_dir):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--sock-dir", required=True)
-    parser.add_argument("--parent-pid", required=True, type=int)
+    parser.add_argument("--sock-dir")
+    parser.add_argument("--parent-pid", type=int)
+    parser.add_argument("--probe", action="store_true")
     args = parser.parse_args()
+    if args.probe:
+        sys.stdout.write("%s\n" % (pick_backend() or "none"))
+        return 0
+    if not args.sock_dir or args.parent_pid is None:
+        parser.error("--sock-dir and --parent-pid are required")
     sock_path = prepare_sock_dir(args.sock_dir)
     return serve(sock_path, args.parent_pid, args.sock_dir)
 

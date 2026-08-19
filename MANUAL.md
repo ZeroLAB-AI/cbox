@@ -431,7 +431,7 @@ Clipboard image bridge (`CBOX_CLIPBOARD_MODE`, default `off`). In `bridge` mode 
 
 Privacy note: while enabled, any process in that container can read the host clipboard's image content.
 
-Host requires wl-clipboard (Wayland) or xclip (X11).
+Host requires wl-clipboard (Wayland) or xclip (X11). Choosing `bridge` in setup probes the host for a usable backend (`clip_bridge.py --probe` prints `wayland`, `x11` or `none`, the same decision the running bridge makes per connection); when none is found, setup names the missing package and offers to install it with the host package manager (apt-get/dnf/yum/pacman/zypper/apk), or prints the exact command when it cannot run it. The package is picked from the session type: `wl-clipboard` when `WAYLAND_DISPLAY` is set, otherwise `xclip` for `DISPLAY`. Installing it takes effect immediately - the backend is re-detected per paste, no rebuild and no restart - while fixing a missing `WAYLAND_DISPLAY`/`DISPLAY` needs a new cbox session, because the helper inherits its environment at launch. `cbox up` prints a one-line warning when the bridge starts with no host backend, instead of failing silently at the first paste. Compositors without wlr-data-control/ext-data-control (GNOME/mutter) expose no clipboard to `wl-paste` at all; setup reports that as a failed read probe. macOS has no backend (no pbpaste path in the bridge).
 
 ## Behavioral read-only
 

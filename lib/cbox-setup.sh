@@ -2861,6 +2861,124 @@ step_dns() {
   fi
 }
 
+_clip_probe_backend() {
+  local probe="$ETC_DIR/clipboard/clip_bridge.py" out=""
+  if [ -f "$probe" ]; then
+    out="$(python3 "$probe" --probe 2>/dev/null)"
+  fi
+  case "$out" in
+    wayland|x11)
+      printf '%s\n' "$out"
+      ;;
+    *)
+      printf 'none\n'
+      ;;
+  esac
+}
+
+_clip_missing_pkg() {
+  if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    printf 'wl-clipboard\n'
+  elif [ -n "${DISPLAY:-}" ]; then
+    printf 'xclip\n'
+  fi
+}
+
+_clip_install_cmd() {
+  local pkg="$1"
+  if command -v apt-get >/dev/null 2>&1; then
+    printf 'apt-get install -y %s\n' "$pkg"
+  elif command -v dnf >/dev/null 2>&1; then
+    printf 'dnf install -y %s\n' "$pkg"
+  elif command -v yum >/dev/null 2>&1; then
+    printf 'yum install -y %s\n' "$pkg"
+  elif command -v pacman >/dev/null 2>&1; then
+    printf 'pacman -S --noconfirm %s\n' "$pkg"
+  elif command -v zypper >/dev/null 2>&1; then
+    printf 'zypper install -y %s\n' "$pkg"
+  elif command -v apk >/dev/null 2>&1; then
+    printf 'apk add %s\n' "$pkg"
+  fi
+}
+
+_clip_live_probe() {
+  local backend="$1" err="" rc=0
+  case "$backend" in
+    wayland)
+      err="$( { wl-paste --list-types >/dev/null; } 2>&1 )" || rc=$?
+      ;;
+    x11)
+      err="$( { xclip -selection clipboard -t TARGETS -o >/dev/null; } 2>&1 )" || rc=$?
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+  [ "$rc" = 0 ] && return 0
+  case "$err" in
+    *"othing is copied"*|*"o selection"*|*"not available"*)
+      return 0
+      ;;
+  esac
+  warn "host clipboard read probe failed: $err"
+  case "$err" in
+    *data-control*|*data_control*|*"data control"*)
+      note "this compositor does not expose the wlr-data-control/ext-data-control protocol that wl-paste needs (GNOME/mutter); the bridge cannot read the clipboard there"
+      ;;
+  esac
+  return 0
+}
+
+_clip_host_preflight() {
+  local backend pkg base full offer
+  backend="$(_clip_probe_backend)"
+  if [ "$backend" != none ]; then
+    note "host clipboard backend: $backend"
+    _clip_live_probe "$backend"
+    return 0
+  fi
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    warn "the bridge reads the host clipboard through wl-paste or xclip and has no macOS backend; it stays selected but answers 'no clipboard backend'"
+    return 0
+  fi
+  pkg="$(_clip_missing_pkg)"
+  if [ -z "$pkg" ]; then
+    warn "no graphical session detected (WAYLAND_DISPLAY and DISPLAY are both empty); the bridge answers 'no clipboard backend' until cbox is started from a desktop session"
+    return 0
+  fi
+  warn "$pkg is missing on this host - the bridge would answer 'no clipboard backend' and Ctrl+V of an image would fail"
+  base="$(_clip_install_cmd "$pkg")"
+  if [ -z "$base" ]; then
+    warn "no known package manager found; install $pkg yourself - a running bridge picks it up on the next paste, no rebuild needed"
+    return 0
+  fi
+  offer=1
+  if [ "$(id -u)" = 0 ]; then
+    full="$base"
+  elif command -v sudo >/dev/null 2>&1; then
+    full="sudo $base"
+  else
+    full="$base"
+    offer=0
+  fi
+  if [ "$offer" = 0 ]; then
+    note "no sudo on this host; run as root: $full"
+    return 0
+  fi
+  note "install command: $full"
+  if ! ask_yn "setup: install $pkg now" y; then
+    note "skipped; run it later: $full"
+    return 0
+  fi
+  if sh -c "$full"; then
+    note "$pkg installed; a running bridge picks it up on the next paste, no rebuild needed"
+    _clip_live_probe "$(_clip_probe_backend)"
+  else
+    warn "install failed; refresh the package index and run it yourself: $full"
+  fi
+  return 0
+}
+
 step_clipboard() {
   echo "== section: clipboard =="
   if [ "$SEC_AUTO" = 1 ]; then
@@ -2868,8 +2986,11 @@ step_clipboard() {
     return 0
   fi
   note "bridge = a per-session host helper serves the host clipboard's image content read-only over a unix socket, answering Ctrl+V image paste inside the container; off = no bridge"
+  note "bridge needs wl-clipboard (Wayland) or xclip (X11) on the host; setup checks for it and offers to install it"
   ask_choice "setup: clipboard image bridge" "$CBOX_CLIPBOARD_MODE" off bridge
   CBOX_CLIPBOARD_MODE="$ASK_VALUE"
+  [ "$CBOX_CLIPBOARD_MODE" = bridge ] || return 0
+  _clip_host_preflight
 }
 
 step_kernel_lang() {
