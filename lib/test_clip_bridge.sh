@@ -208,6 +208,14 @@ _clip_missing_pkg')" = xclip ] || _fail "package pick: x11 session must ask for 
 _clip_missing_pkg')" ] || _fail "package pick: headless session must ask for nothing"
 _ok "setup: package pick follows the session type"
 
+WARN_FN="$(awk '$0 == "_clip_backend_warn() {" , $0 == "}"' "$INSTALL_DIR/lib/cbox-setup.sh")"
+[ -n "$WARN_FN" ] || _fail "cannot extract _clip_backend_warn"
+awk '$0 == "run_rebless() {" , $0 == "}"' "$INSTALL_DIR/lib/cbox-setup.sh" | grep -q '_clip_backend_warn' || _fail "re-bless must report a missing host backend"
+if awk '$0 == "run_rebless() {" , $0 == "}"' "$INSTALL_DIR/lib/cbox-setup.sh" | grep -q '_clip_host_preflight'; then
+  _fail "re-bless must never run the interactive install offer"
+fi
+_ok "setup: re-bless reports a missing backend without installing anything"
+
 grep -q -- '--probe' "$INSTALL_DIR/cbox" || _fail "cbox up must probe the host backend before starting the bridge"
 grep -q "no host clipboard backend" "$INSTALL_DIR/cbox" || _fail "cbox up must warn when the bridge starts without a host backend"
 _ok "cbox: bridge start warns instead of failing silently at the first paste"

@@ -314,7 +314,7 @@
     },
     "lib/test_code_hygiene_guard.sh": {
       "layer": "test",
-      "purpose": "code_hygiene_guard: non-ASCII denied in code AND docs (.md/.txt), comment/model-name checks code-only, markdown headings allowed"
+      "purpose": "code_hygiene_guard: non-ASCII denied in code AND docs (.md/.txt), comment/model-name checks code-only, markdown headings allowed, malformed payload fails closed, U+2028/U+2029/U+0085 checked not treated as line breaks"
     },
     "lib/test_codex_mcp_shim.py": {
       "layer": "test",

@@ -2901,6 +2901,35 @@ _clip_install_cmd() {
   fi
 }
 
+_clip_sudo_prefix() {
+  if [ "$(id -u 2>/dev/null)" = 0 ]; then
+    return 0
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    printf 'sudo '
+  fi
+}
+
+_clip_backend_warn() {
+  [ "${CBOX_CLIPBOARD_MODE:-off}" = bridge ] || return 0
+  [ "$(_clip_probe_backend)" = none ] || return 0
+  local pkg base full
+  pkg="$(_clip_missing_pkg)"
+  if [ -z "$pkg" ]; then
+    warn "clipboard bridge is on but no graphical session is visible from here (WAYLAND_DISPLAY and DISPLAY are both empty); image paste will fail"
+    return 0
+  fi
+  warn "clipboard bridge is on but $pkg is missing on this host; image paste will fail"
+  base="$(_clip_install_cmd "$pkg")"
+  if [ -z "$base" ]; then
+    note "install $pkg with the host package manager, or run 'cbox setup update clipboard' - re-bless never installs anything"
+    return 0
+  fi
+  full="$(_clip_sudo_prefix)$base"
+  note "install it with: $full, or run 'cbox setup update clipboard' - re-bless never installs anything"
+  return 0
+}
+
 _clip_live_probe() {
   local backend="$1" err="" rc=0
   case "$backend" in
@@ -2953,12 +2982,8 @@ _clip_host_preflight() {
     return 0
   fi
   offer=1
-  if [ "$(id -u)" = 0 ]; then
-    full="$base"
-  elif command -v sudo >/dev/null 2>&1; then
-    full="sudo $base"
-  else
-    full="$base"
+  full="$(_clip_sudo_prefix)$base"
+  if [ "$full" = "$base" ] && [ "$(id -u 2>/dev/null)" != 0 ]; then
     offer=0
   fi
   if [ "$offer" = 0 ]; then
@@ -3481,6 +3506,7 @@ run_rebless() {
   regen_all
   conf_load
   note "templates re-blessed (CBOX_TPL_SHA updated) and artifacts regenerated"
+  _clip_backend_warn
   note "restart containers to pick the changes up: cbox down && cbox run <bin>; isolated projects re-bless interactively on their next cbox run"
 }
 

@@ -50,4 +50,24 @@ r="$(_decision '{"tool_name":"Write","tool_input":{"file_path":"/x/plain.log","c
 [ "$r" = allow ] || _fail "a non-text extension (.log) must be ignored, got $r"
 _ok "non-text extensions are ignored (only code + docs are checked)"
 
+r="$(_decision 'this is not valid json at all')"
+[ "$r" = deny ] || _fail "a malformed hook payload must fail closed, got $r"
+_ok "malformed payload fails closed"
+
+r="$(_decision "$(python3 -c 'import json; print(json.dumps({"tool_name":"Write","tool_input":{"file_path":"/x/doc.md","content":"a"+chr(0x2028)+"b"}}))')")"
+[ "$r" = deny ] || _fail "U+2028 must be denied, not swallowed as a line break, got $r"
+_ok "U+2028 line separator denied"
+
+r="$(_decision "$(python3 -c 'import json; print(json.dumps({"tool_name":"Write","tool_input":{"file_path":"/x/doc.md","content":"a"+chr(0x2029)+"b"}}))')")"
+[ "$r" = deny ] || _fail "U+2029 must be denied, got $r"
+_ok "U+2029 paragraph separator denied"
+
+r="$(_decision "$(python3 -c 'import json; print(json.dumps({"tool_name":"Write","tool_input":{"file_path":"/x/doc.md","content":"a"+chr(0x85)+"b"}}))')")"
+[ "$r" = deny ] || _fail "U+0085 NEL must be denied, got $r"
+_ok "U+0085 NEL denied"
+
+r="$(_decision "$(python3 -c 'import json; print(json.dumps({"tool_name":"Write","tool_input":{"file_path":"/x/doc.md","content":"a"+chr(0x0b)+"b"}}))')")"
+[ "$r" = allow ] || _fail "U+000B is ASCII and must stay allowed, got $r"
+_ok "ASCII control chars stay allowed"
+
 echo "PASS: all code hygiene guard checks"

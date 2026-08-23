@@ -17,4 +17,3 @@ backups/
 __pycache__/
 sshd_config
 sshd/
-.cbox-conf-manifest

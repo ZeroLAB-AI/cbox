@@ -28,13 +28,13 @@ def is_text(path):
 
 def added_lines(ti, tool):
     if tool == "Write":
-        return (ti.get("content") or "").splitlines()
+        return (ti.get("content") or "").split("\n")
     if tool == "Edit":
-        return (ti.get("new_string") or "").splitlines()
+        return (ti.get("new_string") or "").split("\n")
     if tool == "MultiEdit":
         out = []
         for e in ti.get("edits") or []:
-            out.extend((e.get("new_string") or "").splitlines())
+            out.extend((e.get("new_string") or "").split("\n"))
         return out
     return []
 
@@ -93,5 +93,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
-        pass
+    except Exception as exc:
+        deny("coding policy guard could not evaluate this call (%s: %s) - failing closed; fix the guard or retry"
+             % (type(exc).__name__, exc))
