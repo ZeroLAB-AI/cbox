@@ -80,6 +80,14 @@ _stamp_field() {
   sed -n "${2}p" "$1"
 }
 
+_want_compat() {
+  local name="$1" value="$2"
+  case "$name" in
+    codex) printf '%s' "${value%%|*}" ;;
+    *) printf '%s' "$value" ;;
+  esac
+}
+
 _bins_ready() {
   local name="$1" want stamp link cur_want p resolved
   case "$name" in
@@ -87,6 +95,7 @@ _bins_ready() {
     codex) want="$CBOX_CODEX_VERSION"; stamp="$CXPKG/.cbox-stamp"; link="$CLROOT/bin/codex" ;;
   esac
   cur_want="$(_stamp_field "$stamp" 1)" || return 1
+  cur_want="$(_want_compat "$name" "$cur_want")"
   [ "$cur_want" = "$want" ] || return 1
   p="$(_stamp_field "$stamp" 2)" || return 1
   [ -n "$p" ] || return 1

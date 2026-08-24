@@ -358,7 +358,9 @@
       "profile": "skip",
       "scope": "project",
       "dependencies": [],
-      "doctor_rows": []
+      "doctor_rows": [
+        "clipboard"
+      ]
     },
     {
       "id": "kernel-lang",
@@ -397,7 +399,8 @@
     "managed-dirs",
     "config-pending",
     "sessions",
-    "capabilities"
+    "capabilities",
+    "stale-binds"
   ],
   "variables": [
     {

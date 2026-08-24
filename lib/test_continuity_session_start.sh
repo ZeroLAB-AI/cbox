@@ -6,6 +6,9 @@ HOOK="$INSTALL_DIR/etc/hooks/continuity_session_start.py"
 TMPBASE="$(mktemp -d)"
 trap 'rm -rf "$TMPBASE"' EXIT
 
+: > "$TMPBASE/mountinfo_hermetic"
+export CBOX_MOUNTINFO="$TMPBASE/mountinfo_hermetic"
+
 _fail() {
   echo "FAIL: $1" >&2
   exit 1
@@ -411,6 +414,115 @@ JSON
   echo "PASS: every single-section emission stays under the 8500 B persist-safety ceiling"
 }
 
+test_stale_binds_detection() {
+  local d="$TMPBASE/stale" mi_dirty="$TMPBASE/mi_dirty" mi_clean="$TMPBASE/mi_clean" out rc
+  mkdir -p "$d"
+
+  cat > "$mi_dirty" <<'MI'
+25 30 0:23 / /proc rw,nosuid - proc proc rw
+26 30 252:1 /host/generated/managed-settings.json//deleted /etc/claude-code/managed-settings.json ro,relatime - ext4 /dev/sda1 rw
+27 30 252:1 /host/codex/hooks.json//deleted /home/u/.codex/hooks.json ro,relatime - ext4 /dev/sda1 rw
+28 30 252:1 /host/live.json /home/u/live.json ro,relatime - ext4 /dev/sda1 rw
+MI
+
+  grep -v 'deleted' "$mi_dirty" > "$mi_clean"
+
+  out="$(CBOX_MOUNTINFO="$mi_dirty" python3 "$HOOK" --section core <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+  case "$out" in
+    *"CBOX CONTINUITY PAYLOAD stale-binds BEGIN"*) ;;
+    *) _fail "a mountinfo with //deleted binds must emit a stale-binds payload" ;;
+  esac
+  case "$out" in
+    *"2 stale bind mount(s)"*) ;;
+    *) _fail "the stale-binds payload must report the count of affected binds" ;;
+  esac
+  case "$out" in
+    *"/etc/claude-code/managed-settings.json"*) ;;
+    *) _fail "the stale-binds payload must name the affected mount points, not the source paths" ;;
+  esac
+  case "$out" in
+    *"/home/u/live.json"*) _fail "a live bind must not be reported as stale" ;;
+    *) ;;
+  esac
+  echo "ok: stale binds are detected, counted and named"
+
+  out="$(CBOX_MOUNTINFO="$mi_clean" python3 "$HOOK" --section core <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+  case "$out" in
+    *"stale-binds"*) _fail "a mountinfo with no //deleted binds must stay silent" ;;
+    *) ;;
+  esac
+  case "$out" in
+    *"CBOX CONTINUITY PAYLOAD core BEGIN"*) ;;
+    *) _fail "the core payload must still be emitted when no binds are stale" ;;
+  esac
+  echo "ok: a clean mountinfo emits no stale-binds payload"
+
+  rc=0
+  out="$(CBOX_MOUNTINFO="$TMPBASE/does_not_exist" python3 "$HOOK" --section core <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)" || rc=$?
+  [ "$rc" = 0 ] || _fail "an unreadable mountinfo must not change the loader exit code, got $rc"
+  case "$out" in
+    *"CBOX CONTINUITY PAYLOAD core BEGIN"*) ;;
+    *) _fail "an unreadable mountinfo must never cost the core payload" ;;
+  esac
+  case "$out" in
+    *"stale-binds"*) _fail "an unreadable mountinfo must stay silent, not guess" ;;
+    *) ;;
+  esac
+  cat > "$TMPBASE/mi_odd" <<'MI'
+25 30 0:23 / /proc rw,nosuid - proc proc rw
+short line with four
+26 30 252:1 /host/my\040file//deleted /home/u/my\040file ro,relatime - ext4 /dev/sda1 rw
+
+27 30 252:1 /host/tab\011name//deleted /home/u/tab\011name ro - ext4 /dev/sda1 rw
+MI
+  out="$(CBOX_MOUNTINFO="$TMPBASE/mi_odd" python3 "$HOOK" --section core <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+  case "$out" in
+    *"2 stale bind mount(s)"*) ;;
+    *) _fail "short and blank mountinfo lines must be skipped, not counted or crashed on" ;;
+  esac
+  case "$out" in
+    *"/home/u/my file"*) ;;
+    *) _fail "octal-escaped mount points must be decoded for the report, got raw escapes" ;;
+  esac
+  echo "ok: malformed lines are skipped and octal-escaped paths are decoded"
+
+  local full
+  mkdir -p "$d/.cbox"
+  printf '# LEDGER\n\n## WAVE now\n\nstate line\n' > "$d/.cbox/LEDGER.md"
+  printf '# PROGRESS\n\nstep line\n' > "$d/.cbox/PROGRESS_2026_01_01.md"
+  full="$(cd "$d" && git init -q . 2>/dev/null; CBOX_MOUNTINFO="$mi_dirty" python3 "$HOOK" <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+  case "$full" in
+    *"PAYLOAD stale-binds BEGIN"*) ;;
+    *) _fail "a full no-arg run must still emit the stale-binds payload" ;;
+  esac
+  case "$full" in
+    *"PAYLOAD bounded-ledger BEGIN"*) ;;
+    *) _fail "the stale-bind probe must not cost the ledger payload in a full run" ;;
+  esac
+  case "$full" in
+    *"PAYLOAD progress BEGIN"*) ;;
+    *) _fail "the stale-bind probe must not cost the progress payload in a full run" ;;
+  esac
+  echo "ok: a full run keeps ledger and progress alongside the stale-binds payload"
+
+  echo "PASS: stale bind probe reports, stays silent when clean, and never costs the payload"
+}
+
 test_reference_payload_cap
 test_core_payload_cap
 test_section_concat_equals_noarg
@@ -424,4 +536,5 @@ test_shared_memory_tail_retention_vs_ledger_prefix
 test_unreadable_ledger_degrades_not_discards
 test_unreadable_progress_degrades_not_discards
 test_distillate_fence_forgery_neutralized
+test_stale_binds_detection
 echo "all continuity_session_start tests passed"

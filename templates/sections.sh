@@ -745,7 +745,7 @@ sec_get() {
           printf '%s\n' ''
           ;;
         clipboard)
-          printf '%s\n' ''
+          printf '%s\n' 'clipboard'
           ;;
         kernel-lang)
           printf '%s\n' ''
@@ -897,4 +897,4 @@ sec_keys() {
   esac
 }
 
-DOCTOR_EXTRA_ROWS='codex-profile context-manifest local-model local-model-egress managed-dirs config-pending sessions capabilities'
+DOCTOR_EXTRA_ROWS='codex-profile context-manifest local-model local-model-egress managed-dirs config-pending sessions capabilities stale-binds'

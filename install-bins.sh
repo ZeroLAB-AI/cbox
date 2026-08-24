@@ -157,6 +157,14 @@ _stamp_field() {
   sed -n "${n}p" "$file"
 }
 
+_want_compat() {
+  local name="$1" value="$2"
+  case "$name" in
+    codex) printf '%s' "${value%%|*}" ;;
+    *) printf '%s' "$value" ;;
+  esac
+}
+
 _stamp_write() {
   local file="$1" want="$2" path="$3" hash="$4" ver="$5" dir tmp
   dir="$(dirname "$file")"
@@ -180,6 +188,7 @@ _adopt_check() {
   stamp="$(_stamp_path "$name")"
   [ -f "$stamp" ] || return 1
   cur_want="$(_stamp_field "$stamp" 1)" || return 1
+  cur_want="$(_want_compat "$name" "$cur_want")"
   [ "$cur_want" = "$want" ] || return 1
   p="$(_stamp_field "$stamp" 2)" || return 1
   [ -n "$p" ] || return 1
@@ -484,6 +493,7 @@ _install_one() {
 
   if [ "$force" != "1" ] && [ -f "$stamp" ]; then
     cur_want="$(_stamp_field "$stamp" 1)" || cur_want=""
+    cur_want="$(_want_compat "$name" "$cur_want")"
     if [ -n "$cur_want" ] && [ "$cur_want" != "$want" ]; then
       echo "install-bins: $name pin mismatch - volume stamped for $cur_want, requested $want - run with CBOX_INSTALL_FORCE=1 (cbox reinstall-bins) to move the shared tuple, or use CBOX_BINS_SCOPE=pinned for a private volume" >&2
       printf 'cbox-bins: %s %s %s refuse\n' "$name" "$cur_want" "$want"

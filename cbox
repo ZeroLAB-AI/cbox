@@ -4809,6 +4809,41 @@ sys.exit(0 if 'SessionStart' not in ('',) and hooks else 1)
     _cbox_doctor_row "sessions" OFF "no .cbox/sessions/ - no cbox session created yet in this scope"
   fi
 
+  local clip_mode clip_sock clip_wired
+  clip_mode="${CBOX_CLIPBOARD_MODE:-}"
+  clip_sock="${CBOX_CLIP_SOCK:-/run/cbox-clip/clip.sock}"
+  clip_wired=0
+  { [ -n "${CBOX_CLIP_SOCK:-}" ] || [ -d "$(dirname "$clip_sock")" ] || [ "$clip_mode" = bridge ]; } && clip_wired=1
+  if [ "$in_container" != 1 ]; then
+    _cbox_doctor_row "clipboard" HOST-CHECK "the bridge socket and the wl-paste shim only exist inside a container - run cbox doctor there"
+  elif [ "$clip_wired" = 0 ]; then
+    _cbox_doctor_row "clipboard" OFF "no bridge socket dir and CBOX_CLIPBOARD_MODE=${clip_mode:-unset}"
+  elif [ ! -S "$clip_sock" ]; then
+    _cbox_doctor_row "clipboard" CONFIG-ONLY "bridge wired but no socket at $clip_sock - host helper not running, or the host has no clipboard backend"
+  elif [ -x /usr/local/bin/wl-paste ]; then
+    _cbox_doctor_row "clipboard" ACTIVE "bridge socket $clip_sock, wl-paste shim present"
+  else
+    _cbox_doctor_row "clipboard" CONFIG-ONLY "bridge socket $clip_sock but no wl-paste shim - image paste cannot reach it"
+  fi
+
+  local mi stale_n stale_first
+  mi="${CBOX_MOUNTINFO:-/proc/self/mountinfo}"
+  if [ "$in_container" != 1 ]; then
+    _cbox_doctor_row "stale-binds" HOST-CHECK "only meaningful inside a container - run cbox doctor there"
+  elif [ ! -r "$mi" ]; then
+    _cbox_doctor_row "stale-binds" MISSING "$mi not readable - cannot tell whether binds went stale"
+  else
+    local stale_scan
+    stale_scan="$(awk '$4 ~ /\/\/deleted$/ {n++; if (n == 1) first = $5} END {print n+0; print first}' "$mi" 2>/dev/null || printf '0\n')"
+    stale_n="$(printf '%s\n' "$stale_scan" | sed -n '1p')"
+    stale_first="$(printf '%s\n' "$stale_scan" | sed -n '2p')"
+    if [ "${stale_n:-0}" -gt 0 ]; then
+      _cbox_doctor_row "stale-binds" WARN "$stale_n bind(s) pinned to replaced inodes, e.g. $stale_first - container reads old content, recreate it (restart and rebuild do not clear this)"
+    else
+      _cbox_doctor_row "stale-binds" ACTIVE "no stale binds - every bind still points at its live source"
+    fi
+  fi
+
   echo
   echo "legend: ACTIVE=wired and operational here, CONFIG-ONLY=configured but not active in this container, OFF=disabled, MISSING=expected artifact absent, HOST-CHECK=needs docker/GPU/TTY, not decidable in-container"
 }

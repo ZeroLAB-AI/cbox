@@ -27,6 +27,7 @@ HON_FN="$(_extract_fn "$INSTALL_DIR/cbox" _bins_hermes_on)"
 INST_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _install_one)"
 WANT_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _want_string)"
 SPATH_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _stamp_path)"
+COMPAT_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _want_compat)"
 RHB_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _resolve_hermes_bin)"
 HHASH_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _hermes_hash)"
 RHI_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _run_hermes_install)"
@@ -225,6 +226,7 @@ run_install_one_hermes() {
     '"$INST_FN"'
     '"$WANT_FN"'
     '"$SPATH_FN"'
+    '"$COMPAT_FN"'
     _wipe_volume() { echo WIPED >> "$marker/actions"; }
     _adopt_check() { [ -f "$marker/adopts" ]; }
     _stamp_field() { sed -n "${2}p" "$1" 2>/dev/null; }
@@ -267,6 +269,55 @@ run_install_one_hermes 0 "$HM" 0.19.0 >/dev/null 2>&1
 grep -q INSTALLED "$HM/actions" && _fail "install-one hermes: pin mismatch must refuse before installing"
 grep -q "RC=1" "$HM/actions" || _fail "install-one hermes: pin mismatch must fail loudly"
 _ok "install-one hermes: stamped channel vs requested pin refuses"
+
+run_install_one_codex() {
+  CBOX_CODEX_VERSION="$3" bash -c '
+    set -u
+    force="$1"; marker="$2"
+    CBOX_INSTALL_FORCE="$force"
+    CLROOT=/nonexistent-clroot
+    CXPKG="$marker/cx"
+    HXROOT=/nonexistent-hxroot
+    '"$INST_FN"'
+    '"$WANT_FN"'
+    '"$SPATH_FN"'
+    '"$COMPAT_FN"'
+    _wipe_volume() { echo WIPED >> "$marker/actions"; }
+    _adopt_check() { [ -f "$marker/adopts" ]; }
+    _stamp_field() { sed -n "${2}p" "$1" 2>/dev/null; }
+    _run_codex_install() { echo INSTALLED >> "$marker/actions"; return 1; }
+    _install_one codex >> "$marker/signal" 2>/dev/null || echo "RC=$?" >> "$marker/actions"
+  ' inst "$1" "$2"
+}
+
+CX="$TMPBASE/inst-codex"
+mkdir -p "$CX/cx"
+
+: > "$CX/actions"; : > "$CX/signal"
+printf 'latest|\n/p\nh\n1.0.0\n' > "$CX/cx/.cbox-stamp"
+run_install_one_codex 0 "$CX" latest >/dev/null 2>&1
+grep -q refuse "$CX/signal" && _fail "install-one codex: a legacy version|target stamp must not read as a pin mismatch against the same version"
+grep -q INSTALLED "$CX/actions" || _fail "install-one codex: after a legacy stamp matches, the install must proceed"
+_ok "install-one codex: legacy 'version|target' stamp still matches the bare version want"
+
+: > "$CX/actions"; : > "$CX/signal"
+printf 'latest|x86_64-unknown-linux-musl\n/p\nh\n1.0.0\n' > "$CX/cx/.cbox-stamp"
+run_install_one_codex 0 "$CX" latest >/dev/null 2>&1
+grep -q refuse "$CX/signal" && _fail "install-one codex: a legacy stamp carrying a real target must still match the bare version"
+_ok "install-one codex: legacy stamp with a populated target also matches"
+
+: > "$CX/actions"; : > "$CX/signal"
+printf 'latest|\n/p\nh\n1.0.0\n' > "$CX/cx/.cbox-stamp"
+run_install_one_codex 0 "$CX" 0.149.1 >/dev/null 2>&1
+grep -q refuse "$CX/signal" || _fail "install-one codex: a genuinely different pin must still refuse, legacy stamp or not"
+grep -q INSTALLED "$CX/actions" && _fail "install-one codex: a refused pin must not reach the installer"
+_ok "install-one codex: a real version change still refuses"
+
+: > "$CX/actions"; : > "$CX/signal"
+printf 'latest\n/p\nh\n1.0.0\n' > "$CX/cx/.cbox-stamp"
+run_install_one_codex 0 "$CX" latest >/dev/null 2>&1
+grep -q refuse "$CX/signal" && _fail "install-one codex: a current-format stamp must keep matching"
+_ok "install-one codex: current-format stamp is unaffected"
 
 HV="$TMPBASE/venv/opt-hermes"
 mkdir -p "$HV/bin" "$HV/lib/python3.12/site-packages/hermes_agent-0.19.0.dist-info"

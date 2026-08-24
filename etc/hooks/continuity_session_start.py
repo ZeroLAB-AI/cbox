@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import glob
 import hashlib
+import io
 import json
 import os
 import re
@@ -45,6 +46,51 @@ RESUME_KERNEL = """SESSION CORE (resume) - short driver kernel for a resumed/com
 Reconstitute from the ledger below, then PROCEED, DO NOT BLOCK: continue the queue immediately without asking - a resume nudge is the instruction to act, not a prompt to ask. Accept and commit work that already passed its gate; relaunch only unfinished work, fanning out independent peer tasks concurrently. Update LEDGER.md before switching phases and after accepting verified work. Delegates never write the brain directly - they return a distillate, you write it.
 SECURITY FLOOR: before committing changes that touch auth, API endpoints, or input handling, run the security-reviewer subagent; CRITICAL/HIGH findings block the commit.
 """
+
+
+STALE_BIND_SUFFIX = "//deleted"
+STALE_BIND_REPORT_CAP = 8
+
+
+def _mountinfo_path():
+    return os.environ.get("CBOX_MOUNTINFO", "/proc/self/mountinfo")
+
+
+def _unescape_mountinfo(field):
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
+
+
+def _stale_binds(path):
+    try:
+        with io.open(path, "r", encoding="utf-8", errors="replace") as f:
+            raw = f.read()
+    except Exception:
+        return []
+    found = []
+    for line in raw.split("\n"):
+        fields = line.split(" ")
+        if len(fields) < 5:
+            continue
+        if fields[3].endswith(STALE_BIND_SUFFIX):
+            found.append(_unescape_mountinfo(fields[4]))
+    return found
+
+
+def _stale_bind_body(paths):
+    shown = paths[:STALE_BIND_REPORT_CAP]
+    lines = [
+        "This container is running on %d bind mount(s) whose source file was replaced"
+        " on the host after the container started." % len(paths),
+        "The kernel pins a file bind to its inode, so a re-bless or any rewrite of the"
+        " source leaves the container reading the OLD content while the host disk already"
+        " holds the new one. Restart and rebuild do NOT clear this - the container must be"
+        " removed and created again.",
+        "Affected mount points:",
+    ]
+    lines.extend("  %s" % q for q in shown)
+    if len(paths) > len(shown):
+        lines.append("  ... and %d more" % (len(paths) - len(shown)))
+    return "\n".join(lines)
 
 
 def _warn(component, detail):
@@ -366,6 +412,18 @@ def main():
             core_body = RESUME_KERNEL
 
         _write_payload("core", core_label, core_version, core_body)
+
+        try:
+            stale = _stale_binds(_mountinfo_path())
+            if stale:
+                _write_payload(
+                    "stale-binds",
+                    "CONTAINER STATE",
+                    "%d stale bind mount(s)" % len(stale),
+                    _stale_bind_body(stale),
+                )
+        except Exception as exc:
+            _warn("stale bind probe", str(exc))
 
     if root and "memory" in sections:
         memory_path, memory_body = _shared_memory(root)

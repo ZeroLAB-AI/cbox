@@ -3,7 +3,7 @@
   "per_file": {
     "cbox": {
       "ip_route": 1,
-      "proc_path": 3,
+      "proc_path": 4,
       "raw_timeout": 2,
       "stat_c": 2
     },
@@ -24,7 +24,7 @@
   "schema_version": 1,
   "totals": {
     "ip_route": 1,
-    "proc_path": 9,
+    "proc_path": 10,
     "raw_timeout": 2,
     "stat_c": 2
   }
