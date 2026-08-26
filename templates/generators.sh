@@ -2525,6 +2525,7 @@ gen_hooks_dir() {
   _cbox_write "$INSTALL_DIR/generated/hooks/agent_label_guard.py" < "$INSTALL_DIR/etc/hooks/agent_label_guard.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/code_hygiene_guard.py" < "$INSTALL_DIR/etc/hooks/code_hygiene_guard.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/rm_glob_guard.py" < "$INSTALL_DIR/etc/hooks/rm_glob_guard.py"
+  _cbox_write "$INSTALL_DIR/generated/hooks/rm_permission_gate.py" < "$INSTALL_DIR/etc/hooks/rm_permission_gate.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/spawn_gate.py" < "$INSTALL_DIR/etc/hooks/spawn_gate.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/commit_guard.py" < "$INSTALL_DIR/etc/hooks/commit_guard.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/codex_guard_bridge.py" < "$INSTALL_DIR/etc/hooks/codex_guard_bridge.py"

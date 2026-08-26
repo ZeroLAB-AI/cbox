@@ -2666,7 +2666,7 @@ step_hooks() {
   fi
   gen_hooks_dir
   if [ "$CBOX_CLAUDE_MODE" = mount ]; then
-    staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py rm_glob_guard.py spawn_gate.py codex_guard_bridge.py hermes_guard_bridge.py orchestrator-global.txt conduct-kernel.txt session-core.txt codex_scope.container.json ask_claude_mcp.py ask_claude_fallback_models.json codex_notify.py codex_bump_probe.sh codex_mcp_shim.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py continuity_session_start.py session_scope_farm.py limit_watchdog.py session_pane_map.py || true
+    staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py rm_glob_guard.py rm_permission_gate.py spawn_gate.py codex_guard_bridge.py hermes_guard_bridge.py orchestrator-global.txt conduct-kernel.txt session-core.txt codex_scope.container.json ask_claude_mcp.py ask_claude_fallback_models.json codex_notify.py codex_bump_probe.sh codex_mcp_shim.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py continuity_session_start.py session_scope_farm.py limit_watchdog.py session_pane_map.py || true
   else
     note "volume mode: hooks are served read-only from $GEN_DIR/hooks (synced)"
   fi

@@ -133,6 +133,18 @@
       },
       "degrade_floor": "advisory-text"
     },
+    "guard-rm-permission": {
+      "class": "guard",
+      "enforcement": "behavioral",
+      "audience": "driver",
+      "sources": ["etc/hooks/rm_permission_gate.py"],
+      "enabled_when_env": null,
+      "planes": ["native"],
+      "bindings": {
+        "claude": {"mechanism": "permissionrequest-hook", "matcher": "Bash", "artifact": "etc/hooks/rm_permission_gate.py", "status": "live"}
+      },
+      "degrade_floor": "feature-off"
+    },
     "guard-code-hygiene": {
       "class": "guard",
       "enforcement": "behavioral",

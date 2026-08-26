@@ -120,6 +120,10 @@
       "layer": "template-generating-container-content",
       "purpose": "copied into generated/hooks, staged into container claude hooks"
     },
+    "etc/hooks/rm_permission_gate.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "copied into generated/hooks, staged into container claude hooks"
+    },
     "etc/hooks/session_pane_map.py": {
       "layer": "template-generating-container-content",
       "purpose": "copied into generated/hooks, staged into container claude hooks"
@@ -457,6 +461,10 @@
       "purpose": "host-side test harness under the lib/test_* suite"
     },
     "lib/test_rm_glob_guard.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_rm_permission_gate.py": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
