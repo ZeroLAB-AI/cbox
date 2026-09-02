@@ -6,6 +6,8 @@ PROJECT_DIR="$INSTALL_DIR"
 TMPBASE="$(mktemp -d)"
 trap 'rm -rf "$TMPBASE"' EXIT
 
+unset CBOX_CLAUDE_TARGET CBOX_CODEX_VERSION CBOX_CODEX_TARGET CBOX_HERMES CBOX_HERMES_VERSION CBOX_INSTALL_FORCE CBOX_AUTOUPDATE CBOX_AUTOUPDATE_TTL_HOURS
+
 _fail() {
   echo "FAIL: $1" >&2
   exit 1
@@ -33,6 +35,7 @@ HHASH_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _hermes_hash)"
 RHI_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _run_hermes_install)"
 CUP_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_compose_up)"
 CDIG_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_compose_files_digest)"
+RIB_FN="$(_extract_fn "$INSTALL_DIR/cbox" reinstall_bins)"
 [ -n "$HON_FN" ] || _fail "cannot extract _bins_hermes_on"
 for _fn in WANT_FN SPATH_FN RHB_FN HHASH_FN RHI_FN; do
   [ -n "${!_fn}" ] || _fail "cannot extract install-bins function for $_fn"
@@ -44,6 +47,7 @@ done
 [ -n "$INST_FN" ] || _fail "cannot extract _install_one"
 [ -n "$CUP_FN" ] || _fail "cannot extract _cbox_compose_up"
 [ -n "$CDIG_FN" ] || _fail "cannot extract _cbox_compose_files_digest"
+[ -n "$RIB_FN" ] || _fail "cannot extract reinstall_bins"
 
 run_reap() {
   local probe1="$1" probe2="$2" out
@@ -457,5 +461,92 @@ FORCE_OUT="$FORCE_OUT" TMPBASE="$TMPBASE" INSTALL_DIR="$INSTALL_DIR" bash -c '
 ' || _fail "compose: managed-settings repair must recreate"
 grep -qx 'up -d --force-recreate' "$FORCE_OUT" || _fail "compose: managed-settings repair must force recreate"
 _ok "compose: managed-settings repair forces recreation"
+
+RIB_INST="$TMPBASE/rib-install"
+mkdir -p "$RIB_INST"
+: > "$RIB_INST/image.inputs"
+
+run_reinstall() {
+  local h="$1"; shift
+  INSTALL_DIR="$RIB_INST" bash -c '
+    set -u
+    h="$1"; shift
+    '"$RIB_FN"'
+    _cbox_effective_mode() { printf global; }
+    require_global_conf() { :; }
+    _cbox_image_tag() { printf img; }
+    _cbox_image_hash() { printf hash; }
+    docker() { :; }
+    _bins_want() { printf latest; }
+    _bins_conflict_scan() { :; }
+    _bins_hermes_on() { return 1; }
+    _cbox_bins_volume() { printf "vol-%s" "$1"; }
+    _cbox_probe_exes_seed() { :; }
+    die() { echo "DIE: $*" >&2; exit 1; }
+    _ensure_bins() { printf "%s\n" "${2:-}" >> "$h/ensure.calls"; }
+    reinstall_bins "$@"
+  ' rib "$h" "$@"
+}
+
+RH="$TMPBASE/rib-h"
+mkdir -p "$RH"
+CBOX_INSTALL_FORCE= run_reinstall "$RH" >/dev/null 2>&1
+[ "$(cat "$RH/ensure.calls")" = 0 ] || _fail "reinstall: default must not force"
+_ok "reinstall: default keeps force off"
+
+: > "$RH/ensure.calls"
+CBOX_INSTALL_FORCE=1 run_reinstall "$RH" >/dev/null 2>&1
+[ "$(cat "$RH/ensure.calls")" = 1 ] || _fail "reinstall: CBOX_INSTALL_FORCE=1 must pass force to the install"
+_ok "reinstall: CBOX_INSTALL_FORCE=1 moves the shared tuple"
+
+: > "$RH/ensure.calls"
+CBOX_INSTALL_FORCE=1 run_reinstall "$RH" --if-stale >/dev/null 2>&1
+[ "$(cat "$RH/ensure.calls")" = 0 ] || _fail "reinstall: --if-stale must win over CBOX_INSTALL_FORCE"
+_ok "reinstall: --if-stale overrides the env force"
+
+: > "$RH/ensure.calls"
+CBOX_INSTALL_FORCE=yes run_reinstall "$RH" >/dev/null 2>&1
+[ "$(cat "$RH/ensure.calls")" = 0 ] || _fail "reinstall: only literal 1 may force"
+_ok "reinstall: non-literal force values stay off"
+
+: > "$RH/ensure.calls"
+CBOX_INSTALL_FORCE= run_reinstall "$RH" --fresh >/dev/null 2>&1
+[ "$(cat "$RH/ensure.calls")" = 1 ] || _fail "reinstall: --fresh must force"
+_ok "reinstall: --fresh still forces"
+
+run_reinstall_isolated() {
+  local h="$1"; shift
+  INSTALL_DIR="$RIB_INST" HOME="$h" bash -c '
+    set -u
+    h="$1"; shift
+    '"$RIB_FN"'
+    _cbox_effective_mode() { printf isolated; }
+    _cbox_workspace_root() { printf "%s/ws" "$h"; }
+    _cbox_path_hash() { printf "abc123"; }
+    _cbox_image_tag() { printf img; }
+    _cbox_image_hash() { printf hash; }
+    docker() { :; }
+    _bins_want() { printf latest; }
+    _bins_conflict_scan() { :; }
+    _bins_hermes_on() { return 1; }
+    _cbox_bins_volume() { printf "vol-%s" "$1"; }
+    _cbox_probe_exes_seed() { :; }
+    die() { echo "DIE: $*" >&2; exit 1; }
+    _ensure_bins() { printf "%s\n" "${2:-}" >> "$h/ensure.calls"; }
+    reinstall_bins "$@"
+  ' rib "$h" "$@"
+}
+
+RHI="$TMPBASE/rib-iso"
+mkdir -p "$RHI/ws" "$RHI/.config/cbox/projects/abc123"
+printf 'CBOX_CLAUDE_TARGET=stable\n' > "$RHI/.config/cbox/projects/abc123/cbox.conf"
+CBOX_INSTALL_FORCE=1 run_reinstall_isolated "$RHI" >/dev/null 2>&1
+[ "$(cat "$RHI/ensure.calls")" = 1 ] || _fail "reinstall: isolated subshell must inherit the env force past conf sourcing"
+_ok "reinstall: isolated mode inherits the env force"
+
+: > "$RHI/ensure.calls"
+CBOX_INSTALL_FORCE=1 run_reinstall_isolated "$RHI" --if-stale >/dev/null 2>&1
+[ "$(cat "$RHI/ensure.calls")" = 0 ] || _fail "reinstall: isolated --if-stale must win over the env force"
+_ok "reinstall: isolated --if-stale overrides the env force"
 
 echo "PASS: ops lifecycle"

@@ -1853,7 +1853,7 @@ _bins_run_install_group() {
         status_word="$(printf '%s' "$line" | awk '{print $5}')"
         case "$status_word" in
           refuse|fail)
-            echo "cbox: bins install refused for $name (see message above) - re-pin the project, run '$0 reinstall-bins' to move the shared tuple, or set CBOX_BINS_SCOPE=pinned for a private volume" >&2
+            echo "cbox: bins install refused for $name (see message above) - re-pin the project, run 'CBOX_INSTALL_FORCE=1 $0 reinstall-bins' to move the shared tuple, or set CBOX_BINS_SCOPE=pinned for a private volume" >&2
             rc=1
             ;;
           ok|adopt)
@@ -1997,6 +1997,16 @@ reinstall_bins() {
     --if-stale) if_stale=1; shift ;;
   esac
   local mode img_tag force=0 hits_claude hits_codex hits_hermes
+  case "${CBOX_INSTALL_FORCE:-0}" in
+    1)
+      if [ "$if_stale" = 1 ]; then
+        echo "cbox: ignoring CBOX_INSTALL_FORCE=1 - --if-stale runs without force" >&2
+      else
+        force=1
+        echo "cbox: CBOX_INSTALL_FORCE=1 - forcing bins reinstall (moves the shared tuple)" >&2
+      fi
+      ;;
+  esac
   mode="$(_cbox_effective_mode)"
   case "$mode" in
     isolated)
