@@ -495,7 +495,7 @@ _install_one() {
     cur_want="$(_stamp_field "$stamp" 1)" || cur_want=""
     cur_want="$(_want_compat "$name" "$cur_want")"
     if [ -n "$cur_want" ] && [ "$cur_want" != "$want" ]; then
-      echo "install-bins: $name pin mismatch - volume stamped for $cur_want, requested $want - run with CBOX_INSTALL_FORCE=1 (cbox reinstall-bins) to move the shared tuple, or use CBOX_BINS_SCOPE=pinned for a private volume" >&2
+      echo "install-bins: $name pin mismatch - volume stamped for $cur_want, requested $want - run 'cbox reinstall-bins --force' to move the shared tuple, or use CBOX_BINS_SCOPE=pinned for a private volume" >&2
       printf 'cbox-bins: %s %s %s refuse\n' "$name" "$cur_want" "$want"
       return 1
     fi

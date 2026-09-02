@@ -6,7 +6,7 @@ PROJECT_DIR="$INSTALL_DIR"
 TMPBASE="$(mktemp -d)"
 trap 'rm -rf "$TMPBASE"' EXIT
 
-unset CBOX_CLAUDE_TARGET CBOX_CODEX_VERSION CBOX_CODEX_TARGET CBOX_HERMES CBOX_HERMES_VERSION CBOX_INSTALL_FORCE CBOX_AUTOUPDATE CBOX_AUTOUPDATE_TTL_HOURS
+unset CBOX_CLAUDE_TARGET CBOX_CODEX_VERSION CBOX_CODEX_TARGET CBOX_HERMES CBOX_HERMES_VERSION CBOX_INSTALL_FORCE CBOX_AUTOUPDATE CBOX_AUTOUPDATE_TTL_HOURS CBOX_BINS_SCOPE
 
 _fail() {
   echo "FAIL: $1" >&2
@@ -36,6 +36,7 @@ RHI_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _run_hermes_install)"
 CUP_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_compose_up)"
 CDIG_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_compose_files_digest)"
 RIB_FN="$(_extract_fn "$INSTALL_DIR/cbox" reinstall_bins)"
+BCR_FN="$(_extract_fn "$INSTALL_DIR/cbox" _bins_conflict_report)"
 [ -n "$HON_FN" ] || _fail "cannot extract _bins_hermes_on"
 for _fn in WANT_FN SPATH_FN RHB_FN HHASH_FN RHI_FN; do
   [ -n "${!_fn}" ] || _fail "cannot extract install-bins function for $_fn"
@@ -48,6 +49,7 @@ done
 [ -n "$CUP_FN" ] || _fail "cannot extract _cbox_compose_up"
 [ -n "$CDIG_FN" ] || _fail "cannot extract _cbox_compose_files_digest"
 [ -n "$RIB_FN" ] || _fail "cannot extract reinstall_bins"
+[ -n "$BCR_FN" ] || _fail "cannot extract _bins_conflict_report"
 
 run_reap() {
   local probe1="$1" probe2="$2" out
@@ -478,7 +480,7 @@ run_reinstall() {
     _cbox_image_hash() { printf hash; }
     docker() { :; }
     _bins_want() { printf latest; }
-    _bins_conflict_scan() { :; }
+    _bins_conflict_report() { :; }
     _bins_hermes_on() { return 1; }
     _cbox_bins_volume() { printf "vol-%s" "$1"; }
     _cbox_probe_exes_seed() { :; }
@@ -514,6 +516,16 @@ CBOX_INSTALL_FORCE= run_reinstall "$RH" --fresh >/dev/null 2>&1
 [ "$(cat "$RH/ensure.calls")" = 1 ] || _fail "reinstall: --fresh must force"
 _ok "reinstall: --fresh still forces"
 
+: > "$RH/ensure.calls"
+CBOX_INSTALL_FORCE= run_reinstall "$RH" --force >/dev/null 2>&1
+[ "$(cat "$RH/ensure.calls")" = 1 ] || _fail "reinstall: --force must force without the env var"
+_ok "reinstall: --force flag forces"
+
+: > "$RH/ensure.calls"
+CBOX_INSTALL_FORCE=1 run_reinstall "$RH" --force >/dev/null 2>&1
+[ "$(cat "$RH/ensure.calls")" = 1 ] || _fail "reinstall: --force with the env var must force exactly once"
+_ok "reinstall: --force and env force compose"
+
 run_reinstall_isolated() {
   local h="$1"; shift
   INSTALL_DIR="$RIB_INST" HOME="$h" bash -c '
@@ -527,7 +539,7 @@ run_reinstall_isolated() {
     _cbox_image_hash() { printf hash; }
     docker() { :; }
     _bins_want() { printf latest; }
-    _bins_conflict_scan() { :; }
+    _bins_conflict_report() { :; }
     _bins_hermes_on() { return 1; }
     _cbox_bins_volume() { printf "vol-%s" "$1"; }
     _cbox_probe_exes_seed() { :; }
@@ -548,5 +560,30 @@ _ok "reinstall: isolated mode inherits the env force"
 CBOX_INSTALL_FORCE=1 run_reinstall_isolated "$RHI" --if-stale >/dev/null 2>&1
 [ "$(cat "$RHI/ensure.calls")" = 0 ] || _fail "reinstall: isolated --if-stale must win over the env force"
 _ok "reinstall: isolated --if-stale overrides the env force"
+
+: > "$RHI/ensure.calls"
+CBOX_INSTALL_FORCE= run_reinstall_isolated "$RHI" --force >/dev/null 2>&1
+[ "$(cat "$RHI/ensure.calls")" = 1 ] || _fail "reinstall: isolated --force must survive conf sourcing"
+_ok "reinstall: isolated --force forces past conf sourcing"
+
+run_conflict_report() {
+  bash -c '
+    set -u
+    '"$BCR_FN"'
+    _bins_want() { printf latest; }
+    _bins_hermes_on() { return 1; }
+    _bins_conflict_scan() { printf "projA projB"; }
+    _bins_conflict_report
+  '
+}
+
+OUT="$(CBOX_BINS_SCOPE=pinned run_conflict_report 2>&1)"
+[ -z "$OUT" ] || _fail "conflict report: pinned scope must stay silent (private volume moves nothing shared)"
+_ok "conflict report: pinned scope skips the shared-tuple warning"
+
+OUT="$(CBOX_BINS_SCOPE=global run_conflict_report 2>&1)"
+printf '%s' "$OUT" | grep -q "moving the shared claude tuple will make these projects mismatch:projA projB" || _fail "conflict report: global scope must warn about mismatching projects"
+printf '%s' "$OUT" | grep -q "moving the shared codex tuple" || _fail "conflict report: global scope must scan codex too"
+_ok "conflict report: global scope warns about shared-tuple movers"
 
 echo "PASS: ops lifecycle"

@@ -733,7 +733,7 @@ case "${1:-}" in
         claude) _want="$CBOX_CLAUDE_TARGET" ;;
         codex) _want="$CBOX_CODEX_VERSION" ;;
       esac
-      echo "entrypoint: $1 not installed or does not match the pinned version (want $_want) - run 'cbox reinstall-bins' on the host (with CBOX_INSTALL_FORCE=1 if it refuses a pin mismatch)" >&2
+      echo "entrypoint: $1 not installed or does not match the pinned version (want $_want) - run 'cbox reinstall-bins' on the host (add --force if it refuses a pin mismatch)" >&2
       exit 1
     fi
     shift

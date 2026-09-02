@@ -3,6 +3,7 @@
     "commit": "",
     "pr": ""
   },
+  "remoteControlAtStartup": false,
   "permissions": {
     "defaultMode": "bypassPermissions"
   },

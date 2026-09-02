@@ -1853,7 +1853,7 @@ _bins_run_install_group() {
         status_word="$(printf '%s' "$line" | awk '{print $5}')"
         case "$status_word" in
           refuse|fail)
-            echo "cbox: bins install refused for $name (see message above) - re-pin the project, run 'CBOX_INSTALL_FORCE=1 $0 reinstall-bins' to move the shared tuple, or set CBOX_BINS_SCOPE=pinned for a private volume" >&2
+            echo "cbox: bins install refused for $name (see message above) - re-pin the project, run '$0 reinstall-bins --force' to move the shared tuple, or set CBOX_BINS_SCOPE=pinned for a private volume" >&2
             rc=1
             ;;
           ok|adopt)
@@ -1990,18 +1990,33 @@ _bins_conflict_scan() {
   printf '%s' "${hits# }"
 }
 
+_bins_conflict_report() {
+  [ "${CBOX_BINS_SCOPE:-global}" = global ] || return 0
+  local hits_claude hits_codex hits_hermes
+  hits_claude="$(_bins_conflict_scan claude "$(_bins_want claude)")"
+  hits_codex="$(_bins_conflict_scan codex "$(_bins_want codex)")"
+  [ -z "$hits_claude" ] || echo "cbox: moving the shared claude tuple will make these projects mismatch:$hits_claude" >&2
+  [ -z "$hits_codex" ] || echo "cbox: moving the shared codex tuple will make these projects mismatch:$hits_codex" >&2
+  if _bins_hermes_on; then
+    hits_hermes="$(_bins_conflict_scan hermes "$(_bins_want hermes)")"
+    [ -z "$hits_hermes" ] || echo "cbox: moving the shared hermes tuple will make these projects mismatch:$hits_hermes" >&2
+  fi
+}
+
 reinstall_bins() {
-  local fresh=0 if_stale=0
+  local fresh=0 if_stale=0 force=0
   case "${1:-}" in
     --fresh) fresh=1; shift ;;
     --if-stale) if_stale=1; shift ;;
+    --force) force=1; shift ;;
   esac
-  local mode img_tag force=0 hits_claude hits_codex hits_hermes
+  local mode img_tag
+  [ "$force" != 1 ] || echo "cbox: --force - forcing bins reinstall of the configured tuple" >&2
   case "${CBOX_INSTALL_FORCE:-0}" in
     1)
       if [ "$if_stale" = 1 ]; then
         echo "cbox: ignoring CBOX_INSTALL_FORCE=1 - --if-stale runs without force" >&2
-      else
+      elif [ "$force" != 1 ]; then
         force=1
         echo "cbox: CBOX_INSTALL_FORCE=1 - forcing bins reinstall (moves the shared tuple)" >&2
       fi
@@ -2016,7 +2031,7 @@ reinstall_bins() {
       [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run codex' or 'cbox setup --local $root' first"
       (
         set -e
-        unset CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL CBOX_CODEX_TARGET
+        unset CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL CBOX_CODEX_TARGET CBOX_BINS_SCOPE
         . "$eff/cbox.conf"
         img_tag="$(_cbox_image_tag "$(_cbox_image_hash "$eff")")"
         docker image inspect "$img_tag" >/dev/null 2>&1 || die "image $img_tag not built - run 'cbox run codex' first"
@@ -2029,14 +2044,7 @@ reinstall_bins() {
             docker volume rm "$(_cbox_bins_volume codex)" >/dev/null 2>&1 || true
             ! _bins_hermes_on || docker volume rm "$(_cbox_bins_volume hermes)" >/dev/null 2>&1 || true
           else
-            hits_claude="$(_bins_conflict_scan claude "$(_bins_want claude)")"
-            hits_codex="$(_bins_conflict_scan codex "$(_bins_want codex)")"
-            [ -z "$hits_claude" ] || echo "cbox: moving the shared claude tuple will make these projects mismatch:$hits_claude" >&2
-            [ -z "$hits_codex" ] || echo "cbox: moving the shared codex tuple will make these projects mismatch:$hits_codex" >&2
-            if _bins_hermes_on; then
-              hits_hermes="$(_bins_conflict_scan hermes "$(_bins_want hermes)")"
-              [ -z "$hits_hermes" ] || echo "cbox: moving the shared hermes tuple will make these projects mismatch:$hits_hermes" >&2
-            fi
+            _bins_conflict_report
           fi
           _ensure_bins "$img_tag" "$force"
         fi
@@ -2058,14 +2066,7 @@ reinstall_bins() {
         docker volume rm "$(_cbox_bins_volume codex)" >/dev/null 2>&1 || true
         ! _bins_hermes_on || docker volume rm "$(_cbox_bins_volume hermes)" >/dev/null 2>&1 || true
       else
-        hits_claude="$(_bins_conflict_scan claude "$(_bins_want claude)")"
-        hits_codex="$(_bins_conflict_scan codex "$(_bins_want codex)")"
-        [ -z "$hits_claude" ] || echo "cbox: moving the shared claude tuple will make these projects mismatch:$hits_claude" >&2
-        [ -z "$hits_codex" ] || echo "cbox: moving the shared codex tuple will make these projects mismatch:$hits_codex" >&2
-        if _bins_hermes_on; then
-          hits_hermes="$(_bins_conflict_scan hermes "$(_bins_want hermes)")"
-          [ -z "$hits_hermes" ] || echo "cbox: moving the shared hermes tuple will make these projects mismatch:$hits_hermes" >&2
-        fi
+        _bins_conflict_report
       fi
       _ensure_bins "$img_tag" "$force"
       _cbox_probe_exes_seed "$INSTALL_DIR" "" 1
@@ -6129,7 +6130,7 @@ print(json.dumps({
 }
 
 usage() {
-  echo "usage: $0 {run [--session <id>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force]|restart [--gpu]|shell|logs [args]|update|reinstall-bins [--fresh|--if-stale]|install-hooks|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|pending}|netaccess {status|allow|deny}|ollama {status|up|down|pull <model>|reconcile}|wg {status|up|down|keygen|peer {add|rm|list|config}}|session-broker {status|access {disabled|viewer|full-attach}|window {off|<minutes>}|key {add <pubkey-file> [comment]|rm <fingerprint>|fingerprints}}|backup|login [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}"
+  echo "usage: $0 {run [--session <id>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force]|restart [--gpu]|shell|logs [args]|update|reinstall-bins [--fresh|--force|--if-stale]|install-hooks|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|pending}|netaccess {status|allow|deny}|ollama {status|up|down|pull <model>|reconcile}|wg {status|up|down|keygen|peer {add|rm|list|config}}|session-broker {status|access {disabled|viewer|full-attach}|window {off|<minutes>}|key {add <pubkey-file> [comment]|rm <fingerprint>|fingerprints}}|backup|login [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}"
   echo "cbox: with zero arguments and a TTY on stdin+stdout, bare '$0' opens the interactive hub instead of this usage text"
   echo "cbox: 'cbox ls' lists RUNNING isolated projects only, not every configured project"
   exit 1
