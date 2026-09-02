@@ -387,6 +387,50 @@ _cbox_selftest_path_primitives() {
   return "$fail"
 }
 
+_mirror_write_one() {
+  local dir="$1" src="$2" name="$3" tmp
+  [ -f "$src" ] || return 0
+  tmp="$(mktemp "$dir/.cbox.XXXXXX")" || return 0
+  if cp "$src" "$tmp" 2>/dev/null; then
+    chmod 0644 "$tmp"
+    mv "$tmp" "$dir/$name" 2>/dev/null || rm -f "$tmp"
+  else
+    rm -f "$tmp"
+  fi
+}
+
+_write_mirror() {
+  local root="$1" eff="$2" dir tmp
+  dir="$root/.cbox/runtime"
+  if [ -L "$root/.cbox" ] || [ -L "$dir" ]; then
+    echo "cbox: warning: $dir is a symlink - skipping mirror" >&2
+    return 0
+  fi
+  mkdir -p "$dir" 2>/dev/null || { echo "cbox: warning: cannot create $dir - skipping mirror" >&2; return 0; }
+  case "$(_cbox_realpath "$dir" 2>/dev/null)" in
+    "$root"/*) ;;
+    *) echo "cbox: warning: $dir escapes workspace - skipping mirror" >&2; return 0 ;;
+  esac
+  _mirror_write_one "$dir" "$eff/docker-compose.yml" docker-compose.mirror.yml
+  _mirror_write_one "$dir" "$eff/cbox.conf" cbox.conf.mirror
+  _mirror_write_one "$dir" "$eff/Dockerfile" Dockerfile.mirror
+  _mirror_write_one "$dir" "$eff/image.inputs" image-inputs.mirror
+  tmp="$(mktemp "$dir/.cbox.XXXXXX" 2>/dev/null)" || tmp=""
+  if [ -n "$tmp" ]; then
+    printf '*\n' > "$tmp"
+    mv "$tmp" "$dir/.gitignore" 2>/dev/null || rm -f "$tmp"
+  fi
+  tmp="$(mktemp "$dir/.cbox.XXXXXX" 2>/dev/null)" || tmp=""
+  if [ -n "$tmp" ]; then
+    {
+      printf 'mirror of %s\n' "$eff"
+      printf 'not authoritative; edits here have no effect and are overwritten\n'
+      printf 'add .cbox/runtime/ (never .cbox/) to your repo .gitignore if you want it untracked there too\n'
+    } > "$tmp"
+    mv "$tmp" "$dir/README" 2>/dev/null || rm -f "$tmp"
+  fi
+}
+
 _cbox_manifest_write() {
   local eff="$1" root="$2" conf="$3"
   local conf_sha gen_sha

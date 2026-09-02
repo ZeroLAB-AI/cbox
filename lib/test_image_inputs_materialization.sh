@@ -73,6 +73,22 @@ test_regen_all_calls_session_entry_before_image_inputs() {
   _ok "regen_all calls gen_session_entry_into before gen_image_inputs"
 }
 
+test_run_local_refreshes_mirror_after_bless() {
+  local body="$TMPBASE/run_local_body.sh"
+  _validator_body "$INSTALL_DIR/lib/cbox-setup.sh" run_local > "$body"
+  [ -s "$body" ] || _fail "could not extract run_local body from lib/cbox-setup.sh"
+  local l_manifest l_mirror
+  l_manifest="$(grep -n '_cbox_manifest_write_generated' "$body" | head -n1 | cut -d: -f1)"
+  l_mirror="$(grep -n '_write_mirror' "$body" | head -n1 | cut -d: -f1)"
+  [ -n "$l_manifest" ] || _fail "run_local body does not call _cbox_manifest_write_generated"
+  [ -n "$l_mirror" ] \
+    || _fail "run_local must refresh the in-project mirror after blessing the effective conf - a setup --local that skips _write_mirror leaves a stale cbox.conf.mirror in the workspace"
+  [ "$l_manifest" -lt "$l_mirror" ] \
+    || _fail "run_local must write the manifest before refreshing the mirror (manifest=$l_manifest mirror=$l_mirror) - the mirror must never get ahead of a blessed conf"
+  _ok "run_local refreshes the in-project mirror after the manifest bless"
+}
+
 test_run_local_sequence_materializes_session_entry
 test_regen_all_calls_session_entry_before_image_inputs
+test_run_local_refreshes_mirror_after_bless
 echo "PASS: all image inputs materialization checks"

@@ -3836,6 +3836,7 @@ run_local() {
 
   _cbox_manifest_write "$eff" "$root" "$eff/cbox.conf"
   _cbox_manifest_write_generated "$eff"
+  _write_mirror "$root" "$eff"
 
   if [ "${CBOX_CLAUDE_MODE:-mount}" = mount ] && [ ! -f "${CBOX_CLAUDE_PATH:-$HOME/.claude}/hooks/session_scope_farm.py" ]; then
     warn "claude hooks are not installed in ${CBOX_CLAUDE_PATH:-$HOME/.claude}/hooks - scoped sessions, guards and the codex mcp shim will be missing in the container; run cbox setup (global wizard) or cbox setup update hooks first"

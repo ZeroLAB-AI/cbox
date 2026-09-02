@@ -492,7 +492,9 @@ grep -qx 'hermes=recreate' "$EFF/pending.apply" || _fail "e2e success: pending.a
 conf_sha_now="$(sha256sum "$EFF/cbox.conf" | awk '{print $1}')"
 manifest_conf_sha="$(_cbox_manifest_field "$EFF/manifest.sha256" conf)"
 [ "$conf_sha_now" = "$manifest_conf_sha" ] || _fail "e2e success: manifest conf sha does not match post-set cbox.conf"
-_ok "e2e success: conf updated, regen ran, manifests stamped, pending.apply written"
+[ -f "$ROOT/.cbox/runtime/cbox.conf.mirror" ] || _fail "e2e success: config set must refresh the in-project mirror"
+cmp -s "$ROOT/.cbox/runtime/cbox.conf.mirror" "$EFF/cbox.conf" || _fail "e2e success: mirror must match the effective conf after config set"
+_ok "e2e success: conf updated, regen ran, manifests stamped, mirror refreshed, pending.apply written"
 
 ORDER_LOG="$TMPBASE/order.log"
 _cbox_manifest_write() {
