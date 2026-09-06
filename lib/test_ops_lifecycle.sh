@@ -37,6 +37,8 @@ CUP_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_compose_up)"
 CDIG_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_compose_files_digest)"
 RIB_FN="$(_extract_fn "$INSTALL_DIR/cbox" reinstall_bins)"
 BCR_FN="$(_extract_fn "$INSTALL_DIR/cbox" _bins_conflict_report)"
+BSF_FN="$(_extract_fn "$INSTALL_DIR/entrypoint.sh" _bins_start_fallback)"
+BCW_FN="$(_extract_fn "$INSTALL_DIR/entrypoint.sh" _bins_channel_want)"
 [ -n "$HON_FN" ] || _fail "cannot extract _bins_hermes_on"
 for _fn in WANT_FN SPATH_FN RHB_FN HHASH_FN RHI_FN; do
   [ -n "${!_fn}" ] || _fail "cannot extract install-bins function for $_fn"
@@ -50,6 +52,8 @@ done
 [ -n "$CDIG_FN" ] || _fail "cannot extract _cbox_compose_files_digest"
 [ -n "$RIB_FN" ] || _fail "cannot extract reinstall_bins"
 [ -n "$BCR_FN" ] || _fail "cannot extract _bins_conflict_report"
+[ -n "$BSF_FN" ] || _fail "cannot extract _bins_start_fallback"
+[ -n "$BCW_FN" ] || _fail "cannot extract _bins_channel_want"
 
 run_reap() {
   local probe1="$1" probe2="$2" out
@@ -585,5 +589,47 @@ OUT="$(CBOX_BINS_SCOPE=global run_conflict_report 2>&1)"
 printf '%s' "$OUT" | grep -q "moving the shared claude tuple will make these projects mismatch:projA projB" || _fail "conflict report: global scope must warn about mismatching projects"
 printf '%s' "$OUT" | grep -q "moving the shared codex tuple" || _fail "conflict report: global scope must scan codex too"
 _ok "conflict report: global scope warns about shared-tuple movers"
+
+run_start_fallback_env() {
+  local tool="$1" claude_want="$2" codex_want="$3" resolve_rc="$4" stamp_rc="${5:-0}"
+  CBOX_CLAUDE_TARGET="$claude_want" CBOX_CODEX_VERSION="$codex_want" bash -c '
+    set -eu
+    tool="$1"; resolve_rc="$2"; stamp_rc="$3"
+    CLROOT=/fake-clroot
+    CXPKG=/fake-cxpkg
+    '"$BCW_FN"'
+    '"$BSF_FN"'
+    _resolve_bin() { [ "$resolve_rc" = 0 ] || return 1; printf "/fake-clroot/real/%s" "$(basename "$1")"; }
+    _stamp_field() { [ "$stamp_rc" = 0 ] || return 1; printf "other-want"; }
+    _want_compat() { printf "%s" "$2"; }
+    _bins_start_fallback "$tool"
+  ' bsf "$tool" "$resolve_rc" "$stamp_rc" 2>"$TMPBASE/bsf.stderr"
+}
+
+OUT="$(run_start_fallback_env claude latest 0.149.1 0)" || _fail "start fallback: claude channel want with a working binary must start"
+[ "$OUT" = "/fake-clroot/real/claude" ] || _fail "start fallback: must print the resolved binary path (got '$OUT')"
+grep -q "starting the installed binary anyway" "$TMPBASE/bsf.stderr" || _fail "start fallback: must warn about the stamped-vs-wanted mismatch"
+_ok "start fallback: channel want starts the installed binary with a warning"
+
+OUT="$(run_start_fallback_env claude stable 0.149.1 0)" || _fail "start fallback: stable is a channel want and must also start"
+_ok "start fallback: stable channel want also falls back"
+
+OUT="$(run_start_fallback_env codex stable latest 0)" || _fail "start fallback: codex latest channel want with a working binary must start"
+[ "$OUT" = "/fake-clroot/real/codex" ] || _fail "start fallback: codex fallback must print the codex path (got '$OUT')"
+_ok "start fallback: codex channel want starts the installed binary"
+
+OUT="$(run_start_fallback_env claude latest latest 0 1)" || _fail "start fallback: a missing stamp file must not abort the channel fallback under set -e"
+[ "$OUT" = "/fake-clroot/real/claude" ] || _fail "start fallback: missing stamp must still print the resolved path (got '$OUT')"
+grep -q "stamped 'unknown'" "$TMPBASE/bsf.stderr" || _fail "start fallback: missing stamp must warn with the unknown placeholder"
+_ok "start fallback: missing stamp degrades to unknown without aborting"
+
+run_start_fallback_env claude 1.2.3 latest 0 >/dev/null && _fail "start fallback: an exact claude pin must stay fail-closed"
+_ok "start fallback: exact claude pin stays fail-closed"
+
+run_start_fallback_env codex latest 0.149.1 0 >/dev/null && _fail "start fallback: an exact codex pin must stay fail-closed"
+_ok "start fallback: exact codex pin stays fail-closed"
+
+run_start_fallback_env codex stable latest 1 >/dev/null && _fail "start fallback: a missing binary must stay fail-closed even on a channel want"
+_ok "start fallback: missing binary stays fail-closed"
 
 echo "PASS: ops lifecycle"

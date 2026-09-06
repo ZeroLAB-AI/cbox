@@ -255,6 +255,19 @@
       },
       "degrade_floor": "feature-off"
     },
+    "codex-astra": {
+      "class": "tool",
+      "enforcement": "advisory",
+      "audience": "driver",
+      "sources": ["etc/mcp/delegates.json"],
+      "enabled_when_env": null,
+      "planes": ["mediated"],
+      "bindings": {
+        "claude": {"mechanism": "mcp-config-render", "status": "live"},
+        "hermes": {"mechanism": "mcp-config-render", "status": "live"}
+      },
+      "degrade_floor": "feature-off"
+    },
     "codex-terra": {
       "class": "tool",
       "enforcement": "advisory",

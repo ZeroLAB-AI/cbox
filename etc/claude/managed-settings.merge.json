@@ -8,9 +8,12 @@
       "mcp__codex-luna",
       "mcp__codex-terra",
       "mcp__codex-terra-light",
-      "mcp__codex-sol"
+      "mcp__codex-sol",
+      "mcp__codex-astra"
     ],
-    "deny": []
+    "deny": [
+      "SendFeedback"
+    ]
   },
   "hooks": {
     "PreToolUse": [

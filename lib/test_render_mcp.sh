@@ -52,7 +52,7 @@ test_render_byte_identity_progress_off() {
   _render "$all" off "$TMPBASE/render_off.json"
   local got want
   got="$(sha256sum "$TMPBASE/render_off.json" | awk '{print $1}')"
-  want="f009635ceb81572436f83d7d35c84be582a040e2e8c38f7380294b44f63af064"
+  want="5f586d02a69b55441334653cb2ce85f5e7b6335ede37f39cfdd2031686b44e16"
   [ "$got" = "$want" ] || _fail "render selection=all progress=off changed (got $got want $want)"
   echo "PASS: render byte-identity progress=off"
 }
@@ -63,7 +63,7 @@ test_render_byte_identity_progress_on() {
   _render "$all" on "$TMPBASE/render_on.json"
   local got want
   got="$(sha256sum "$TMPBASE/render_on.json" | awk '{print $1}')"
-  want="4883e938d6aa1161808df6a8f086db347e49a754189c58f3145d2496fc6f8d11"
+  want="26fb1f3159c8266bd590d19453f42cca2e7e53d1ee96826be9e9f70511cbbff4"
   [ "$got" = "$want" ] || _fail "render selection=all progress=on changed (got $got want $want)"
   echo "PASS: render byte-identity progress=on"
 }
@@ -75,13 +75,13 @@ test_seed_shape_byte_identity() {
   _seed_shape "$TMPBASE/render_off2.json" "$TMPBASE/seed_off.json"
   local got want
   got="$(sha256sum "$TMPBASE/seed_off.json" | awk '{print $1}')"
-  want="d98bda11cc1e7e4d4c0c60892eeed910a5350c757077b31a94c7b975d30655eb"
+  want="1721ccbf2432263426a8a8642280a0697c23ff0bd8cc8ce266ddf227946d7f38"
   [ "$got" = "$want" ] || _fail "seed shape progress=off changed (got $got want $want)"
 
   _render "$all" on "$TMPBASE/render_on2.json"
   _seed_shape "$TMPBASE/render_on2.json" "$TMPBASE/seed_on.json"
   got="$(sha256sum "$TMPBASE/seed_on.json" | awk '{print $1}')"
-  want="170d810286ad26419316531ee44b7b73505019f670182ba986ef1516e89e7b9c"
+  want="864c24e5d9bad4b0299d87b7a19331fde296dd9ef63cd82bc423abad994ad921"
   [ "$got" = "$want" ] || _fail "seed shape progress=on changed (got $got want $want)"
   echo "PASS: seed shape byte-identity (gen_claude_json_seed consumer)"
 }
@@ -298,8 +298,9 @@ avail = {
     for n, s in data.items()
     if isinstance(s, dict) and isinstance(s.get("_cbox"), dict)
 }
-codex_tiers = ["codex-luna", "codex-sol", "codex-terra", "codex-terra-light"]
+codex_tiers = ["codex-astra", "codex-luna", "codex-sol", "codex-terra", "codex-terra-light"]
 expected_avail = {
+    "codex-astra": ["claude", "hermes"],
     "codex-luna": ["claude", "hermes"],
     "codex-sol": ["claude", "hermes"],
     "codex-terra": ["claude", "hermes"],
@@ -320,7 +321,7 @@ expected_gated = sorted(["local-qwen", "hermes-local", "container-exec"])
 assert gated == expected_gated, gated
 assert sorted(data.keys()) == sorted(expected_avail.keys()), sorted(data.keys())
 ' "$INSTALL_DIR/etc/mcp/delegates.json"
-  echo "PASS: delegates.json reproduces the current default set exactly (4 codex tiers available to claude+hermes, ask-claude codex-only, local-qwen/container-exec/hermes-local claude+codex+hermes env-gated, no other new entry)"
+  echo "PASS: delegates.json reproduces the current default set exactly (5 codex tiers available to claude+hermes, ask-claude codex-only, local-qwen/container-exec/hermes-local claude+codex+hermes env-gated, no other new entry)"
 }
 
 test_render_refuses_codex_named_non_codex_mcp_adapter() {
@@ -709,7 +710,7 @@ import sys
 
 data = json.load(open(sys.argv[1]))
 servers = json.load(open(sys.argv[2]))
-codex_tiers = ["codex-luna", "codex-sol", "codex-terra", "codex-terra-light"]
+codex_tiers = ["codex-astra", "codex-luna", "codex-sol", "codex-terra", "codex-terra-light"]
 gated_off = ["hermes-local", "local-qwen", "container-exec"]
 assert sorted(data.keys()) == sorted(codex_tiers + gated_off), data.keys()
 for tier in codex_tiers:
@@ -735,7 +736,7 @@ assert lq["enabled"] is False, lq
 ce = data["container-exec"]
 assert ce["enabled"] is False, ce
 ' "$rendered" "$INSTALL_DIR/etc/mcp/delegates.json"
-  echo "PASS: hermes target default render carries exactly the opted-in entries (4 codex tiers shim-wrapped, hermes-local/local-qwen/container-exec disabled since their gates are unset) and nothing else"
+  echo "PASS: hermes target default render carries exactly the opted-in entries (5 codex tiers shim-wrapped, hermes-local/local-qwen/container-exec disabled since their gates are unset) and nothing else"
 }
 
 test_hermes_target_entry_absent_without_available_to() {
@@ -850,7 +851,7 @@ test_claude_and_codex_renders_unaffected_by_hermes_target() {
   got_claude="$(sha256sum "$claude_rendered" | awk '{print $1}')"
   got_codex="$(sha256sum "$codex_rendered" | awk '{print $1}')"
   local want_claude want_codex
-  want_claude="f009635ceb81572436f83d7d35c84be582a040e2e8c38f7380294b44f63af064"
+  want_claude="5f586d02a69b55441334653cb2ce85f5e7b6335ede37f39cfdd2031686b44e16"
   want_codex="ddde00b645e9cf9d74f0dd7611f36ad4543caee7dcf8273d8e36715edf911ca3"
   [ "$got_claude" = "$want_claude" ] || _fail "claude target render changed after adding the hermes target (got $got_claude want $want_claude)"
   [ "$got_codex" = "$want_codex" ] || _fail "codex target render changed after adding the hermes target (got $got_codex want $want_codex)"

@@ -37,6 +37,26 @@
       "model_reasoning_effort": "xhigh"
     }
   },
+  "codex-astra": {
+    "type": "stdio",
+    "command": "codex",
+    "args": [
+      "mcp-server"
+    ],
+    "_cbox": {
+      "adapter": "codex-mcp",
+      "available_to": [
+        "claude",
+        "hermes"
+      ],
+      "backend": "codex",
+      "side_effects": [
+        "spawns-codex-subprocess"
+      ],
+      "model": "gpt-6-astra",
+      "model_reasoning_effort": "xhigh"
+    }
+  },
   "codex-terra": {
     "type": "stdio",
     "command": "codex",

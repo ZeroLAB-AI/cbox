@@ -103,6 +103,29 @@ _bins_ready() {
   [ "$resolved" = "$p" ] && printf '%s' "$p"
 }
 
+_bins_channel_want() {
+  case "$1" in
+    claude) case "$CBOX_CLAUDE_TARGET" in stable|latest) return 0 ;; esac ;;
+    codex) case "$CBOX_CODEX_VERSION" in latest) return 0 ;; esac ;;
+  esac
+  return 1
+}
+
+_bins_start_fallback() {
+  local name="$1" want link stampf cur p
+  case "$name" in
+    claude) want="$CBOX_CLAUDE_TARGET"; link="$CLROOT/bin/claude"; stampf="$CLROOT/.cbox-stamp" ;;
+    codex) want="$CBOX_CODEX_VERSION"; link="$CLROOT/bin/codex"; stampf="$CXPKG/.cbox-stamp" ;;
+    *) return 1 ;;
+  esac
+  _bins_channel_want "$name" || return 1
+  p="$(_resolve_bin "$link")" || return 1
+  cur="$(_stamp_field "$stampf" 1 2>/dev/null)" || cur=unknown
+  cur="$(_want_compat "$name" "$cur")"
+  echo "entrypoint: $name tuple is stamped '$cur' but this project wants '$want' - starting the installed binary anyway; run 'cbox reinstall-bins --force' on the host to move the shared tuple" >&2
+  printf '%s' "$p"
+}
+
 _run_as_user() {
   if [ "$CBOX_ROOTLESS" = 1 ]; then
     exec "$@"
@@ -728,7 +751,7 @@ _guard_socks_proxy
 case "${1:-}" in
   claude|codex)
     _verb="$1"
-    if ! _resolved="$(_bins_ready "$1")"; then
+    if ! _resolved="$(_bins_ready "$1")" && ! _resolved="$(_bins_start_fallback "$1")"; then
       case "$1" in
         claude) _want="$CBOX_CLAUDE_TARGET" ;;
         codex) _want="$CBOX_CODEX_VERSION" ;;

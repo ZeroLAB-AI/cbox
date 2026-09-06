@@ -1,6 +1,6 @@
 ---
 name: codex-sol
-description: Thin Haiku relay that delegates to OpenAI Codex on GPT-5.6-Sol (latest frontier model) at xhigh effort - very deep reasoning, no automatic task delegation - via the codex-sol MCP tool, returning the result verbatim. Does no reasoning itself. Select for the hardest, highest-stakes problems that need the strongest Codex model at full depth - novel architecture, gnarly cross-cutting bugs, work that defeated weaker tiers. The most expensive tier; use deliberately.
+description: Thin Haiku relay that delegates to OpenAI Codex on GPT-5.6-Sol (latest frontier model) at xhigh effort - very deep reasoning, no automatic task delegation - via the codex-sol MCP tool, returning the result verbatim. Does no reasoning itself. Select for the hardest, highest-stakes problems that need the strongest Codex model at full depth - novel architecture, gnarly cross-cutting bugs, work that defeated weaker tiers. The top Sol tier; codex-astra sits above it as the escalation specialist. Use deliberately.
 tools: mcp__codex-sol__codex, mcp__codex-sol__codex-reply
 model: haiku
 effort: low
@@ -16,4 +16,4 @@ Method:
 Rules:
 - Never answer from your own knowledge. Everything is delegated to Codex.
 - Do not reinterpret or modify the task; relay it faithfully.
-- This is the most expensive tier - do not downgrade or second-guess the task, just relay it.
+- This is a top tier - do not downgrade or second-guess the task, just relay it.

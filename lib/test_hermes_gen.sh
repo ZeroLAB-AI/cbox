@@ -353,7 +353,7 @@ MCP_OUT_EMPTY="$FI_EMPTY/generated/hermes/mcp_servers.yaml"
 grep -q '^mcp_servers:$' "$MCP_OUT_EMPTY" \
   || _fail "gen_hermes_mcp_servers_into: default render missing top-level mcp_servers: key (real delegates.json opts codex-* and hermes-local into hermes):
 $(cat "$MCP_OUT_EMPTY")"
-for tier in codex-sol codex-terra codex-terra-light codex-luna; do
+for tier in codex-astra codex-sol codex-terra codex-terra-light codex-luna; do
   grep -q "\"$tier\":" "$MCP_OUT_EMPTY" \
     || _fail "gen_hermes_mcp_servers_into: default render missing opted-in $tier:
 $(cat "$MCP_OUT_EMPTY")"
@@ -388,7 +388,7 @@ $(cat "$MCP_OUT_EMPTY")"
 _gated_entry_disabled container-exec "$MCP_OUT_EMPTY" \
   || _fail "gen_hermes_mcp_servers_into: default render's container-exec entry does not carry enabled: false with CBOX_CONTAINER_EXEC_TOOL unset:
 $(cat "$MCP_OUT_EMPTY")"
-_ok "gen_hermes_mcp_servers_into: real delegates.json default render carries the 4 codex tiers (shim-wrapped) plus hermes-local/local-qwen/container-exec rendered disabled since their gates are unset"
+_ok "gen_hermes_mcp_servers_into: real delegates.json default render carries the 5 codex tiers (shim-wrapped) plus hermes-local/local-qwen/container-exec rendered disabled since their gates are unset"
 
 FI_OPTED="$TMPBASE/fi_opted"
 OPTED_JSON="$(python3 -c '
