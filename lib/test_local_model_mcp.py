@@ -341,6 +341,11 @@ class AuditTests(unittest.TestCase):
         self.assertNotIn("content", rec)
 
 
+class DefaultTimeoutConstantTests(unittest.TestCase):
+    def test_default_timeout_is_600(self):
+        self.assertEqual(MOD.DEFAULT_TIMEOUT_SEC, 600)
+
+
 class SubprocessStdioTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

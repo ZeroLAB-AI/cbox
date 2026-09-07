@@ -103,7 +103,8 @@
     "_cbox": {
       "adapter": "claude-cli",
       "available_to": [
-        "codex"
+        "codex",
+        "hermes"
       ],
       "backend": "claude",
       "side_effects": [
@@ -123,10 +124,11 @@
     ],
     "env": {
       "CBOX_LOCAL_MODEL_URL": "@CBOX_LOCAL_MODEL_URL@",
-      "CBOX_LOCAL_MODEL_NAME": "@CBOX_LOCAL_MODEL_NAME@"
+      "CBOX_LOCAL_MODEL_NAME": "@CBOX_LOCAL_MODEL_NAME@",
+      "CBOX_LOCAL_MODEL_TIMEOUT_SEC": "@CBOX_LOCAL_MODEL_TIMEOUT_SEC@"
     },
     "startup_timeout_sec": 30,
-    "tool_timeout_sec": 180,
+    "tool_timeout_sec": 3600,
     "_cbox": {
       "adapter": "stdio-mcp",
       "available_to": [
@@ -141,7 +143,12 @@
       "enabled_when_env": [
         "CBOX_LOCAL_MODEL_URL",
         "CBOX_LOCAL_MODEL_NAME"
-      ]
+      ],
+      "tool_timeout_from_env": {
+        "var": "CBOX_LOCAL_MODEL_TIMEOUT_SEC",
+        "default": 600,
+        "headroom_sec": 60
+      }
     }
   },
   "container-exec": {
@@ -187,6 +194,7 @@
       "CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC": "@CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC@",
       "CBOX_HERMES_DELEGATE_LOCK_DIR": "@CBOX_HERMES_DELEGATE_LOCK_DIR@",
       "OLLAMA_NUM_PARALLEL": "@OLLAMA_NUM_PARALLEL@",
+      "CBOX_OLLAMA_CONTEXT_LENGTH": "@CBOX_OLLAMA_CONTEXT_LENGTH@",
       "CBOX_DELEGATION_DEPTH": "@CBOX_DELEGATION_DEPTH_FOR_CODEX_CHILD@",
       "CBOX_MCP_DEPTH": "@CBOX_DELEGATION_DEPTH_FOR_CODEX_CHILD@"
     },

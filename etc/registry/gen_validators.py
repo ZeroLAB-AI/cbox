@@ -11,6 +11,7 @@ NAMED_DISPATCH = {
     "claude-target": "_cbox_val_named_claude_target \"$val\"",
     "codex-version": "_cbox_val_named_codex_version \"$val\"",
     "ollama-image": "_cbox_val_named_ollama_image \"$val\"",
+    "ollama-keep-alive": "_cbox_val_named_ollama_keep_alive \"$val\"",
     "ipv4-or-empty": "_cbox_val_named_ipv4_or_empty \"$val\"",
     "wg-peer-address-cidr": "_cbox_val_named_wg_peer_address_cidr \"$val\"",
     "wg-hostport-or-empty": "_cbox_val_named_wg_hostport_or_empty \"$val\"",
@@ -19,6 +20,7 @@ NAMED_DISPATCH = {
     "unvalidated-legacy-gap": "_cbox_val_named_unvalidated_legacy_gap \"$key\"",
     "ipv4-list": "_cbox_val_named_ipv4_list \"$val\"",
     "kernel-lang": "_cbox_val_named_kernel_lang \"$val\"",
+    "codex-model-slug": "_cbox_val_named_codex_model_slug \"$val\"",
 }
 
 

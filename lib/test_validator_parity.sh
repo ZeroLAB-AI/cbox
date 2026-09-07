@@ -340,7 +340,7 @@ _case CBOX_RESTART_POLICY always
 _case CBOX_OLLAMA_MODE off
 _case CBOX_OLLAMA_MODE on
 _case CBOX_OLLAMA_MODE bogus
-_case CBOX_OLLAMA_IMAGE "ollama/ollama:0.32.5"
+_case CBOX_OLLAMA_IMAGE "ollama/ollama:0.33.3"
 _case CBOX_OLLAMA_IMAGE ""
 _case CBOX_OLLAMA_IMAGE "bad image ref"
 _case CBOX_OLLAMA_GPU off
@@ -526,9 +526,66 @@ _new_case CBOX_CODEX_HOOKS off accept
 _new_case CBOX_CODEX_HOOKS on accept
 _new_case CBOX_CODEX_HOOKS bogus reject
 
+_new_case CBOX_CODEX_MODEL "gpt-5.6-terra" accept
+_new_case CBOX_CODEX_MODEL "gpt-5.6-sol" accept
+_new_case CBOX_CODEX_MODEL "o3-mini_2" accept
+_new_case CBOX_CODEX_MODEL "" reject
+_new_case CBOX_CODEX_MODEL "-x" reject
+_new_case CBOX_CODEX_MODEL "bad model" reject
+_new_case CBOX_CODEX_MODEL "bad;rm -rf /" reject
+_new_case CBOX_CODEX_MODEL '$(evil)' reject
+
+_new_case CBOX_CODEX_EFFORT max accept
+_new_case CBOX_CODEX_EFFORT ultra accept
+_new_case CBOX_CODEX_EFFORT minimal reject
+_new_case CBOX_CODEX_EFFORT low accept
+_new_case CBOX_CODEX_EFFORT medium accept
+_new_case CBOX_CODEX_EFFORT high accept
+_new_case CBOX_CODEX_EFFORT xhigh accept
+_new_case CBOX_CODEX_EFFORT bogus reject
+
 _new_case CBOX_HERMES_HOOKS off accept
 _new_case CBOX_HERMES_HOOKS on accept
 _new_case CBOX_HERMES_HOOKS bogus reject
+
+_new_case CBOX_OLLAMA_CONTEXT_LENGTH 32768 accept
+_new_case CBOX_OLLAMA_CONTEXT_LENGTH 65536 accept
+_new_case CBOX_OLLAMA_CONTEXT_LENGTH 2048 accept
+_new_case CBOX_OLLAMA_CONTEXT_LENGTH 2047 reject
+_new_case CBOX_OLLAMA_CONTEXT_LENGTH 0 reject
+_new_case CBOX_OLLAMA_CONTEXT_LENGTH -1 reject
+_new_case CBOX_OLLAMA_CONTEXT_LENGTH abc reject
+
+_new_case CBOX_OLLAMA_FLASH_ATTENTION off accept
+_new_case CBOX_OLLAMA_FLASH_ATTENTION on accept
+_new_case CBOX_OLLAMA_FLASH_ATTENTION bogus reject
+
+_new_case CBOX_OLLAMA_KV_CACHE_TYPE f16 accept
+_new_case CBOX_OLLAMA_KV_CACHE_TYPE q8_0 accept
+_new_case CBOX_OLLAMA_KV_CACHE_TYPE q4_0 accept
+_new_case CBOX_OLLAMA_KV_CACHE_TYPE bogus reject
+
+_new_case CBOX_OLLAMA_KEEP_ALIVE 30m accept
+_new_case CBOX_OLLAMA_KEEP_ALIVE 1h accept
+_new_case CBOX_OLLAMA_KEEP_ALIVE 0 accept
+_new_case CBOX_OLLAMA_KEEP_ALIVE -1 accept
+_new_case CBOX_OLLAMA_KEEP_ALIVE "1h30m" accept
+_new_case CBOX_OLLAMA_KEEP_ALIVE 3600 accept
+_new_case CBOX_OLLAMA_KEEP_ALIVE -5 accept
+_new_case CBOX_OLLAMA_KEEP_ALIVE "-1m" accept
+_new_case CBOX_OLLAMA_KEEP_ALIVE "1.5h" accept
+_new_case CBOX_OLLAMA_KEEP_ALIVE "-" reject
+_new_case CBOX_OLLAMA_KEEP_ALIVE "30x" reject
+_new_case CBOX_OLLAMA_KEEP_ALIVE "" reject
+_new_case CBOX_OLLAMA_KEEP_ALIVE "30m; rm -rf /" reject
+_new_case CBOX_OLLAMA_KEEP_ALIVE '$(evil)' reject
+_new_case CBOX_OLLAMA_KEEP_ALIVE "30 m" reject
+_new_case CBOX_OLLAMA_KEEP_ALIVE "bogus" reject
+
+_new_case CBOX_LOCAL_MODEL_TIMEOUT_SEC 600 accept
+_new_case CBOX_LOCAL_MODEL_TIMEOUT_SEC 0 accept
+_new_case CBOX_LOCAL_MODEL_TIMEOUT_SEC -1 reject
+_new_case CBOX_LOCAL_MODEL_TIMEOUT_SEC abc reject
 
 _new_case CBOX_WORKSPACES "$INSTALL_DIR" reject
 _new_case CBOX_WORKSPACES "$INSTALL_DIR/templates" reject
@@ -562,7 +619,7 @@ while IFS=$'\t' read -r key val want; do
   fi
 done < "$NEW_CASES_FILE"
 exec 9<&-
-_ok "new-section validators (autoupdate/dns/clipboard/CBOX_NAME/CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_SAFEGUARD_AUTOCONFIRM/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING/CBOX_CODEX_HOOKS/CBOX_HERMES_HOOKS): verdicts match intended semantics for $(wc -l < "$NEW_CASES_FILE" | tr -d ' ') cases"
+_ok "new-section validators (autoupdate/dns/clipboard/CBOX_NAME/CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_SAFEGUARD_AUTOCONFIRM/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING/CBOX_CODEX_HOOKS/CBOX_CODEX_MODEL/CBOX_CODEX_EFFORT/CBOX_HERMES_HOOKS/CBOX_OLLAMA_CONTEXT_LENGTH/CBOX_OLLAMA_FLASH_ATTENTION/CBOX_OLLAMA_KV_CACHE_TYPE/CBOX_OLLAMA_KEEP_ALIVE/CBOX_LOCAL_MODEL_TIMEOUT_SEC): verdicts match intended semantics for $(wc -l < "$NEW_CASES_FILE" | tr -d ' ') cases"
 
 PARITY_STREAM="$TMPBASE/parity_stream.nul"
 : > "$PARITY_STREAM"

@@ -221,6 +221,16 @@ _run_codex_install() {
   '
 }
 
+_hermes_stamp_install_method() {
+  _hxgosu "$HXROOT/bin/python" -c '
+import hermes_cli, os
+root = os.path.dirname(os.path.dirname(hermes_cli.__file__))
+os.makedirs(root, exist_ok=True)
+with open(os.path.join(root, ".install_method"), "w", encoding="utf-8") as f:
+    f.write("docker\n")
+'
+}
+
 _hermes_seed_delegate_home() {
   _hxgosu rm -rf "$HXSEED" || return 1
   _hxgosu mkdir -p "$HXSEED" || return 1
@@ -415,7 +425,7 @@ _run_hermes_install() {
   if [ -d "$(_hermes_backup_dir)" ]; then backed_up=1; fi
   if [ "$take_rc" = 0 ]; then
     if _hermes_venv_reset; then
-      _hxgosu "$HXROOT/bin/pip" install --no-cache-dir "$spec" && _hermes_seed_delegate_home || rc=1
+      _hxgosu "$HXROOT/bin/pip" install --no-cache-dir "$spec" && _hermes_stamp_install_method && _hermes_seed_delegate_home || rc=1
     else
       rc=1
     fi

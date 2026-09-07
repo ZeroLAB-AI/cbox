@@ -442,18 +442,37 @@ _hermes_validate_provider() {
   esac
 }
 
+_hermes_provider_for_cli() {
+  case "$1" in
+    local) printf 'custom' ;;
+    openai) printf 'openai-api' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+_hermes_validate_context_length() {
+  case "$1" in
+    ''|*[!0-9]*|0*) return 1 ;;
+  esac
+  return 0
+}
+
 _hermes_apply_managed_env() {
-  local envfile="$1" key val
+  local envfile="$1" key val cli_provider
+  local saw_provider_local=0 saw_base_url=0
   [ -f "$envfile" ] || return 0
   while IFS='=' read -r key val || [ -n "$key" ]; do
     if [ "$key" = HERMES_MANAGED_PROVIDER ]; then
       _hermes_validate_provider "$val" \
         || { echo "entrypoint: hermes-managed.env has an invalid HERMES_MANAGED_PROVIDER '$val' - refusing to apply" >&2; return 1; }
-      _as_user env HERMES_HOME="$HERMES_HOME" /opt/hermes/bin/hermes config set model.provider "$val" \
-        || { echo "entrypoint: 'hermes config set model.provider $val' failed" >&2; return 1; }
+      cli_provider="$(_hermes_provider_for_cli "$val")"
+      [ "$val" = local ] && saw_provider_local=1
+      _as_user env HERMES_HOME="$HERMES_HOME" /opt/hermes/bin/hermes config set model.provider "$cli_provider" \
+        || { echo "entrypoint: 'hermes config set model.provider $cli_provider' failed" >&2; return 1; }
     elif [ "$key" = HERMES_MANAGED_BASE_URL ]; then
       _hermes_validate_url "$val" \
         || { echo "entrypoint: hermes-managed.env has an invalid HERMES_MANAGED_BASE_URL '$val' - refusing to apply" >&2; return 1; }
+      [ -n "$val" ] && saw_base_url=1
       _as_user env HERMES_HOME="$HERMES_HOME" /opt/hermes/bin/hermes config set model.base_url "$val" \
         || { echo "entrypoint: 'hermes config set model.base_url $val' failed" >&2; return 1; }
     elif [ "$key" = HERMES_MANAGED_MODEL ]; then
@@ -461,8 +480,17 @@ _hermes_apply_managed_env() {
         || { echo "entrypoint: hermes-managed.env has an invalid HERMES_MANAGED_MODEL '$val' - refusing to apply" >&2; return 1; }
       _as_user env HERMES_HOME="$HERMES_HOME" /opt/hermes/bin/hermes config set model.default "$val" \
         || { echo "entrypoint: 'hermes config set model.default $val' failed" >&2; return 1; }
+    elif [ "$key" = HERMES_MANAGED_CONTEXT_LENGTH ]; then
+      _hermes_validate_context_length "$val" \
+        || { echo "entrypoint: hermes-managed.env has an invalid HERMES_MANAGED_CONTEXT_LENGTH '$val' - refusing to apply" >&2; return 1; }
+      _as_user env HERMES_HOME="$HERMES_HOME" /opt/hermes/bin/hermes config set model.context_length "$val" \
+        || { echo "entrypoint: 'hermes config set model.context_length $val' failed" >&2; return 1; }
     fi
   done < "$envfile"
+  if [ "$saw_provider_local" = 1 ] && [ "$saw_base_url" != 1 ]; then
+    echo "entrypoint: refusing to apply hermes-managed.env: the local provider needs HERMES_MANAGED_BASE_URL, otherwise the endpoint would come from the template home that the hermes package seeds for itself" >&2
+    return 1
+  fi
 }
 
 _sshd_listen_addr_present() {

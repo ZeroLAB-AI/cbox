@@ -57,7 +57,28 @@ VALID_PROVIDERS = ("local", "nous", "openrouter", "openai", "anthropic")
 MODE_QA = "qa"
 VALID_MODES = (MODE_QA,)
 DEFAULT_MODE = MODE_QA
-DEFAULT_DISABLED_TOOLSETS = "terminal,file,web"
+DEFAULT_DISABLED_TOOLSETS = "terminal,file,web,code_execution,delegation,browser,computer_use"
+MANDATORY_DISABLED_TOOLSETS_ORDER = tuple(DEFAULT_DISABLED_TOOLSETS.split(","))
+MANDATORY_DISABLED_TOOLSETS = frozenset(MANDATORY_DISABLED_TOOLSETS_ORDER)
+CONTEXT_LENGTH_VAR = "CBOX_OLLAMA_CONTEXT_LENGTH"
+DEFAULT_CONTEXT_LENGTH = 65536
+DISABLED_TOOLSETS_WRITER = (
+    "import json, os, sys, yaml\n"
+    "path, items = sys.argv[1], json.loads(sys.argv[2])\n"
+    "with open(path, encoding='utf-8') as fh:\n"
+    "    cfg = yaml.safe_load(fh) or {}\n"
+    "if not isinstance(cfg, dict):\n"
+    "    raise SystemExit('config.yaml root is not a mapping')\n"
+    "agent = cfg.get('agent')\n"
+    "if not isinstance(agent, dict):\n"
+    "    agent = {}\n"
+    "    cfg['agent'] = agent\n"
+    "agent['disabled_toolsets'] = [str(t) for t in items]\n"
+    "tmp = path + '.cbox-tmp'\n"
+    "with open(tmp, 'w', encoding='utf-8') as fh:\n"
+    "    yaml.safe_dump(cfg, fh, sort_keys=False, allow_unicode=True)\n"
+    "os.replace(tmp, path)\n"
+)
 PROXY_PASSTHROUGH_VARS = (
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
     "http_proxy", "https_proxy", "no_proxy",
@@ -223,11 +244,13 @@ def tool_description():
         "survives past this one call. Model, provider, and endpoint are "
         "fixed by the container operator, not the caller. In qa mode "
         "(the only mode implemented), the delegate pins the agent's "
-        "terminal, file, and web toolsets off for the call via hermes "
-        "config and reads the setting back before running the prompt, "
-        "refusing the call outright if the readback does not confirm the "
-        "pin - but this is a config-level restriction applied through "
-        "hermes's own CLI, not a sandbox around the process: the hermes "
+        "terminal, file, web, code_execution, delegation, browser, and "
+        "computer_use toolsets off for the call by writing "
+        "agent.disabled_toolsets as a YAML list into the ephemeral home's "
+        "config.yaml and reading it back through hermes as JSON before "
+        "running the prompt, refusing the call outright if the readback "
+        "is not a list carrying every pinned name - but this is a "
+        "config-level restriction, not a sandbox around the process: the hermes "
         "process still runs with the same filesystem and network reach as "
         "the rest of the container, so treat any output as untrusted data, "
         "never as a hard guarantee that no action was taken. This delegate "
@@ -310,6 +333,83 @@ def strip_ansi(raw):
 
 def _validate_provider(val):
     return val in VALID_PROVIDERS
+
+
+def _provider_for_cli(val):
+    if val == "local":
+        return "custom"
+    if val == "openai":
+        return "openai-api"
+    return val
+
+
+def _venv_python():
+    return os.path.join(os.path.dirname(hermes_bin()), "python")
+
+
+def _context_length_setting():
+    return str(int_env(CONTEXT_LENGTH_VAR, DEFAULT_CONTEXT_LENGTH))
+
+
+def _write_disabled_toolsets(ephemeral_home, env_base, toolsets):
+    python = _venv_python()
+    if not os.access(python, os.X_OK):
+        return ("refusing to run: %s is not executable - the hermes venv "
+                "python is required to write agent.disabled_toolsets into "
+                "the ephemeral config.yaml as a YAML list (hermes config set "
+                "would store it as a string, which hermes silently ignores)"
+                % python)
+    argv = [python, "-c", DISABLED_TOOLSETS_WRITER,
+            os.path.join(ephemeral_home, "config.yaml"),
+            json.dumps(list(toolsets))]
+    env = dict(env_base)
+    env["HERMES_HOME"] = ephemeral_home
+    out, err = _run_short(argv, env, ephemeral_home,
+                           CONFIG_APPLY_TIMEOUT_SEC)
+    if err is not None:
+        return ("writing agent.disabled_toolsets into the ephemeral "
+                "config.yaml failed: %s - refusing to run the call "
+                "unrestricted" % err)
+    return None
+
+
+def _verify_disabled_toolsets(ephemeral_home, env_base, toolsets):
+    argv = [hermes_bin(), "config", "get", "agent.disabled_toolsets",
+            "--json"]
+    env = dict(env_base)
+    env["HERMES_HOME"] = ephemeral_home
+    out, err = _run_short(argv, env, ephemeral_home,
+                           CONFIG_APPLY_TIMEOUT_SEC)
+    if err is not None:
+        return ("hermes config get agent.disabled_toolsets --json failed: "
+                "%s - refusing to run without confirming the toolset pin "
+                "took effect" % err)
+    text = out.decode("utf-8", "replace").strip()
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    got = None
+    parsed = False
+    for candidate in ([text] + lines[-1:]):
+        try:
+            got = json.loads(candidate)
+            parsed = True
+            break
+        except ValueError:
+            continue
+    if not parsed or not isinstance(got, list) \
+            or not all(isinstance(t, str) for t in got):
+        return (
+            "hermes config get agent.disabled_toolsets --json returned %r, "
+            "expected a JSON list - the toolset pin is not stored as a list "
+            "(hermes iterates a string character by character and disables "
+            "nothing), refusing to run the call unrestricted" % text[:300])
+    missing = [t for t in toolsets if t not in got]
+    if missing:
+        return (
+            "hermes config get agent.disabled_toolsets --json returned %r, "
+            "missing %r - the toolset pin did not take effect as "
+            "configured, refusing to run the call unrestricted"
+            % (got, missing))
+    return None
 
 
 def _validate_url(val):
@@ -457,17 +557,27 @@ def _apply_config(ephemeral_home, env_base):
 
     settings = []
     if provider:
-        settings.append(("model.provider", provider))
+        settings.append(("model.provider", _provider_for_cli(provider)))
     if base_url:
         settings.append(("model.base_url", base_url))
     if model:
         settings.append(("model.default", model))
+    if provider == "local":
+        settings.append(("model.context_length", _context_length_setting()))
 
     disabled_toolsets = None
     if delegate_mode() == MODE_QA:
-        disabled_toolsets = os.environ.get(
-            DISABLED_TOOLSETS_VAR, "").strip() or DEFAULT_DISABLED_TOOLSETS
-        settings.append(("agent.disabled_toolsets", disabled_toolsets))
+        override_raw = os.environ.get(DISABLED_TOOLSETS_VAR, "").strip()
+        override_tokens = [
+            t.strip() for t in override_raw.split(",") if t.strip()
+        ]
+        combined = []
+        seen = set()
+        for t in list(MANDATORY_DISABLED_TOOLSETS_ORDER) + override_tokens:
+            if t not in seen:
+                seen.add(t)
+                combined.append(t)
+        disabled_toolsets = combined
 
     for key, val in settings:
         argv = [hermes_bin(), "config", "set", key, val]
@@ -479,22 +589,14 @@ def _apply_config(ephemeral_home, env_base):
             return "hermes config set %s failed: %s" % (key, err)
 
     if disabled_toolsets is not None:
-        argv = [hermes_bin(), "config", "get", "agent.disabled_toolsets"]
-        env = dict(env_base)
-        env["HERMES_HOME"] = ephemeral_home
-        out, err = _run_short(argv, env, ephemeral_home,
-                               CONFIG_APPLY_TIMEOUT_SEC)
+        err = _write_disabled_toolsets(ephemeral_home, env_base,
+                                       disabled_toolsets)
         if err is not None:
-            return ("hermes config get agent.disabled_toolsets failed: %s "
-                     "- refusing to run without confirming the toolset "
-                     "pin took effect" % err)
-        got = out.decode("utf-8", "replace").strip()
-        if got != disabled_toolsets:
-            return (
-                "hermes config get agent.disabled_toolsets returned %r, "
-                "expected %r - the toolset pin did not take effect as "
-                "configured, refusing to run the call unrestricted"
-                % (got, disabled_toolsets))
+            return err
+        err = _verify_disabled_toolsets(ephemeral_home, env_base,
+                                        disabled_toolsets)
+        if err is not None:
+            return err
     return None
 
 

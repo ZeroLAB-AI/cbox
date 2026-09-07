@@ -18,7 +18,7 @@ source "$INSTALL_DIR/lib/portable.sh"
 source "$INSTALL_DIR/templates/sections.sh"
 source "$INSTALL_DIR/templates/conf_lib.sh"
 
-OLLAMA_VARS="CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL"
+OLLAMA_VARS="CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL CBOX_OLLAMA_CONTEXT_LENGTH CBOX_OLLAMA_FLASH_ATTENTION CBOX_OLLAMA_KV_CACHE_TYPE CBOX_OLLAMA_KEEP_ALIVE"
 
 case " ${SECTIONS[*]} " in
   *" ollama "*) ;;
@@ -42,7 +42,7 @@ _ok "registry: SEC_VARS[ollama] lists every required var"
 got_count="$(printf '%s\n' $(sec_get SEC_VARS ollama) | wc -l)"
 want_count="$(printf '%s\n' $OLLAMA_VARS | wc -l)"
 [ "$got_count" -eq "$want_count" ] || _fail "registry: SEC_VARS[ollama] has extra/unexpected entries (got $got_count want $want_count): $(sec_get SEC_VARS ollama)"
-_ok "registry: SEC_VARS[ollama] has exactly the 7 required vars, no more"
+_ok "registry: SEC_VARS[ollama] has exactly the 11 required vars, no more"
 
 [ "$(sec_get SEC_APPLY ollama)" = infra-reconcile ] || _fail "registry: SEC_APPLY[ollama] should be infra-reconcile, got $(sec_get SEC_APPLY ollama)"
 _ok "registry: SEC_APPLY[ollama]=infra-reconcile"
@@ -99,7 +99,7 @@ _cbox_config_validate_var CBOX_OLLAMA_MODE on || _fail "validator: CBOX_OLLAMA_M
 _cbox_config_validate_var CBOX_OLLAMA_MODE bogus >/dev/null 2>&1 && _fail "validator: CBOX_OLLAMA_MODE=bogus should be rejected"
 _ok "validator: CBOX_OLLAMA_MODE"
 
-_cbox_config_validate_var CBOX_OLLAMA_IMAGE "ollama/ollama:0.32.5" || _fail "validator: pinned image tag should be valid"
+_cbox_config_validate_var CBOX_OLLAMA_IMAGE "ollama/ollama:0.33.3" || _fail "validator: pinned image tag should be valid"
 _cbox_config_validate_var CBOX_OLLAMA_IMAGE "" >/dev/null 2>&1 && _fail "validator: empty image should be rejected"
 _ok "validator: CBOX_OLLAMA_IMAGE"
 
@@ -127,6 +127,34 @@ _cbox_config_validate_var CBOX_OLLAMA_NUM_PARALLEL 1 || _fail "validator: CBOX_O
 _cbox_config_validate_var CBOX_OLLAMA_NUM_PARALLEL 0 >/dev/null 2>&1 && _fail "validator: CBOX_OLLAMA_NUM_PARALLEL=0 should be rejected"
 _cbox_config_validate_var CBOX_OLLAMA_NUM_PARALLEL abc >/dev/null 2>&1 && _fail "validator: non-numeric CBOX_OLLAMA_NUM_PARALLEL should be rejected"
 _ok "validator: CBOX_OLLAMA_NUM_PARALLEL"
+
+_cbox_config_validate_var CBOX_OLLAMA_CONTEXT_LENGTH 32768 || _fail "validator: CBOX_OLLAMA_CONTEXT_LENGTH=32768 should be valid"
+_cbox_config_validate_var CBOX_OLLAMA_CONTEXT_LENGTH 2048 || _fail "validator: CBOX_OLLAMA_CONTEXT_LENGTH=2048 (the floor) should be valid"
+_cbox_config_validate_var CBOX_OLLAMA_CONTEXT_LENGTH 0 >/dev/null 2>&1 && _fail "validator: CBOX_OLLAMA_CONTEXT_LENGTH=0 must be rejected (ollama would fall back to its own default silently)"
+_cbox_config_validate_var CBOX_OLLAMA_CONTEXT_LENGTH 2047 >/dev/null 2>&1 && _fail "validator: CBOX_OLLAMA_CONTEXT_LENGTH=2047 must be rejected (below the 2048 floor)"
+_cbox_config_validate_var CBOX_OLLAMA_CONTEXT_LENGTH -1 >/dev/null 2>&1 && _fail "validator: negative CBOX_OLLAMA_CONTEXT_LENGTH should be rejected"
+_cbox_config_validate_var CBOX_OLLAMA_CONTEXT_LENGTH abc >/dev/null 2>&1 && _fail "validator: non-numeric CBOX_OLLAMA_CONTEXT_LENGTH should be rejected"
+_ok "validator: CBOX_OLLAMA_CONTEXT_LENGTH"
+
+_cbox_config_validate_var CBOX_OLLAMA_FLASH_ATTENTION off || _fail "validator: CBOX_OLLAMA_FLASH_ATTENTION=off should be valid"
+_cbox_config_validate_var CBOX_OLLAMA_FLASH_ATTENTION on || _fail "validator: CBOX_OLLAMA_FLASH_ATTENTION=on should be valid"
+_cbox_config_validate_var CBOX_OLLAMA_FLASH_ATTENTION bogus >/dev/null 2>&1 && _fail "validator: CBOX_OLLAMA_FLASH_ATTENTION=bogus should be rejected"
+_ok "validator: CBOX_OLLAMA_FLASH_ATTENTION"
+
+_cbox_config_validate_var CBOX_OLLAMA_KV_CACHE_TYPE f16 || _fail "validator: CBOX_OLLAMA_KV_CACHE_TYPE=f16 should be valid"
+_cbox_config_validate_var CBOX_OLLAMA_KV_CACHE_TYPE q8_0 || _fail "validator: CBOX_OLLAMA_KV_CACHE_TYPE=q8_0 should be valid"
+_cbox_config_validate_var CBOX_OLLAMA_KV_CACHE_TYPE q4_0 || _fail "validator: CBOX_OLLAMA_KV_CACHE_TYPE=q4_0 should be valid"
+_cbox_config_validate_var CBOX_OLLAMA_KV_CACHE_TYPE bogus >/dev/null 2>&1 && _fail "validator: CBOX_OLLAMA_KV_CACHE_TYPE=bogus should be rejected"
+_ok "validator: CBOX_OLLAMA_KV_CACHE_TYPE"
+
+_cbox_config_validate_var CBOX_OLLAMA_KEEP_ALIVE 30m || _fail "validator: CBOX_OLLAMA_KEEP_ALIVE=30m should be valid"
+_cbox_config_validate_var CBOX_OLLAMA_KEEP_ALIVE 1h || _fail "validator: CBOX_OLLAMA_KEEP_ALIVE=1h should be valid"
+_cbox_config_validate_var CBOX_OLLAMA_KEEP_ALIVE 0 || _fail "validator: CBOX_OLLAMA_KEEP_ALIVE=0 should be valid"
+_cbox_config_validate_var CBOX_OLLAMA_KEEP_ALIVE -1 || _fail "validator: CBOX_OLLAMA_KEEP_ALIVE=-1 should be valid"
+_cbox_config_validate_var CBOX_OLLAMA_KEEP_ALIVE 3600 || _fail "validator: CBOX_OLLAMA_KEEP_ALIVE=3600 (plain seconds, documented by ollama) should be valid"
+_cbox_config_validate_var CBOX_OLLAMA_KEEP_ALIVE "30m; rm -rf /" >/dev/null 2>&1 && _fail "validator: CBOX_OLLAMA_KEEP_ALIVE with shell metacharacters should be rejected"
+_cbox_config_validate_var CBOX_OLLAMA_KEEP_ALIVE '$(evil)' >/dev/null 2>&1 && _fail "validator: CBOX_OLLAMA_KEEP_ALIVE with command substitution should be rejected"
+_ok "validator: CBOX_OLLAMA_KEEP_ALIVE"
 
 machine_vars="$(_cbox_machine_scoped_vars | sort)"
 missing_ollama_vars=""
@@ -165,7 +193,14 @@ conf_defaults
 [ -z "$CBOX_OLLAMA_STORE_PATH" ] || _fail "conf_defaults: CBOX_OLLAMA_STORE_PATH should default to empty, got $CBOX_OLLAMA_STORE_PATH"
 [ "$CBOX_OLLAMA_PORT" = 11434 ] || _fail "conf_defaults: CBOX_OLLAMA_PORT should default to 11434, got $CBOX_OLLAMA_PORT"
 [ "$CBOX_OLLAMA_NUM_PARALLEL" = 1 ] || _fail "conf_defaults: CBOX_OLLAMA_NUM_PARALLEL should default to 1, got $CBOX_OLLAMA_NUM_PARALLEL"
+[ "$CBOX_OLLAMA_CONTEXT_LENGTH" = 65536 ] || _fail "conf_defaults: CBOX_OLLAMA_CONTEXT_LENGTH should default to 65536, got $CBOX_OLLAMA_CONTEXT_LENGTH"
+[ "$CBOX_OLLAMA_FLASH_ATTENTION" = on ] || _fail "conf_defaults: CBOX_OLLAMA_FLASH_ATTENTION should default to on, got $CBOX_OLLAMA_FLASH_ATTENTION"
+[ "$CBOX_OLLAMA_KV_CACHE_TYPE" = q8_0 ] || _fail "conf_defaults: CBOX_OLLAMA_KV_CACHE_TYPE should default to q8_0, got $CBOX_OLLAMA_KV_CACHE_TYPE"
+[ "$CBOX_OLLAMA_KEEP_ALIVE" = 30m ] || _fail "conf_defaults: CBOX_OLLAMA_KEEP_ALIVE should default to 30m, got $CBOX_OLLAMA_KEEP_ALIVE"
 _ok "conf_defaults: every new var has the documented default, CBOX_OLLAMA_MODE=off"
+
+[ "$CBOX_LOCAL_MODEL_TIMEOUT_SEC" = 600 ] || _fail "conf_defaults: CBOX_LOCAL_MODEL_TIMEOUT_SEC should default to 600, got $CBOX_LOCAL_MODEL_TIMEOUT_SEC"
+_ok "conf_defaults: K5 CBOX_LOCAL_MODEL_TIMEOUT_SEC defaults to 600"
 
 CONFFILE="$TMPBASE/roundtrip.conf"
 CBOX_OLLAMA_MODE=on
@@ -175,6 +210,10 @@ CBOX_OLLAMA_STORE=shared
 CBOX_OLLAMA_STORE_PATH=/srv/ollama-host
 CBOX_OLLAMA_PORT=18434
 CBOX_OLLAMA_NUM_PARALLEL=4
+CBOX_OLLAMA_CONTEXT_LENGTH=8192
+CBOX_OLLAMA_FLASH_ATTENTION=off
+CBOX_OLLAMA_KV_CACHE_TYPE=f16
+CBOX_OLLAMA_KEEP_ALIVE=1h
 conf_save "$CONFFILE"
 
 for v in $OLLAMA_VARS; do
@@ -183,7 +222,8 @@ done
 _ok "conf_save: every new var has an explicit printf line (not silently dropped)"
 
 (
-  unset CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL
+  unset CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL \
+    CBOX_OLLAMA_CONTEXT_LENGTH CBOX_OLLAMA_FLASH_ATTENTION CBOX_OLLAMA_KV_CACHE_TYPE CBOX_OLLAMA_KEEP_ALIVE
   . "$CONFFILE"
   [ "$CBOX_OLLAMA_MODE" = on ] || exit 1
   [ "$CBOX_OLLAMA_IMAGE" = "ollama/ollama:9.9.9" ] || exit 1
@@ -192,6 +232,10 @@ _ok "conf_save: every new var has an explicit printf line (not silently dropped)
   [ "$CBOX_OLLAMA_STORE_PATH" = /srv/ollama-host ] || exit 1
   [ "$CBOX_OLLAMA_PORT" = 18434 ] || exit 1
   [ "$CBOX_OLLAMA_NUM_PARALLEL" = 4 ] || exit 1
+  [ "$CBOX_OLLAMA_CONTEXT_LENGTH" = 8192 ] || exit 1
+  [ "$CBOX_OLLAMA_FLASH_ATTENTION" = off ] || exit 1
+  [ "$CBOX_OLLAMA_KV_CACHE_TYPE" = f16 ] || exit 1
+  [ "$CBOX_OLLAMA_KEEP_ALIVE" = 1h ] || exit 1
 ) || _fail "round-trip: values written by conf_save do not read back identically"
 _ok "round-trip: every new var survives conf_save -> disk -> source unchanged"
 

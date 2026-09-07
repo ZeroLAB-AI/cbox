@@ -305,7 +305,7 @@ expected_avail = {
     "codex-sol": ["claude", "hermes"],
     "codex-terra": ["claude", "hermes"],
     "codex-terra-light": ["claude", "hermes"],
-    "ask-claude": ["codex"],
+    "ask-claude": ["codex", "hermes"],
     "local-qwen": ["claude", "codex", "hermes"],
     "hermes-local": ["claude", "codex", "hermes"],
     "container-exec": ["claude", "codex", "hermes"],
@@ -321,7 +321,7 @@ expected_gated = sorted(["local-qwen", "hermes-local", "container-exec"])
 assert gated == expected_gated, gated
 assert sorted(data.keys()) == sorted(expected_avail.keys()), sorted(data.keys())
 ' "$INSTALL_DIR/etc/mcp/delegates.json"
-  echo "PASS: delegates.json reproduces the current default set exactly (5 codex tiers available to claude+hermes, ask-claude codex-only, local-qwen/container-exec/hermes-local claude+codex+hermes env-gated, no other new entry)"
+  echo "PASS: delegates.json reproduces the current default set exactly (5 codex tiers available to claude+hermes, ask-claude codex+hermes, local-qwen/container-exec/hermes-local claude+codex+hermes env-gated, no other new entry)"
 }
 
 test_render_refuses_codex_named_non_codex_mcp_adapter() {
@@ -496,6 +496,7 @@ assert spec["args"] == ["/home/x/.claude/hooks/local_model_mcp.py"], spec
 assert spec["env"] == {
     "CBOX_LOCAL_MODEL_URL": "http://127.0.0.1:11500",
     "CBOX_LOCAL_MODEL_NAME": "qwen2.5:7b",
+    "CBOX_LOCAL_MODEL_TIMEOUT_SEC": "",
 }, spec
 ' "$rendered"
   echo "PASS: local-qwen renders with substituted env when CBOX_LOCAL_MODEL_URL and CBOX_LOCAL_MODEL_NAME are set"
@@ -601,6 +602,50 @@ data = json.load(open(sys.argv[1]))
 assert "local-qwen" in data, data.keys()
 ' "$rendered"
   echo "PASS: local-qwen renders when both halves of the compound gate (CBOX_LOCAL_MODEL_URL and CBOX_LOCAL_MODEL_NAME) are set"
+}
+
+test_local_qwen_tool_timeout_derived_from_env_default() {
+  local rendered="$TMPBASE/local_qwen_timeout_default.json"
+  env -u CBOX_LOCAL_MODEL_TIMEOUT_SEC \
+    CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="qwen2.5:7b" \
+    python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
+    "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$rendered"
+  python3 -c '
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+assert data["local-qwen"]["tool_timeout_sec"] == 3600, data["local-qwen"]
+' "$rendered"
+  echo "PASS: local-qwen tool_timeout_sec stays at the 3600 floor when CBOX_LOCAL_MODEL_TIMEOUT_SEC is unset"
+}
+
+test_local_qwen_tool_timeout_derived_from_env_raised() {
+  local rendered="$TMPBASE/local_qwen_timeout_raised.json"
+  CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="qwen2.5:7b" \
+    CBOX_LOCAL_MODEL_TIMEOUT_SEC="7200" \
+    python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
+    "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$rendered"
+  python3 -c '
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+assert data["local-qwen"]["tool_timeout_sec"] == 7260, data["local-qwen"]
+' "$rendered"
+  local rendered_hermes="$TMPBASE/local_qwen_timeout_raised_hermes.json"
+  CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="qwen2.5:7b" \
+    CBOX_LOCAL_MODEL_TIMEOUT_SEC="7200" \
+    python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
+    "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off hermes > "$rendered_hermes"
+  python3 -c '
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+assert data["local-qwen"]["timeout"] == 7260, data["local-qwen"]
+' "$rendered_hermes"
+  echo "PASS: local-qwen tool_timeout_sec is derived from a raised CBOX_LOCAL_MODEL_TIMEOUT_SEC with headroom, for both claude and hermes targets, always above the client's own request timeout"
 }
 
 test_single_string_enabled_when_env_still_works() {
@@ -712,7 +757,8 @@ data = json.load(open(sys.argv[1]))
 servers = json.load(open(sys.argv[2]))
 codex_tiers = ["codex-astra", "codex-luna", "codex-sol", "codex-terra", "codex-terra-light"]
 gated_off = ["hermes-local", "local-qwen", "container-exec"]
-assert sorted(data.keys()) == sorted(codex_tiers + gated_off), data.keys()
+always_on = ["ask-claude"]
+assert sorted(data.keys()) == sorted(codex_tiers + gated_off + always_on), data.keys()
 for tier in codex_tiers:
     spec = data[tier]
     cbox = servers[tier]["_cbox"]
@@ -733,8 +779,16 @@ assert hl["timeout"] == 3600, hl
 assert hl["connect_timeout"] == 30, hl
 lq = data["local-qwen"]
 assert lq["enabled"] is False, lq
+assert lq["timeout"] == 3600, lq
 ce = data["container-exec"]
 assert ce["enabled"] is False, ce
+ac = data["ask-claude"]
+ac_cbox = servers["ask-claude"]["_cbox"]
+assert ac["command"] == "python3", ac
+assert ac["args"] == ["/home/x/.claude/hooks/ask_claude_mcp.py"], ac
+assert "enabled" not in ac, ac
+assert ac["timeout"] == ac_cbox["tool_timeout_sec"], ac
+assert ac["connect_timeout"] == ac_cbox["startup_timeout_sec"], ac
 ' "$rendered" "$INSTALL_DIR/etc/mcp/delegates.json"
   echo "PASS: hermes target default render carries exactly the opted-in entries (5 codex tiers shim-wrapped, hermes-local/local-qwen/container-exec disabled since their gates are unset) and nothing else"
 }
@@ -883,6 +937,8 @@ test_local_qwen_invisible_to_boot_gate_when_configured
 test_local_qwen_compound_gate_url_set_name_empty_not_rendered
 test_local_qwen_compound_gate_explicit_selection_url_only_fails_loud
 test_local_qwen_compound_gate_both_set_renders
+test_local_qwen_tool_timeout_derived_from_env_default
+test_local_qwen_tool_timeout_derived_from_env_raised
 test_single_string_enabled_when_env_still_works
 test_local_qwen_gate_agrees_with_capabilities_registry
 test_fixture_stdio_mcp_renders_plain_for_claude

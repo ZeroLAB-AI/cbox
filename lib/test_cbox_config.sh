@@ -209,11 +209,11 @@ if _cbox_config_validate_var CBOX_OLLAMA_MODE bogus >/dev/null 2>&1; then
 fi
 _ok "validator: CBOX_OLLAMA_MODE enum"
 
-_cbox_config_validate_var CBOX_OLLAMA_IMAGE "ollama/ollama:0.32.5" || _fail "ollama image: pinned tag should be valid"
+_cbox_config_validate_var CBOX_OLLAMA_IMAGE "ollama/ollama:0.33.3" || _fail "ollama image: pinned tag should be valid"
 if _cbox_config_validate_var CBOX_OLLAMA_IMAGE "" >/dev/null 2>&1; then
   _fail "ollama image: empty should be rejected"
 fi
-if _cbox_config_validate_var CBOX_OLLAMA_IMAGE "ollama/ollama 0.32.5" >/dev/null 2>&1; then
+if _cbox_config_validate_var CBOX_OLLAMA_IMAGE "ollama/ollama 0.33.3" >/dev/null 2>&1; then
   _fail "ollama image: whitespace should be rejected"
 fi
 _ok "validator: CBOX_OLLAMA_IMAGE"
@@ -330,7 +330,7 @@ if _cbox_config_validate_var CBOX_WG_KEEPALIVE -1 >/dev/null 2>&1; then
 fi
 _ok "validator: CBOX_WG_KEEPALIVE"
 
-for _v in CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL; do
+for _v in CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL CBOX_OLLAMA_CONTEXT_LENGTH CBOX_OLLAMA_FLASH_ATTENTION CBOX_OLLAMA_KV_CACHE_TYPE CBOX_OLLAMA_KEEP_ALIVE; do
   _cbox_config_is_whitelisted "$_v" || _fail "whitelist: $_v should be whitelisted (SEC_VARS[ollama])"
 done
 unset _v
@@ -371,7 +371,7 @@ _ok "apply-cmd: infra-reconcile class names cbox ollama reconcile"
 
 declare -f _cbox_machine_scoped_vars >/dev/null || _fail "extraction failed: _cbox_machine_scoped_vars not defined"
 machine_vars="$(_cbox_machine_scoped_vars | sort)"
-expected_machine_vars="$(printf '%s\n' CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE CBOX_WG_FORWARDS | sort)"
+expected_machine_vars="$(printf '%s\n' CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL CBOX_OLLAMA_CONTEXT_LENGTH CBOX_OLLAMA_FLASH_ATTENTION CBOX_OLLAMA_KV_CACHE_TYPE CBOX_OLLAMA_KEEP_ALIVE CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE CBOX_WG_FORWARDS | sort)"
 [ "$machine_vars" = "$expected_machine_vars" ] || _fail "_cbox_machine_scoped_vars: expected exactly the ollama+wireguard vars, got: $machine_vars"
 _ok "_cbox_machine_scoped_vars: enumerates exactly SEC_VARS[ollama] + SEC_VARS[wireguard] (the two machine-scoped sections)"
 

@@ -388,6 +388,10 @@
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
+    "lib/test_hermes_install_method_stamp.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
     "lib/test_hermes_install_rollback.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"

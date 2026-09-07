@@ -1645,7 +1645,8 @@ step_local_model() {
   echo "== section: local-model =="
   note "off by default; a text-only MCP delegate (local-qwen) backed by an OpenAI-compatible endpoint such as ollama - see etc/docs/LOCAL_MODEL_RUNBOOK.md"
   note "ollama runs outside cbox; local-qwen is absent from the rendered mcp server list unless CBOX_LOCAL_MODEL_URL is set, regardless of CBOX_MCP_SERVERS"
-  local prev_on="$CBOX_LOCAL_MODEL" prev_url="$CBOX_LOCAL_MODEL_URL" prev_name="$CBOX_LOCAL_MODEL_NAME"
+  local prev_on="$CBOX_LOCAL_MODEL" prev_url="$CBOX_LOCAL_MODEL_URL" prev_name="$CBOX_LOCAL_MODEL_NAME" \
+    prev_timeout="$CBOX_LOCAL_MODEL_TIMEOUT_SEC"
   ask_choice "setup: enable the local model delegate" "$CBOX_LOCAL_MODEL" off on
   CBOX_LOCAL_MODEL="$ASK_VALUE"
   if [ "$CBOX_LOCAL_MODEL" = on ]; then
@@ -1657,6 +1658,12 @@ step_local_model() {
     CBOX_LOCAL_MODEL_URL="$ASK_VALUE"
     ask "setup: local model name (as known to the endpoint, e.g. qwen2.5:7b)" "$CBOX_LOCAL_MODEL_NAME"
     CBOX_LOCAL_MODEL_NAME="$ASK_VALUE"
+    note "raise this above the endpoint's own worst-case response time for larger models (e.g. a 27B model on one GPU can take several minutes)"
+    ask "setup: local model request timeout in seconds" "$CBOX_LOCAL_MODEL_TIMEOUT_SEC"
+    case "$ASK_VALUE" in
+      ''|*[!0-9]*) warn "not a number; keeping $CBOX_LOCAL_MODEL_TIMEOUT_SEC" ;;
+      *) CBOX_LOCAL_MODEL_TIMEOUT_SEC="$ASK_VALUE" ;;
+    esac
     if [ -z "$CBOX_LOCAL_MODEL_URL" ] || [ -z "$CBOX_LOCAL_MODEL_NAME" ]; then
       warn "local model url or name left empty - keeping the delegate off (CBOX_LOCAL_MODEL=off) until both are set"
       CBOX_LOCAL_MODEL=off
@@ -1669,7 +1676,8 @@ step_local_model() {
   fi
   export CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
   if [ "$CBOX_LOCAL_MODEL" = "$prev_on" ] && [ "$CBOX_LOCAL_MODEL_URL" = "$prev_url" ] \
-      && [ "$CBOX_LOCAL_MODEL_NAME" = "$prev_name" ]; then
+      && [ "$CBOX_LOCAL_MODEL_NAME" = "$prev_name" ] \
+      && [ "$CBOX_LOCAL_MODEL_TIMEOUT_SEC" = "$prev_timeout" ]; then
     return 0
   fi
   if container_target_ok; then
@@ -1713,6 +1721,10 @@ step_hermes() {
     fi
     ask "setup: hermes model name" "$CBOX_HERMES_MODEL_NAME"
     CBOX_HERMES_MODEL_NAME="$ASK_VALUE"
+    if [ "$CBOX_HERMES_PROVIDER" = local ] && [ -z "$CBOX_HERMES_MODEL_URL" ]; then
+      warn "hermes local endpoint url left empty - keeping hermes off (CBOX_HERMES=off) until CBOX_HERMES_MODEL_URL is set; the managed.env generator refuses provider=local without a url and that refusal would block every engine's regen, not just hermes"
+      CBOX_HERMES=off
+    fi
   else
     CBOX_HERMES_VERSION="${CBOX_HERMES_VERSION:-latest}"
     CBOX_HERMES_PROVIDER="${CBOX_HERMES_PROVIDER:-local}"
@@ -1779,7 +1791,9 @@ step_ollama() {
   note "off by default; ollama runs as its own owner compose project (cbox-infra-u<uid>), outside any generated cbox project, so it survives 'cbox down' and per-project compose teardown"
   local prev_mode="$CBOX_OLLAMA_MODE" prev_image="$CBOX_OLLAMA_IMAGE" prev_gpu="$CBOX_OLLAMA_GPU" \
     prev_store="$CBOX_OLLAMA_STORE" prev_store_path="$CBOX_OLLAMA_STORE_PATH" \
-    prev_port="$CBOX_OLLAMA_PORT" prev_parallel="$CBOX_OLLAMA_NUM_PARALLEL"
+    prev_port="$CBOX_OLLAMA_PORT" prev_parallel="$CBOX_OLLAMA_NUM_PARALLEL" \
+    prev_context_length="$CBOX_OLLAMA_CONTEXT_LENGTH" prev_flash_attention="$CBOX_OLLAMA_FLASH_ATTENTION" \
+    prev_kv_cache_type="$CBOX_OLLAMA_KV_CACHE_TYPE" prev_keep_alive="$CBOX_OLLAMA_KEEP_ALIVE"
   ask_choice "setup: enable the ollama machine service" "$CBOX_OLLAMA_MODE" off on
   CBOX_OLLAMA_MODE="$ASK_VALUE"
   if [ "$CBOX_OLLAMA_MODE" = on ]; then
@@ -1816,13 +1830,39 @@ step_ollama() {
       ''|*[!0-9]*|0) warn "expected a positive integer; keeping $CBOX_OLLAMA_NUM_PARALLEL" ;;
       *) CBOX_OLLAMA_NUM_PARALLEL="$ASK_VALUE" ;;
     esac
+    note "a 27B-class model at Q4 needs its context window and KV cache tuned for the GPU's VRAM budget; hermes needs 64000 tokens or more for agent use, and this value is mirrored into hermes as model.context_length"
+    ask "setup: ollama OLLAMA_CONTEXT_LENGTH (context window in tokens; hermes needs 64000 or more for agent use)" "$CBOX_OLLAMA_CONTEXT_LENGTH"
+    case "$ASK_VALUE" in
+      ''|*[!0-9]*) warn "not a number; keeping $CBOX_OLLAMA_CONTEXT_LENGTH" ;;
+      *)
+        if [ "$ASK_VALUE" -ge 2048 ] 2>/dev/null; then
+          CBOX_OLLAMA_CONTEXT_LENGTH="$ASK_VALUE"
+        else
+          warn "below the 2048-token floor; keeping $CBOX_OLLAMA_CONTEXT_LENGTH"
+        fi
+        ;;
+    esac
+    ask_choice "setup: ollama OLLAMA_FLASH_ATTENTION" "$CBOX_OLLAMA_FLASH_ATTENTION" off on
+    CBOX_OLLAMA_FLASH_ATTENTION="$ASK_VALUE"
+    ask_choice "setup: ollama OLLAMA_KV_CACHE_TYPE (KV cache quantization)" "$CBOX_OLLAMA_KV_CACHE_TYPE" f16 q8_0 q4_0
+    CBOX_OLLAMA_KV_CACHE_TYPE="$ASK_VALUE"
+    ask "setup: ollama OLLAMA_KEEP_ALIVE (how long a loaded model stays in memory, e.g. 30m, 1h, 0, -1)" "$CBOX_OLLAMA_KEEP_ALIVE"
+    if printf '%s' "$ASK_VALUE" | grep -Eq '^(-?[0-9]+|-?([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$'; then
+      CBOX_OLLAMA_KEEP_ALIVE="$ASK_VALUE"
+    else
+      warn "expected an ollama duration (e.g. 30m, 1h, 0, -1) or plain seconds (e.g. 3600); keeping $CBOX_OLLAMA_KEEP_ALIVE"
+    fi
   else
     CBOX_OLLAMA_STORE_PATH=""
   fi
   if [ "$CBOX_OLLAMA_MODE" = "$prev_mode" ] && [ "$CBOX_OLLAMA_IMAGE" = "$prev_image" ] \
       && [ "$CBOX_OLLAMA_GPU" = "$prev_gpu" ] && [ "$CBOX_OLLAMA_STORE" = "$prev_store" ] \
       && [ "$CBOX_OLLAMA_STORE_PATH" = "$prev_store_path" ] && [ "$CBOX_OLLAMA_PORT" = "$prev_port" ] \
-      && [ "$CBOX_OLLAMA_NUM_PARALLEL" = "$prev_parallel" ]; then
+      && [ "$CBOX_OLLAMA_NUM_PARALLEL" = "$prev_parallel" ] \
+      && [ "$CBOX_OLLAMA_CONTEXT_LENGTH" = "$prev_context_length" ] \
+      && [ "$CBOX_OLLAMA_FLASH_ATTENTION" = "$prev_flash_attention" ] \
+      && [ "$CBOX_OLLAMA_KV_CACHE_TYPE" = "$prev_kv_cache_type" ] \
+      && [ "$CBOX_OLLAMA_KEEP_ALIVE" = "$prev_keep_alive" ]; then
     return 0
   fi
   note "ollama is an infra-reconcile change (SEC_APPLY[ollama]=infra-reconcile): run 'cbox ollama reconcile' to create/update/tear down the owner project - a plain 'cbox down && cbox run' does not touch it"
@@ -2263,6 +2303,24 @@ step_codex_mcp() {
       codex_mcp_ensure_hooks_dep
     fi
   fi
+  local ok
+  while :; do
+    ask "setup: codex model (e.g. gpt-5.6-terra): " "$CBOX_CODEX_MODEL"
+    CBOX_CODEX_MODEL="$ASK_VALUE"
+    ok=1
+    case "$CBOX_CODEX_MODEL" in
+      -*) ok=0 ;;
+    esac
+    if [ "$ok" = 1 ]; then
+      printf '%s' "$CBOX_CODEX_MODEL" | grep -Eq '^[A-Za-z0-9._-]+$' || ok=0
+    fi
+    if [ "$ok" = 1 ]; then
+      break
+    fi
+    echo "setup: invalid codex model: $CBOX_CODEX_MODEL (expected letters, digits, dot, dash, underscore; no leading -)"
+  done
+  ask_choice "setup: codex reasoning effort" "$CBOX_CODEX_EFFORT" low medium high xhigh max ultra
+  CBOX_CODEX_EFFORT="$ASK_VALUE"
   codex_mcp_apply
 }
 

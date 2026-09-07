@@ -111,6 +111,67 @@ Caveat under egress lockdown or SOCKS mode: the remote endpoint must be explicit
 
 Path A (cbox-managed) is simplest and recommended; Path B avoids containerizing ollama if you want it to run natively; Path C reaches a host ollama via proxy; Path D reaches a remote model over a tunnel without cbox wiring. Live verification of endpoint reachability is a host-side step - these descriptions are configuration goals, not confirmed results.
 
+## Running a 27B-class model on a single 24 GB card
+
+Qwen3.8-27B (`qwen3.8:27b-q4_K_M`, 17 GB of Q4_K_M weights plus a 0.93 GB
+vision projector) is a hybrid architecture: only 16 of its 64 layers are full
+attention (4 KV heads x head_dim 256), the other 48 are linear attention with
+a fixed-size state. Its KV cache is therefore small: 64 KiB per token at f16,
+32 KiB per token at q8_0. Budget on a 24 GB card with OLLAMA_NUM_PARALLEL=1
+(weights + projector + KV cache + roughly 1.5 GB of compute buffers):
+
+- 32768 context, q8_0 KV: 1 GiB cache, about 20.5 GB total.
+- 65536 context, q8_0 KV: 2 GiB cache, about 21.5 GB total (the default).
+- 65536 context, f16 KV: 4 GiB cache, about 23.5 GB total - marginal.
+- 131072 context, q8_0 KV: 4 GiB cache, about 23.5 GB total - marginal, and
+  the practical ceiling on this card.
+
+Four `ollama` section vars tune this (`cbox setup update ollama` or
+`--config`; all apply via `cbox ollama reconcile` since the owner compose
+service reads them as env):
+
+- `CBOX_OLLAMA_CONTEXT_LENGTH` (default `65536`, floor `2048`) - the context
+  window in tokens, rendered as `OLLAMA_CONTEXT_LENGTH` and mirrored into
+  hermes as `model.context_length` (managed.env for `cbox run hermes`, the
+  delegate's ephemeral config for hermes-local), so hermes compresses its
+  conversation against the real server window. Hermes documents a
+  64000-token minimum for agent use with tools: below it hermes prints a
+  warning at startup and its tool loop degrades, and ollama silently
+  truncates any prompt longer than this value (the OpenAI-compatible `/v1`
+  endpoint has no per-request `num_ctx`), so the system prompt and tool
+  schemas are the first thing to be cut. Keep it at 65536 or above whenever
+  hermes drives the model; the local-qwen delegate alone would be fine with
+  less.
+- `CBOX_OLLAMA_KV_CACHE_TYPE` (`f16`, `q8_0`, or `q4_0`, default `q8_0`) -
+  quantizing the KV cache itself trades a small quality cost for meaningfully
+  less VRAM at long context lengths; `q4_0` frees the most, `f16` the least.
+- `CBOX_OLLAMA_FLASH_ATTENTION` (`off`/`on`, default `on`) - flash attention
+  reduces memory overhead at inference time; leave it on unless the specific
+  ollama build on the host has a reason to disable it. `off` renders an
+  explicit `OLLAMA_FLASH_ATTENTION=0` (ollama's unset state is auto, which is
+  on for this model family). KV cache quantization requires flash attention:
+  with `off`, a `q8_0`/`q4_0` cache silently falls back to f16 and the VRAM
+  budget below no longer holds.
+- `CBOX_OLLAMA_KEEP_ALIVE` (ollama duration string or plain seconds, default `30m`)
+  - how long the model stays resident in VRAM after the last request before
+    ollama unloads it. `-1` keeps it loaded indefinitely (avoids a slow
+    reload on the next call, at the cost of holding VRAM the whole time);
+    a short value frees VRAM between calls at the cost of a reload delay.
+
+`CBOX_LOCAL_MODEL_TIMEOUT_SEC` (default `600`, section `local-model`) matters
+here too: at roughly 25-30 tokens/sec on a single 3090-class card, a longer
+completion from a 27B model can take several minutes, well past the older
+120s default. Raise it further if prompts routinely produce long completions;
+the `local-qwen` MCP delegate's own `tool_timeout_sec` in
+`etc/mcp/delegates.json` is kept above this value with headroom so the outer
+MCP timeout never cuts a request off before the model's own timeout would.
+
+`CBOX_OLLAMA_IMAGE` must also be new enough: Qwen3.8-class models need ollama
+0.32.12 or newer to pull and run at all, hence the registry default moved to
+`ollama/ollama:0.33.3`. Run `cbox ollama gpu-check` before enabling
+`CBOX_OLLAMA_GPU=cdi` to confirm the CDI device is actually reachable first
+(see MANUAL.md's `gpu` and `ollama` sections).
+
 ## Design decision: no CBOX_LOCAL_MODEL_APPLIED flag
 
 egress/netaccess/hostroute each have a CBOX_*_APPLIED flag that tracks

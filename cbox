@@ -660,7 +660,7 @@ _cbox_ollama_adopt_or_refuse() {
         return 1
       fi
       image="$(docker inspect --format '{{.Config.Image}}' "$cid" 2>/dev/null)" || image=""
-      want_image="${CBOX_OLLAMA_IMAGE:-ollama/ollama:0.32.5}"
+      want_image="${CBOX_OLLAMA_IMAGE:-ollama/ollama:0.33.3}"
       if [ -n "$image" ] && [ "$image" != "$want_image" ]; then
         echo "cbox: found an existing container ($cid) owned by $name but its image ($image) does not match the configured CBOX_OLLAMA_IMAGE ($want_image) - run 'cbox ollama reconcile' to recreate it" >&2
         return 0
@@ -783,6 +783,19 @@ _cbox_ollama_down_cmd() {
   _cbox_ollama_gc_scope_networks_impl
 }
 
+_cbox_ollama_gpu_check_cmd() {
+  local image="${CBOX_OLLAMA_IMAGE:-ollama/ollama:0.33.3}"
+  echo "cbox: gpu-check: running 'docker run --rm --device nvidia.com/gpu=all -- $image nvidia-smi' as a CDI smoke test" >&2
+  if docker run --rm --device nvidia.com/gpu=all -- "$image" nvidia-smi; then
+    echo "cbox: gpu-check: PASS - the CDI device nvidia.com/gpu=all is visible to a container and nvidia-smi ran inside it against $image"
+    return 0
+  fi
+  echo "cbox: gpu-check: FAIL - could not start a container with --device nvidia.com/gpu=all against $image, or nvidia-smi failed inside it" >&2
+  echo "cbox: gpu-check: this is a preflight only - it never runs automatically and does not touch CBOX_OLLAMA_GPU" >&2
+  echo "cbox: gpu-check: fix candidates: (1) regenerate the CDI spec after any GPU replug, notably an eGPU - 'sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml' (an eGPU's PCI address changes on every replug, invalidating the previous spec); (2) only on a docker daemon older than 28.3 (CDI is enabled by default from 28.3 on): enable CDI in the rootless daemon's own config (features.cdi in the rootless dockerd's daemon.json, not the system-wide /etc/docker/daemon.json); (3) not a CDI setting at all: no-cgroups = true in the nvidia-container-runtime config belongs to the legacy nvidia runtime hook path (--runtime nvidia / --gpus), which this verb does not exercise - only look there if you deliberately run ollama through that legacy path instead of CDI" >&2
+  return 1
+}
+
 _cbox_ollama_model_ref_ok() {
   case "$1" in
     ''|*[!A-Za-z0-9._:/@-]*) return 1 ;;
@@ -830,7 +843,7 @@ _cbox_ollama_pull_cmd() {
     return 1
   fi
   docker exec -- "$container" sh -c \
-    'for i in $(seq 1 30); do curl -sf http://127.0.0.1:11434/ >/dev/null 2>&1 && break; sleep 1; done; ollama pull "$1"' \
+    'for i in $(seq 1 30); do ollama ls >/dev/null 2>&1 && break; sleep 1; done; ollama pull "$1"' \
     cbox-pull "$model" || rc=$?
   trap - EXIT INT TERM
   _restore_ollama
@@ -1020,9 +1033,9 @@ _cbox_ollama_gc_scope_networks() {
 ollama_cmd() {
   local sub="${1:-}"
   case "$sub" in
-    status|up|down|pull|reconcile) ;;
+    status|up|down|pull|reconcile|gpu-check) ;;
     *)
-      echo "cbox: usage: $0 ollama {status|up|down|pull <model>|reconcile}" >&2
+      echo "cbox: usage: $0 ollama {status|up|down|pull <model>|reconcile|gpu-check}" >&2
       return 1
       ;;
   esac
@@ -1033,7 +1046,7 @@ ollama_cmd() {
   fi
   [ -f "$INSTALL_DIR/templates/sections.sh" ] || die "$INSTALL_DIR/templates/sections.sh missing"
   . "$INSTALL_DIR/templates/sections.sh"
-  if [ "$sub" != status ]; then
+  if [ "$sub" != status ] && [ "$sub" != gpu-check ]; then
     _cbox_ollama_guard || return 1
   fi
   mkdir -p "$HOME/.config/cbox/infra"
@@ -1060,6 +1073,10 @@ ollama_cmd() {
     reconcile)
       _cbox_flock -x -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
       _cbox_ollama_reconcile_cmd || rc=$?
+      ;;
+    gpu-check)
+      _cbox_flock -s -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+      _cbox_ollama_gpu_check_cmd || rc=$?
       ;;
   esac
   exec 6>&-
@@ -4580,12 +4597,17 @@ doctor() {
   if [ "$in_container" = 1 ]; then
     _cbox_doctor_row "ollama" HOST-CHECK "machine-scoped - CBOX_OLLAMA_* is decided by the host owner project, not this container"
   else
-    local ollama_conf="$INSTALL_DIR/cbox.conf" ollama_mode=off
+    local ollama_conf="$INSTALL_DIR/cbox.conf" ollama_mode=off ollama_gpu=off
     if [ -f "$ollama_conf" ]; then
       ollama_mode="$(unset CBOX_OLLAMA_MODE; . "$ollama_conf" >/dev/null 2>&1; printf '%s' "${CBOX_OLLAMA_MODE:-off}")"
+      ollama_gpu="$(unset CBOX_OLLAMA_GPU; . "$ollama_conf" >/dev/null 2>&1; printf '%s' "${CBOX_OLLAMA_GPU:-off}")"
     fi
     if [ "$ollama_mode" = on ]; then
-      _cbox_doctor_row "ollama" CONFIG-ONLY "CBOX_OLLAMA_MODE=on (machine-scoped) - verify the owner project with cbox ollama status"
+      if [ "$ollama_gpu" = cdi ]; then
+        _cbox_doctor_row "ollama" CONFIG-ONLY "CBOX_OLLAMA_MODE=on (machine-scoped) - verify the owner project with cbox ollama status, run cbox ollama gpu-check first"
+      else
+        _cbox_doctor_row "ollama" CONFIG-ONLY "CBOX_OLLAMA_MODE=on (machine-scoped) - verify the owner project with cbox ollama status"
+      fi
     else
       _cbox_doctor_row "ollama" OFF "CBOX_OLLAMA_MODE=off (default, machine-scoped)"
     fi
@@ -5689,6 +5711,7 @@ _hub_ollama_submenu() {
     echo "  3) down" >&2
     echo "  4) pull a model" >&2
     echo "  5) reconcile" >&2
+    echo "  6) gpu-check (CDI smoke test, does not touch config)" >&2
     echo "  b) back" >&2
     printf '> ' >&2
     local ans model
@@ -5704,6 +5727,7 @@ _hub_ollama_submenu() {
         ollama_cmd pull "$model" 2>&1 | cat 1>&2 || true
         ;;
       5) ollama_cmd reconcile 2>&1 | cat 1>&2 || true ;;
+      6) ollama_cmd gpu-check 2>&1 | cat 1>&2 || true ;;
       b|B) return 0 ;;
       *) echo "cbox: unrecognized choice '$ans'" >&2 ;;
     esac
@@ -6087,7 +6111,7 @@ print(json.dumps({
 }
 
 usage() {
-  echo "usage: $0 {run [--session <id>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force]|restart [--gpu]|shell|logs [args]|update|reinstall-bins [--fresh|--force|--if-stale]|install-hooks|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|pending}|netaccess {status|allow|deny}|ollama {status|up|down|pull <model>|reconcile}|wg {status|up|down|keygen|peer {add|rm|list|config}}|session-broker {status|access {disabled|viewer|full-attach}|window {off|<minutes>}|key {add <pubkey-file> [comment]|rm <fingerprint>|fingerprints}}|backup|login [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}"
+  echo "usage: $0 {run [--session <id>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force]|restart [--gpu]|shell|logs [args]|update|reinstall-bins [--fresh|--force|--if-stale]|install-hooks|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|pending}|netaccess {status|allow|deny}|ollama {status|up|down|pull <model>|reconcile|gpu-check}|wg {status|up|down|keygen|peer {add|rm|list|config}}|session-broker {status|access {disabled|viewer|full-attach}|window {off|<minutes>}|key {add <pubkey-file> [comment]|rm <fingerprint>|fingerprints}}|backup|login [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}"
   echo "cbox: with zero arguments and a TTY on stdin+stdout, bare '$0' opens the interactive hub instead of this usage text"
   echo "cbox: 'cbox ls' lists RUNNING isolated projects only, not every configured project"
   exit 1

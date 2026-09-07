@@ -2117,6 +2117,13 @@ _cbox_hermes_validate_provider() {
   esac
 }
 
+_cbox_hermes_validate_context_length() {
+  case "$1" in
+    ''|*[!0-9]*|0*) return 1 ;;
+  esac
+  return 0
+}
+
 _cbox_hermes_validate_compose_env() {
   local provider="${CBOX_HERMES_PROVIDER:-local}"
   local url="${CBOX_HERMES_MODEL_URL:-}"
@@ -2136,6 +2143,9 @@ gen_hermes_managed_into() {
   local model="${CBOX_HERMES_MODEL_NAME:-}"
   _cbox_hermes_validate_provider "$provider" \
     || die "invalid CBOX_HERMES_PROVIDER '$provider' (expected local, nous, openrouter, openai, or anthropic)"
+  if [ "$provider" = local ] && [ -z "$url" ]; then
+    die "CBOX_HERMES_PROVIDER=local needs CBOX_HERMES_MODEL_URL set, otherwise the endpoint would come from the template home that the hermes package seeds for itself"
+  fi
   if [ "$provider" = local ] && [ -n "$url" ]; then
     _cbox_hermes_validate_url "$url" || die "invalid CBOX_HERMES_MODEL_URL '$url'"
     case "$url" in
@@ -2146,6 +2156,11 @@ gen_hermes_managed_into() {
   if [ -n "$model" ]; then
     _cbox_hermes_validate_model "$model" || die "invalid CBOX_HERMES_MODEL_NAME '$model'"
   fi
+  local context_length="${CBOX_OLLAMA_CONTEXT_LENGTH:-65536}"
+  if [ "$provider" = local ]; then
+    _cbox_hermes_validate_context_length "$context_length" \
+      || die "invalid CBOX_OLLAMA_CONTEXT_LENGTH '$context_length' (expected a positive integer; it is the context window hermes is told to budget against)"
+  fi
   {
     printf 'HERMES_MANAGED_PROVIDER=%s\n' "$provider"
     if [ "$provider" = local ] && [ -n "$url" ]; then
@@ -2153,6 +2168,9 @@ gen_hermes_managed_into() {
     fi
     if [ -n "$model" ]; then
       printf 'HERMES_MANAGED_MODEL=%s\n' "$model"
+    fi
+    if [ "$provider" = local ]; then
+      printf 'HERMES_MANAGED_CONTEXT_LENGTH=%s\n' "$context_length"
     fi
   } | _cbox_write "$target"
 }
@@ -2376,13 +2394,12 @@ _cbox_codex_mcp_toml_blocks() {
 gen_codex_profile_into() {
   local outdir="$1" mode="${2:-global}" root="${3:-}"
   local hooks_path="$HOME/.claude/hooks"
-  local codex_model="gpt-5.6-terra"
   mkdir -p "$outdir"
   local tmp
   tmp="$(mktemp "$outdir/.cbox.XXXXXX")"
   {
-    printf 'model = "%s"\n' "$codex_model"
-    printf 'model_reasoning_effort = "xhigh"\n'
+    printf 'model = "%s"\n' "${CBOX_CODEX_MODEL:-gpt-5.6-terra}"
+    printf 'model_reasoning_effort = "%s"\n' "${CBOX_CODEX_EFFORT:-xhigh}"
     printf 'approval_policy = "never"\n'
     printf 'sandbox_mode = "danger-full-access"\n'
     printf 'hide_agent_reasoning = true\n'
@@ -2981,10 +2998,23 @@ gen_ollama_owner_compose_into() {
     rm -rf "$dir/wireguard-build"
     return 0
   fi
-  local image="${CBOX_OLLAMA_IMAGE:-ollama/ollama:0.32.5}"
+  if command -v _cbox_config_validate_var >/dev/null 2>&1; then
+    local _ol_var _ol_err
+    for _ol_var in CBOX_OLLAMA_IMAGE CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL CBOX_OLLAMA_CONTEXT_LENGTH CBOX_OLLAMA_FLASH_ATTENTION CBOX_OLLAMA_KV_CACHE_TYPE CBOX_OLLAMA_KEEP_ALIVE; do
+      _ol_err="$(_cbox_config_validate_var "$_ol_var" "$(eval "printf '%s' \"\${$_ol_var:-}\"")" 2>&1)" || {
+        echo "cbox: refusing to render the ollama owner compose - $_ol_var is invalid: $_ol_err" >&2
+        return 1
+      }
+    done
+  fi
+  local image="${CBOX_OLLAMA_IMAGE:-ollama/ollama:0.33.3}"
   local store="${CBOX_OLLAMA_STORE:-dedicated}"
   local port="${CBOX_OLLAMA_PORT:-11434}"
   local parallel="${CBOX_OLLAMA_NUM_PARALLEL:-1}"
+  local context_length="${CBOX_OLLAMA_CONTEXT_LENGTH:-65536}"
+  local flash_attention="${CBOX_OLLAMA_FLASH_ATTENTION:-on}"
+  local kv_cache_type="${CBOX_OLLAMA_KV_CACHE_TYPE:-q8_0}"
+  local keep_alive="${CBOX_OLLAMA_KEEP_ALIVE:-30m}"
   local restart_policy="unless-stopped"
   local name owner_dir tmp store_path
   name="$(_cbox_ollama_owner_name)"
@@ -3009,8 +3039,22 @@ EOF
       cbox.owner: $name
     environment:
       - OLLAMA_NUM_PARALLEL=$parallel
+      - "OLLAMA_CONTEXT_LENGTH=$context_length"
+      - "OLLAMA_KV_CACHE_TYPE=$kv_cache_type"
+      - "OLLAMA_KEEP_ALIVE=$keep_alive"
+EOF
+    if [ "$flash_attention" = on ]; then
+      cat >> "$tmp" <<EOF
+      - "OLLAMA_FLASH_ATTENTION=1"
+EOF
+    else
+      cat >> "$tmp" <<EOF
+      - "OLLAMA_FLASH_ATTENTION=0"
+EOF
+    fi
+    cat >> "$tmp" <<EOF
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:11434/ 2>/dev/null | grep -qi 'ollama is running' || curl -sf http://127.0.0.1:11434/ >/dev/null 2>&1"]
+      test: ["CMD", "/bin/ollama", "ls"]
       interval: 10s
       timeout: 3s
       start_period: 15s
@@ -3161,12 +3205,17 @@ _cbox_ollama_manifest_peers_hash() {
 
 _cbox_ollama_manifest_write() {
   local dir="$1" name image store store_path gpu port
+  local context_length flash_attention kv_cache_type keep_alive
   name="$(_cbox_ollama_owner_name)"
-  image="${CBOX_OLLAMA_IMAGE:-ollama/ollama:0.32.5}"
+  image="${CBOX_OLLAMA_IMAGE:-ollama/ollama:0.33.3}"
   store="${CBOX_OLLAMA_STORE:-dedicated}"
   store_path="$(_cbox_ollama_store_path)"
   gpu="${CBOX_OLLAMA_GPU:-off}"
   port="${CBOX_OLLAMA_PORT:-11434}"
+  context_length="${CBOX_OLLAMA_CONTEXT_LENGTH:-65536}"
+  flash_attention="${CBOX_OLLAMA_FLASH_ATTENTION:-on}"
+  kv_cache_type="${CBOX_OLLAMA_KV_CACHE_TYPE:-q8_0}"
+  keep_alive="${CBOX_OLLAMA_KEEP_ALIVE:-30m}"
   {
     printf 'schema=1\n'
     printf 'owner=%s\n' "$name"
@@ -3176,6 +3225,10 @@ _cbox_ollama_manifest_write() {
     printf 'store_path=%s\n' "$store_path"
     printf 'gpu=%s\n' "$gpu"
     printf 'port=%s\n' "$port"
+    printf 'context_length=%s\n' "$context_length"
+    printf 'flash_attention=%s\n' "$flash_attention"
+    printf 'kv_cache_type=%s\n' "$kv_cache_type"
+    printf 'keep_alive=%s\n' "$keep_alive"
     printf 'wg_mode=%s\n' "${CBOX_WG_MODE:-off}"
     printf 'wg_impl=%s\n' "${CBOX_WG_IMPL:-auto}"
     printf 'wg_address=%s\n' "${CBOX_WG_ADDRESS:-}"
@@ -3204,6 +3257,7 @@ _cbox_ollama_manifest_matches_current() {
   local dir="$1" want have
   [ -f "$dir/ownership.manifest" ] || return 1
   local name image store store_path gpu port
+  local context_length flash_attention kv_cache_type keep_alive
   local wg_mode wg_impl wg_address wg_listen_port wg_publish_addr
   local wg_peer_endpoint wg_peer_pubkey wg_peer_address wg_keepalive wg_forwards wg_peers_hash
   name="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" owner)" || return 1
@@ -3212,6 +3266,10 @@ _cbox_ollama_manifest_matches_current() {
   store_path="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" store_path)" || return 1
   gpu="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" gpu)" || return 1
   port="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" port)" || return 1
+  context_length="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" context_length)" || context_length=65536
+  flash_attention="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" flash_attention)" || flash_attention=on
+  kv_cache_type="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" kv_cache_type)" || kv_cache_type=q8_0
+  keep_alive="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" keep_alive)" || keep_alive=30m
   wg_mode="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" wg_mode)" || wg_mode=off
   wg_impl="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" wg_impl)" || wg_impl=auto
   wg_address="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" wg_address)" || wg_address=
@@ -3224,11 +3282,15 @@ _cbox_ollama_manifest_matches_current() {
   wg_forwards="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" wg_forwards)" || wg_forwards=
   wg_peers_hash="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" wg_peers_hash)" || wg_peers_hash=
   [ "$name" = "$(_cbox_ollama_owner_name)" ] || return 1
-  [ "$image" = "${CBOX_OLLAMA_IMAGE:-ollama/ollama:0.32.5}" ] || return 1
+  [ "$image" = "${CBOX_OLLAMA_IMAGE:-ollama/ollama:0.33.3}" ] || return 1
   [ "$store" = "${CBOX_OLLAMA_STORE:-dedicated}" ] || return 1
   [ "$store_path" = "$(_cbox_ollama_store_path)" ] || return 1
   [ "$gpu" = "${CBOX_OLLAMA_GPU:-off}" ] || return 1
   [ "$port" = "${CBOX_OLLAMA_PORT:-11434}" ] || return 1
+  [ "$context_length" = "${CBOX_OLLAMA_CONTEXT_LENGTH:-65536}" ] || return 1
+  [ "$flash_attention" = "${CBOX_OLLAMA_FLASH_ATTENTION:-on}" ] || return 1
+  [ "$kv_cache_type" = "${CBOX_OLLAMA_KV_CACHE_TYPE:-q8_0}" ] || return 1
+  [ "$keep_alive" = "${CBOX_OLLAMA_KEEP_ALIVE:-30m}" ] || return 1
   [ "$wg_mode" = "${CBOX_WG_MODE:-off}" ] || return 1
   [ "$wg_impl" = "${CBOX_WG_IMPL:-auto}" ] || return 1
   [ "$wg_address" = "${CBOX_WG_ADDRESS:-}" ] || return 1
@@ -3547,7 +3609,7 @@ _cbox_wg_runtime_conf_path() {
 }
 
 _cbox_wg_client_forward_port() {
-  printf '%s' "${CBOX_OLLAMA_PORT:-11434}"
+  printf '11434'
 }
 
 _cbox_wg_forward_entries() {

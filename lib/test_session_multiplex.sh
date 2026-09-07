@@ -127,6 +127,7 @@ set -eu
 _verb='$verb'
 CBOX_SESSION_MULTIPLEX='$multiplex'
 CBOX_LIMIT_AUTORESUME='$autoresume'
+CBOX_SAFEGUARD_AUTOCONFIRM='off'
 _resolved=/fake/bin
 HERMES_HOME=/fake/home
 _hermes_session_prompt=""

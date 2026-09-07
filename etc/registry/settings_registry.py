@@ -30,6 +30,7 @@ NAMED_VALIDATORS = {
     "claude-target",
     "codex-version",
     "ollama-image",
+    "ollama-keep-alive",
     "wg-address-cidr",
     "wg-peer-address-cidr",
     "wg-hostport-or-empty",
@@ -39,6 +40,7 @@ NAMED_VALIDATORS = {
     "unvalidated-legacy-gap",
     "ipv4-list",
     "kernel-lang",
+    "codex-model-slug",
 }
 
 NAMED_RESOLVERS = {

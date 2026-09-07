@@ -140,6 +140,9 @@ _cbox_reg_validate_var_dispatch() {
     CBOX_LOCAL_MODEL_NAME)
       _cbox_val_named_no_validator "$val" || return 1
       ;;
+    CBOX_LOCAL_MODEL_TIMEOUT_SEC)
+      _cbox_val_kind_uint "$val" || return 1
+      ;;
     CBOX_HERMES)
       _cbox_val_kind_enum "$val" 'off' 'on' || return 1
       ;;
@@ -209,6 +212,18 @@ _cbox_reg_validate_var_dispatch() {
     CBOX_OLLAMA_NUM_PARALLEL)
       _cbox_val_kind_uint_min "$val" 1 || return 1
       ;;
+    CBOX_OLLAMA_CONTEXT_LENGTH)
+      _cbox_val_kind_uint_min "$val" 2048 || return 1
+      ;;
+    CBOX_OLLAMA_FLASH_ATTENTION)
+      _cbox_val_kind_enum "$val" 'off' 'on' || return 1
+      ;;
+    CBOX_OLLAMA_KV_CACHE_TYPE)
+      _cbox_val_kind_enum "$val" 'f16' 'q8_0' 'q4_0' || return 1
+      ;;
+    CBOX_OLLAMA_KEEP_ALIVE)
+      _cbox_val_named_ollama_keep_alive "$val" || return 1
+      ;;
     CBOX_WG_MODE)
       _cbox_val_kind_enum "$val" 'off' 'server' 'client' 'both' || return 1
       ;;
@@ -277,6 +292,12 @@ _cbox_reg_validate_var_dispatch() {
       ;;
     CBOX_CODEX_HOOKS)
       _cbox_val_kind_enum "$val" 'off' 'on' || return 1
+      ;;
+    CBOX_CODEX_MODEL)
+      _cbox_val_named_codex_model_slug "$val" || return 1
+      ;;
+    CBOX_CODEX_EFFORT)
+      _cbox_val_kind_enum "$val" 'low' 'medium' 'high' 'xhigh' 'max' 'ultra' || return 1
       ;;
     CBOX_HISTORY)
       _cbox_val_kind_enum "$val" '0' '1' || return 1

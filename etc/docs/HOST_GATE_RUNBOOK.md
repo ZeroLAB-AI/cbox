@@ -427,6 +427,21 @@ CDI generation succeeding on the host). If step 16's in-container
 `nvidia-smi -L` fails on a rootless host after CDI generation succeeded,
 check this setting by hand before suspecting cbox's own GPU wiring.
 
+Before enabling the ollama owner project's own GPU reservation
+(`CBOX_OLLAMA_GPU=cdi`), `cbox ollama gpu-check` gives a narrower smoke test
+than step 16: it runs `docker run --rm --device nvidia.com/gpu=all
+<CBOX_OLLAMA_IMAGE> nvidia-smi` directly against the configured ollama image
+and reports pass or fail with the fix candidates that apply to the CDI path
+(CDI regeneration; rootless CDI enablement only on a daemon older than 28.3,
+where CDI is not yet on by default). The `no-cgroups = true` setting above
+belongs to the legacy nvidia runtime hook path, not to CDI, so gpu-check only
+mentions it as the place to look if ollama is deliberately run through that
+legacy path instead. Host-only, never invoked
+automatically by any other cbox flow. Especially relevant for an eGPU: the
+CDI spec must be regenerated (`nvidia-ctk cdi generate`) every time the eGPU
+is unplugged and replugged, since its PCI address changes and invalidates
+the previous spec.
+
 ## What to do when a step fails
 
 - **Re-bless (step 1) dies on missing conf**: this is a fresh-install host,

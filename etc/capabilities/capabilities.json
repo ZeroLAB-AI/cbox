@@ -302,7 +302,8 @@
       "enabled_when_env": null,
       "planes": ["mediated"],
       "bindings": {
-        "codex": {"mechanism": "mcp-config-render", "status": "live"}
+        "codex": {"mechanism": "mcp-config-render", "status": "live"},
+        "hermes": {"mechanism": "mcp-config-render", "status": "live"}
       },
       "degrade_floor": "feature-off"
     },

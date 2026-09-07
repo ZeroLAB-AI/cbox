@@ -28,7 +28,7 @@ render() {
   ( set -e
     source "$INSTALL_DIR/templates/generators.sh"
     export HOME="$home"
-    export CBOX_OLLAMA_MODE=on CBOX_OLLAMA_IMAGE=ollama/ollama:0.32.5 CBOX_OLLAMA_GPU=off \
+    export CBOX_OLLAMA_MODE=on CBOX_OLLAMA_IMAGE=ollama/ollama:0.33.3 CBOX_OLLAMA_GPU=off \
       CBOX_OLLAMA_STORE=dedicated CBOX_OLLAMA_STORE_PATH= CBOX_OLLAMA_PORT=11434 CBOX_OLLAMA_NUM_PARALLEL=1
     export CBOX_WG_MODE="$mode"
     export "$@"
@@ -199,7 +199,9 @@ render "$CUSTOMPORTHOME" "$CUSTOMPORTOWNER" server \
 SUP_CUSTOMPORT="$CUSTOMPORTOWNER/wireguard-build/supervisord.wireguard.conf"
 grep -q 'TCP:ollama:11434' "$SUP_CUSTOMPORT" || _fail "server forwarder: forward target must be hardcoded to the ollama container's real listen port (11434) regardless of CBOX_OLLAMA_PORT"
 ! grep -q 'TCP:ollama:11500' "$SUP_CUSTOMPORT" || _fail "server forwarder: forward target must not follow CBOX_OLLAMA_PORT (a host-side probe setting, not the in-container port) - the ollama container always listens on 11434"
-_ok "server forwarder: forward target stays hardcoded to 11434 even when CBOX_OLLAMA_PORT is set to a different value"
+grep -q 'TCP-LISTEN:11434,bind=10.90.0.1' "$SUP_CUSTOMPORT" || _fail "server forwarder: listen port must stay hardcoded to 11434 regardless of CBOX_OLLAMA_PORT (both tunnel ends must agree on 11434 without desync)"
+! grep -q 'TCP-LISTEN:11500' "$SUP_CUSTOMPORT" || _fail "server forwarder: listen port must not follow CBOX_OLLAMA_PORT"
+_ok "server forwarder: forward target and listen port both stay hardcoded to 11434 even when CBOX_OLLAMA_PORT is set to a different value"
 
 grep -q 'TCP:10.90.0.1:11434' "$SUP_CLIENT" || _fail "client forwarder: must forward to the remote tunnel address"
 grep -q 'TCP-LISTEN:11434,bind=wg-remote-ollama' "$SUP_CLIENT" || _fail "client forwarder: must accept only on the infra-network alias, not all interfaces"

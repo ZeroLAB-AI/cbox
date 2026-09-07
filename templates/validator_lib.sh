@@ -219,7 +219,16 @@ _cbox_val_named_codex_version() {
 _cbox_val_named_ollama_image() {
   local val="$1"
   [ -n "$val" ] || { printf 'must not be empty'; return 1; }
+  case "$val" in
+    -*) printf 'must not start with -'; return 1 ;;
+  esac
   printf '%s' "$val" | grep -Eq '^[A-Za-z0-9._:/@-]+$' || { printf 'expected an image reference matching [A-Za-z0-9._:/@-]+'; return 1; }
+}
+
+_cbox_val_named_ollama_keep_alive() {
+  local val="$1"
+  printf '%s' "$val" | grep -Eq '^(-?[0-9]+|-?([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+)$' \
+    || { printf 'expected an ollama duration (e.g. 30m, 1h, 0, -1) or plain seconds (e.g. 3600)'; return 1; }
 }
 
 _cbox_val_named_wg_address_cidr() {
@@ -332,4 +341,13 @@ _cbox_val_named_kernel_lang() {
     ' '*|*' ') printf 'must not have leading or trailing spaces'; return 1 ;;
   esac
   return 0
+}
+
+_cbox_val_named_codex_model_slug() {
+  local val="$1"
+  [ -n "$val" ] || { printf 'must not be empty'; return 1; }
+  case "$val" in
+    -*) printf 'must not start with -'; return 1 ;;
+  esac
+  printf '%s' "$val" | grep -Eq '^[A-Za-z0-9._-]+$' || { printf 'expected a model slug matching [A-Za-z0-9._-]+'; return 1; }
 }

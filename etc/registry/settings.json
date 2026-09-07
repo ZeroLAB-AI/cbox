@@ -1093,6 +1093,19 @@
       "validator": null
     },
     {
+      "key": "CBOX_LOCAL_MODEL_TIMEOUT_SEC",
+      "section": "local-model",
+      "type": {
+        "kind": "uint"
+      },
+      "default": 600,
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: local model request timeout in seconds",
+      "help": "Request timeout (seconds) for the local-qwen MCP delegate's calls to the local endpoint.",
+      "validator": null
+    },
+    {
       "key": "CBOX_HERMES",
       "section": "hermes",
       "type": {
@@ -1319,7 +1332,7 @@
       "role": "setting",
       "export": true,
       "prompt": null,
-      "help": "qa mode (the only mode implemented) pins the hermes child's terminal/file/web toolsets off per call.",
+      "help": "qa mode (the only mode implemented) pins the hermes child's terminal, file, web, code_execution, delegation, browser, and computer_use toolsets off per call (see CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS to override).",
       "validator": null
     },
     {
@@ -1333,7 +1346,7 @@
       "role": "setting",
       "export": true,
       "prompt": null,
-      "help": "Overrides the default disabled toolset list (terminal,file,web).",
+      "help": "Adds to the mandatory disabled toolset list (terminal,file,web,code_execution,delegation,browser,computer_use) - this floor can never be shrunk, only extended with extra toolset names.",
       "validator": null
     },
     {
@@ -1360,7 +1373,7 @@
         "kind": "ollama-image",
         "escape_hatch": "ollama-image"
       },
-      "default": "ollama/ollama:0.32.5",
+      "default": "ollama/ollama:0.33.3",
       "role": "setting",
       "export": true,
       "prompt": "setup: ollama image reference (pinned tag or digest)",
@@ -1439,6 +1452,69 @@
       "export": true,
       "prompt": "setup: ollama OLLAMA_NUM_PARALLEL (concurrent request slots)",
       "help": "Ollama concurrent request slots.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_OLLAMA_CONTEXT_LENGTH",
+      "section": "ollama",
+      "type": {
+        "kind": "uint-min",
+        "min": 2048
+      },
+      "default": 65536,
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: ollama OLLAMA_CONTEXT_LENGTH (context window in tokens; hermes needs 64000 or more for agent use)",
+      "help": "Ollama context window in tokens (floor 2048), rendered as OLLAMA_CONTEXT_LENGTH and mirrored into hermes as model.context_length so hermes budgets against the real server window. Hermes documents a 64000-token minimum for agent use with tools; below that it warns and its tool loop degrades, so keep this at 65536 or above when hermes drives the model.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_OLLAMA_FLASH_ATTENTION",
+      "section": "ollama",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: ollama OLLAMA_FLASH_ATTENTION",
+      "help": "Ollama flash attention, rendered as OLLAMA_FLASH_ATTENTION=1 when on and =0 when off (never left unset: ollama's unset state is auto, which resolves to on for qwen3/qwen35/gemma3-class models). KV cache quantization (CBOX_OLLAMA_KV_CACHE_TYPE q8_0/q4_0) only takes effect while flash attention is on.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_OLLAMA_KV_CACHE_TYPE",
+      "section": "ollama",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "f16",
+          "q8_0",
+          "q4_0"
+        ]
+      },
+      "default": "q8_0",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: ollama OLLAMA_KV_CACHE_TYPE (KV cache quantization)",
+      "help": "Ollama KV cache quantization type.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_OLLAMA_KEEP_ALIVE",
+      "section": "ollama",
+      "type": {
+        "kind": "string",
+        "escape_hatch": "ollama-keep-alive"
+      },
+      "default": "30m",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: ollama OLLAMA_KEEP_ALIVE (how long a loaded model stays in memory, e.g. 30m, 1h, 0, -1)",
+      "help": "Ollama keep-alive controlling how long a loaded model stays in memory: a duration string (30m, 1h30m), plain seconds (3600), 0 to unload immediately, or any negative value (-1) to keep it loaded forever - the same forms ollama's own parser accepts.",
       "validator": null
     },
     {
@@ -1782,6 +1858,41 @@
       "export": false,
       "prompt": null,
       "help": "Experiment gate, off by default: when on, renders [features].codex_hooks=true into the codex profile and the PreToolUse guard entries into the codex hooks.json, giving codex the same guard coverage claude has natively. Off reproduces today's codex profile and hooks.json byte-for-byte.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_CODEX_MODEL",
+      "section": "codex-mcp",
+      "type": {
+        "kind": "string",
+        "escape_hatch": "codex-model-slug"
+      },
+      "default": "gpt-5.6-terra",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: codex model (e.g. gpt-5.6-terra): ",
+      "help": "Model slug rendered as model= into the generated read-only codex profile (cbox-container.config.toml).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_CODEX_EFFORT",
+      "section": "codex-mcp",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+          "ultra"
+        ]
+      },
+      "default": "xhigh",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: codex reasoning effort",
+      "help": "Reasoning effort rendered as model_reasoning_effort= into the generated read-only codex profile (cbox-container.config.toml).",
       "validator": null
     },
     {

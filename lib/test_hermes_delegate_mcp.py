@@ -4,6 +4,7 @@ import io
 import json
 import os
 import pathlib
+import shlex
 import shutil
 import stat
 import subprocess
@@ -49,12 +50,32 @@ if env_dump and not os.path.exists(env_dump):
                       "http_proxy", "https_proxy", "no_proxy", "all_proxy"):
             fh.write(_name + "=" + os.environ.get(_name, "") + "\\n")
 
-TOOLSET_STATE_FILE = os.path.join(os.path.dirname(CONTROL_FILE), "toolset_state.txt")
+CONFIG_PATH = os.path.join(os.environ.get("HERMES_HOME", ""), "config.yaml")
 
-if (len(sys.argv) >= 5 and sys.argv[1] == "config" and sys.argv[2] == "set"
-        and sys.argv[3] == "agent.disabled_toolsets"):
-    with open(TOOLSET_STATE_FILE, "w") as fh:
-        fh.write(sys.argv[4])
+
+def _load_cfg():
+    try:
+        with open(CONFIG_PATH) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_cfg(cfg):
+    with open(CONFIG_PATH, "w") as fh:
+        json.dump(cfg, fh)
+
+
+if len(sys.argv) >= 5 and sys.argv[1] == "config" and sys.argv[2] == "set":
+    cfg = _load_cfg()
+    node = cfg
+    parts = sys.argv[3].split(".")
+    for part in parts[:-1]:
+        if not isinstance(node.get(part), dict):
+            node[part] = {}
+        node = node[part]
+    node[parts[-1]] = sys.argv[4]
+    _save_cfg(cfg)
     sys.exit(0)
 
 if len(sys.argv) >= 3 and sys.argv[1] == "config" and sys.argv[2] == "set":
@@ -66,14 +87,22 @@ if (len(sys.argv) >= 4 and sys.argv[1] == "config" and sys.argv[2] == "get"
     if toolset_get_mode == "fail":
         sys.stderr.write("config get: injected failure\\n")
         sys.exit(1)
+    if "--json" not in sys.argv[4:]:
+        sys.stderr.write("config get: called without --json, the type of the stored value is invisible\\n")
+        sys.exit(2)
+    cfg = _load_cfg()
+    value = (cfg.get("agent") or {}).get("disabled_toolsets")
     if toolset_get_mode == "mismatch":
-        sys.stdout.write("not-what-was-set\\n")
-        sys.exit(0)
-    stored = ""
-    if os.path.exists(TOOLSET_STATE_FILE):
-        with open(TOOLSET_STATE_FILE) as fh:
-            stored = fh.read()
-    sys.stdout.write(stored + "\\n")
+        value = "not-what-was-set"
+    elif toolset_get_mode == "string":
+        value = ",".join(value) if isinstance(value, list) else value
+    elif toolset_get_mode == "short":
+        value = ["terminal", "file"]
+    record = control.get("toolset_record")
+    if record:
+        with open(record, "w") as fh:
+            fh.write(json.dumps(value))
+    sys.stdout.write(json.dumps(value) + "\\n")
     sys.exit(0)
 
 if len(sys.argv) >= 2 and sys.argv[1] == "-z":
@@ -95,11 +124,45 @@ sys.exit(0)
 '''
 
 
+YAML_STUB_SOURCE = '''import json
+
+
+def safe_load(stream):
+    data = stream.read() if hasattr(stream, "read") else stream
+    if isinstance(data, bytes):
+        data = data.decode("utf-8")
+    if not data.strip():
+        return None
+    return json.loads(data)
+
+
+def safe_dump(data, stream=None, **kwargs):
+    text = json.dumps(data)
+    if stream is None:
+        return text
+    stream.write(text)
+'''
+
+
+def install_fake_venv_python(tmpdir):
+    stubdir = os.path.join(tmpdir, "yamlstub")
+    os.makedirs(stubdir, exist_ok=True)
+    with open(os.path.join(stubdir, "yaml.py"), "w") as fh:
+        fh.write(YAML_STUB_SOURCE)
+    wrapper = os.path.join(tmpdir, "python")
+    with open(wrapper, "w") as fh:
+        fh.write("#!/bin/sh\nexec env PYTHONPATH=%s %s \"$@\"\n"
+                 % (shlex.quote(stubdir), shlex.quote(sys.executable)))
+    os.chmod(wrapper, 0o755)
+    return wrapper
+
+
 def make_stub(tmpdir, control_file):
     stub_path = os.path.join(tmpdir, "hermes-stub.py")
     with open(stub_path, "w") as fh:
         fh.write(STUB_SOURCE % {"control_file": control_file})
     os.chmod(stub_path, os.stat(stub_path).st_mode | stat.S_IEXEC)
+    install_fake_venv_python(tmpdir)
     return stub_path
 
 
@@ -113,7 +176,7 @@ def make_template_home(tmpdir, hardened=True):
     os.makedirs(home, exist_ok=True)
     cfg = os.path.join(home, "config.yaml")
     with open(cfg, "w") as fh:
-        fh.write("model:\n  provider: local\n")
+        fh.write(json.dumps({"model": {"provider": "local"}}) + "\n")
     if hardened:
         os.chmod(cfg, 0o444)
         os.chmod(home, 0o555)
@@ -136,6 +199,7 @@ class HermesDelegateUnitTests(unittest.TestCase):
         os.environ.pop("CBOX_HERMES_PROVIDER", None)
         os.environ.pop("CBOX_HERMES_MODEL_URL", None)
         os.environ.pop("CBOX_HERMES_MODEL_NAME", None)
+        os.environ.pop("CBOX_OLLAMA_CONTEXT_LENGTH", None)
         os.environ.pop("CBOX_HERMES_DELEGATE_TIMEOUT_SEC", None)
         os.environ.pop("CBOX_HERMES_DELEGATE_MAX_PROMPT_BYTES", None)
         os.environ.pop("CBOX_HERMES_DELEGATE_MAX_RESPONSE_BYTES", None)
@@ -281,10 +345,51 @@ class HermesDelegateUnitTests(unittest.TestCase):
         self.assertFalse(result["isError"], result)
         with open(marker) as fh:
             calls = fh.read()
-        self.assertIn("config set model.provider local", calls)
+        self.assertIn("config set model.provider custom", calls)
         self.assertIn(
             "config set model.base_url http://127.0.0.1:11434", calls)
         self.assertIn("config set model.default qwen2.5:7b", calls)
+        self.assertIn("config set model.context_length 65536", calls)
+
+    def test_context_length_follows_the_ollama_context_var(self):
+        marker = os.path.join(self.tmpdir, "marker_ctx.txt")
+        write_control(self.control_file, marker=marker)
+        os.environ["CBOX_OLLAMA_CONTEXT_LENGTH"] = "131072"
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertFalse(result["isError"], result)
+        with open(marker) as fh:
+            calls = fh.read()
+        self.assertIn("config set model.context_length 131072", calls)
+        self.assertNotIn("config set model.context_length 65536", calls)
+
+    def test_context_length_not_managed_for_hosted_providers(self):
+        marker = os.path.join(self.tmpdir, "marker_ctx_hosted.txt")
+        write_control(self.control_file, marker=marker)
+        os.environ["CBOX_HERMES_DELEGATE_PROVIDER"] = "anthropic"
+        os.environ.pop("CBOX_HERMES_DELEGATE_BASE_URL", None)
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertFalse(result["isError"], result)
+        with open(marker) as fh:
+            calls = fh.read()
+        self.assertNotIn("model.context_length", calls)
+
+    def test_provider_for_cli_maps_cbox_enum_to_hermes_ids(self):
+        self.assertEqual(MOD._provider_for_cli("local"), "custom")
+        self.assertEqual(MOD._provider_for_cli("openai"), "openai-api")
+        for name in ("nous", "openrouter", "anthropic"):
+            self.assertEqual(MOD._provider_for_cli(name), name)
+
+    def test_openai_provider_reaches_hermes_as_openai_api(self):
+        marker = os.path.join(self.tmpdir, "marker_openai.txt")
+        write_control(self.control_file, marker=marker)
+        os.environ["CBOX_HERMES_DELEGATE_PROVIDER"] = "openai"
+        os.environ.pop("CBOX_HERMES_DELEGATE_BASE_URL", None)
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertFalse(result["isError"], result)
+        with open(marker) as fh:
+            calls = fh.read()
+        self.assertIn("config set model.provider openai-api", calls)
+        self.assertNotIn("config set model.provider openai\n", calls)
 
     def test_no_provider_refuses_to_trust_the_seeded_template(self):
         os.environ.pop("CBOX_HERMES_DELEGATE_PROVIDER", None)
@@ -319,51 +424,94 @@ class HermesDelegateUnitTests(unittest.TestCase):
         self.assertTrue(result["isError"])
         self.assertIn("invalid", result["content"][0]["text"])
 
+    def _run_and_record_pin(self, tag):
+        marker = os.path.join(self.tmpdir, "marker_%s.txt" % tag)
+        record = os.path.join(self.tmpdir, "record_%s.json" % tag)
+        write_control(self.control_file, marker=marker, toolset_record=record)
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        with open(marker) as fh:
+            calls = fh.read()
+        stored = None
+        if os.path.exists(record):
+            with open(record) as fh:
+                stored = json.loads(fh.read())
+        return result, calls, stored
+
     def test_disabled_toolsets_applied_in_qa_mode_by_default(self):
-        marker = os.path.join(self.tmpdir, "marker_toolsets.txt")
-        write_control(self.control_file, marker=marker)
         os.environ.pop("CBOX_HERMES_DELEGATE_MODE", None)
         os.environ.pop("CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS", None)
-        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        result, calls, stored = self._run_and_record_pin("toolsets")
         self.assertFalse(result["isError"], result)
+        self.assertEqual(stored, list(MOD.MANDATORY_DISABLED_TOOLSETS_ORDER))
+
+    def test_pin_is_written_as_a_list_never_via_config_set(self):
+        os.environ.pop("CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS", None)
+        result, calls, stored = self._run_and_record_pin("toolsets_list")
+        self.assertFalse(result["isError"], result)
+        self.assertNotIn("config set agent.disabled_toolsets", calls)
+        self.assertIsInstance(stored, list)
+        self.assertEqual(stored, list(MOD.MANDATORY_DISABLED_TOOLSETS_ORDER))
+        self.assertIn("config get agent.disabled_toolsets --json", calls)
+
+    def test_comma_string_pin_is_refused_as_fail_open(self):
+        marker = os.path.join(self.tmpdir, "marker_toolsets_string.txt")
+        write_control(
+            self.control_file, marker=marker, toolset_get_mode="string")
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertTrue(result["isError"], result)
+        self.assertIn("expected a JSON list", result["content"][0]["text"])
         with open(marker) as fh:
             calls = fh.read()
-        self.assertIn(
-            "config set agent.disabled_toolsets " + MOD.DEFAULT_DISABLED_TOOLSETS,
-            calls)
+        self.assertNotIn(" -z ", calls)
 
     def test_disabled_toolsets_applied_with_custom_value(self):
-        marker = os.path.join(self.tmpdir, "marker_toolsets2.txt")
-        write_control(self.control_file, marker=marker)
         os.environ["CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS"] = "terminal,web"
-        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        result, calls, stored = self._run_and_record_pin("toolsets2")
         self.assertFalse(result["isError"], result)
-        with open(marker) as fh:
-            calls = fh.read()
-        self.assertIn("config set agent.disabled_toolsets terminal,web", calls)
+        self.assertEqual(stored, list(MOD.MANDATORY_DISABLED_TOOLSETS_ORDER))
+
+    def test_disabled_toolsets_override_cannot_shrink_mandatory_set(self):
+        os.environ["CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS"] = "terminal"
+        result, calls, stored = self._run_and_record_pin("toolsets_shrink")
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(stored, list(MOD.MANDATORY_DISABLED_TOOLSETS_ORDER))
+        for name in ("code_execution", "delegation", "browser",
+                     "computer_use"):
+            self.assertIn(name, MOD.DEFAULT_DISABLED_TOOLSETS)
+
+    def test_disabled_toolsets_override_can_add_beyond_mandatory_floor(self):
+        os.environ["CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS"] = "extra_toolset"
+        result, calls, stored = self._run_and_record_pin("toolsets_add")
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(
+            stored,
+            list(MOD.MANDATORY_DISABLED_TOOLSETS_ORDER) + ["extra_toolset"])
+
+    def test_default_disabled_toolsets_pinned_literal(self):
+        self.assertEqual(
+            MOD.DEFAULT_DISABLED_TOOLSETS,
+            "terminal,file,web,code_execution,delegation,browser,"
+            "computer_use")
+
+    def test_tool_description_names_all_mandatory_toolsets(self):
+        desc = MOD.tool_description()
+        for name in MOD.DEFAULT_DISABLED_TOOLSETS.split(","):
+            self.assertIn(name, desc)
 
     def test_disabled_toolsets_falls_back_to_default_when_var_empty(self):
-        marker = os.path.join(self.tmpdir, "marker_toolsets3.txt")
-        write_control(self.control_file, marker=marker)
         os.environ["CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS"] = ""
-        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        result, calls, stored = self._run_and_record_pin("toolsets3")
         self.assertFalse(result["isError"], result)
-        with open(marker) as fh:
-            calls = fh.read()
-        self.assertIn(
-            "config set agent.disabled_toolsets " + MOD.DEFAULT_DISABLED_TOOLSETS,
-            calls)
+        self.assertEqual(stored, list(MOD.MANDATORY_DISABLED_TOOLSETS_ORDER))
 
     def test_disabled_toolsets_readback_confirms_the_pin(self):
-        marker = os.path.join(self.tmpdir, "marker_toolsets4.txt")
-        write_control(self.control_file, marker=marker)
         os.environ["CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS"] = "terminal,web"
-        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        result, calls, stored = self._run_and_record_pin("toolsets4")
         self.assertFalse(result["isError"], result)
-        with open(marker) as fh:
-            calls = fh.read()
-        self.assertIn(
-            "config get agent.disabled_toolsets", calls)
+        self.assertIn("config get agent.disabled_toolsets --json", calls)
+        self.assertLess(
+            calls.index("config get agent.disabled_toolsets --json"),
+            calls.index("-z "))
 
     def test_disabled_toolsets_readback_mismatch_refuses_the_call(self):
         marker = os.path.join(self.tmpdir, "marker_toolsets5.txt")
@@ -371,8 +519,16 @@ class HermesDelegateUnitTests(unittest.TestCase):
             self.control_file, marker=marker, toolset_get_mode="mismatch")
         result = MOD.run_hermes_delegate({"prompt": "hi"})
         self.assertTrue(result["isError"], result)
-        self.assertIn(
-            "did not take effect", result["content"][0]["text"])
+        self.assertIn("expected a JSON list", result["content"][0]["text"])
+
+    def test_disabled_toolsets_readback_missing_name_refuses_the_call(self):
+        marker = os.path.join(self.tmpdir, "marker_toolsets_short.txt")
+        write_control(
+            self.control_file, marker=marker, toolset_get_mode="short")
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertTrue(result["isError"], result)
+        self.assertIn("missing", result["content"][0]["text"])
+        self.assertIn("did not take effect", result["content"][0]["text"])
 
     def test_disabled_toolsets_readback_failure_refuses_the_call(self):
         marker = os.path.join(self.tmpdir, "marker_toolsets6.txt")
@@ -382,6 +538,23 @@ class HermesDelegateUnitTests(unittest.TestCase):
         self.assertTrue(result["isError"], result)
         self.assertIn(
             "confirming the toolset pin", result["content"][0]["text"])
+
+    def test_missing_venv_python_refuses_the_call(self):
+        marker = os.path.join(self.tmpdir, "marker_nopython.txt")
+        write_control(self.control_file, marker=marker)
+        os.remove(os.path.join(self.tmpdir, "python"))
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertTrue(result["isError"], result)
+        self.assertIn("venv", result["content"][0]["text"])
+        with open(marker) as fh:
+            calls = fh.read()
+        self.assertNotIn(" -z ", calls)
+
+    def test_writer_source_produces_a_list_not_a_string(self):
+        self.assertIn("yaml.safe_load", MOD.DISABLED_TOOLSETS_WRITER)
+        self.assertIn("yaml.safe_dump", MOD.DISABLED_TOOLSETS_WRITER)
+        self.assertIn("[str(t) for t in items]", MOD.DISABLED_TOOLSETS_WRITER)
+        self.assertNotIn("join(", MOD.DISABLED_TOOLSETS_WRITER)
 
     def test_proxy_env_passed_through_to_child(self):
         env_dump = os.path.join(self.tmpdir, "proxy_env_dump.txt")
@@ -533,6 +706,7 @@ class HermesDelegateStdioTests(unittest.TestCase):
         self.env["CBOX_HERMES_DELEGATE_HOME_TEMPLATE"] = self.template_home
         self.env["CBOX_HERMES_DELEGATE_PROVIDER"] = "local"
         self.env["CBOX_HERMES_DELEGATE_BASE_URL"] = "http://127.0.0.1:11434"
+        self.env.pop("CBOX_OLLAMA_CONTEXT_LENGTH", None)
         self.env.pop("CBOX_HERMES_DELEGATE_MODEL", None)
         self.env.pop("CBOX_HERMES_PROVIDER", None)
         self.env.pop("CBOX_HERMES_MODEL_URL", None)
@@ -766,21 +940,16 @@ SLOW_STUB = '''#!/usr/bin/env python3
 import sys
 import time
 REC = %(rec)r
-STATE = REC + ".toolsets"
-if (len(sys.argv) >= 5 and sys.argv[1] == "config" and sys.argv[2] == "set"
-        and sys.argv[3] == "agent.disabled_toolsets"):
-    with open(STATE, "w") as fh:
-        fh.write(sys.argv[4])
+import json
+import os
+CONFIG_PATH = os.path.join(os.environ.get("HERMES_HOME", ""), "config.yaml")
+if len(sys.argv) >= 3 and sys.argv[1] == "config" and sys.argv[2] == "set":
     sys.exit(0)
 if (len(sys.argv) >= 4 and sys.argv[1] == "config" and sys.argv[2] == "get"
         and sys.argv[3] == "agent.disabled_toolsets"):
-    stored = ""
-    try:
-        with open(STATE) as fh:
-            stored = fh.read()
-    except OSError:
-        pass
-    sys.stdout.write(stored + "\\n")
+    with open(CONFIG_PATH) as fh:
+        cfg = json.load(fh)
+    sys.stdout.write(json.dumps((cfg.get("agent") or {}).get("disabled_toolsets")) + "\\n")
     sys.exit(0)
 if len(sys.argv) > 1 and sys.argv[1] == "-z":
     with open(REC, "a") as fh:
@@ -851,6 +1020,7 @@ class ConcurrencySlotTests(unittest.TestCase):
         with open(stub_path, "w") as fh:
             fh.write(SLOW_STUB % {"rec": rec})
         os.chmod(stub_path, os.stat(stub_path).st_mode | stat.S_IEXEC)
+        install_fake_venv_python(self.tmpdir)
         template = make_template_home(self.tmpdir)
         env = dict(os.environ)
         env["HERMES_BIN"] = stub_path

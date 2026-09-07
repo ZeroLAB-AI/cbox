@@ -59,7 +59,8 @@ _common_preamble() {
     "$BUNWIND_FN" "$RECOVER_FN" \
     "$BTAKE_FN" "$BCOMMIT_FN" "$BRESTORE_FN" "$RHI_FN" \
     'chown() { :; }' \
-    '_hxgosu() { "$@"; }'
+    '_hxgosu() { "$@"; }' \
+    '_hermes_stamp_install_method() { echo STAMPED >> "'"$TMPBASE"'/install_method.log"; return 0; }'
 }
 
 _run_install() {

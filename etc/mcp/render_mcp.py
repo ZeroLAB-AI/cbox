@@ -121,7 +121,25 @@ def _substitute_env_placeholders(entry):
     entry["env"] = resolved
 
 
-def render_stdio_entry(name, spec, hooks_dir):
+def _derive_tool_timeout_sec(spec, cbox):
+    tspec = cbox.get("tool_timeout_from_env")
+    if not isinstance(tspec, dict):
+        return None
+    var = tspec.get("var")
+    if not isinstance(var, str) or not var:
+        return None
+    default = tspec.get("default", 0)
+    headroom = tspec.get("headroom_sec", 0)
+    floor = spec.get("tool_timeout_sec", default)
+    raw = os.environ.get(var, "").strip()
+    try:
+        base = int(raw) if raw else int(default)
+    except ValueError:
+        base = int(default)
+    return max(int(floor), base + int(headroom))
+
+
+def render_stdio_entry(name, spec, hooks_dir, cbox=None):
     entry = dict(spec)
     entry.pop("_cbox", None)
     if entry.get("command") == "python3":
@@ -130,6 +148,10 @@ def render_stdio_entry(name, spec, hooks_dir):
             args[0] = hooks_dir + "/" + args[0]
         entry["args"] = args
     _substitute_env_placeholders(entry)
+    if cbox is not None:
+        derived = _derive_tool_timeout_sec(spec, cbox)
+        if derived is not None:
+            entry["tool_timeout_sec"] = derived
     return entry
 
 
@@ -157,7 +179,7 @@ def render_hermes_entry(name, spec, cbox, hooks_dir, shim_mode, adapter, enabled
     if adapter == "codex-mcp":
         entry = wrap_codex_entry(name, spec, cbox, hooks_dir, shim_mode)
     elif adapter == "stdio-mcp":
-        entry = render_stdio_entry(name, spec, hooks_dir)
+        entry = render_stdio_entry(name, spec, hooks_dir, cbox)
     elif adapter == "claude-cli":
         entry = render_claude_cli_entry(name, cbox, hooks_dir)
     else:
@@ -171,7 +193,9 @@ def render_hermes_entry(name, spec, cbox, hooks_dir, shim_mode, adapter, enabled
     }
     if entry.get("env"):
         hermes_entry["env"] = entry["env"]
-    timeout_sec = spec.get("tool_timeout_sec", cbox.get("tool_timeout_sec"))
+    timeout_sec = _derive_tool_timeout_sec(spec, cbox)
+    if timeout_sec is None:
+        timeout_sec = spec.get("tool_timeout_sec", cbox.get("tool_timeout_sec"))
     if isinstance(timeout_sec, int):
         hermes_entry["timeout"] = timeout_sec
     connect_timeout_sec = spec.get(
@@ -254,7 +278,7 @@ def render(delegates, selection, hooks_dir, shim_mode, target, explicit=None):
         elif adapter == "codex-mcp":
             chosen[name] = wrap_codex_entry(name, spec, cbox, hooks_dir, shim_mode)
         elif adapter == "stdio-mcp":
-            chosen[name] = render_stdio_entry(name, spec, hooks_dir)
+            chosen[name] = render_stdio_entry(name, spec, hooks_dir, cbox)
         elif adapter == "claude-cli":
             chosen[name] = render_claude_cli_entry(name, cbox, hooks_dir)
     return chosen

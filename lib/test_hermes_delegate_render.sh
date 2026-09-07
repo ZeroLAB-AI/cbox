@@ -82,6 +82,7 @@ CBOX_HERMES_DELEGATE_MAX_CONCURRENCY=2 \
 CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC=900 \
 CBOX_HERMES_DELEGATE_LOCK_DIR=/tmp/hermes-locks \
 OLLAMA_NUM_PARALLEL=4 \
+CBOX_OLLAMA_CONTEXT_LENGTH=65536 \
   python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
   "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$RENDERED_PRESENT"
 python3 -c "
@@ -106,6 +107,7 @@ assert spec['env'] == {
     'CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC': '900',
     'CBOX_HERMES_DELEGATE_LOCK_DIR': '/tmp/hermes-locks',
     'OLLAMA_NUM_PARALLEL': '4',
+    'CBOX_OLLAMA_CONTEXT_LENGTH': '65536',
     'CBOX_DELEGATION_DEPTH': '',
     'CBOX_MCP_DEPTH': '',
 }, spec

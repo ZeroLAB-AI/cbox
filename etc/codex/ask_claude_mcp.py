@@ -203,6 +203,14 @@ def build_tool():
 
 AUDIT_LINE_MAX = 2048
 
+_CALLER_NAME = ""
+
+
+def set_caller_name(name):
+    global _CALLER_NAME
+    if isinstance(name, str):
+        _CALLER_NAME = name[:64]
+
 
 def audit_text(value, limit=128):
     if not isinstance(value, str):
@@ -223,6 +231,7 @@ def audit(decision, reason, args, mode):
         if os.path.isfile(AUDIT) and os.path.getsize(AUDIT) > AUDIT_MAX_BYTES:
             os.replace(AUDIT, AUDIT + ".1")
         rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+               "caller": audit_text(_CALLER_NAME, 64) or "unknown",
                "decision": audit_text(decision, 16),
                "reason": audit_text(reason, 128),
                "model": audit_text(args.get("model"), 80),
@@ -437,6 +446,9 @@ def handle(msg):
         proto = params.get("protocolVersion")
         if not isinstance(proto, str) or not proto:
             proto = DEFAULT_PROTOCOL
+        client_info = params.get("clientInfo")
+        if isinstance(client_info, dict):
+            set_caller_name(client_info.get("name"))
         reply(req_id, {
             "protocolVersion": proto,
             "capabilities": {"tools": {}},

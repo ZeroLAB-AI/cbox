@@ -3,6 +3,8 @@ import importlib.util
 import json
 import os
 import pathlib
+import shutil
+import tempfile
 import types
 import unittest
 import unittest.mock
@@ -311,6 +313,61 @@ class DelegateIsALeafTests(unittest.TestCase):
             with self.subTest(args=args, in_container=inc):
                 for cmd in self._cmds(args, inc):
                     self._asserts_leaf(cmd)
+
+
+class AuditCallerAttributionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir)
+        self.audit_path = os.path.join(self.tmpdir, "audit.jsonl")
+        self._old_audit = MOD.AUDIT
+        MOD.AUDIT = self.audit_path
+        self.addCleanup(self._restore_audit)
+
+    def _restore_audit(self):
+        MOD.AUDIT = self._old_audit
+        MOD._CALLER_NAME = ""
+
+    def test_audit_record_carries_caller_name(self):
+        MOD.set_caller_name("codex")
+        MOD.audit("ok", "test", {"model": "sonnet", "cwd": "/tmp"}, "analyse")
+        with open(self.audit_path) as fh:
+            rec = json.loads(fh.readline())
+        self.assertEqual(rec["caller"], "codex")
+
+    def test_audit_record_carries_hermes_caller_name(self):
+        MOD.set_caller_name("hermes")
+        MOD.audit("ok", "test", {"model": "sonnet", "cwd": "/tmp"}, "analyse")
+        with open(self.audit_path) as fh:
+            rec = json.loads(fh.readline())
+        self.assertEqual(rec["caller"], "hermes")
+
+    def test_audit_record_defaults_to_unknown_caller(self):
+        MOD._CALLER_NAME = ""
+        MOD.audit("ok", "test", {"model": "sonnet", "cwd": "/tmp"}, "analyse")
+        with open(self.audit_path) as fh:
+            rec = json.loads(fh.readline())
+        self.assertEqual(rec["caller"], "unknown")
+
+    def test_set_caller_name_ignores_non_string(self):
+        MOD.set_caller_name("codex")
+        MOD.set_caller_name(None)
+        MOD.audit("ok", "test", {"model": "sonnet", "cwd": "/tmp"}, "analyse")
+        with open(self.audit_path) as fh:
+            rec = json.loads(fh.readline())
+        self.assertEqual(rec["caller"], "codex")
+
+    def test_handle_initialize_sets_caller_from_client_info(self):
+        MOD._CALLER_NAME = ""
+        captured = []
+        with unittest.mock.patch.object(
+                MOD, "send", lambda msg: captured.append(msg)):
+            MOD.handle({
+                "method": "initialize",
+                "id": 1,
+                "params": {"clientInfo": {"name": "hermes"}},
+            })
+        self.assertEqual(MOD._CALLER_NAME, "hermes")
 
 
 if __name__ == "__main__":

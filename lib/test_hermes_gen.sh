@@ -117,7 +117,43 @@ grep -q '^HERMES_MANAGED_BASE_URL=http://127.0.0.1:11434/v1$' "$M1" \
 $(cat "$M1")"
 grep -q '^HERMES_MANAGED_MODEL=qwen2.5:7b$' "$M1" || _fail "model line missing/wrong in $M1:
 $(cat "$M1")"
-_ok "gen_hermes_managed_into: local provider url without /v1 gets /v1 appended"
+grep -q '^HERMES_MANAGED_CONTEXT_LENGTH=65536$' "$M1" || _fail "local provider must carry the registry-default context length (65536) so hermes budgets against the real ollama window:
+$(cat "$M1")"
+_ok "gen_hermes_managed_into: local provider url without /v1 gets /v1 appended, context length defaults to 65536"
+
+M1B="$TMPBASE/m1b/managed.env"
+mkdir -p "$(dirname "$M1B")"
+(
+  INSTALL_DIR="$INSTALL_DIR"
+  export INSTALL_DIR
+  export HOME="/home/x"
+  export CBOX_HERMES_PROVIDER=local
+  export CBOX_HERMES_MODEL_URL=http://ollama:11434
+  export CBOX_HERMES_MODEL_NAME=qwen3.8:27b-q4_K_M
+  export CBOX_OLLAMA_CONTEXT_LENGTH=131072
+  source "$INSTALL_DIR/_common.sh"
+  source "$INSTALL_DIR/templates/generators.sh"
+  gen_hermes_managed_into "$M1B"
+)
+grep -q '^HERMES_MANAGED_CONTEXT_LENGTH=131072$' "$M1B" || _fail "HERMES_MANAGED_CONTEXT_LENGTH must follow CBOX_OLLAMA_CONTEXT_LENGTH, the single source both sides read:
+$(cat "$M1B")"
+_ok "gen_hermes_managed_into: context length follows CBOX_OLLAMA_CONTEXT_LENGTH"
+
+if (
+  INSTALL_DIR="$INSTALL_DIR"
+  export INSTALL_DIR
+  export HOME="/home/x"
+  export CBOX_HERMES_PROVIDER=local
+  export CBOX_HERMES_MODEL_URL=http://ollama:11434
+  export CBOX_HERMES_MODEL_NAME=qwen3.8:27b-q4_K_M
+  export CBOX_OLLAMA_CONTEXT_LENGTH="65536; rm -rf /"
+  source "$INSTALL_DIR/_common.sh"
+  source "$INSTALL_DIR/templates/generators.sh"
+  gen_hermes_managed_into "$TMPBASE/m1c.env"
+) 2>/dev/null; then
+  _fail "gen_hermes_managed_into accepted a non-numeric CBOX_OLLAMA_CONTEXT_LENGTH into managed.env"
+fi
+_ok "gen_hermes_managed_into: a non-numeric context length is refused before it reaches managed.env"
 
 M2="$TMPBASE/m2/managed.env"
 mkdir -p "$(dirname "$M2")"
@@ -136,7 +172,9 @@ grep -q '^HERMES_MANAGED_PROVIDER=openai$' "$M2" || _fail "hosted provider line 
 $(cat "$M2")"
 ! grep -q '^HERMES_MANAGED_BASE_URL=' "$M2" || _fail "hosted provider must omit base_url line:
 $(cat "$M2")"
-_ok "gen_hermes_managed_into: hosted provider omits base_url"
+! grep -q '^HERMES_MANAGED_CONTEXT_LENGTH=' "$M2" || _fail "hosted provider must omit the context length line (hermes knows hosted models' windows itself):
+$(cat "$M2")"
+_ok "gen_hermes_managed_into: hosted provider omits base_url and context length"
 
 if (
   INSTALL_DIR="$INSTALL_DIR"
@@ -317,6 +355,126 @@ $entry_body"
 _cross_check_validator "url"      _cbox_hermes_validate_url      _hermes_validate_url
 _cross_check_validator "model"    _cbox_hermes_validate_model    _hermes_validate_model
 _cross_check_validator "provider" _cbox_hermes_validate_provider _hermes_validate_provider
+_cross_check_validator "context-length" _cbox_hermes_validate_context_length _hermes_validate_context_length
+
+PROVIDER_CLI_BODY="$(_validator_body "$INSTALL_DIR/entrypoint.sh" _hermes_provider_for_cli)"
+[ -n "$PROVIDER_CLI_BODY" ] || _fail "K4: _hermes_provider_for_cli not found in entrypoint.sh"
+printf '%s\n' "$PROVIDER_CLI_BODY" | grep -q 'local) printf .custom.' \
+  || _fail "K4: _hermes_provider_for_cli must translate the cbox-side 'local' provider to hermes's 'custom' provider alias"
+printf '%s\n' "$PROVIDER_CLI_BODY" | grep -q 'openai) printf .openai-api.' \
+  || _fail "_hermes_provider_for_cli must translate the cbox-side 'openai' provider to hermes's 'openai-api' id - hermes has no bare 'openai' provider and its alias table routes bare 'openai' to openrouter"
+_ok "K4: _hermes_provider_for_cli translates local -> custom and openai -> openai-api"
+
+APPLY_MANAGED_BODY="$(_validator_body "$INSTALL_DIR/entrypoint.sh" _hermes_apply_managed_env)"
+[ -n "$APPLY_MANAGED_BODY" ] || _fail "K4: _hermes_apply_managed_env not found in entrypoint.sh"
+printf '%s\n' "$APPLY_MANAGED_BODY" | grep -q '_hermes_validate_provider "\$val"' \
+  || _fail "K4: _hermes_apply_managed_env must still validate the raw HERMES_MANAGED_PROVIDER value against the cbox-side enum before translating it"
+printf '%s\n' "$APPLY_MANAGED_BODY" | grep -q 'cli_provider="\$(_hermes_provider_for_cli "\$val")"' \
+  || _fail "K4: _hermes_apply_managed_env must translate \$val through _hermes_provider_for_cli before calling the hermes CLI"
+printf '%s\n' "$APPLY_MANAGED_BODY" | grep -q 'hermes config set model.provider "\$cli_provider"' \
+  || _fail "K4: _hermes_apply_managed_env must call 'hermes config set model.provider' with the translated value, not the raw cbox enum"
+_ok "K4: entrypoint.sh translates HERMES_MANAGED_PROVIDER=local to 'hermes config set model.provider custom' while managed.env itself keeps the cbox-facing 'local' enum"
+
+_apply_managed_env_fns() {
+  local file="$1"
+  awk '
+    /^_hermes_validate_url\(\) \{/,/^\}$/ { print; next }
+    /^_hermes_validate_model\(\) \{/,/^\}$/ { print; next }
+    /^_hermes_validate_provider\(\) \{/,/^\}$/ { print; next }
+    /^_hermes_provider_for_cli\(\) \{/,/^\}$/ { print; next }
+    /^_hermes_validate_context_length\(\) \{/,/^\}$/ { print; next }
+    /^_hermes_apply_managed_env\(\) \{/,/^\}$/ { print; next }
+  ' "$file"
+}
+APPLY_MANAGED_FNS="$TMPBASE/apply_managed_fns.sh"
+_apply_managed_env_fns "$INSTALL_DIR/entrypoint.sh" > "$APPLY_MANAGED_FNS"
+[ -s "$APPLY_MANAGED_FNS" ] || _fail "could not extract hermes managed-env functions from entrypoint.sh"
+
+NOURL_ENV="$TMPBASE/managed_nourl.env"
+cat > "$NOURL_ENV" <<'EOF'
+HERMES_MANAGED_PROVIDER=local
+HERMES_MANAGED_MODEL=qwen2.5:7b
+EOF
+NOURL_OUT="$TMPBASE/nourl_calls.txt"
+: > "$NOURL_OUT"
+set +e
+(
+  _as_user() { printf '%s\n' "$*" >> "$NOURL_OUT"; return 0; }
+  HERMES_HOME="$TMPBASE/hermes-home-nourl"
+  source "$APPLY_MANAGED_FNS"
+  _hermes_apply_managed_env "$NOURL_ENV"
+) 2>"$TMPBASE/nourl.stderr"
+rc=$?
+set -e
+[ "$rc" != 0 ] || _fail "K4/finding5: _hermes_apply_managed_env accepted provider=local with no HERMES_MANAGED_BASE_URL"
+grep -q "needs HERMES_MANAGED_BASE_URL" "$TMPBASE/nourl.stderr" \
+  || _fail "K4/finding5: refusal message missing for provider=local with no base url: $(cat "$TMPBASE/nourl.stderr")"
+_ok "finding5: _hermes_apply_managed_env refuses provider=local with HERMES_MANAGED_BASE_URL absent, instead of silently leaving model.provider=custom unbound"
+
+WITHURL_ENV="$TMPBASE/managed_withurl.env"
+cat > "$WITHURL_ENV" <<'EOF'
+HERMES_MANAGED_PROVIDER=local
+HERMES_MANAGED_BASE_URL=http://127.0.0.1:11434/v1
+HERMES_MANAGED_MODEL=qwen2.5:7b
+HERMES_MANAGED_CONTEXT_LENGTH=65536
+EOF
+WITHURL_OUT="$TMPBASE/withurl_calls.txt"
+: > "$WITHURL_OUT"
+(
+  _as_user() { printf '%s\n' "$*" >> "$WITHURL_OUT"; return 0; }
+  HERMES_HOME="$TMPBASE/hermes-home-withurl"
+  source "$APPLY_MANAGED_FNS"
+  _hermes_apply_managed_env "$WITHURL_ENV"
+) || _fail "K4/finding5: _hermes_apply_managed_env refused a well-formed provider=local + base_url managed.env"
+grep -q "model.provider custom" "$WITHURL_OUT" \
+  || _fail "K4/finding5: model.provider was not applied: $(cat "$WITHURL_OUT")"
+grep -q "model.base_url http://127.0.0.1:11434/v1" "$WITHURL_OUT" \
+  || _fail "K4/finding5: model.base_url was not applied: $(cat "$WITHURL_OUT")"
+grep -q "model.context_length 65536" "$WITHURL_OUT" \
+  || _fail "model.context_length was not applied from HERMES_MANAGED_CONTEXT_LENGTH: $(cat "$WITHURL_OUT")"
+_ok "finding5: _hermes_apply_managed_env applies provider=local normally when HERMES_MANAGED_BASE_URL is present, and mirrors the context length"
+
+BADCTX_ENV="$TMPBASE/managed_badctx.env"
+cat > "$BADCTX_ENV" <<'EOF'
+HERMES_MANAGED_PROVIDER=local
+HERMES_MANAGED_BASE_URL=http://127.0.0.1:11434/v1
+HERMES_MANAGED_MODEL=qwen2.5:7b
+HERMES_MANAGED_CONTEXT_LENGTH=0
+EOF
+BADCTX_OUT="$TMPBASE/badctx_calls.txt"
+: > "$BADCTX_OUT"
+set +e
+(
+  _as_user() { printf '%s\n' "$*" >> "$BADCTX_OUT"; return 0; }
+  HERMES_HOME="$TMPBASE/hermes-home-badctx"
+  source "$APPLY_MANAGED_FNS"
+  _hermes_apply_managed_env "$BADCTX_ENV"
+) 2>"$TMPBASE/badctx.stderr"
+rc=$?
+set -e
+[ "$rc" != 0 ] || _fail "_hermes_apply_managed_env accepted HERMES_MANAGED_CONTEXT_LENGTH=0"
+grep -q "invalid HERMES_MANAGED_CONTEXT_LENGTH" "$TMPBASE/badctx.stderr" \
+  || _fail "refusal message missing for a zero context length: $(cat "$TMPBASE/badctx.stderr")"
+! grep -q "model.context_length" "$BADCTX_OUT" || _fail "a zero context length must never reach hermes config set"
+_ok "_hermes_apply_managed_env refuses a zero or non-numeric HERMES_MANAGED_CONTEXT_LENGTH"
+
+OPENAI_ENV="$TMPBASE/managed_openai.env"
+cat > "$OPENAI_ENV" <<'EOF'
+HERMES_MANAGED_PROVIDER=openai
+HERMES_MANAGED_MODEL=gpt-5
+EOF
+OPENAI_OUT="$TMPBASE/openai_calls.txt"
+: > "$OPENAI_OUT"
+(
+  _as_user() { printf '%s\n' "$*" >> "$OPENAI_OUT"; return 0; }
+  HERMES_HOME="$TMPBASE/hermes-home-openai"
+  source "$APPLY_MANAGED_FNS"
+  _hermes_apply_managed_env "$OPENAI_ENV"
+) || _fail "_hermes_apply_managed_env refused a well-formed hosted openai managed.env"
+grep -q "model.provider openai-api" "$OPENAI_OUT" \
+  || _fail "provider openai must reach hermes as openai-api: $(cat "$OPENAI_OUT")"
+! grep -q "model.context_length" "$OPENAI_OUT" || _fail "hosted providers must not get a managed context length"
+_ok "_hermes_apply_managed_env maps openai -> openai-api and leaves hosted context length to hermes"
 
 _render_hermes_mcp_servers() {
   local fake_install="$1" out="$2"
@@ -411,8 +569,8 @@ $(cat "$MCP_OUT_OPTED")"
 grep -q '"local-qwen":' "$MCP_OUT_OPTED" \
   || _fail "gen_hermes_mcp_servers_into: opted-in local-qwen entry missing from render:
 $(cat "$MCP_OUT_OPTED")"
-grep -q 'timeout: 180$' "$MCP_OUT_OPTED" \
-  || _fail "gen_hermes_mcp_servers_into: local-qwen tool_timeout_sec (180) did not carry through as timeout:
+grep -q 'timeout: 3600$' "$MCP_OUT_OPTED" \
+  || _fail "gen_hermes_mcp_servers_into: local-qwen tool_timeout_sec (3600) did not carry through as timeout:
 $(cat "$MCP_OUT_OPTED")"
 _ok "gen_hermes_mcp_servers_into: an entry with hermes added to available_to renders with its command/args/env and timeout"
 
@@ -432,8 +590,8 @@ $(cat "$MCP_OUT_REAL_OPTED")"
 grep -q '"container-exec":' "$MCP_OUT_REAL_OPTED" \
   || _fail "gen_hermes_mcp_servers_into: real delegates.json opted-in render missing container-exec:
 $(cat "$MCP_OUT_REAL_OPTED")"
-grep -q 'timeout: 180$' "$MCP_OUT_REAL_OPTED" \
-  || _fail "gen_hermes_mcp_servers_into: real local-qwen tool_timeout_sec (180) did not carry through as timeout:
+grep -q 'timeout: 3600$' "$MCP_OUT_REAL_OPTED" \
+  || _fail "gen_hermes_mcp_servers_into: real local-qwen tool_timeout_sec (3600) did not carry through as timeout:
 $(cat "$MCP_OUT_REAL_OPTED")"
 grep -q 'timeout: 3600$' "$MCP_OUT_REAL_OPTED" \
   || _fail "gen_hermes_mcp_servers_into: real container-exec tool_timeout_sec (3600) did not carry through as timeout:
@@ -444,7 +602,7 @@ $(cat "$MCP_OUT_REAL_OPTED")"
 _gated_entry_disabled container-exec "$MCP_OUT_REAL_OPTED" \
   && _fail "gen_hermes_mcp_servers_into: container-exec should carry no enabled key once its gate is satisfied:
 $(cat "$MCP_OUT_REAL_OPTED")"
-_ok "gen_hermes_mcp_servers_into: real delegates.json local-qwen and container-exec render enabled for hermes with their timeouts (180, 3600) carried through once their gates are set"
+_ok "gen_hermes_mcp_servers_into: real delegates.json local-qwen and container-exec render enabled for hermes with their timeouts (3600, 3600) carried through once their gates are set"
 
 _apply_mcp_servers_func() {
   awk '
@@ -674,5 +832,46 @@ if (
   _fail "_cbox_context_manifest_verify did not catch a silent edit to entrypoint.sh (hermes channel drift)"
 fi
 _ok "_cbox_context_manifest_verify: a silent entrypoint.sh edit is caught as hermes_entrypoint drift"
+
+STEP_HERMES_FN="$(awk '/^step_hermes\(\) \{/,/^}$/' "$INSTALL_DIR/lib/cbox-setup.sh")"
+[ -n "$STEP_HERMES_FN" ] || _fail "step_hermes not found in lib/cbox-setup.sh"
+
+_run_step_hermes() {
+  (
+    set +u
+    note() { :; }
+    warn() { printf 'warn: %s\n' "$*"; }
+    _answers=("$@")
+    _idx=0
+    ask() { ASK_VALUE="${_answers[$_idx]}"; _idx=$((_idx+1)); }
+    ask_choice() { ASK_VALUE="${_answers[$_idx]}"; _idx=$((_idx+1)); }
+    eval "$STEP_HERMES_FN"
+    CBOX_HERMES=off CBOX_HERMES_VERSION=latest CBOX_HERMES_PROVIDER=local
+    CBOX_HERMES_MODEL_URL="" CBOX_HERMES_MODEL_NAME="" CBOX_LOCAL_MODEL_URL=""
+    step_hermes
+    printf 'RESULT HERMES=%s PROVIDER=%s URL=%s NAME=%s\n' "$CBOX_HERMES" "$CBOX_HERMES_PROVIDER" "$CBOX_HERMES_MODEL_URL" "$CBOX_HERMES_MODEL_NAME"
+  )
+}
+
+NOURL_WIZ="$(_run_step_hermes on latest local "" qwen3.8:27b-q4_K_M)"
+printf '%s\n' "$NOURL_WIZ" | grep -q '^RESULT HERMES=off PROVIDER=local URL= ' \
+  || _fail "step_hermes staged CBOX_HERMES=on with provider=local and an empty url - gen_hermes_managed_into dies on that combination from every engine's regen path, so the wizard must keep hermes off instead:
+$NOURL_WIZ"
+printf '%s\n' "$NOURL_WIZ" | grep -q 'keeping hermes off' \
+  || _fail "step_hermes did not explain why hermes stays off when the local url is empty:
+$NOURL_WIZ"
+_ok "wizard: step_hermes keeps hermes off when provider=local and the endpoint url is left empty (the generator would otherwise refuse and block every engine's regen)"
+
+WITHURL_WIZ="$(_run_step_hermes on latest local http://ollama:11434 qwen3.8:27b-q4_K_M)"
+printf '%s\n' "$WITHURL_WIZ" | grep -q '^RESULT HERMES=on PROVIDER=local URL=http://ollama:11434 NAME=qwen3.8:27b-q4_K_M$' \
+  || _fail "step_hermes must keep hermes on when provider=local carries a url:
+$WITHURL_WIZ"
+_ok "wizard: step_hermes keeps hermes on when provider=local carries an endpoint url"
+
+HOSTED_WIZ="$(_run_step_hermes on latest anthropic claude-x)"
+printf '%s\n' "$HOSTED_WIZ" | grep -q '^RESULT HERMES=on PROVIDER=anthropic URL= NAME=claude-x$' \
+  || _fail "step_hermes must not require a url for a hosted provider:
+$HOSTED_WIZ"
+_ok "wizard: step_hermes does not require a url for hosted providers"
 
 echo "PASS: all hermes_gen checks"
