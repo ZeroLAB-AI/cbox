@@ -697,13 +697,30 @@ _gen_effective() { :; }
   HOME="$TMPBASE/home"
   export HOME
   CBOX_MODE=isolated
-  HAVE_GLOBAL_CONF=0
+  HAVE_GLOBAL_CONF=1
   _cbox_config_in_container() { return 1; }
+  _cbox_config_set_global() { printf 'global\n' > "$TMPBASE/machinescope.routed"; return 0; }
+  _cbox_config_set_isolated() { printf 'isolated\n' > "$TMPBASE/machinescope.routed"; return 0; }
   _cbox_config_set "CBOX_OLLAMA_MODE=on"
-) > "$TMPBASE/machinescope.stdout" 2>"$TMPBASE/machinescope.stderr" && _fail "machine-scope gate: cbox config set should refuse a machine-scoped key from an isolated project"
-grep -qi "machine-scoped" "$TMPBASE/machinescope.stderr" || _fail "machine-scope gate: rejection message does not mention machine-scoped: $(cat "$TMPBASE/machinescope.stderr")"
-grep -q "^CBOX_OLLAMA_MODE='on'" "$MACHINESCOPE/cbox.conf" && _fail "machine-scope gate: CBOX_OLLAMA_MODE=on should never be written into an isolated project's cbox.conf"
-_ok "machine-scope gate: cbox config set refuses CBOX_OLLAMA_MODE from an isolated project and leaves cbox.conf untouched"
+) > "$TMPBASE/machinescope.stdout" 2>"$TMPBASE/machinescope.stderr" || _fail "machine-scope routing: set of a machine-scoped key must succeed from an isolated project: $(cat "$TMPBASE/machinescope.stderr")"
+[ "$(cat "$TMPBASE/machinescope.routed" 2>/dev/null)" = global ] || _fail "machine-scope routing: a machine-scoped key must be written to the machine-level conf, not the per-project one (routed to: $(cat "$TMPBASE/machinescope.routed" 2>/dev/null))"
+grep -q "^CBOX_OLLAMA_MODE='on'" "$MACHINESCOPE/cbox.conf" && _fail "machine-scope routing: CBOX_OLLAMA_MODE must never land in an isolated project's cbox.conf"
+_ok "machine-scope routing: config set writes a machine-scoped key to the machine-level conf even from an isolated project"
+
+(
+  cd "$ROOT"
+  HOME="$TMPBASE/home"
+  export HOME
+  CBOX_MODE=isolated
+  HAVE_GLOBAL_CONF=1
+  _cbox_config_in_container() { return 1; }
+  _cbox_config_set_global() { printf 'global\n' > "$TMPBASE/machinemix.routed"; return 0; }
+  _cbox_config_set_isolated() { printf 'isolated\n' > "$TMPBASE/machinemix.routed"; return 0; }
+  _cbox_config_set "CBOX_OLLAMA_MODE=on" "CBOX_GPU=1"
+) > "$TMPBASE/machinemix.stdout" 2>"$TMPBASE/machinemix.stderr" && _fail "machine-scope routing: a call mixing machine-scoped and project-scoped keys must be refused, not split silently"
+grep -qi "different config files" "$TMPBASE/machinemix.stderr" || _fail "machine-scope routing: the mixed-call refusal should explain that the keys live in different config files: $(cat "$TMPBASE/machinemix.stderr")"
+[ -f "$TMPBASE/machinemix.routed" ] && _fail "machine-scope routing: a refused mixed call must not write anything at all"
+_ok "machine-scope routing: a mixed machine/project call is refused before any write"
 
 _cbox_path_hash() { printf 'machinestriphash'; }
 MACHINESTRIP="$HOME/.config/cbox/projects/machinestriphash"
@@ -721,5 +738,93 @@ _gen_effective() { :; }
 grep -q '^CBOX_OLLAMA_MODE=' "$MACHINESTRIP/cbox.conf" && _fail "machine-scope strip: _cbox_config_set_isolated's whitelist write-loop should never re-write a machine-scoped key into the per-project file"
 grep -qx 'CBOX_GPU=1' "$MACHINESTRIP/cbox.conf" || _fail "machine-scope strip: the actually-requested key (CBOX_GPU) should still be written"
 _ok "machine-scope strip: _cbox_config_set_isolated's whitelist write-loop omits machine-scoped keys even on an unrelated set"
+
+grep -qx "CBOX_CLAUDE_MODE=mount" "$MACHINESTRIP/cbox.conf" \
+  || _fail "conf defaults (production path): _cbox_config_set_isolated must seed registry defaults before writing - the fixture stores CBOX_CLAUDE_MODE='' and it came out as $(grep '^CBOX_CLAUDE_MODE=' "$MACHINESTRIP/cbox.conf")"
+_ok "conf defaults (production path): a real _cbox_config_set_isolated run fills a blank key from its registry default"
+
+
+MACHINEROUTE="$TMPBASE/machineroute"
+mkdir -p "$MACHINEROUTE"
+INSTALL_DIR_SAVE="$INSTALL_DIR"
+INSTALL_DIR="$MACHINEROUTE"
+printf 'CBOX_MODE=isolated\n' > "$INSTALL_DIR/cbox.conf"
+HAVE_GLOBAL_CONF=1
+CBOX_MODE=isolated
+
+_route_probe() {
+  local -n _keys=$1
+  local -n _vals=$2
+  CBOX_CONFIG_KEYS=("${_keys[@]}")
+  CBOX_CONFIG_VALS=("${_vals[@]}")
+  local mode
+  mode="$(_cbox_effective_mode)"
+  if [ "$mode" = isolated ]; then
+    local i key section n_machine=0 n_project=0
+    for i in "${!CBOX_CONFIG_KEYS[@]}"; do
+      key="${CBOX_CONFIG_KEYS[$i]}"
+      if ! section="$(_cbox_config_section_for_var "$key")"; then
+        n_project=$((n_project + 1))
+        continue
+      fi
+      if [ "$(sec_get SEC_SCOPE "$section")" = machine ]; then
+        n_machine=$((n_machine + 1))
+      else
+        n_project=$((n_project + 1))
+      fi
+    done
+    if [ "$n_machine" -gt 0 ] && [ "$n_project" -gt 0 ]; then
+      printf 'mixed'
+      return 0
+    fi
+    if [ "$n_machine" -gt 0 ]; then
+      printf 'global'
+      return 0
+    fi
+  fi
+  printf '%s' "$mode"
+}
+
+_mk=(CBOX_OLLAMA_MODE) _mv=(on)
+[ "$(_route_probe _mk _mv)" = global ] \
+  || _fail "machine-scope routing: a machine-scoped key must route to the global conf even when the effective mode is isolated"
+_ok "machine-scope routing: machine-scoped key routes to the global conf from an isolated scope"
+
+_pk=(CBOX_GPU) _pv=(1)
+[ "$(_route_probe _pk _pv)" = isolated ] \
+  || _fail "machine-scope routing: a project-scoped key must still route to the per-project conf"
+_ok "machine-scope routing: project-scoped key still routes to the per-project conf"
+
+_xk=(CBOX_OLLAMA_MODE CBOX_GPU) _xv=(on 1)
+[ "$(_route_probe _xk _xv)" = mixed ] \
+  || _fail "machine-scope routing: mixing machine-scoped and project-scoped keys in one call must be refused"
+_ok "machine-scope routing: a mixed call is refused rather than split across two files"
+
+INSTALL_DIR="$INSTALL_DIR_SAVE"
+
+
+DEFAULTSFILL="$TMPBASE/defaultsfill"
+mkdir -p "$DEFAULTSFILL"
+printf 'CBOX_MODE=global\nCBOX_OLLAMA_MODE=off\n' > "$DEFAULTSFILL/cbox.conf"
+(
+  set -e
+  unset CBOX_OLLAMA_IMAGE CBOX_OLLAMA_CONTEXT_LENGTH CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE
+  unset CBOX_OLLAMA_KV_CACHE_TYPE CBOX_OLLAMA_FLASH_ATTENTION CBOX_OLLAMA_KEEP_ALIVE
+  CBOX_CONFIG_KEYS=(CBOX_OLLAMA_MODE)
+  CBOX_CONFIG_VALS=(on)
+  . "$DEFAULTSFILL/cbox.conf"
+  _cbox_reg_conf_defaults
+  _cbox_config_apply_staged_vars
+  _cbox_reg_conf_write_whitelist "$DEFAULTSFILL/out.conf" 0 "$DEFAULTSFILL/cbox.conf"
+)
+grep -qx "CBOX_OLLAMA_MODE=on" "$DEFAULTSFILL/out.conf" \
+  || _fail "conf defaults: the requested key must be written (got: $(grep '^CBOX_OLLAMA_MODE=' "$DEFAULTSFILL/out.conf"))"
+grep -qE "^CBOX_OLLAMA_IMAGE=''$" "$DEFAULTSFILL/out.conf" \
+  && _fail "conf defaults: a key absent from the source conf must be written with its registry default, never as an empty string - that silently breaks the very service being enabled"
+grep -qE "^CBOX_OLLAMA_IMAGE=.*ollama/ollama" "$DEFAULTSFILL/out.conf" \
+  || _fail "conf defaults: CBOX_OLLAMA_IMAGE should carry its registry default (got: $(grep '^CBOX_OLLAMA_IMAGE=' "$DEFAULTSFILL/out.conf"))"
+grep -qE "^CBOX_OLLAMA_CONTEXT_LENGTH=('?)65536\1$" "$DEFAULTSFILL/out.conf" \
+  || _fail "conf defaults: CBOX_OLLAMA_CONTEXT_LENGTH should carry its registry default (got: $(grep '^CBOX_OLLAMA_CONTEXT_LENGTH=' "$DEFAULTSFILL/out.conf"))"
+_ok "conf defaults: a sparse conf is filled from registry defaults before the whitelist write, not blanked"
 
 echo "PASS: all cbox config tests"

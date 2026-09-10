@@ -18,3 +18,5 @@ __pycache__/
 sshd_config
 sshd/
 .cbox-conf-manifest
+cbox.conf.bak
+pending.apply

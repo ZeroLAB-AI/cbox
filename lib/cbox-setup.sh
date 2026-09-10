@@ -1787,7 +1787,7 @@ step_hermes_delegate() {
 
 step_ollama() {
   echo "== section: ollama =="
-  note "machine-scoped: this section applies once per machine, never per project - the isolated per-project wizard never asks about it, and 'cbox config set' from inside an isolated project refuses these keys"
+  note "machine-scoped: this section applies once per machine, never per project - the isolated per-project wizard never asks about it, and 'cbox config set' writes these keys to the global config from any scope, since the service they configure is shared by every project"
   note "off by default; ollama runs as its own owner compose project (cbox-infra-u<uid>), outside any generated cbox project, so it survives 'cbox down' and per-project compose teardown"
   local prev_mode="$CBOX_OLLAMA_MODE" prev_image="$CBOX_OLLAMA_IMAGE" prev_gpu="$CBOX_OLLAMA_GPU" \
     prev_store="$CBOX_OLLAMA_STORE" prev_store_path="$CBOX_OLLAMA_STORE_PATH" \
@@ -1870,7 +1870,7 @@ step_ollama() {
 
 step_wireguard() {
   echo "== section: wireguard =="
-  note "machine-scoped: this section applies once per machine, never per project - the isolated per-project wizard never asks about it, and 'cbox config set' from inside an isolated project refuses these keys"
+  note "machine-scoped: this section applies once per machine, never per project - the isolated per-project wizard never asks about it, and 'cbox config set' writes these keys to the global config from any scope, since the service they configure is shared by every project"
   note "off by default; the sidecar joins the same owner project as ollama (cbox-infra-u<uid>) and never routes traffic - it terminates the tunnel and forwards exactly one TCP service in each direction, never IP forwarding, NAT, or a gateway"
   local prev_mode="$CBOX_WG_MODE" prev_impl="$CBOX_WG_IMPL" prev_address="$CBOX_WG_ADDRESS" \
     prev_listen_port="$CBOX_WG_LISTEN_PORT" prev_publish_addr="$CBOX_WG_PUBLISH_ADDR" \
