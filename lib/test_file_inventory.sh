@@ -85,4 +85,17 @@ case "$OUT2" in
 esac
 _ok "enforcement: an inventory entry for a file no longer on disk also fails the check and names the entry"
 
+
+GENERATED_HOOKS="$(grep -oE 'generated/hooks/[A-Za-z0-9_.-]+' "$INSTALL_DIR/templates/generators.sh" | sed 's|generated/hooks/||' | sort -u)"
+INSTALL_LINE="$(grep -h 'staged_install_files .*GEN_DIR/hooks' "$INSTALL_DIR/lib/cbox-setup.sh" | tr '\n' ' ')"
+[ -n "$INSTALL_LINE" ] || _fail "hooks delivery: could not find any staged_install_files call that delivers generated/hooks"
+for f in $GENERATED_HOOKS; do
+  case "$f" in
+    .cbox.XXXXXX|*XXXXXX*) continue ;;
+  esac
+  printf '%s' "$INSTALL_LINE" | grep -qF -- " $f" \
+    || _fail "hooks delivery: generators.sh writes generated/hooks/$f but lib/cbox-setup.sh never installs it into the claude hooks dir - a generated-but-undelivered hook is invisible to every client that resolves it by absolute path (this is exactly how the three MCP delegate scripts went missing)"
+done
+_ok "hooks delivery: every file generators.sh writes into generated/hooks is also installed into the claude hooks dir"
+
 echo "PASS: file inventory enforcement"

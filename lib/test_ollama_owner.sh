@@ -117,6 +117,8 @@ render_compose "$D3" CBOX_OLLAMA_MODE=on CBOX_OLLAMA_IMAGE=ollama/ollama:0.33.3 
 grep -q 'driver: cdi' "$D3/docker-compose.gpu.yml" || _fail "gpu overlay missing cdi driver"
 grep -q 'nvidia.com/gpu=all' "$D3/docker-compose.gpu.yml" || _fail "gpu overlay missing device_ids reservation"
 awk '/^services:/,0' "$D3/docker-compose.gpu.yml" | grep -q '^  ollama:' || _fail "gpu overlay must target the ollama service"
+grep -q 'capabilities:' "$D3/docker-compose.gpu.yml" || _fail "gpu overlay missing 'capabilities' - the compose schema requires it on every device reservation and docker refuses the file without it"
+awk '/capabilities:/{f=1;next} f&&/^ *- /{print;exit}' "$D3/docker-compose.gpu.yml" | grep -q 'gpu' || _fail "gpu overlay capabilities list must contain gpu"
 _ok "gpu=cdi: overlay rendered and targets the ollama service only"
 
 D4="$TMPBASE/shared"

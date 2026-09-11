@@ -147,7 +147,7 @@ sec_get() {
           printf '%s\n' 'Wrap codex-* MCP servers in a shim that translates codex events into MCP progress notifications - codex output shows live in the Claude UI.'
           ;;
         local-model)
-          printf '%s\n' 'Off by default. A text-only MCP delegate (local-qwen) backed by a local OpenAI-compatible endpoint such as ollama - see etc/docs/LOCAL_MODEL_RUNBOOK.md.'
+          printf '%s\n' 'Off by default. A text-only MCP delegate (local-qwen) backed by a local OpenAI-compatible endpoint such as ollama - see etc/docs/LOCAL_MODEL_RUNBOOK.md. Machine-scoped: the endpoint is a fact about this host, not about a project, so it is configured once and every project on the machine reads the same value.'
           ;;
         hermes)
           printf '%s\n' 'Off by default; third console engine (NousResearch Hermes Agent) installed at runtime into the shared bins volume; local OpenAI-compatible endpoint by default.'
@@ -256,7 +256,7 @@ sec_get() {
           printf '%s\n' 'CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME CBOX_LOCAL_MODEL_TIMEOUT_SEC'
           ;;
         hermes)
-          printf '%s\n' 'CBOX_HERMES CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME CBOX_HERMES_HOOKS'
+          printf '%s\n' 'CBOX_HERMES CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_EFFORT CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME CBOX_HERMES_HOOKS'
           ;;
         hermes-delegate)
           printf '%s\n' 'CBOX_HERMES_DELEGATE CBOX_HERMES_DELEGATE_PROVIDER CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL CBOX_HERMES_DELEGATE_MAX_CONCURRENCY CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC CBOX_HERMES_DELEGATE_LOCK_DIR OLLAMA_NUM_PARALLEL CBOX_HERMES_DELEGATE_MODE CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS'
@@ -571,7 +571,7 @@ sec_get() {
           printf '%s\n' 'project'
           ;;
         local-model)
-          printf '%s\n' 'project'
+          printf '%s\n' 'machine'
           ;;
         hermes)
           printf '%s\n' 'project'

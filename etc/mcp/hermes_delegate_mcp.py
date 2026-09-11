@@ -26,6 +26,8 @@ MODEL_VAR = "CBOX_HERMES_DELEGATE_MODEL"
 CONSOLE_PROVIDER_VAR = "CBOX_HERMES_PROVIDER"
 CONSOLE_BASE_URL_VAR = "CBOX_HERMES_MODEL_URL"
 CONSOLE_MODEL_VAR = "CBOX_HERMES_MODEL_NAME"
+MACHINE_BASE_URL_VAR = "CBOX_LOCAL_MODEL_URL"
+MACHINE_MODEL_VAR = "CBOX_LOCAL_MODEL_NAME"
 TIMEOUT_VAR = "CBOX_HERMES_DELEGATE_TIMEOUT_SEC"
 MAX_PROMPT_VAR = "CBOX_HERMES_DELEGATE_MAX_PROMPT_BYTES"
 MAX_RESPONSE_VAR = "CBOX_HERMES_DELEGATE_MAX_RESPONSE_BYTES"
@@ -61,6 +63,8 @@ DEFAULT_DISABLED_TOOLSETS = "terminal,file,web,code_execution,delegation,browser
 MANDATORY_DISABLED_TOOLSETS_ORDER = tuple(DEFAULT_DISABLED_TOOLSETS.split(","))
 MANDATORY_DISABLED_TOOLSETS = frozenset(MANDATORY_DISABLED_TOOLSETS_ORDER)
 CONTEXT_LENGTH_VAR = "CBOX_OLLAMA_CONTEXT_LENGTH"
+EFFORT_VAR = "CBOX_HERMES_EFFORT"
+VALID_EFFORTS = ("none", "low", "medium", "xhigh")
 DEFAULT_CONTEXT_LENGTH = 65536
 DISABLED_TOOLSETS_WRITER = (
     "import json, os, sys, yaml\n"
@@ -114,11 +118,11 @@ def int_env(name, default):
 
 
 def hermes_bin():
-    return os.environ.get(BIN_VAR, DEFAULT_BIN)
+    return os.environ.get(BIN_VAR) or DEFAULT_BIN
 
 
 def template_home():
-    return os.environ.get(TEMPLATE_HOME_VAR, DEFAULT_TEMPLATE_HOME)
+    return os.environ.get(TEMPLATE_HOME_VAR) or DEFAULT_TEMPLATE_HOME
 
 
 def concurrency_limit():
@@ -132,7 +136,7 @@ def concurrency_limit():
 
 def acquire_slot():
     limit = concurrency_limit()
-    d = os.environ.get(LOCK_DIR_VAR, DEFAULT_LOCK_DIR)
+    d = os.environ.get(LOCK_DIR_VAR) or DEFAULT_LOCK_DIR
     try:
         os.makedirs(d, exist_ok=True)
     except OSError as e:
@@ -173,9 +177,8 @@ def release_slot(fd):
 
 
 def audit_path():
-    return os.environ.get(
-        AUDIT_VAR,
-        os.path.expanduser("~/.claude/hermes_delegate_audit.container.jsonl"))
+    return (os.environ.get(AUDIT_VAR)
+            or os.path.expanduser("~/.claude/hermes_delegate_audit.container.jsonl"))
 
 
 def send(msg):
@@ -274,6 +277,16 @@ def build_tool():
                     "type": "string",
                     "description": "Optional system message, prepended to "
                                     "the prompt."},
+                "effort": {
+                    "type": "string",
+                    "enum": list(VALID_EFFORTS),
+                    "description": "Optional reasoning effort for this one call,"
+                                   " overriding the container default. 'none'"
+                                   " turns thinking off. Deeper levels cost"
+                                   " roughly three times the wall-clock for the"
+                                   " same task on a local model and tend to"
+                                   " shorten the final answer, so raise it only"
+                                   " when the task genuinely needs deliberation."},
             },
             "required": ["prompt"],
         },
@@ -345,6 +358,15 @@ def _provider_for_cli(val):
 
 def _venv_python():
     return os.path.join(os.path.dirname(hermes_bin()), "python")
+
+
+def _effort_setting(override=None):
+    val = (override or os.environ.get(EFFORT_VAR) or "").strip()
+    if not val:
+        return None
+    if val not in VALID_EFFORTS:
+        return False
+    return val
 
 
 def _context_length_setting():
@@ -527,13 +549,24 @@ def _kill_group(proc):
         pass
 
 
-def _apply_config(ephemeral_home, env_base):
+def _openai_base_url(url):
+    if not url:
+        return url
+    trimmed = url.rstrip("/")
+    if trimmed.endswith("/v1"):
+        return trimmed
+    return trimmed + "/v1"
+
+
+def _apply_config(ephemeral_home, env_base, effort_override=None):
     provider = (os.environ.get(PROVIDER_VAR, "").strip()
                 or os.environ.get(CONSOLE_PROVIDER_VAR, "").strip())
     base_url = (os.environ.get(BASE_URL_VAR, "").strip()
-                or os.environ.get(CONSOLE_BASE_URL_VAR, "").strip())
+                or os.environ.get(CONSOLE_BASE_URL_VAR, "").strip()
+                or os.environ.get(MACHINE_BASE_URL_VAR, "").strip())
     model = (os.environ.get(MODEL_VAR, "").strip()
-             or os.environ.get(CONSOLE_MODEL_VAR, "").strip())
+             or os.environ.get(CONSOLE_MODEL_VAR, "").strip()
+             or os.environ.get(MACHINE_MODEL_VAR, "").strip())
 
     if not provider:
         return ("refusing to delegate: neither " + PROVIDER_VAR + " nor " + CONSOLE_PROVIDER_VAR
@@ -559,11 +592,18 @@ def _apply_config(ephemeral_home, env_base):
     if provider:
         settings.append(("model.provider", _provider_for_cli(provider)))
     if base_url:
-        settings.append(("model.base_url", base_url))
+        settings.append(("model.base_url", _openai_base_url(base_url)))
     if model:
         settings.append(("model.default", model))
     if provider == "local":
         settings.append(("model.context_length", _context_length_setting()))
+    effort = _effort_setting(effort_override)
+    if effort is False:
+        return ("invalid reasoning effort - expected one of %r (a Qwen3.x chat"
+                " template raises on anything else and the endpoint answers HTTP 500)"
+                % (VALID_EFFORTS,))
+    if effort:
+        settings.append(("agent.reasoning_effort", effort))
 
     disabled_toolsets = None
     if delegate_mode() == MODE_QA:
@@ -667,7 +707,7 @@ def _proxy_env():
     return out
 
 
-def spawn_hermes(prompt, system):
+def spawn_hermes(prompt, system, effort=None):
     ephemeral_home = None
     proc = None
     slot_fd, queue_err = acquire_slot()
@@ -688,7 +728,7 @@ def spawn_hermes(prompt, system):
         }
         env_base.update(_proxy_env())
 
-        cfg_err = _apply_config(ephemeral_home, env_base)
+        cfg_err = _apply_config(ephemeral_home, env_base, effort)
         if cfg_err:
             return None, cfg_err
 
@@ -790,6 +830,18 @@ def run_hermes_delegate(args):
     if system is not None and not isinstance(system, str):
         return tool_text(
             "hermes-delegate refused: system must be a string", True)
+    effort = args.get("effort")
+    if effort is not None:
+        if not isinstance(effort, str):
+            return tool_text(
+                "hermes-delegate refused: effort must be a string", True)
+        effort = effort.strip()
+        if effort and effort not in VALID_EFFORTS:
+            return tool_text(
+                "hermes-delegate refused: effort must be one of %r - a Qwen3.x"
+                " chat template raises on anything else and the endpoint then"
+                " answers HTTP 500 rather than a config error"
+                % (VALID_EFFORTS,), True)
 
     max_prompt = int_env(MAX_PROMPT_VAR, DEFAULT_MAX_PROMPT_BYTES)
     prompt_bytes = len(prompt.encode("utf-8", "replace"))
@@ -801,7 +853,7 @@ def run_hermes_delegate(args):
             "bytes)" % (prompt_bytes + system_bytes, max_prompt), True)
 
     start = time.monotonic()
-    text, err = spawn_hermes(prompt, system)
+    text, err = spawn_hermes(prompt, system, effort)
     duration = time.monotonic() - start
 
     if err is not None:

@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -1060,6 +1061,79 @@ class ConcurrencySlotTests(unittest.TestCase):
         self.assertEqual(len(spans), 2)
         spans.sort()
         self.assertGreaterEqual(spans[1][0], spans[0][1] - 0.05)
+
+
+class EmptyEnvDefaultsTests(unittest.TestCase):
+    """A rendered MCP entry supplies every declared env key, so an unset cbox var
+    arrives as an EMPTY STRING rather than as a missing key. os.environ.get(k, d)
+    returns "" in that case, not d - which is how the lock dir became "" and made
+    every delegate call die on makedirs("")."""
+
+    EMPTY_VARS = (
+        MOD.BIN_VAR,
+        MOD.TEMPLATE_HOME_VAR,
+        MOD.LOCK_DIR_VAR,
+        MOD.AUDIT_VAR,
+    )
+
+    def test_empty_env_values_fall_back_to_defaults(self):
+        env = {v: "" for v in self.EMPTY_VARS}
+        with mock.patch.dict(os.environ, env, clear=False):
+            self.assertEqual(MOD.hermes_bin(), MOD.DEFAULT_BIN)
+            self.assertEqual(MOD.template_home(), MOD.DEFAULT_TEMPLATE_HOME)
+            self.assertTrue(MOD.audit_path(),
+                            "audit path must never resolve to an empty string")
+            self.assertNotEqual(MOD.audit_path(), "")
+
+    def test_empty_lock_dir_still_acquires_a_slot(self):
+        with mock.patch.dict(os.environ, {MOD.LOCK_DIR_VAR: ""}, clear=False):
+            handle, err = MOD.acquire_slot()
+            self.assertIsNone(
+                err,
+                "an empty lock dir must fall back to the default, not fail: %r" % (err,))
+            self.assertIsNotNone(handle)
+            MOD.release_slot(handle)
+
+
+class PerCallEffortTests(unittest.TestCase):
+    """The container default is a floor for convenience, not a cage: the caller
+    picks the effort per task, the same way the codex tiers take model/effort
+    per call. The accepted set stays narrow because a Qwen3.x chat template
+    raises on anything outside it and that surfaces as HTTP 500, not as a
+    config error."""
+
+    def test_schema_offers_the_narrow_enum(self):
+        tool = MOD.build_tool()
+        props = tool["inputSchema"]["properties"]
+        self.assertIn("effort", props)
+        self.assertEqual(list(props["effort"]["enum"]), list(MOD.VALID_EFFORTS))
+        self.assertNotIn("effort", tool["inputSchema"]["required"])
+
+    def test_override_beats_the_container_default(self):
+        with mock.patch.dict(os.environ, {MOD.EFFORT_VAR: "xhigh"}, clear=False):
+            self.assertEqual(MOD._effort_setting(), "xhigh")
+            self.assertEqual(MOD._effort_setting("low"), "low")
+
+    def test_no_override_falls_back_to_the_container_default(self):
+        with mock.patch.dict(os.environ, {MOD.EFFORT_VAR: "medium"}, clear=False):
+            self.assertEqual(MOD._effort_setting(None), "medium")
+
+    def test_unset_everywhere_leaves_it_to_the_model(self):
+        with mock.patch.dict(os.environ, {MOD.EFFORT_VAR: ""}, clear=False):
+            self.assertIsNone(MOD._effort_setting())
+            self.assertIsNone(MOD._effort_setting(""))
+
+    def test_value_outside_the_enum_is_refused(self):
+        for bad in ("high", "max", "ultra", "minimal", "banana"):
+            self.assertIs(MOD._effort_setting(bad), False,
+                          "%r must be refused: the chat template raises on it" % bad)
+
+    def test_caller_supplied_bad_effort_is_refused_before_spawning(self):
+        with mock.patch.object(MOD, "spawn_hermes") as spawned:
+            out = MOD.run_hermes_delegate({"prompt": "hi", "effort": "max"})
+        spawned.assert_not_called()
+        body = json.dumps(out)
+        self.assertIn("effort must be one of", body)
 
 
 if __name__ == "__main__":

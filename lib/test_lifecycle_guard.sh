@@ -94,4 +94,18 @@ awk '/^down\(\) \{/,/^}$/' "$v_down_project" | grep -q 'flock -n -x 9' \
   || _fail "global down() does not attempt the exclusive session lock"
 _ok "global down() wires the exclusive flock, matching down_project's guard"
 
+
+DISPATCH="$(awk '/^  restart\)/,/^    ;;/' "$INSTALL_DIR/cbox")"
+[ -n "$DISPATCH" ] || _fail "restart verb: no dispatch block found in the cbox verb table"
+printf '%s' "$DISPATCH" | grep -q 'isolated) restart_isolated' \
+  || _fail "restart verb: isolated mode must route to restart_isolated - routing it to the global restart() prepares the GLOBAL image while the project compose file wants its own, so docker falls back to pulling a non-existent image"
+printf '%s' "$DISPATCH" | grep -q 'global) restart' \
+  || _fail "restart verb: global mode must still route to the global restart()"
+_ok "restart verb: dispatches by effective mode, like down/shell/logs"
+
+grep -q '^restart_isolated() {' "$INSTALL_DIR/cbox" || _fail "restart_isolated function not found"
+awk '/^restart_isolated\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q 'down_project' \
+  || _fail "restart_isolated must stop the project container via down_project"
+_ok "restart_isolated stops the project container rather than touching the global one"
+
 echo "PASS: all lifecycle guard checks"

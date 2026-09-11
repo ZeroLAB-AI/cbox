@@ -108,6 +108,9 @@ assert spec['env'] == {
     'CBOX_HERMES_DELEGATE_LOCK_DIR': '/tmp/hermes-locks',
     'OLLAMA_NUM_PARALLEL': '4',
     'CBOX_OLLAMA_CONTEXT_LENGTH': '65536',
+    'CBOX_HERMES_EFFORT': '',
+    'CBOX_LOCAL_MODEL_URL': '',
+    'CBOX_LOCAL_MODEL_NAME': '',
     'CBOX_DELEGATION_DEPTH': '',
     'CBOX_MCP_DEPTH': '',
 }, spec

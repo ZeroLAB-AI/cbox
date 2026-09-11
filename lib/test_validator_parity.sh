@@ -535,6 +535,14 @@ _new_case CBOX_CODEX_MODEL "bad model" reject
 _new_case CBOX_CODEX_MODEL "bad;rm -rf /" reject
 _new_case CBOX_CODEX_MODEL '$(evil)' reject
 
+_new_case CBOX_HERMES_EFFORT "" accept
+_new_case CBOX_HERMES_EFFORT none accept
+_new_case CBOX_HERMES_EFFORT low accept
+_new_case CBOX_HERMES_EFFORT medium accept
+_new_case CBOX_HERMES_EFFORT xhigh accept
+_new_case CBOX_HERMES_EFFORT high reject
+_new_case CBOX_HERMES_EFFORT max reject
+_new_case CBOX_HERMES_EFFORT ultra reject
 _new_case CBOX_CODEX_EFFORT max accept
 _new_case CBOX_CODEX_EFFORT ultra accept
 _new_case CBOX_CODEX_EFFORT minimal reject

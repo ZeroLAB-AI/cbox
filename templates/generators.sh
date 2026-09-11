@@ -1348,6 +1348,8 @@ EOF
             - driver: cdi
               device_ids:
                 - nvidia.com/gpu=all
+              capabilities:
+                - gpu
 EOF
   fi
   cat >> "$tmp" <<EOF
@@ -1740,6 +1742,8 @@ services:
             - driver: cdi
               device_ids:
                 - nvidia.com/gpu=all
+              capabilities:
+                - gpu
 EOF
 }
 
@@ -2117,6 +2121,13 @@ _cbox_hermes_validate_provider() {
   esac
 }
 
+_cbox_hermes_validate_effort() {
+  case "$1" in
+    none|low|medium|xhigh) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 _cbox_hermes_validate_context_length() {
   case "$1" in
     ''|*[!0-9]*|0*) return 1 ;;
@@ -2128,6 +2139,10 @@ _cbox_hermes_validate_compose_env() {
   local provider="${CBOX_HERMES_PROVIDER:-local}"
   local url="${CBOX_HERMES_MODEL_URL:-}"
   local model="${CBOX_HERMES_MODEL_NAME:-}"
+  if [ "$provider" = local ]; then
+    [ -n "$url" ] || url="${CBOX_LOCAL_MODEL_URL:-}"
+    [ -n "$model" ] || model="${CBOX_LOCAL_MODEL_NAME:-}"
+  fi
   local version="${CBOX_HERMES_VERSION:-latest}"
   _cbox_validate_hermes_version "$version"
   _cbox_hermes_validate_provider "$provider" \
@@ -2141,10 +2156,14 @@ gen_hermes_managed_into() {
   local provider="${CBOX_HERMES_PROVIDER:-local}"
   local url="${CBOX_HERMES_MODEL_URL:-}"
   local model="${CBOX_HERMES_MODEL_NAME:-}"
+  if [ "$provider" = local ]; then
+    [ -n "$url" ] || url="${CBOX_LOCAL_MODEL_URL:-}"
+    [ -n "$model" ] || model="${CBOX_LOCAL_MODEL_NAME:-}"
+  fi
   _cbox_hermes_validate_provider "$provider" \
     || die "invalid CBOX_HERMES_PROVIDER '$provider' (expected local, nous, openrouter, openai, or anthropic)"
   if [ "$provider" = local ] && [ -z "$url" ]; then
-    die "CBOX_HERMES_PROVIDER=local needs CBOX_HERMES_MODEL_URL set, otherwise the endpoint would come from the template home that the hermes package seeds for itself"
+    die "CBOX_HERMES_PROVIDER=local needs an endpoint: set CBOX_HERMES_MODEL_URL for this project, or CBOX_LOCAL_MODEL_URL once for the machine and every project inherits it - otherwise the endpoint would come from the template home that the hermes package seeds for itself"
   fi
   if [ "$provider" = local ] && [ -n "$url" ]; then
     _cbox_hermes_validate_url "$url" || die "invalid CBOX_HERMES_MODEL_URL '$url'"
@@ -2155,6 +2174,11 @@ gen_hermes_managed_into() {
   fi
   if [ -n "$model" ]; then
     _cbox_hermes_validate_model "$model" || die "invalid CBOX_HERMES_MODEL_NAME '$model'"
+  fi
+  local effort="${CBOX_HERMES_EFFORT:-}"
+  if [ -n "$effort" ]; then
+    _cbox_hermes_validate_effort "$effort" \
+      || die "invalid CBOX_HERMES_EFFORT '$effort' (expected none, low, medium, or xhigh - a Qwen3.x chat template raises on anything else and the endpoint answers HTTP 500)"
   fi
   local context_length="${CBOX_OLLAMA_CONTEXT_LENGTH:-65536}"
   if [ "$provider" = local ]; then
@@ -2171,6 +2195,9 @@ gen_hermes_managed_into() {
     fi
     if [ "$provider" = local ]; then
       printf 'HERMES_MANAGED_CONTEXT_LENGTH=%s\n' "$context_length"
+    fi
+    if [ -n "$effort" ]; then
+      printf 'HERMES_MANAGED_EFFORT=%s\n' "$effort"
     fi
   } | _cbox_write "$target"
 }
@@ -3194,6 +3221,8 @@ services:
             - driver: cdi
               device_ids:
                 - nvidia.com/gpu=all
+              capabilities:
+                - gpu
 EOF
 }
 

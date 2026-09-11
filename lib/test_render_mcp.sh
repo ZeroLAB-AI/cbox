@@ -453,7 +453,7 @@ assert sorted(data.keys()) == ["codex-sol", "fixture-tool"], data.keys()
 
 test_local_qwen_absent_when_url_unset() {
   local rendered="$TMPBASE/local_qwen_absent.json"
-  env -u CBOX_LOCAL_MODEL_URL -u CBOX_LOCAL_MODEL_NAME \
+  env -u CBOX_LOCAL_MODEL -u CBOX_LOCAL_MODEL_URL -u CBOX_LOCAL_MODEL_NAME \
     python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
     "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$rendered"
   python3 -c '
@@ -468,20 +468,20 @@ assert "local-qwen" not in data, data.keys()
 
 test_local_qwen_explicit_selection_unconfigured_fails_loud() {
   local err="$TMPBASE/local_qwen_explicit.err"
-  if env -u CBOX_LOCAL_MODEL_URL -u CBOX_LOCAL_MODEL_NAME \
+  if env -u CBOX_LOCAL_MODEL -u CBOX_LOCAL_MODEL_URL -u CBOX_LOCAL_MODEL_NAME \
     python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
     "$INSTALL_DIR/etc/mcp/delegates.json" local-qwen "/home/x/.claude/hooks" off claude \
     >/dev/null 2>"$err"; then
     _fail "render_mcp.py accepted an explicit local-qwen selection with CBOX_LOCAL_MODEL_URL and CBOX_LOCAL_MODEL_NAME unset"
   fi
-  grep -q "explicitly selected but CBOX_LOCAL_MODEL_URL, CBOX_LOCAL_MODEL_NAME is not set" "$err" \
+  grep -q "explicitly selected but CBOX_LOCAL_MODEL, CBOX_LOCAL_MODEL_URL, CBOX_LOCAL_MODEL_NAME is not set" "$err" \
     || _fail "render_mcp.py refusal message missing both unmet compound-gate vars for unconfigured explicit local-qwen selection"
   echo "PASS: render_mcp.py refuses an explicit unconfigured local-qwen selection loudly, naming both unmet compound-gate vars"
 }
 
 test_local_qwen_present_and_env_substituted_when_configured() {
   local rendered="$TMPBASE/local_qwen_present.json"
-  CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="qwen2.5:7b" \
+  CBOX_LOCAL_MODEL=on CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="qwen2.5:7b" \
     python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
     "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$rendered"
   python3 -c '
@@ -504,7 +504,7 @@ assert spec["env"] == {
 
 test_local_qwen_available_to_codex_when_configured() {
   local rendered="$TMPBASE/local_qwen_codex.json"
-  CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="qwen2.5:7b" \
+  CBOX_LOCAL_MODEL=on CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="qwen2.5:7b" \
     python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
     "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off codex > "$rendered"
   python3 -c '
@@ -519,7 +519,7 @@ assert sorted(data.keys()) == ["ask-claude", "local-qwen"], data.keys()
 
 test_local_qwen_invisible_to_boot_gate_when_configured() {
   local rendered="$TMPBASE/local_qwen_gate.json"
-  CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="qwen2.5:7b" \
+  CBOX_LOCAL_MODEL=on CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="qwen2.5:7b" \
     python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
     "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$rendered"
   local hosthome="$TMPBASE/hosthome_local_qwen"
@@ -539,7 +539,7 @@ test_local_qwen_invisible_to_boot_gate_when_configured() {
 
 test_local_qwen_compound_gate_url_set_name_empty_not_rendered() {
   local rendered="$TMPBASE/local_qwen_url_only_claude.json"
-  CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="" \
+  CBOX_LOCAL_MODEL=on CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="" \
     python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
     "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$rendered"
   python3 -c '
@@ -551,7 +551,7 @@ assert "local-qwen" not in data, data.keys()
 ' "$rendered"
 
   local rendered_codex="$TMPBASE/local_qwen_url_only_codex.json"
-  CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="" \
+  CBOX_LOCAL_MODEL=on CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="" \
     python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
     "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off codex > "$rendered_codex"
   python3 -c '
@@ -563,7 +563,7 @@ assert "local-qwen" not in data, data.keys()
 ' "$rendered_codex"
 
   local rendered_hermes="$TMPBASE/local_qwen_url_only_hermes.json"
-  CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="" \
+  CBOX_LOCAL_MODEL=on CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="" \
     python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
     "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off hermes > "$rendered_hermes"
   python3 -c '
@@ -578,7 +578,7 @@ assert data["local-qwen"]["enabled"] is False, data["local-qwen"]
 
 test_local_qwen_compound_gate_explicit_selection_url_only_fails_loud() {
   local err="$TMPBASE/local_qwen_url_only_explicit.err"
-  if CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="" \
+  if CBOX_LOCAL_MODEL=on CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="" \
     python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
     "$INSTALL_DIR/etc/mcp/delegates.json" local-qwen "/home/x/.claude/hooks" off claude \
     >/dev/null 2>"$err"; then
@@ -591,7 +591,7 @@ test_local_qwen_compound_gate_explicit_selection_url_only_fails_loud() {
 
 test_local_qwen_compound_gate_both_set_renders() {
   local rendered="$TMPBASE/local_qwen_both_set.json"
-  CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="qwen2.5:7b" \
+  CBOX_LOCAL_MODEL=on CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="qwen2.5:7b" \
     python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
     "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$rendered"
   python3 -c '
@@ -607,7 +607,7 @@ assert "local-qwen" in data, data.keys()
 test_local_qwen_tool_timeout_derived_from_env_default() {
   local rendered="$TMPBASE/local_qwen_timeout_default.json"
   env -u CBOX_LOCAL_MODEL_TIMEOUT_SEC \
-    CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="qwen2.5:7b" \
+    CBOX_LOCAL_MODEL=on CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="qwen2.5:7b" \
     python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
     "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$rendered"
   python3 -c '
@@ -622,7 +622,7 @@ assert data["local-qwen"]["tool_timeout_sec"] == 3600, data["local-qwen"]
 
 test_local_qwen_tool_timeout_derived_from_env_raised() {
   local rendered="$TMPBASE/local_qwen_timeout_raised.json"
-  CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="qwen2.5:7b" \
+  CBOX_LOCAL_MODEL=on CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="qwen2.5:7b" \
     CBOX_LOCAL_MODEL_TIMEOUT_SEC="7200" \
     python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
     "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$rendered"
@@ -634,7 +634,7 @@ data = json.load(open(sys.argv[1]))
 assert data["local-qwen"]["tool_timeout_sec"] == 7260, data["local-qwen"]
 ' "$rendered"
   local rendered_hermes="$TMPBASE/local_qwen_timeout_raised_hermes.json"
-  CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="qwen2.5:7b" \
+  CBOX_LOCAL_MODEL=on CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500" CBOX_LOCAL_MODEL_NAME="qwen2.5:7b" \
     CBOX_LOCAL_MODEL_TIMEOUT_SEC="7200" \
     python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
     "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off hermes > "$rendered_hermes"
@@ -689,7 +689,7 @@ if isinstance(d_gate, str):
 c_gate = caps["local-qwen"]["enabled_when_env"]
 assert sorted(d_gate) == sorted(c_gate), (d_gate, c_gate)
 '
-  echo "PASS: delegates.json local-qwen enabled_when_env agrees with capabilities.json local-qwen enabled_when_env (both require CBOX_LOCAL_MODEL_URL and CBOX_LOCAL_MODEL_NAME)"
+  echo "PASS: delegates.json local-qwen enabled_when_env agrees with capabilities.json local-qwen enabled_when_env (both require CBOX_LOCAL_MODEL, CBOX_LOCAL_MODEL_URL and CBOX_LOCAL_MODEL_NAME - the on/off switch is part of the gate so a project can actually opt out now that the section is machine-scoped)"
 }
 
 test_enabled_when_env_gates_are_exported_everywhere() {

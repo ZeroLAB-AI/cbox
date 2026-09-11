@@ -450,6 +450,13 @@ _hermes_provider_for_cli() {
   esac
 }
 
+_hermes_validate_effort() {
+  case "$1" in
+    none|low|medium|xhigh) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 _hermes_validate_context_length() {
   case "$1" in
     ''|*[!0-9]*|0*) return 1 ;;
@@ -485,6 +492,11 @@ _hermes_apply_managed_env() {
         || { echo "entrypoint: hermes-managed.env has an invalid HERMES_MANAGED_CONTEXT_LENGTH '$val' - refusing to apply" >&2; return 1; }
       _as_user env HERMES_HOME="$HERMES_HOME" /opt/hermes/bin/hermes config set model.context_length "$val" \
         || { echo "entrypoint: 'hermes config set model.context_length $val' failed" >&2; return 1; }
+    elif [ "$key" = HERMES_MANAGED_EFFORT ]; then
+      _hermes_validate_effort "$val" \
+        || { echo "entrypoint: hermes-managed.env has an invalid HERMES_MANAGED_EFFORT '$val' - refusing to apply" >&2; return 1; }
+      _as_user env HERMES_HOME="$HERMES_HOME" /opt/hermes/bin/hermes config set agent.reasoning_effort "$val" \
+        || { echo "entrypoint: 'hermes config set agent.reasoning_effort $val' failed" >&2; return 1; }
     fi
   done < "$envfile"
   if [ "$saw_provider_local" = 1 ] && [ "$saw_base_url" != 1 ]; then

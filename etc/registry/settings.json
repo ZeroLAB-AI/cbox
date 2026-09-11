@@ -138,10 +138,10 @@
     {
       "id": "local-model",
       "title": "Local model",
-      "description": "Off by default. A text-only MCP delegate (local-qwen) backed by a local OpenAI-compatible endpoint such as ollama - see etc/docs/LOCAL_MODEL_RUNBOOK.md.",
+      "description": "Off by default. A text-only MCP delegate (local-qwen) backed by a local OpenAI-compatible endpoint such as ollama - see etc/docs/LOCAL_MODEL_RUNBOOK.md. Machine-scoped: the endpoint is a fact about this host, not about a project, so it is configured once and every project on the machine reads the same value.",
       "apply_class": "restart",
       "profile": "skip",
-      "scope": "project",
+      "scope": "machine",
       "dependencies": [],
       "doctor_rows": null
     },
@@ -1154,6 +1154,26 @@
       "export": true,
       "prompt": "setup: hermes model provider",
       "help": "Hermes model provider: local, nous, openrouter, openai, or anthropic.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HERMES_EFFORT",
+      "section": "hermes",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "",
+          "none",
+          "low",
+          "medium",
+          "xhigh"
+        ]
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: hermes reasoning effort",
+      "help": "Reasoning effort applied to hermes as agent.reasoning_effort, for the console engine and for the hermes-local delegate. Empty leaves the decision to the model's own default; 'none' turns thinking off entirely. The accepted set is deliberately narrower than hermes itself accepts (hermes also knows minimal, high, max and ultra): a Qwen3.x chat template raises on anything outside low/medium/xhigh, which surfaces as an HTTP 500 from the endpoint rather than as a config error, so those values are not offered here. Measured on a local 27B model, the deepest level costs about three times the wall-clock of no thinking for the same task and yields a shorter final answer, so medium or none is usually the better trade.",
       "validator": null
     },
     {

@@ -1721,6 +1721,9 @@ step_hermes() {
     fi
     ask "setup: hermes model name" "$CBOX_HERMES_MODEL_NAME"
     CBOX_HERMES_MODEL_NAME="$ASK_VALUE"
+    note "reasoning effort: empty leaves it to the model; none turns thinking off. On a local 27B model the deepest level costs about three times the wall-clock for the same task and shortens the final answer. Only low, medium and xhigh are offered because a Qwen3.x chat template raises on anything else and the endpoint then answers HTTP 500."
+    ask_choice "setup: hermes reasoning effort" "$CBOX_HERMES_EFFORT" "" none low medium xhigh
+    CBOX_HERMES_EFFORT="$ASK_VALUE"
     if [ "$CBOX_HERMES_PROVIDER" = local ] && [ -z "$CBOX_HERMES_MODEL_URL" ]; then
       warn "hermes local endpoint url left empty - keeping hermes off (CBOX_HERMES=off) until CBOX_HERMES_MODEL_URL is set; the managed.env generator refuses provider=local without a url and that refusal would block every engine's regen, not just hermes"
       CBOX_HERMES=off
@@ -1730,6 +1733,7 @@ step_hermes() {
     CBOX_HERMES_PROVIDER="${CBOX_HERMES_PROVIDER:-local}"
     CBOX_HERMES_MODEL_URL=""
     CBOX_HERMES_MODEL_NAME=""
+    CBOX_HERMES_EFFORT=""
   fi
   export CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME
   if [ "$CBOX_HERMES" = "$prev_on" ] && [ "$CBOX_HERMES_VERSION" = "$prev_ver" ] \
@@ -2724,7 +2728,7 @@ step_hooks() {
   fi
   gen_hooks_dir
   if [ "$CBOX_CLAUDE_MODE" = mount ]; then
-    staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py rm_glob_guard.py rm_permission_gate.py spawn_gate.py codex_guard_bridge.py hermes_guard_bridge.py orchestrator-global.txt conduct-kernel.txt session-core.txt codex_scope.container.json ask_claude_mcp.py ask_claude_fallback_models.json codex_notify.py codex_bump_probe.sh codex_mcp_shim.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py continuity_session_start.py session_scope_farm.py limit_watchdog.py session_pane_map.py || true
+    staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py rm_glob_guard.py rm_permission_gate.py spawn_gate.py codex_guard_bridge.py hermes_guard_bridge.py orchestrator-global.txt conduct-kernel.txt session-core.txt codex_scope.container.json ask_claude_mcp.py ask_claude_fallback_models.json codex_notify.py codex_bump_probe.sh codex_mcp_shim.py hermes_delegate_mcp.py local_model_mcp.py container_exec_mcp.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py continuity_session_start.py session_scope_farm.py limit_watchdog.py session_pane_map.py || true
   else
     note "volume mode: hooks are served read-only from $GEN_DIR/hooks (synced)"
   fi

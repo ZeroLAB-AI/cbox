@@ -504,7 +504,7 @@ FI_EMPTY="$TMPBASE/fi_empty"
 _make_fake_install_with_delegates "$FI_EMPTY" "$(cat "$INSTALL_DIR/etc/mcp/delegates.json")"
 MCP_OUT_EMPTY="$FI_EMPTY/generated/hermes/mcp_servers.yaml"
 (
-  unset CBOX_HERMES_DELEGATE CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME CBOX_CONTAINER_EXEC_TOOL
+  unset CBOX_HERMES_DELEGATE CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME CBOX_CONTAINER_EXEC_TOOL
   _render_hermes_mcp_servers "$FI_EMPTY" "$MCP_OUT_EMPTY"
 )
 [ -f "$MCP_OUT_EMPTY" ] || _fail "gen_hermes_mcp_servers_into did not write $MCP_OUT_EMPTY"
@@ -558,9 +558,9 @@ print(json.dumps(data))
 _make_fake_install_with_delegates "$FI_OPTED" "$OPTED_JSON"
 MCP_OUT_OPTED="$FI_OPTED/generated/hermes/mcp_servers.yaml"
 (
-  CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500"
+  CBOX_LOCAL_MODEL=on CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500"
   CBOX_LOCAL_MODEL_NAME="qwen2.5:7b"
-  export CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
+  export CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME
   _render_hermes_mcp_servers "$FI_OPTED" "$MCP_OUT_OPTED"
 )
 grep -q '^mcp_servers:$' "$MCP_OUT_OPTED" \
@@ -578,10 +578,10 @@ FI_REAL_OPTED="$TMPBASE/fi_real_opted"
 _make_fake_install_with_delegates "$FI_REAL_OPTED" "$(cat "$INSTALL_DIR/etc/mcp/delegates.json")"
 MCP_OUT_REAL_OPTED="$FI_REAL_OPTED/generated/hermes/mcp_servers.yaml"
 (
-  CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500"
+  CBOX_LOCAL_MODEL=on CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500"
   CBOX_LOCAL_MODEL_NAME="qwen2.5:7b"
   CBOX_CONTAINER_EXEC_TOOL="on"
-  export CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME CBOX_CONTAINER_EXEC_TOOL
+  export CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME CBOX_CONTAINER_EXEC_TOOL
   _render_hermes_mcp_servers "$FI_REAL_OPTED" "$MCP_OUT_REAL_OPTED"
 )
 grep -q '"local-qwen":' "$MCP_OUT_REAL_OPTED" \

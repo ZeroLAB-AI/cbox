@@ -5,13 +5,31 @@
       "class": "context",
       "enforcement": "advisory",
       "audience": "all",
-      "sources": ["etc/hooks/conduct-kernel.txt", "etc/hooks/session-core.txt", "etc/hooks/continuity_session_start.py"],
+      "sources": [
+        "etc/hooks/conduct-kernel.txt",
+        "etc/hooks/session-core.txt",
+        "etc/hooks/continuity_session_start.py"
+      ],
       "enabled_when_env": null,
-      "planes": ["native", "substrate"],
+      "planes": [
+        "native",
+        "substrate"
+      ],
       "bindings": {
-        "claude": {"mechanism": "claude-md-block+sessionstart-loader", "artifact": "generated/claude-config/CLAUDE.md", "status": "live"},
-        "codex": {"mechanism": "agents-override+sessionstart-loader", "artifact": "generated/codex/AGENTS.override.md", "status": "live"},
-        "hermes": {"mechanism": "ephemeral-system-prompt", "status": "live"}
+        "claude": {
+          "mechanism": "claude-md-block+sessionstart-loader",
+          "artifact": "generated/claude-config/CLAUDE.md",
+          "status": "live"
+        },
+        "codex": {
+          "mechanism": "agents-override+sessionstart-loader",
+          "artifact": "generated/codex/AGENTS.override.md",
+          "status": "live"
+        },
+        "hermes": {
+          "mechanism": "ephemeral-system-prompt",
+          "status": "live"
+        }
       },
       "degrade_floor": "none"
     },
@@ -19,12 +37,23 @@
       "class": "context",
       "enforcement": "advisory",
       "audience": "delegate",
-      "sources": ["etc/mcp/codex_mcp_shim.py"],
+      "sources": [
+        "etc/mcp/codex_mcp_shim.py"
+      ],
       "enabled_when_env": null,
-      "planes": ["mediated"],
+      "planes": [
+        "mediated"
+      ],
       "bindings": {
-        "codex": {"mechanism": "shim-developer-instructions-injection", "artifact": "etc/mcp/codex_mcp_shim.py", "status": "live"},
-        "hermes": {"mechanism": "hermes-delegate-ignore-rules", "status": "declined"}
+        "codex": {
+          "mechanism": "shim-developer-instructions-injection",
+          "artifact": "etc/mcp/codex_mcp_shim.py",
+          "status": "live"
+        },
+        "hermes": {
+          "mechanism": "hermes-delegate-ignore-rules",
+          "status": "declined"
+        }
       },
       "degrade_floor": "none"
     },
@@ -32,12 +61,26 @@
       "class": "guard",
       "enforcement": "hard",
       "audience": "delegate",
-      "sources": ["etc/mcp/codex_mcp_shim.py", "etc/mcp/hermes_delegate_mcp.py"],
+      "sources": [
+        "etc/mcp/codex_mcp_shim.py",
+        "etc/mcp/hermes_delegate_mcp.py"
+      ],
       "enabled_when_env": null,
-      "planes": ["substrate", "mediated"],
+      "planes": [
+        "substrate",
+        "mediated"
+      ],
       "bindings": {
-        "codex": {"mechanism": "delegation-depth-env-pin", "artifact": "etc/mcp/codex_mcp_shim.py", "status": "live"},
-        "hermes": {"mechanism": "delegation-depth-env-pin", "artifact": "etc/mcp/hermes_delegate_mcp.py", "status": "live"}
+        "codex": {
+          "mechanism": "delegation-depth-env-pin",
+          "artifact": "etc/mcp/codex_mcp_shim.py",
+          "status": "live"
+        },
+        "hermes": {
+          "mechanism": "delegation-depth-env-pin",
+          "artifact": "etc/mcp/hermes_delegate_mcp.py",
+          "status": "live"
+        }
       },
       "degrade_floor": "feature-off"
     },
@@ -45,11 +88,19 @@
       "class": "guard",
       "enforcement": "hard",
       "audience": "delegate",
-      "sources": ["etc/mcp/codex_mcp_shim.py"],
+      "sources": [
+        "etc/mcp/codex_mcp_shim.py"
+      ],
       "enabled_when_env": null,
-      "planes": ["mediated"],
+      "planes": [
+        "mediated"
+      ],
       "bindings": {
-        "codex": {"mechanism": "cwd-scope-git-worktree-check", "artifact": "etc/mcp/codex_mcp_shim.py", "status": "live"}
+        "codex": {
+          "mechanism": "cwd-scope-git-worktree-check",
+          "artifact": "etc/mcp/codex_mcp_shim.py",
+          "status": "live"
+        }
       },
       "degrade_floor": "feature-off"
     },
@@ -57,11 +108,19 @@
       "class": "guard",
       "enforcement": "hard",
       "audience": "delegate",
-      "sources": ["etc/mcp/codex_mcp_shim.py"],
+      "sources": [
+        "etc/mcp/codex_mcp_shim.py"
+      ],
       "enabled_when_env": null,
-      "planes": ["mediated"],
+      "planes": [
+        "mediated"
+      ],
       "bindings": {
-        "codex": {"mechanism": "approval-policy-sandbox-pin", "artifact": "etc/mcp/codex_mcp_shim.py", "status": "live"}
+        "codex": {
+          "mechanism": "approval-policy-sandbox-pin",
+          "artifact": "etc/mcp/codex_mcp_shim.py",
+          "status": "live"
+        }
       },
       "degrade_floor": "feature-off"
     },
@@ -69,13 +128,26 @@
       "class": "guard",
       "enforcement": "hard",
       "audience": "all",
-      "sources": ["templates/generators.sh"],
+      "sources": [
+        "templates/generators.sh"
+      ],
       "enabled_when_env": null,
-      "planes": ["substrate"],
+      "planes": [
+        "substrate"
+      ],
       "bindings": {
-        "claude": {"mechanism": "ro-bind-mount-hooks-managed-settings", "status": "live"},
-        "codex": {"mechanism": "ro-bind-mount-hooks-config", "status": "live"},
-        "hermes": {"mechanism": "ro-bind-mount-hooks-config", "status": "live"}
+        "claude": {
+          "mechanism": "ro-bind-mount-hooks-managed-settings",
+          "status": "live"
+        },
+        "codex": {
+          "mechanism": "ro-bind-mount-hooks-config",
+          "status": "live"
+        },
+        "hermes": {
+          "mechanism": "ro-bind-mount-hooks-config",
+          "status": "live"
+        }
       },
       "degrade_floor": "feature-off"
     },
@@ -83,13 +155,26 @@
       "class": "guard",
       "enforcement": "hard",
       "audience": "all",
-      "sources": ["templates/generators.sh"],
+      "sources": [
+        "templates/generators.sh"
+      ],
       "enabled_when_env": null,
-      "planes": ["substrate"],
+      "planes": [
+        "substrate"
+      ],
       "bindings": {
-        "claude": {"mechanism": "egress-proxy-topology", "status": "live"},
-        "codex": {"mechanism": "egress-proxy-topology", "status": "live"},
-        "hermes": {"mechanism": "egress-proxy-topology", "status": "live"}
+        "claude": {
+          "mechanism": "egress-proxy-topology",
+          "status": "live"
+        },
+        "codex": {
+          "mechanism": "egress-proxy-topology",
+          "status": "live"
+        },
+        "hermes": {
+          "mechanism": "egress-proxy-topology",
+          "status": "live"
+        }
       },
       "degrade_floor": "feature-off"
     },
@@ -97,11 +182,20 @@
       "class": "guard",
       "enforcement": "behavioral",
       "audience": "delegate",
-      "sources": ["etc/mcp/codex_mcp_shim.py", "entrypoint.sh"],
+      "sources": [
+        "etc/mcp/codex_mcp_shim.py",
+        "entrypoint.sh"
+      ],
       "enabled_when_env": null,
-      "planes": ["mediated"],
+      "planes": [
+        "mediated"
+      ],
       "bindings": {
-        "codex": {"mechanism": "boot-gate-refuse-unwrapped-server", "artifact": "entrypoint.sh", "status": "live"}
+        "codex": {
+          "mechanism": "boot-gate-refuse-unwrapped-server",
+          "artifact": "entrypoint.sh",
+          "status": "live"
+        }
       },
       "degrade_floor": "block-start"
     },
@@ -109,13 +203,32 @@
       "class": "guard",
       "enforcement": "behavioral",
       "audience": "driver",
-      "sources": ["etc/hooks/commit_guard.py"],
+      "sources": [
+        "etc/hooks/commit_guard.py"
+      ],
       "enabled_when_env": null,
-      "planes": ["native"],
+      "planes": [
+        "native"
+      ],
       "bindings": {
-        "claude": {"mechanism": "pretooluse-hook", "matcher": "Bash", "artifact": "etc/hooks/commit_guard.py", "status": "live"},
-        "codex": {"mechanism": "shell-hook-pre-tool-call", "matcher": "Bash", "artifact": "etc/hooks/codex_guard_bridge.py", "status": "gated:codex-hooks-experiment"},
-        "hermes": {"mechanism": "shell-hook-pre-tool-call", "matcher": "terminal", "artifact": "etc/hooks/hermes_guard_bridge.py", "status": "gated:hermes-hooks-experiment"}
+        "claude": {
+          "mechanism": "pretooluse-hook",
+          "matcher": "Bash",
+          "artifact": "etc/hooks/commit_guard.py",
+          "status": "live"
+        },
+        "codex": {
+          "mechanism": "shell-hook-pre-tool-call",
+          "matcher": "Bash",
+          "artifact": "etc/hooks/codex_guard_bridge.py",
+          "status": "gated:codex-hooks-experiment"
+        },
+        "hermes": {
+          "mechanism": "shell-hook-pre-tool-call",
+          "matcher": "terminal",
+          "artifact": "etc/hooks/hermes_guard_bridge.py",
+          "status": "gated:hermes-hooks-experiment"
+        }
       },
       "degrade_floor": "advisory-text"
     },
@@ -123,13 +236,32 @@
       "class": "guard",
       "enforcement": "behavioral",
       "audience": "driver",
-      "sources": ["etc/hooks/rm_glob_guard.py"],
+      "sources": [
+        "etc/hooks/rm_glob_guard.py"
+      ],
       "enabled_when_env": null,
-      "planes": ["native"],
+      "planes": [
+        "native"
+      ],
       "bindings": {
-        "claude": {"mechanism": "pretooluse-hook", "matcher": "Bash", "artifact": "etc/hooks/rm_glob_guard.py", "status": "live"},
-        "codex": {"mechanism": "shell-hook-pre-tool-call", "matcher": "Bash", "artifact": "etc/hooks/codex_guard_bridge.py", "status": "gated:codex-hooks-experiment"},
-        "hermes": {"mechanism": "shell-hook-pre-tool-call", "matcher": "terminal", "artifact": "etc/hooks/hermes_guard_bridge.py", "status": "gated:hermes-hooks-experiment"}
+        "claude": {
+          "mechanism": "pretooluse-hook",
+          "matcher": "Bash",
+          "artifact": "etc/hooks/rm_glob_guard.py",
+          "status": "live"
+        },
+        "codex": {
+          "mechanism": "shell-hook-pre-tool-call",
+          "matcher": "Bash",
+          "artifact": "etc/hooks/codex_guard_bridge.py",
+          "status": "gated:codex-hooks-experiment"
+        },
+        "hermes": {
+          "mechanism": "shell-hook-pre-tool-call",
+          "matcher": "terminal",
+          "artifact": "etc/hooks/hermes_guard_bridge.py",
+          "status": "gated:hermes-hooks-experiment"
+        }
       },
       "degrade_floor": "advisory-text"
     },
@@ -137,11 +269,20 @@
       "class": "guard",
       "enforcement": "behavioral",
       "audience": "driver",
-      "sources": ["etc/hooks/rm_permission_gate.py"],
+      "sources": [
+        "etc/hooks/rm_permission_gate.py"
+      ],
       "enabled_when_env": null,
-      "planes": ["native"],
+      "planes": [
+        "native"
+      ],
       "bindings": {
-        "claude": {"mechanism": "permissionrequest-hook", "matcher": "Bash", "artifact": "etc/hooks/rm_permission_gate.py", "status": "live"}
+        "claude": {
+          "mechanism": "permissionrequest-hook",
+          "matcher": "Bash",
+          "artifact": "etc/hooks/rm_permission_gate.py",
+          "status": "live"
+        }
       },
       "degrade_floor": "feature-off"
     },
@@ -149,11 +290,20 @@
       "class": "guard",
       "enforcement": "behavioral",
       "audience": "driver",
-      "sources": ["etc/hooks/code_hygiene_guard.py"],
+      "sources": [
+        "etc/hooks/code_hygiene_guard.py"
+      ],
       "enabled_when_env": null,
-      "planes": ["native"],
+      "planes": [
+        "native"
+      ],
       "bindings": {
-        "claude": {"mechanism": "pretooluse-hook", "matcher": "Write|Edit|MultiEdit", "artifact": "etc/hooks/code_hygiene_guard.py", "status": "live"}
+        "claude": {
+          "mechanism": "pretooluse-hook",
+          "matcher": "Write|Edit|MultiEdit",
+          "artifact": "etc/hooks/code_hygiene_guard.py",
+          "status": "live"
+        }
       },
       "degrade_floor": "advisory-text"
     },
@@ -161,11 +311,20 @@
       "class": "guard",
       "enforcement": "behavioral",
       "audience": "driver",
-      "sources": ["etc/hooks/agent_label_guard.py"],
+      "sources": [
+        "etc/hooks/agent_label_guard.py"
+      ],
       "enabled_when_env": null,
-      "planes": ["native"],
+      "planes": [
+        "native"
+      ],
       "bindings": {
-        "claude": {"mechanism": "pretooluse-hook", "matcher": "Agent", "artifact": "etc/hooks/agent_label_guard.py", "status": "live"}
+        "claude": {
+          "mechanism": "pretooluse-hook",
+          "matcher": "Agent",
+          "artifact": "etc/hooks/agent_label_guard.py",
+          "status": "live"
+        }
       },
       "degrade_floor": "advisory-text"
     },
@@ -173,11 +332,20 @@
       "class": "guard",
       "enforcement": "behavioral",
       "audience": "driver",
-      "sources": ["etc/hooks/spawn_gate.py"],
+      "sources": [
+        "etc/hooks/spawn_gate.py"
+      ],
       "enabled_when_env": null,
-      "planes": ["native"],
+      "planes": [
+        "native"
+      ],
       "bindings": {
-        "claude": {"mechanism": "pretooluse-hook", "matcher": "Agent|Workflow", "artifact": "etc/hooks/spawn_gate.py", "status": "live"}
+        "claude": {
+          "mechanism": "pretooluse-hook",
+          "matcher": "Agent|Workflow",
+          "artifact": "etc/hooks/spawn_gate.py",
+          "status": "live"
+        }
       },
       "degrade_floor": "advisory-text"
     },
@@ -185,11 +353,20 @@
       "class": "guard",
       "enforcement": "behavioral",
       "audience": "driver",
-      "sources": ["etc/hooks/codex_mode_guard.py"],
+      "sources": [
+        "etc/hooks/codex_mode_guard.py"
+      ],
       "enabled_when_env": null,
-      "planes": ["native"],
+      "planes": [
+        "native"
+      ],
       "bindings": {
-        "claude": {"mechanism": "pretooluse-hook", "matcher": "mcp__codex-.*", "artifact": "etc/hooks/codex_mode_guard.py", "status": "live"}
+        "claude": {
+          "mechanism": "pretooluse-hook",
+          "matcher": "mcp__codex-.*",
+          "artifact": "etc/hooks/codex_mode_guard.py",
+          "status": "live"
+        }
       },
       "degrade_floor": "advisory-text"
     },
@@ -197,11 +374,20 @@
       "class": "observe",
       "enforcement": "behavioral",
       "audience": "driver",
-      "sources": ["etc/hooks/continuity_commit_log.py"],
+      "sources": [
+        "etc/hooks/continuity_commit_log.py"
+      ],
       "enabled_when_env": null,
-      "planes": ["native"],
+      "planes": [
+        "native"
+      ],
       "bindings": {
-        "claude": {"mechanism": "posttooluse-hook", "matcher": "Bash", "artifact": "etc/hooks/continuity_commit_log.py", "status": "live"}
+        "claude": {
+          "mechanism": "posttooluse-hook",
+          "matcher": "Bash",
+          "artifact": "etc/hooks/continuity_commit_log.py",
+          "status": "live"
+        }
       },
       "degrade_floor": "mine-history"
     },
@@ -209,11 +395,20 @@
       "class": "observe",
       "enforcement": "behavioral",
       "audience": "driver",
-      "sources": ["etc/hooks/continuity_ledger_sweep.py"],
+      "sources": [
+        "etc/hooks/continuity_ledger_sweep.py"
+      ],
       "enabled_when_env": null,
-      "planes": ["native"],
+      "planes": [
+        "native"
+      ],
       "bindings": {
-        "claude": {"mechanism": "posttooluse-hook", "matcher": "Edit|Write|MultiEdit", "artifact": "etc/hooks/continuity_ledger_sweep.py", "status": "live"}
+        "claude": {
+          "mechanism": "posttooluse-hook",
+          "matcher": "Edit|Write|MultiEdit",
+          "artifact": "etc/hooks/continuity_ledger_sweep.py",
+          "status": "live"
+        }
       },
       "degrade_floor": "mine-history"
     },
@@ -221,11 +416,19 @@
       "class": "observe",
       "enforcement": "behavioral",
       "audience": "driver",
-      "sources": ["etc/hooks/continuity_session_digest.py"],
+      "sources": [
+        "etc/hooks/continuity_session_digest.py"
+      ],
       "enabled_when_env": null,
-      "planes": ["native"],
+      "planes": [
+        "native"
+      ],
       "bindings": {
-        "claude": {"mechanism": "sessionend-hook", "artifact": "etc/hooks/continuity_session_digest.py", "status": "live"}
+        "claude": {
+          "mechanism": "sessionend-hook",
+          "artifact": "etc/hooks/continuity_session_digest.py",
+          "status": "live"
+        }
       },
       "degrade_floor": "mine-history"
     },
@@ -233,12 +436,22 @@
       "class": "tool",
       "enforcement": "advisory",
       "audience": "driver",
-      "sources": ["etc/mcp/delegates.json"],
+      "sources": [
+        "etc/mcp/delegates.json"
+      ],
       "enabled_when_env": null,
-      "planes": ["mediated"],
+      "planes": [
+        "mediated"
+      ],
       "bindings": {
-        "claude": {"mechanism": "mcp-config-render", "status": "live"},
-        "hermes": {"mechanism": "mcp-config-render", "status": "live"}
+        "claude": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        },
+        "hermes": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        }
       },
       "degrade_floor": "feature-off"
     },
@@ -246,12 +459,22 @@
       "class": "tool",
       "enforcement": "advisory",
       "audience": "driver",
-      "sources": ["etc/mcp/delegates.json"],
+      "sources": [
+        "etc/mcp/delegates.json"
+      ],
       "enabled_when_env": null,
-      "planes": ["mediated"],
+      "planes": [
+        "mediated"
+      ],
       "bindings": {
-        "claude": {"mechanism": "mcp-config-render", "status": "live"},
-        "hermes": {"mechanism": "mcp-config-render", "status": "live"}
+        "claude": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        },
+        "hermes": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        }
       },
       "degrade_floor": "feature-off"
     },
@@ -259,12 +482,22 @@
       "class": "tool",
       "enforcement": "advisory",
       "audience": "driver",
-      "sources": ["etc/mcp/delegates.json"],
+      "sources": [
+        "etc/mcp/delegates.json"
+      ],
       "enabled_when_env": null,
-      "planes": ["mediated"],
+      "planes": [
+        "mediated"
+      ],
       "bindings": {
-        "claude": {"mechanism": "mcp-config-render", "status": "live"},
-        "hermes": {"mechanism": "mcp-config-render", "status": "live"}
+        "claude": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        },
+        "hermes": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        }
       },
       "degrade_floor": "feature-off"
     },
@@ -272,12 +505,22 @@
       "class": "tool",
       "enforcement": "advisory",
       "audience": "driver",
-      "sources": ["etc/mcp/delegates.json"],
+      "sources": [
+        "etc/mcp/delegates.json"
+      ],
       "enabled_when_env": null,
-      "planes": ["mediated"],
+      "planes": [
+        "mediated"
+      ],
       "bindings": {
-        "claude": {"mechanism": "mcp-config-render", "status": "live"},
-        "hermes": {"mechanism": "mcp-config-render", "status": "live"}
+        "claude": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        },
+        "hermes": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        }
       },
       "degrade_floor": "feature-off"
     },
@@ -285,12 +528,22 @@
       "class": "tool",
       "enforcement": "advisory",
       "audience": "driver",
-      "sources": ["etc/mcp/delegates.json"],
+      "sources": [
+        "etc/mcp/delegates.json"
+      ],
       "enabled_when_env": null,
-      "planes": ["mediated"],
+      "planes": [
+        "mediated"
+      ],
       "bindings": {
-        "claude": {"mechanism": "mcp-config-render", "status": "live"},
-        "hermes": {"mechanism": "mcp-config-render", "status": "live"}
+        "claude": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        },
+        "hermes": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        }
       },
       "degrade_floor": "feature-off"
     },
@@ -298,12 +551,22 @@
       "class": "tool",
       "enforcement": "advisory",
       "audience": "driver",
-      "sources": ["etc/mcp/delegates.json"],
+      "sources": [
+        "etc/mcp/delegates.json"
+      ],
       "enabled_when_env": null,
-      "planes": ["mediated"],
+      "planes": [
+        "mediated"
+      ],
       "bindings": {
-        "codex": {"mechanism": "mcp-config-render", "status": "live"},
-        "hermes": {"mechanism": "mcp-config-render", "status": "live"}
+        "codex": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        },
+        "hermes": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        }
       },
       "degrade_floor": "feature-off"
     },
@@ -311,13 +574,30 @@
       "class": "tool",
       "enforcement": "advisory",
       "audience": "driver",
-      "sources": ["etc/mcp/delegates.json"],
-      "enabled_when_env": ["CBOX_LOCAL_MODEL_URL", "CBOX_LOCAL_MODEL_NAME"],
-      "planes": ["mediated"],
+      "sources": [
+        "etc/mcp/delegates.json"
+      ],
+      "enabled_when_env": [
+        "CBOX_LOCAL_MODEL",
+        "CBOX_LOCAL_MODEL_URL",
+        "CBOX_LOCAL_MODEL_NAME"
+      ],
+      "planes": [
+        "mediated"
+      ],
       "bindings": {
-        "claude": {"mechanism": "mcp-config-render", "status": "live"},
-        "codex": {"mechanism": "mcp-config-render", "status": "live"},
-        "hermes": {"mechanism": "mcp-config-render", "status": "live"}
+        "claude": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        },
+        "codex": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        },
+        "hermes": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        }
       },
       "degrade_floor": "feature-off"
     },
@@ -325,13 +605,28 @@
       "class": "tool",
       "enforcement": "advisory",
       "audience": "driver",
-      "sources": ["etc/mcp/delegates.json"],
-      "enabled_when_env": ["CBOX_CONTAINER_EXEC_TOOL"],
-      "planes": ["mediated"],
+      "sources": [
+        "etc/mcp/delegates.json"
+      ],
+      "enabled_when_env": [
+        "CBOX_CONTAINER_EXEC_TOOL"
+      ],
+      "planes": [
+        "mediated"
+      ],
       "bindings": {
-        "claude": {"mechanism": "mcp-config-render", "status": "live"},
-        "codex": {"mechanism": "mcp-config-render", "status": "live"},
-        "hermes": {"mechanism": "mcp-config-render", "status": "live"}
+        "claude": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        },
+        "codex": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        },
+        "hermes": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        }
       },
       "degrade_floor": "feature-off"
     },
@@ -339,13 +634,28 @@
       "class": "tool",
       "enforcement": "advisory",
       "audience": "driver",
-      "sources": ["etc/mcp/delegates.json"],
-      "enabled_when_env": ["CBOX_HERMES_DELEGATE"],
-      "planes": ["mediated"],
+      "sources": [
+        "etc/mcp/delegates.json"
+      ],
+      "enabled_when_env": [
+        "CBOX_HERMES_DELEGATE"
+      ],
+      "planes": [
+        "mediated"
+      ],
       "bindings": {
-        "claude": {"mechanism": "mcp-config-render", "status": "live"},
-        "codex": {"mechanism": "mcp-config-render", "status": "live"},
-        "hermes": {"mechanism": "mcp-config-render", "status": "live"}
+        "claude": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        },
+        "codex": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        },
+        "hermes": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        }
       },
       "degrade_floor": "feature-off"
     },
@@ -353,13 +663,28 @@
       "class": "lifecycle",
       "enforcement": "behavioral",
       "audience": "all",
-      "sources": ["templates/generators.sh"],
-      "enabled_when_env": ["CBOX_SESSION_MULTIPLEX"],
-      "planes": ["substrate"],
+      "sources": [
+        "templates/generators.sh"
+      ],
+      "enabled_when_env": [
+        "CBOX_SESSION_MULTIPLEX"
+      ],
+      "planes": [
+        "substrate"
+      ],
       "bindings": {
-        "claude": {"mechanism": "tmux-wrap", "status": "live"},
-        "codex": {"mechanism": "tmux-wrap", "status": "live"},
-        "hermes": {"mechanism": "tmux-wrap", "status": "live"}
+        "claude": {
+          "mechanism": "tmux-wrap",
+          "status": "live"
+        },
+        "codex": {
+          "mechanism": "tmux-wrap",
+          "status": "live"
+        },
+        "hermes": {
+          "mechanism": "tmux-wrap",
+          "status": "live"
+        }
       },
       "degrade_floor": "feature-off"
     },
@@ -367,11 +692,19 @@
       "class": "lifecycle",
       "enforcement": "behavioral",
       "audience": "all",
-      "sources": ["etc/hooks/limit_watchdog.py"],
+      "sources": [
+        "etc/hooks/limit_watchdog.py"
+      ],
       "enabled_when_env": null,
-      "planes": ["substrate"],
+      "planes": [
+        "substrate"
+      ],
       "bindings": {
-        "claude": {"mechanism": "tmux-watchdog-process", "artifact": "etc/hooks/limit_watchdog.py", "status": "live"}
+        "claude": {
+          "mechanism": "tmux-watchdog-process",
+          "artifact": "etc/hooks/limit_watchdog.py",
+          "status": "live"
+        }
       },
       "degrade_floor": "feature-off"
     },
@@ -379,11 +712,21 @@
       "class": "lifecycle",
       "enforcement": "behavioral",
       "audience": "driver",
-      "sources": ["etc/hooks/limit_watchdog.py"],
-      "enabled_when_env": ["CBOX_LIMIT_AUTORESUME"],
-      "planes": ["substrate"],
+      "sources": [
+        "etc/hooks/limit_watchdog.py"
+      ],
+      "enabled_when_env": [
+        "CBOX_LIMIT_AUTORESUME"
+      ],
+      "planes": [
+        "substrate"
+      ],
       "bindings": {
-        "claude": {"mechanism": "tmux-watchdog-resume-prompt", "artifact": "etc/hooks/limit_watchdog.py", "status": "live"}
+        "claude": {
+          "mechanism": "tmux-watchdog-resume-prompt",
+          "artifact": "etc/hooks/limit_watchdog.py",
+          "status": "live"
+        }
       },
       "degrade_floor": "feature-off"
     },
@@ -391,13 +734,26 @@
       "class": "lifecycle",
       "enforcement": "advisory",
       "audience": "driver",
-      "sources": ["etc/engines/engines.json"],
+      "sources": [
+        "etc/engines/engines.json"
+      ],
       "enabled_when_env": null,
-      "planes": ["substrate"],
+      "planes": [
+        "substrate"
+      ],
       "bindings": {
-        "claude": {"mechanism": "resume-argv", "status": "live"},
-        "codex": {"mechanism": "resume-argv", "status": "live"},
-        "hermes": {"mechanism": "resume-argv", "status": "live"}
+        "claude": {
+          "mechanism": "resume-argv",
+          "status": "live"
+        },
+        "codex": {
+          "mechanism": "resume-argv",
+          "status": "live"
+        },
+        "hermes": {
+          "mechanism": "resume-argv",
+          "status": "live"
+        }
       },
       "degrade_floor": "feature-off"
     },
@@ -405,13 +761,29 @@
       "class": "lifecycle",
       "enforcement": "behavioral",
       "audience": "all",
-      "sources": ["lib/cbox_session_bridge.py"],
+      "sources": [
+        "lib/cbox_session_bridge.py"
+      ],
       "enabled_when_env": null,
-      "planes": ["substrate"],
+      "planes": [
+        "substrate"
+      ],
       "bindings": {
-        "claude": {"mechanism": "session-bridge-distillate", "artifact": "lib/cbox_session_bridge.py", "status": "live"},
-        "codex": {"mechanism": "session-bridge-distillate", "artifact": "lib/cbox_session_bridge.py", "status": "live"},
-        "hermes": {"mechanism": "session-bridge-distillate", "artifact": "lib/cbox_session_bridge.py", "status": "live"}
+        "claude": {
+          "mechanism": "session-bridge-distillate",
+          "artifact": "lib/cbox_session_bridge.py",
+          "status": "live"
+        },
+        "codex": {
+          "mechanism": "session-bridge-distillate",
+          "artifact": "lib/cbox_session_bridge.py",
+          "status": "live"
+        },
+        "hermes": {
+          "mechanism": "session-bridge-distillate",
+          "artifact": "lib/cbox_session_bridge.py",
+          "status": "live"
+        }
       },
       "degrade_floor": "feature-off"
     }

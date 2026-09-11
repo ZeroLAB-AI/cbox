@@ -2905,6 +2905,15 @@ restart() {
   up "$@"
 }
 
+restart_isolated() {
+  local root eff
+  root="$(_cbox_workspace_root)" || die "refusing to operate in $PWD (home, /, or a mount root)"
+  eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
+  [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run <engine>' or 'cbox setup --local $root' first"
+  down_project 1
+  echo "cbox: restart: the project container for $root is down; the next 'cbox run <engine>' recreates it with the current configuration" >&2
+}
+
 shell() {
   local workspace_root
   require_global_conf
@@ -6158,7 +6167,14 @@ case "${1:-}" in
       *) die_no_conf;;
     esac
     ;;
-  restart) shift; restart "$@";;
+  restart)
+    shift
+    case "$(_cbox_effective_mode)" in
+      isolated) restart_isolated "$@";;
+      global) restart "$@";;
+      *) die_no_conf;;
+    esac
+    ;;
   shell)
     case "$(_cbox_effective_mode)" in
       isolated) shell_isolated;;

@@ -348,8 +348,16 @@ _ok "SEC_SCOPE[ollama]=machine"
 [ "$(sec_get SEC_SCOPE wireguard)" = machine ] || _fail "SEC_SCOPE[wireguard] should be machine"
 _ok "SEC_SCOPE[wireguard]=machine"
 
+[ "$(sec_get SEC_SCOPE local-model)" = machine ] \
+  || _fail "SEC_SCOPE[local-model] should be machine - the endpoint is a fact about the host, and every project reads the same one"
+_ok "SEC_SCOPE[local-model]=machine"
+
+[ "$(sec_get SEC_SCOPE hermes)" = project ] \
+  || _fail "SEC_SCOPE[hermes] must stay project - whether a project offers the hermes engine is a per-project call, unlike where the model runs"
+_ok "SEC_SCOPE[hermes]=project"
+
 for _s in mode mounts workspaces python gpu egress netaccess hostroute ssh bashrc mcp-servers \
-  codex-progress local-model hermes hermes-delegate autoresume agents codex-mcp continuity \
+  codex-progress hermes hermes-delegate autoresume agents codex-mcp continuity \
   claude-md settings hooks git-identity apt-extra binaries restart-policy; do
   [ "$(sec_get SEC_SCOPE "$_s")" = project ] || _fail "SEC_SCOPE[$_s] should default to project, got $(sec_get SEC_SCOPE "$_s")"
 done
@@ -371,8 +379,8 @@ _ok "apply-cmd: infra-reconcile class names cbox ollama reconcile"
 
 declare -f _cbox_machine_scoped_vars >/dev/null || _fail "extraction failed: _cbox_machine_scoped_vars not defined"
 machine_vars="$(_cbox_machine_scoped_vars | sort)"
-expected_machine_vars="$(printf '%s\n' CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL CBOX_OLLAMA_CONTEXT_LENGTH CBOX_OLLAMA_FLASH_ATTENTION CBOX_OLLAMA_KV_CACHE_TYPE CBOX_OLLAMA_KEEP_ALIVE CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE CBOX_WG_FORWARDS | sort)"
-[ "$machine_vars" = "$expected_machine_vars" ] || _fail "_cbox_machine_scoped_vars: expected exactly the ollama+wireguard vars, got: $machine_vars"
+expected_machine_vars="$(printf '%s\n' CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL CBOX_OLLAMA_CONTEXT_LENGTH CBOX_OLLAMA_FLASH_ATTENTION CBOX_OLLAMA_KV_CACHE_TYPE CBOX_OLLAMA_KEEP_ALIVE CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE CBOX_WG_FORWARDS CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME CBOX_LOCAL_MODEL_TIMEOUT_SEC | sort)"
+[ "$machine_vars" = "$expected_machine_vars" ] || _fail "_cbox_machine_scoped_vars: expected exactly the ollama+wireguard+local-model vars, got: $machine_vars"
 _ok "_cbox_machine_scoped_vars: enumerates exactly SEC_VARS[ollama] + SEC_VARS[wireguard] (the two machine-scoped sections)"
 
 CBOX_MODE=global
@@ -826,5 +834,17 @@ grep -qE "^CBOX_OLLAMA_IMAGE=.*ollama/ollama" "$DEFAULTSFILL/out.conf" \
 grep -qE "^CBOX_OLLAMA_CONTEXT_LENGTH=('?)65536\1$" "$DEFAULTSFILL/out.conf" \
   || _fail "conf defaults: CBOX_OLLAMA_CONTEXT_LENGTH should carry its registry default (got: $(grep '^CBOX_OLLAMA_CONTEXT_LENGTH=' "$DEFAULTSFILL/out.conf"))"
 _ok "conf defaults: a sparse conf is filled from registry defaults before the whitelist write, not blanked"
+
+
+SCOPEFLIP_VARS=" $(_cbox_machine_scoped_vars | sort | tr '\n' ' ') "
+case "$SCOPEFLIP_VARS" in
+  *" CBOX_LOCAL_MODEL_URL "*) ;;
+  *) _fail "machine scope: CBOX_LOCAL_MODEL_URL must be machine-scoped - the endpoint is a fact about the host and every project reads the same one" ;;
+esac
+_ok "machine scope: the local-model keys are machine-scoped"
+
+grep -q '_cbox_strip_machine_scoped_vars "$eff/cbox.conf"' "$INSTALL_DIR/lib/cbox-setup.sh" \
+  || _fail "machine scope: the derivation path must strip machine-scoped keys from a project conf - that strip is the ONLY writer that removes them, so a project carrying stale copies is repaired by the re-derive a template bump already forces, and nothing writes to a project conf from the normal run path"
+_ok "machine scope: stale project copies are cleared by the derivation strip, not by a writer on the run path"
 
 echo "PASS: all cbox config tests"
