@@ -404,6 +404,10 @@
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
+    "lib/test_isolated_tpl_rebless.sh": {
+      "layer": "test",
+      "purpose": "isolated template re-bless: a template-only drift (conf untouched) re-blesses silently and keeps every project-level setting; a hand-edited conf is still refused; the re-derive prompt warns and defaults to no"
+    },
     "lib/test_jobs_farm_mirror.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"

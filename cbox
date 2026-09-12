@@ -785,14 +785,14 @@ _cbox_ollama_down_cmd() {
 
 _cbox_ollama_gpu_check_cmd() {
   local image="${CBOX_OLLAMA_IMAGE:-ollama/ollama:0.33.3}"
-  echo "cbox: gpu-check: running 'docker run --rm --device nvidia.com/gpu=all -- $image nvidia-smi' as a CDI smoke test" >&2
-  if docker run --rm --device nvidia.com/gpu=all -- "$image" nvidia-smi; then
+  echo "cbox: gpu-check: running 'docker run --rm --entrypoint nvidia-smi --device nvidia.com/gpu=all -- $image' as a CDI smoke test (the entrypoint override matters: the ollama image's own entrypoint is the ollama CLI, which would treat nvidia-smi as an unknown subcommand)" >&2
+  if docker run --rm --entrypoint nvidia-smi --device nvidia.com/gpu=all -- "$image"; then
     echo "cbox: gpu-check: PASS - the CDI device nvidia.com/gpu=all is visible to a container and nvidia-smi ran inside it against $image"
     return 0
   fi
   echo "cbox: gpu-check: FAIL - could not start a container with --device nvidia.com/gpu=all against $image, or nvidia-smi failed inside it" >&2
   echo "cbox: gpu-check: this is a preflight only - it never runs automatically and does not touch CBOX_OLLAMA_GPU" >&2
-  echo "cbox: gpu-check: fix candidates: (1) on rootless docker, restart the daemon once after the CDI spec directory is first created - rootlesskit starts the daemon with --copy-up=/etc, so the daemon sees a snapshot of /etc taken at its own start and a /etc/cdi created afterwards is invisible to it (the symptom is 'unresolvable CDI devices nvidia.com/gpu=all' even though the spec file exists and is world-readable); 'systemctl --user restart docker' fixes it, and later edits inside an already-existing /etc/cdi need no further restart; (2) regenerate the CDI spec after any GPU replug, notably an eGPU - 'sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml' (an eGPU's PCI address changes on every replug, invalidating the previous spec); (3) only on a docker daemon older than 28.3 (CDI is enabled by default from 28.3 on): enable CDI in the rootless daemon's own config (features.cdi in the rootless dockerd's daemon.json, not the system-wide /etc/docker/daemon.json); (4) not a CDI setting at all: no-cgroups = true in the nvidia-container-runtime config belongs to the legacy nvidia runtime hook path (--runtime nvidia / --gpus), which this verb does not exercise - only look there if you deliberately run ollama through that legacy path instead of CDI" >&2
+  echo "cbox: gpu-check: fix candidates: (1) on rootless docker, restart the daemon once after the CDI spec directory is first created - rootlesskit starts the daemon with --copy-up=/etc and --copy-up=/run, so the daemon sees a snapshot of both taken at its own start: a /etc/cdi created afterwards is invisible to it (the symptom is 'unresolvable CDI devices nvidia.com/gpu=all' even though the spec file exists and is world-readable), and so is a /run/nvidia-persistenced created by a later (re)start of nvidia-persistenced, typically after an eGPU replug (the symptom is 'failed to fulfil mount request: open /run/nvidia-persistenced/socket: no such file or directory' while the socket exists on the host); 'systemctl --user restart docker' fixes both, and later edits inside an already-existing directory need no further restart; (2) regenerate the CDI spec after any GPU replug, notably an eGPU - 'sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml' (an eGPU's PCI address changes on every replug, invalidating the previous spec); (3) only on a docker daemon older than 28.3 (CDI is enabled by default from 28.3 on): enable CDI in the rootless daemon's own config (features.cdi in the rootless dockerd's daemon.json, not the system-wide /etc/docker/daemon.json); (4) not a CDI setting at all: no-cgroups = true in the nvidia-container-runtime config belongs to the legacy nvidia runtime hook path (--runtime nvidia / --gpus), which this verb does not exercise - only look there if you deliberately run ollama through that legacy path instead of CDI; (5) 'failed to stat CDI host device /dev/nvidia-uvm' means the spec is fine but the on-demand device node is missing - it is created by the first CUDA client after driver load or an eGPU replug, so run any CUDA-touching command on the host once (nvidia-persistenced alone does not create it) and retry" >&2
   return 1
 }
 
@@ -2426,22 +2426,38 @@ _cbox_rebless_local() {
   [ "$rc" -eq 0 ] && [ -f "$eff/cbox.conf" ]
 }
 
+_cbox_rebless_local_templates() {
+  local root="$1" eff="$2"
+  (
+    set -e
+    exec 6> "$eff/.regen.lock"
+    _cbox_flock -x 6 || { echo "cbox: cannot lock $eff/.regen.lock" >&2; exit 1; }
+    _cbox_strip_machine_scoped_vars "$eff/cbox.conf"
+    _cbox_conf_set_tpl_sha "$eff/cbox.conf"
+    _cbox_manifest_write_keep_generated "$eff" "$root" "$eff/cbox.conf"
+  )
+}
+
 _cbox_manifest_verify_conf_interactive() {
   local eff="$1" root="$2" status ans reason
   status="$(_cbox_manifest_status "$eff" "$root")"
   case "$status" in
+    tpl-drifted)
+      echo "cbox: templates changed since last generation - re-blessing the effective config for $root (project settings kept)" >&2
+      _cbox_rebless_local_templates "$root" "$eff" || die "template re-bless failed for $root"
+      ;;
     missing|malformed|drifted)
       if [ -t 0 ] && [ -t 1 ]; then
         case "$status" in
           missing)  reason="manifest missing" ;;
           malformed) reason="manifest malformed" ;;
-          drifted)  reason="config/templates drifted" ;;
+          drifted)  reason="config edited outside cbox" ;;
         esac
-        printf 'cbox: effective config for %s: %s.\n  Re-derive from the global profile now? [Y/n] ' "$root" "$reason"
+        printf 'cbox: effective config for %s: %s.\n  Re-derive from the global profile now? This replaces every project-level setting (hermes, delegates, mcp-servers, ...) with the global profile; answer n and run cbox setup --local %s to keep them. [y/N] ' "$root" "$reason" "$root"
         read -r ans || ans=n
         case "$ans" in
-          n|N) : ;;
-          *) _cbox_rebless_local "$root" "$eff" || die "re-bless failed for $root" ;;
+          y|Y) _cbox_rebless_local "$root" "$eff" || die "re-bless failed for $root" ;;
+          *) : ;;
         esac
       fi
       ;;
@@ -2467,6 +2483,7 @@ _run_isolated() {
     exec 6> "$lockfile"
     _cbox_flock -x 6 || { echo "cbox: cannot lock $lockfile" >&2; exit 1; }
     . "$eff/cbox.conf"
+    _cbox_reg_conf_defaults
     _cbox_reg_export_vars
     _cbox_load_machine_scoped_vars
     _gen_effective "$eff" "$root"
@@ -5227,8 +5244,12 @@ _cbox_config_set_isolated() {
       return 1
       ;;
     drifted)
-      echo "cbox: refusing - effective config has drifted; re-derive with cbox setup --local --from-global $root" >&2
+      echo "cbox: refusing - effective config was edited outside cbox; keep it with cbox setup --local $root, or re-derive with cbox setup --local $root --from-global" >&2
       return 1
+      ;;
+    tpl-drifted)
+      _cbox_rebless_local_templates "$root" "$eff" \
+        || { echo "cbox: refusing - template re-bless failed for $root" >&2; return 1; }
       ;;
   esac
 

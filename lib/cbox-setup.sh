@@ -101,21 +101,6 @@ _cbox_machine_scoped_vars() {
   done
 }
 
-_cbox_strip_machine_scoped_vars() {
-  local conf="$1" tmp tmp2 v
-  [ -f "$conf" ] || return 0
-  tmp="$(mktemp "$(dirname "$conf")/.cbox.XXXXXX")"
-  cp "$conf" "$tmp"
-  while IFS= read -r v; do
-    [ -n "$v" ] || continue
-    tmp2="$(mktemp "$(dirname "$tmp")/.cbox.XXXXXX")"
-    sed "/^${v}=/d" "$tmp" > "$tmp2"
-    mv "$tmp2" "$tmp"
-  done < <(_cbox_machine_scoped_vars)
-  chmod 0644 "$tmp"
-  mv "$tmp" "$conf"
-}
-
 header() {
   local title="$1" step="${2:-}" total="${3:-}"
   printf '\n'
@@ -1692,7 +1677,7 @@ step_hermes() {
   note "transitive pip deps stay unpinned in v1 - an explicit documented supply-chain exception"
   note "'latest' tracks the newest PyPI release and is refreshed by the bins autoupdate; an x.y.z pin never moves on its own"
   local prev_on="$CBOX_HERMES" prev_ver="$CBOX_HERMES_VERSION" prev_provider="$CBOX_HERMES_PROVIDER" \
-    prev_url="$CBOX_HERMES_MODEL_URL" prev_name="$CBOX_HERMES_MODEL_NAME"
+    prev_url="$CBOX_HERMES_MODEL_URL" prev_name="$CBOX_HERMES_MODEL_NAME" prev_effort="$CBOX_HERMES_EFFORT"
   ask_choice "setup: enable the hermes console engine" "$CBOX_HERMES" off on
   CBOX_HERMES="$ASK_VALUE"
   if [ "$CBOX_HERMES" = on ]; then
@@ -1721,8 +1706,8 @@ step_hermes() {
     fi
     ask "setup: hermes model name" "$CBOX_HERMES_MODEL_NAME"
     CBOX_HERMES_MODEL_NAME="$ASK_VALUE"
-    note "reasoning effort: empty leaves it to the model; none turns thinking off. On a local 27B model the deepest level costs about three times the wall-clock for the same task and shortens the final answer. Only low, medium and xhigh are offered because a Qwen3.x chat template raises on anything else and the endpoint then answers HTTP 500."
-    ask_choice "setup: hermes reasoning effort" "$CBOX_HERMES_EFFORT" "" none low medium xhigh
+    note "reasoning effort: none turns thinking off; medium is the default. On a local 27B model the deepest level costs about three times the wall-clock for the same task and shortens the final answer. Only none plus the levels the local qwen template documents (low, medium, xhigh) are offered."
+    ask_choice "setup: hermes reasoning effort" "${CBOX_HERMES_EFFORT:-medium}" none low medium xhigh
     CBOX_HERMES_EFFORT="$ASK_VALUE"
     if [ "$CBOX_HERMES_PROVIDER" = local ] && [ -z "$CBOX_HERMES_MODEL_URL" ]; then
       warn "hermes local endpoint url left empty - keeping hermes off (CBOX_HERMES=off) until CBOX_HERMES_MODEL_URL is set; the managed.env generator refuses provider=local without a url and that refusal would block every engine's regen, not just hermes"
@@ -1733,12 +1718,12 @@ step_hermes() {
     CBOX_HERMES_PROVIDER="${CBOX_HERMES_PROVIDER:-local}"
     CBOX_HERMES_MODEL_URL=""
     CBOX_HERMES_MODEL_NAME=""
-    CBOX_HERMES_EFFORT=""
+    CBOX_HERMES_EFFORT="${CBOX_HERMES_EFFORT:-medium}"
   fi
-  export CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME
+  export CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME CBOX_HERMES_EFFORT
   if [ "$CBOX_HERMES" = "$prev_on" ] && [ "$CBOX_HERMES_VERSION" = "$prev_ver" ] \
       && [ "$CBOX_HERMES_PROVIDER" = "$prev_provider" ] && [ "$CBOX_HERMES_MODEL_URL" = "$prev_url" ] \
-      && [ "$CBOX_HERMES_MODEL_NAME" = "$prev_name" ]; then
+      && [ "$CBOX_HERMES_MODEL_NAME" = "$prev_name" ] && [ "$CBOX_HERMES_EFFORT" = "$prev_effort" ]; then
     return 0
   fi
   note "hermes is a recreate-class change; compose recreates the container, and the binary lands via 'cbox reinstall-bins' or the next autoupdate pass"
@@ -3569,7 +3554,7 @@ run_rebless() {
   conf_load
   note "templates re-blessed (CBOX_TPL_SHA updated) and artifacts regenerated"
   _clip_backend_warn
-  note "restart containers to pick the changes up: cbox down && cbox run <bin>; isolated projects re-bless interactively on their next cbox run"
+  note "restart containers to pick the changes up: cbox down && cbox run <bin>; isolated projects re-bless their templates automatically on their next cbox run and keep their own settings"
 }
 
 run_update() {
@@ -3859,7 +3844,7 @@ run_local() {
   CBOX_WORKDIR="$root"
 
   if [ "$from_global" = 1 ]; then
-    note "deriving $eff/cbox.conf from the global profile (silent, no wizard)"
+    note "deriving $eff/cbox.conf from the global profile (silent, no wizard) - project-level settings are replaced by the global profile; run cbox setup --local $root instead to keep them"
   else
     header "Isolated project: $root"
     run_local_wizard_subset "$root"

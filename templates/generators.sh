@@ -445,6 +445,24 @@ _cbox_manifest_write() {
   printf '%s\n' "$root" | _cbox_write "$eff/workspace"
 }
 
+_cbox_manifest_write_keep_generated() {
+  local eff="$1" root="$2" conf="$3" tmp conf_sha gen_sha
+  conf_sha="$(_cbox_sha256 "$conf")"
+  gen_sha="$(_cbox_tpl_sha)"
+  tmp="$(mktemp "$eff/.cbox.XXXXXX")"
+  {
+    printf 'schema=1\n'
+    printf 'workspace=%s\n' "$root"
+    printf 'conf=%s\n' "$conf_sha"
+    printf 'generators=%s\n' "$gen_sha"
+    if [ -f "$eff/manifest.sha256" ]; then
+      grep -E '^(compose|dockerfile|entrypoint|env)=' "$eff/manifest.sha256" || true
+    fi
+  } > "$tmp"
+  chmod 0644 "$tmp"
+  mv "$tmp" "$eff/manifest.sha256"
+}
+
 _cbox_manifest_field() {
   local file="$1" key="$2" line
   [ -f "$file" ] || return 1
@@ -465,7 +483,7 @@ _cbox_manifest_verify_conf() {
   have_conf="$(_cbox_sha256 "$conf")"
   have_gen="$(_cbox_tpl_sha)"
   [ "$have_conf" = "$want_conf" ] || die "effective config drifted - re-bless with cbox setup --local $root"
-  [ "$have_gen" = "$want_gen" ] || die "templates changed since last generation - re-bless with cbox setup --local $root"
+  [ "$have_gen" = "$want_gen" ] || die "templates changed since last generation - run cbox run <bin> from $root (re-blesses the templates and keeps the project config) or cbox setup --local $root"
 }
 
 _cbox_manifest_status() {
@@ -479,8 +497,11 @@ _cbox_manifest_status() {
   [ "$want_ws" = "$root" ] || { printf 'collision'; return 0; }
   have_conf="$(_cbox_sha256 "$conf")"
   have_gen="$(_cbox_tpl_sha)"
-  if [ "$have_conf" != "$want_conf" ] || [ "$have_gen" != "$want_gen" ]; then
+  if [ "$have_conf" != "$want_conf" ]; then
     printf 'drifted'; return 0
+  fi
+  if [ "$have_gen" != "$want_gen" ]; then
+    printf 'tpl-drifted'; return 0
   fi
   printf 'ok'
 }
@@ -2178,7 +2199,7 @@ gen_hermes_managed_into() {
   local effort="${CBOX_HERMES_EFFORT:-}"
   if [ -n "$effort" ]; then
     _cbox_hermes_validate_effort "$effort" \
-      || die "invalid CBOX_HERMES_EFFORT '$effort' (expected none, low, medium, or xhigh - a Qwen3.x chat template raises on anything else and the endpoint answers HTTP 500)"
+      || die "invalid CBOX_HERMES_EFFORT '$effort' (expected none, low, medium, or xhigh - none plus the levels the local qwen template documents)"
   fi
   local context_length="${CBOX_OLLAMA_CONTEXT_LENGTH:-65536}"
   if [ "$provider" = local ]; then
@@ -2895,6 +2916,21 @@ sys.exit(0)
     "$(_cbox_context_manifest_sha "$hooks_json")" \
     "$(_cbox_context_manifest_sha "$hermes_entrypoint")" \
     || die "context manifest drifted - regenerate with cbox setup update claude-md (or the relevant section)"
+}
+
+_cbox_strip_machine_scoped_vars() {
+  local conf="$1" tmp tmp2 v
+  [ -f "$conf" ] || return 0
+  tmp="$(mktemp "$(dirname "$conf")/.cbox.XXXXXX")"
+  cp "$conf" "$tmp"
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    tmp2="$(mktemp "$(dirname "$tmp")/.cbox.XXXXXX")"
+    sed "/^${v}=/d" "$tmp" > "$tmp2"
+    mv "$tmp2" "$tmp"
+  done < <(_cbox_machine_scoped_vars)
+  chmod 0644 "$tmp"
+  mv "$tmp" "$conf"
 }
 
 _cbox_conf_set_tpl_sha() {

@@ -535,7 +535,7 @@ _new_case CBOX_CODEX_MODEL "bad model" reject
 _new_case CBOX_CODEX_MODEL "bad;rm -rf /" reject
 _new_case CBOX_CODEX_MODEL '$(evil)' reject
 
-_new_case CBOX_HERMES_EFFORT "" accept
+_new_case CBOX_HERMES_EFFORT "" reject
 _new_case CBOX_HERMES_EFFORT none accept
 _new_case CBOX_HERMES_EFFORT low accept
 _new_case CBOX_HERMES_EFFORT medium accept

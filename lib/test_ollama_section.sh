@@ -170,17 +170,21 @@ _load_setup_functions() {
     /^conf_load\(\) \{/ { infunc=1 }
     /^conf_save\(\) \{/ { infunc=1 }
     /^_cbox_machine_scoped_vars\(\) \{/ { infunc=1 }
-    /^_cbox_strip_machine_scoped_vars\(\) \{/ { infunc=1 }
     infunc { print }
     infunc && /^\}/ { infunc=0 }
   ' "$INSTALL_DIR/lib/cbox-setup.sh" > "$TMPBASE/setup_functions.sh"
+  awk '
+    /^_cbox_strip_machine_scoped_vars\(\) \{/ { infunc=1 }
+    infunc { print }
+    infunc && /^\}/ { infunc=0 }
+  ' "$INSTALL_DIR/templates/generators.sh" >> "$TMPBASE/setup_functions.sh"
   source "$TMPBASE/setup_functions.sh"
 }
 _load_setup_functions
 
 declare -f conf_defaults >/dev/null || _fail "extraction failed: conf_defaults not defined (setup.sh)"
 declare -f conf_save >/dev/null || _fail "extraction failed: conf_save not defined (setup.sh)"
-declare -f _cbox_strip_machine_scoped_vars >/dev/null || _fail "extraction failed: _cbox_strip_machine_scoped_vars not defined (setup.sh)"
+declare -f _cbox_strip_machine_scoped_vars >/dev/null || _fail "extraction failed: _cbox_strip_machine_scoped_vars not defined (generators.sh - it must be reachable from the runtime cbox script, which never sources the setup library)"
 
 CBOX_NAME=cbox
 CBOX_WORKSPACES=""

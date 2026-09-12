@@ -45,7 +45,7 @@ _cbox_reg_conf_defaults() {
   : "${CBOX_HERMES:=off}"
   : "${CBOX_HERMES_VERSION:=latest}"
   : "${CBOX_HERMES_PROVIDER:=local}"
-  : "${CBOX_HERMES_EFFORT:=}"
+  : "${CBOX_HERMES_EFFORT:=medium}"
   : "${CBOX_HERMES_MODEL_URL:=}"
   : "${CBOX_HERMES_MODEL_NAME:=}"
   : "${CBOX_HERMES_HOOKS:=off}"

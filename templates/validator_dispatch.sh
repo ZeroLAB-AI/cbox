@@ -153,7 +153,7 @@ _cbox_reg_validate_var_dispatch() {
       _cbox_val_kind_enum "$val" 'local' 'nous' 'openrouter' 'openai' 'anthropic' || return 1
       ;;
     CBOX_HERMES_EFFORT)
-      _cbox_val_kind_enum "$val" '' 'none' 'low' 'medium' 'xhigh' || return 1
+      _cbox_val_kind_enum "$val" 'none' 'low' 'medium' 'xhigh' || return 1
       ;;
     CBOX_HERMES_MODEL_URL)
       _cbox_val_kind_url_or_empty "$val" || return 1

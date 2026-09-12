@@ -83,6 +83,8 @@ CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC=900 \
 CBOX_HERMES_DELEGATE_LOCK_DIR=/tmp/hermes-locks \
 OLLAMA_NUM_PARALLEL=4 \
 CBOX_OLLAMA_CONTEXT_LENGTH=65536 \
+  env -u CBOX_HERMES_EFFORT -u CBOX_LOCAL_MODEL_URL -u CBOX_LOCAL_MODEL_NAME \
+      -u CBOX_DELEGATION_DEPTH -u CBOX_MCP_DEPTH \
   python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
   "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$RENDERED_PRESENT"
 python3 -c "
