@@ -197,9 +197,6 @@ _cbox_dep_condition() {
     no-cdi)
       _cbox_no_cdi
       ;;
-    hermes-off)
-      [ "${CBOX_HERMES:-off}" != on ]
-      ;;
     hooks)
       return 0
       ;;
@@ -1732,9 +1729,10 @@ step_hermes() {
 step_hermes_delegate() {
   echo "== section: hermes-delegate =="
   note "off by default; a zero-cost MCP delegate tool (hermes-local) that spawns one 'hermes -z' subprocess per call in a fresh ephemeral home - no skills, no auth, no retained memory, isolated from the hermes console engine's HERMES_HOME"
-  note "requires the hermes console engine (CBOX_HERMES=on); stays off until that is enabled"
+  note "machine-scoped: decided once per host and inherited by every project; 'cbox config set' writes these keys to the global config from any scope"
+  note "the tool is rendered only in projects where the hermes console engine is on (CBOX_HERMES=on is project-scoped) - a project without hermes simply does not get hermes-local"
   local prev_on="$CBOX_HERMES_DELEGATE" prev_provider="$CBOX_HERMES_DELEGATE_PROVIDER" \
-    prev_url="$CBOX_HERMES_DELEGATE_BASE_URL" prev_model="$CBOX_HERMES_DELEGATE_MODEL"
+    prev_url="$CBOX_HERMES_DELEGATE_BASE_URL" prev_model="$CBOX_HERMES_DELEGATE_MODEL" prev_mode="$CBOX_HERMES_DELEGATE_MODE"
   section_dep_gate hermes-delegate
   if [ "$DEP_ACTION" = disable ]; then
     note "hermes-delegate dependency: $DEP_REASON"
@@ -1757,15 +1755,23 @@ step_hermes_delegate() {
       fi
       ask "setup: hermes delegate model name" "${CBOX_HERMES_DELEGATE_MODEL:-$CBOX_HERMES_MODEL_NAME}"
       CBOX_HERMES_DELEGATE_MODEL="$ASK_VALUE"
+      note "mode: qa only reasons and answers (terminal, file, web, code_execution, delegation, browser, computer_use pinned off); agent works inside the project root with terminal and file tools on (code_execution, web, delegation, browser, computer_use, cronjob pinned off) and refuses to run unless the hermes guard hooks are rendered (CBOX_HERMES_HOOKS=on)"
+      ask_choice "setup: hermes delegate mode" "${CBOX_HERMES_DELEGATE_MODE:-qa}" qa agent
+      CBOX_HERMES_DELEGATE_MODE="$ASK_VALUE"
+      if [ "$CBOX_HERMES_DELEGATE_MODE" = agent ] && [ "${CBOX_HERMES_HOOKS:-off}" != on ]; then
+        warn "agent mode needs the hermes guard hooks: set CBOX_HERMES_HOOKS=on in each project that should run it (cbox config set CBOX_HERMES_HOOKS=on), otherwise every agent-mode call refuses and names this"
+      fi
     else
       CBOX_HERMES_DELEGATE_PROVIDER=""
       CBOX_HERMES_DELEGATE_BASE_URL=""
       CBOX_HERMES_DELEGATE_MODEL=""
+      CBOX_HERMES_DELEGATE_MODE=""
     fi
   fi
-  export CBOX_HERMES_DELEGATE CBOX_HERMES_DELEGATE_PROVIDER CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL
+  export CBOX_HERMES_DELEGATE CBOX_HERMES_DELEGATE_PROVIDER CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL CBOX_HERMES_DELEGATE_MODE
   if [ "$CBOX_HERMES_DELEGATE" = "$prev_on" ] && [ "$CBOX_HERMES_DELEGATE_PROVIDER" = "$prev_provider" ] \
-      && [ "$CBOX_HERMES_DELEGATE_BASE_URL" = "$prev_url" ] && [ "$CBOX_HERMES_DELEGATE_MODEL" = "$prev_model" ]; then
+      && [ "$CBOX_HERMES_DELEGATE_BASE_URL" = "$prev_url" ] && [ "$CBOX_HERMES_DELEGATE_MODEL" = "$prev_model" ] \
+      && [ "$CBOX_HERMES_DELEGATE_MODE" = "$prev_mode" ]; then
     return 0
   fi
   if container_target_ok; then
@@ -3814,7 +3820,7 @@ run_local_wizard_subset() {
 run_local() {
   local root="$1" from_global="${2:-0}" eff
   [ "$from_global" = 1 ] || require_tty "cbox setup --local"
-  [ -n "$root" ] || die "usage: cbox setup --local <root> [--from-global]"
+  [ -n "$root" ] || die "usage: cbox setup --local [<root>] [--from-global]"
   [ -d "$root" ] || die "not a directory: $root"
   if root="$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)"; then
     root="$(_cbox_realpath "$root")"
@@ -3900,7 +3906,7 @@ _cbox_setup_main() {
       run_wizard
       ;;
     --help|-h|help)
-      printf 'usage: cbox setup [update [<section>]|list-steps|--config <file>|--local <root> [--from-global]|uninstall|--help]\n'
+      printf 'usage: cbox setup [update [<section>]|list-steps|--config <file>|--local [<root>] [--from-global]|--from-global|uninstall|--help]\n'
       printf '  update with no section: re-render all artifacts and re-bless the templates (CBOX_TPL_SHA)\n'
       print_settings_help
       exit 0
@@ -3920,18 +3926,26 @@ _cbox_setup_main() {
       run_config "$2"
       ;;
     --local)
-      [ -n "${2:-}" ] || die "usage: cbox setup --local <root> [--from-global]"
-      case "${3:-}" in
-        --from-global) run_local "$2" 1 ;;
-        "") run_local "$2" 0 ;;
-        *) die "usage: cbox setup --local <root> [--from-global]" ;;
+      local _local_root="${2:-}" _local_flag="${3:-}"
+      if [ -z "$_local_root" ] || [ "$_local_root" = --from-global ]; then
+        _local_flag="$_local_root"
+        _local_root="$PWD"
+      fi
+      case "$_local_flag" in
+        --from-global) run_local "$_local_root" 1 ;;
+        "") run_local "$_local_root" 0 ;;
+        *) die "usage: cbox setup --local [<root>] [--from-global]" ;;
       esac
+      ;;
+    --from-global)
+      [ -z "${2:-}" ] || die "usage: cbox setup --from-global (re-derives the project in the current directory; use --local <root> --from-global for another one)"
+      run_local "$PWD" 1
       ;;
     uninstall)
       run_uninstall
       ;;
     *)
-      die "usage: cbox setup [--help|update [<section>]|list-steps|--config <file>|--local <root> [--from-global]|uninstall]"
+      die "usage: cbox setup [--help|update [<section>]|list-steps|--config <file>|--local [<root>] [--from-global]|--from-global|uninstall]"
       ;;
   esac
 }

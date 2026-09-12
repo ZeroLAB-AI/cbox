@@ -54,7 +54,7 @@ def cmd_hooks_yaml():
     lines = [
         "hooks:",
         "  pre_tool_call:",
-        "    - matcher: terminal",
+        "    - matcher: terminal|process",
         "      command: %s" % json.dumps(command),
         "      timeout: 10",
     ]

@@ -355,9 +355,12 @@ _ok "SEC_SCOPE[local-model]=machine"
 [ "$(sec_get SEC_SCOPE hermes)" = project ] \
   || _fail "SEC_SCOPE[hermes] must stay project - whether a project offers the hermes engine is a per-project call, unlike where the model runs"
 _ok "SEC_SCOPE[hermes]=project"
+[ "$(sec_get SEC_SCOPE hermes-delegate)" = machine ] \
+  || _fail "SEC_SCOPE[hermes-delegate] must be machine - the delegate is decided once per host and rendered only where the project-scoped hermes engine is on"
+_ok "SEC_SCOPE[hermes-delegate]=machine"
 
 for _s in mode mounts workspaces python gpu egress netaccess hostroute ssh bashrc mcp-servers \
-  codex-progress hermes hermes-delegate autoresume agents codex-mcp continuity \
+  codex-progress hermes autoresume agents codex-mcp continuity \
   claude-md settings hooks git-identity apt-extra binaries restart-policy; do
   [ "$(sec_get SEC_SCOPE "$_s")" = project ] || _fail "SEC_SCOPE[$_s] should default to project, got $(sec_get SEC_SCOPE "$_s")"
 done
@@ -379,8 +382,8 @@ _ok "apply-cmd: infra-reconcile class names cbox ollama reconcile"
 
 declare -f _cbox_machine_scoped_vars >/dev/null || _fail "extraction failed: _cbox_machine_scoped_vars not defined"
 machine_vars="$(_cbox_machine_scoped_vars | sort)"
-expected_machine_vars="$(printf '%s\n' CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL CBOX_OLLAMA_CONTEXT_LENGTH CBOX_OLLAMA_FLASH_ATTENTION CBOX_OLLAMA_KV_CACHE_TYPE CBOX_OLLAMA_KEEP_ALIVE CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE CBOX_WG_FORWARDS CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME CBOX_LOCAL_MODEL_TIMEOUT_SEC | sort)"
-[ "$machine_vars" = "$expected_machine_vars" ] || _fail "_cbox_machine_scoped_vars: expected exactly the ollama+wireguard+local-model vars, got: $machine_vars"
+expected_machine_vars="$(printf '%s\n' CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL CBOX_OLLAMA_CONTEXT_LENGTH CBOX_OLLAMA_FLASH_ATTENTION CBOX_OLLAMA_KV_CACHE_TYPE CBOX_OLLAMA_KEEP_ALIVE CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE CBOX_WG_FORWARDS CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME CBOX_LOCAL_MODEL_TIMEOUT_SEC CBOX_HERMES_DELEGATE CBOX_HERMES_DELEGATE_PROVIDER CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL CBOX_HERMES_DELEGATE_MAX_CONCURRENCY CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC CBOX_HERMES_DELEGATE_LOCK_DIR OLLAMA_NUM_PARALLEL CBOX_HERMES_DELEGATE_MODE CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS | sort)"
+[ "$machine_vars" = "$expected_machine_vars" ] || _fail "_cbox_machine_scoped_vars: expected exactly the ollama+wireguard+local-model+hermes-delegate vars, got: $machine_vars"
 _ok "_cbox_machine_scoped_vars: enumerates exactly SEC_VARS[ollama] + SEC_VARS[wireguard] (the two machine-scoped sections)"
 
 CBOX_MODE=global
@@ -399,16 +402,10 @@ fi
 unset CBOX_MODE
 
 CBOX_HERMES=off
-if err="$(_cbox_config_dep_gate CBOX_HERMES_DELEGATE 2>&1)"; then
-  _fail "dep-gate: CBOX_HERMES=off should force hermes-delegate back (disable:hermes-off)"
-else
-  case "$err" in
-    *"hermes"*) _ok "dep-gate: rejects CBOX_HERMES_DELEGATE when CBOX_HERMES=off ($err)" ;;
-    *) _fail "dep-gate: rejection reason missing hermes text: $err" ;;
-  esac
-fi
-
-CBOX_HERMES=on
+_cbox_config_dep_gate CBOX_HERMES_DELEGATE >/dev/null 2>&1 \
+  || _fail "dep-gate: CBOX_HERMES_DELEGATE is machine-scoped and must not be gated on the project-scoped CBOX_HERMES (the render gate handles a project without the engine); CBOX_HERMES=off rejected it"
+_ok "dep-gate: CBOX_HERMES=off no longer forces hermes-delegate back (machine scope, render-gated instead)"
+export CBOX_HERMES=on
 _cbox_config_dep_gate CBOX_HERMES_DELEGATE >/dev/null 2>&1 \
   || _fail "dep-gate: CBOX_HERMES=on should leave hermes-delegate ungated"
 _ok "dep-gate: CBOX_HERMES=on leaves hermes-delegate ungated"

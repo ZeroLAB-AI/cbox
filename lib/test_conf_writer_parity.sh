@@ -405,11 +405,11 @@ for fx in default full isolated special_chars; do
     _strip_adopted_block "$TMPBASE/neww_stripped_${fx}_${skip}.conf" "$TMPBASE/block_${fx}_${skip}.conf" "$TMPBASE/rem_${fx}_${skip}.conf" \
       || _fail "whitelist writer: adopted six-line block malformed for fixture '$fx' skip_machine=$skip"
     if [ "$skip" = 1 ]; then
-      grep -v '^CBOX_LOCAL_MODEL' "$TMPBASE/oldw_${fx}_${skip}.conf" > "$TMPBASE/oldw_nolocal_${fx}.conf" || true
+      grep -v -e '^CBOX_LOCAL_MODEL' -e '^CBOX_HERMES_DELEGATE' -e '^OLLAMA_NUM_PARALLEL=' "$TMPBASE/oldw_${fx}_${skip}.conf" > "$TMPBASE/oldw_nolocal_${fx}.conf" || true
       mv "$TMPBASE/oldw_nolocal_${fx}.conf" "$TMPBASE/oldw_${fx}_${skip}.conf"
     fi
     cmp -s "$TMPBASE/oldw_${fx}_${skip}.conf" "$TMPBASE/rem_${fx}_${skip}.conf" \
-      || _fail "whitelist writer output diverged beyond the adopted block for fixture '$fx' skip_machine=$skip (note: the local-model keys are expected to be absent when skip_machine=1 - the section moved to machine scope, so the reference writer, which reads the pre-registry section table, still emits them):
+      || _fail "whitelist writer output diverged beyond the adopted block for fixture '$fx' skip_machine=$skip (note: the local-model and hermes-delegate keys are expected to be absent when skip_machine=1 - both sections moved to machine scope, so the reference writer, which reads the pre-registry section table, still emits them):
 $(diff -u "$TMPBASE/oldw_${fx}_${skip}.conf" "$TMPBASE/rem_${fx}_${skip}.conf" || true)"
     _ok "cbox config-set whitelist writer: pre-registry output plus exactly the adopted autoupdate/dns/clipboard block for fixture '$fx' skip_machine=$skip"
   done

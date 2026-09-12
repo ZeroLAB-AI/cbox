@@ -30,7 +30,7 @@ cbox = spec['_cbox']
 assert cbox['adapter'] == 'stdio-mcp', cbox
 assert cbox['available_to'] == ['claude', 'codex', 'hermes'], cbox
 assert cbox['backend'] == 'hermes', cbox
-assert cbox['enabled_when_env'] == 'CBOX_HERMES_DELEGATE', cbox
+assert cbox['enabled_when_env'] == ['CBOX_HERMES_DELEGATE', 'CBOX_HERMES'], cbox
 assert 'spawns-hermes-subprocess' in cbox['side_effects'], cbox
 "
 _ok "hermes-local entry shape matches the stdio-mcp delegate contract"
@@ -70,6 +70,7 @@ _ok "hermes-local is absent from selection=all render when CBOX_HERMES_DELEGATE=
 
 RENDERED_PRESENT="$TMPBASE/present.json"
 CBOX_HERMES_DELEGATE=on \
+CBOX_HERMES=on \
 CBOX_HERMES_DELEGATE_BIN=/opt/hermes/bin/hermes \
 CBOX_HERMES_DELEGATE_HOME_TEMPLATE=/opt/hermes/delegate-home \
 CBOX_HERMES_DELEGATE_PROVIDER=local \
@@ -124,6 +125,7 @@ _ok "hermes-local renders with substituted env when CBOX_HERMES_DELEGATE and inp
 
 RENDERED_CONCURRENCY_EMPTY="$TMPBASE/concurrency_empty.json"
 CBOX_HERMES_DELEGATE=on \
+CBOX_HERMES=on \
   env -u CBOX_HERMES_DELEGATE_MAX_CONCURRENCY -u CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC \
       -u CBOX_HERMES_DELEGATE_LOCK_DIR -u OLLAMA_NUM_PARALLEL \
   python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
@@ -141,6 +143,7 @@ _ok "hermes-local concurrency knobs render as empty string (not the @VAR@ placeh
 
 RENDERED_TOOLSETS="$TMPBASE/toolsets.json"
 CBOX_HERMES_DELEGATE=on \
+CBOX_HERMES=on \
 CBOX_HERMES_DELEGATE_MODE=qa \
 CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS=terminal,web \
   python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
@@ -168,6 +171,7 @@ _ok "hermes-local is absent from codex target render when CBOX_HERMES_DELEGATE i
 
 RENDERED_CODEX="$TMPBASE/codex.json"
 CBOX_HERMES_DELEGATE=on \
+CBOX_HERMES=on \
 CBOX_HERMES_DELEGATE_BIN=/opt/hermes/bin/hermes \
 CBOX_HERMES_DELEGATE_HOME_TEMPLATE=/opt/hermes/delegate-home \
 CBOX_HERMES_DELEGATE_PROVIDER=local \
@@ -190,6 +194,7 @@ _ok "hermes-local is available_to codex when CBOX_HERMES_DELEGATE=on (ask-claude
 
 RENDERED_CODEX_DEPTH="$TMPBASE/codex_depth.json"
 CBOX_HERMES_DELEGATE=on \
+CBOX_HERMES=on \
 CBOX_HERMES_DELEGATE_BIN=/opt/hermes/bin/hermes \
 CBOX_HERMES_DELEGATE_HOME_TEMPLATE=/opt/hermes/delegate-home \
 CBOX_HERMES_DELEGATE_PROVIDER=local \
@@ -209,6 +214,7 @@ _ok "hermes-local rendered for the codex target pins CBOX_DELEGATION_DEPTH=1 whe
 
 RENDERED_GATE="$TMPBASE/gate.json"
 CBOX_HERMES_DELEGATE=on \
+CBOX_HERMES=on \
 CBOX_HERMES_DELEGATE_BIN=/opt/hermes/bin/hermes \
 CBOX_HERMES_DELEGATE_HOME_TEMPLATE=/opt/hermes/delegate-home \
   python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
@@ -255,27 +261,47 @@ DEPFUNC="$TMPBASE/dep_gate.sh"
   ' "$INSTALL_DIR/lib/cbox-setup.sh"
 } > "$DEPFUNC"
 
-DEP_RESULT="$(
+DEP_RESULT_OFF="$(
   CBOX_HERMES=off
-  source "$SECFUNC"
-  source "$DEPFUNC"
-  section_dep_gate hermes-delegate
-  printf '%s %s' "$DEP_ACTION" "$DEP_REASON"
-)"
-case "$DEP_RESULT" in
-  disable\ *) _ok "dep-gate: CBOX_HERMES=off forces hermes-delegate to disable ($DEP_RESULT)" ;;
-  *) _fail "dep-gate did not disable hermes-delegate when CBOX_HERMES=off (got: $DEP_RESULT)" ;;
-esac
-
-DEP_RESULT_ON="$(
-  CBOX_HERMES=on
   source "$SECFUNC"
   source "$DEPFUNC"
   section_dep_gate hermes-delegate
   printf '%s' "$DEP_ACTION"
 )"
-[ "$DEP_RESULT_ON" = ok ] \
-  || _fail "dep-gate disabled hermes-delegate when CBOX_HERMES=on (got: $DEP_RESULT_ON)"
-_ok "dep-gate: CBOX_HERMES=on leaves hermes-delegate ungated"
+[ "$DEP_RESULT_OFF" = ok ] \
+  || _fail "hermes-delegate is machine-scoped and must carry no dependency on the project-scoped hermes engine (a dependency would check the GLOBAL config and force the machine value off); got: $DEP_RESULT_OFF"
+_ok "dep-gate: hermes-delegate has no hermes dependency any more (machine scope)"
+
+RENDERED_ENGINE_OFF="$TMPBASE/engine_off.json"
+CBOX_HERMES_DELEGATE=on CBOX_HERMES=off \
+  python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
+  "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$RENDERED_ENGINE_OFF"
+python3 -c "
+import json
+data = json.load(open('$RENDERED_ENGINE_OFF'))
+assert 'hermes-local' not in data, data.keys()
+"
+_ok "render gate: CBOX_HERMES_DELEGATE=on with CBOX_HERMES=off renders no hermes-local (a project without the engine does not get the tool)"
+
+RENDERED_ENGINE_UNSET="$TMPBASE/engine_unset.json"
+CBOX_HERMES_DELEGATE=on env -u CBOX_HERMES \
+  python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
+  "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$RENDERED_ENGINE_UNSET"
+python3 -c "
+import json
+data = json.load(open('$RENDERED_ENGINE_UNSET'))
+assert 'hermes-local' not in data, data.keys()
+"
+_ok "render gate: CBOX_HERMES unset also renders no hermes-local"
+
+python3 -c "
+import json
+for path in ('$INSTALL_DIR/etc/mcp/delegates.json', '$INSTALL_DIR/etc/capabilities/capabilities.json'):
+    d = json.load(open(path))
+    entry = d['hermes-local'] if 'hermes-local' in d else d['capabilities']['hermes-local']
+    gate = entry['_cbox']['enabled_when_env'] if '_cbox' in entry else entry['enabled_when_env']
+    assert list(gate) == ['CBOX_HERMES_DELEGATE', 'CBOX_HERMES'], (path, gate)
+"
+_ok "render gate: delegates.json and capabilities.json both gate hermes-local on CBOX_HERMES_DELEGATE and CBOX_HERMES"
 
 echo "PASS: all hermes_delegate_render checks"

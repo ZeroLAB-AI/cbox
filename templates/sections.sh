@@ -153,7 +153,7 @@ sec_get() {
           printf '%s\n' 'Off by default; third console engine (NousResearch Hermes Agent) installed at runtime into the shared bins volume; local OpenAI-compatible endpoint by default.'
           ;;
         hermes-delegate)
-          printf '%s\n' 'Off by default. A zero-cost MCP delegate tool (hermes-local) that shells out to a one-shot hermes -z call per invocation, in an ephemeral per-call home isolated from the hermes console engine; requires the hermes console engine.'
+          printf '%s\n' 'Off by default. A zero-cost MCP delegate tool (hermes-local) that shells out to a one-shot hermes -z call per invocation, in an ephemeral per-call home isolated from the hermes console engine. Machine-scoped: decided once per host and inherited by every project; the tool is rendered only in projects where the hermes console engine (CBOX_HERMES=on, project-scoped) is present, so a project without hermes simply does not get it.'
           ;;
         ollama)
           printf '%s\n' 'Off by default. Machine-scoped infra service: ollama runs in its own owner compose project (cbox-infra-u<uid>), never inside a generated cbox project, so it survives per-project compose down. One value applies to every project on this machine; the isolated per-project wizard never asks about it.'
@@ -577,7 +577,7 @@ sec_get() {
           printf '%s\n' 'project'
           ;;
         hermes-delegate)
-          printf '%s\n' 'project'
+          printf '%s\n' 'machine'
           ;;
         ollama)
           printf '%s\n' 'machine'
@@ -646,9 +646,6 @@ sec_get() {
         codex-progress)
           printf '%s\n' 'dictate:shim-hook'
           ;;
-        hermes-delegate)
-          printf '%s\n' 'disable:hermes-off'
-          ;;
         codex-mcp)
           printf '%s\n' 'dictate:hooks'
           ;;
@@ -670,9 +667,6 @@ sec_get() {
           ;;
         dictate:shim-hook)
           printf '%s\n' 'auto-deploys the codex_mcp_shim hook when enabled'
-          ;;
-        disable:hermes-off)
-          printf '%s\n' 'disabled until the hermes console engine (CBOX_HERMES=on) is enabled'
           ;;
         dictate:hooks)
           printf '%s\n' 'auto-deploys the ask-claude hook when enabled'
@@ -828,7 +822,7 @@ sec_has() {
       ;;
     SEC_DEPS)
       case "$2" in
-        gpu|codex-progress|hermes-delegate|codex-mcp|continuity|restart-policy)
+        gpu|codex-progress|codex-mcp|continuity|restart-policy)
           return 0
           ;;
         *)
@@ -838,7 +832,7 @@ sec_has() {
       ;;
     SEC_DEP_TEXT)
       case "$2" in
-        disable:no-cdi|dictate:shim-hook|disable:hermes-off|dictate:hooks|dictate:continuity-hooks|disable:isolated-mode)
+        disable:no-cdi|dictate:shim-hook|dictate:hooks|dictate:continuity-hooks|disable:isolated-mode)
           return 0
           ;;
         *)
@@ -883,10 +877,10 @@ sec_keys() {
       printf '%s\n' 'mode' 'mounts' 'workspaces' 'python' 'gpu' 'egress' 'netaccess' 'hostroute' 'ssh' 'bashrc' 'mcp-servers' 'codex-progress' 'local-model' 'hermes' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'codex-mcp' 'continuity' 'claude-md' 'settings' 'hooks' 'git-identity' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang' 'user-layer'
       ;;
     SEC_DEPS)
-      printf '%s\n' 'gpu' 'codex-progress' 'hermes-delegate' 'codex-mcp' 'continuity' 'restart-policy'
+      printf '%s\n' 'gpu' 'codex-progress' 'codex-mcp' 'continuity' 'restart-policy'
       ;;
     SEC_DEP_TEXT)
-      printf '%s\n' 'disable:no-cdi' 'dictate:shim-hook' 'disable:hermes-off' 'dictate:hooks' 'dictate:continuity-hooks' 'disable:isolated-mode'
+      printf '%s\n' 'disable:no-cdi' 'dictate:shim-hook' 'dictate:hooks' 'dictate:continuity-hooks' 'disable:isolated-mode'
       ;;
     SEC_DOCTOR_ROWS)
       printf '%s\n' 'mounts' 'workspaces' 'python' 'netaccess' 'bashrc' 'mcp-servers' 'ollama' 'wireguard' 'autoresume' 'agents' 'continuity' 'claude-md' 'hooks' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang' 'user-layer'

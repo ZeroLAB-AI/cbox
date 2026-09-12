@@ -29,7 +29,7 @@ RESUME_MARKER = "RESUME"
 FENCE_MARKER = "--- CBOX CONTINUITY PAYLOAD"
 FENCE_MARKER_NEUTRALIZED = "-.- CBOX CONTINUITY PAYLOAD"
 
-SESSION_CORE_VERSION = "session-core v3"
+SESSION_CORE_VERSION = "session-core v4"
 SESSION_CORE_VERSION_RE = re.compile(r"^Version:\s*(session-core v[0-9A-Za-z.]+)\s*$", re.MULTILINE)
 
 LIGHT_CORE = """SESSION CORE (light profile) - minimal driver floor.

@@ -61,12 +61,12 @@ _ok "registry: SEC_SCOPE[wireguard]=machine"
 other_bad=""
 for s in "${SECTIONS[@]}"; do
   case "$s" in
-    wireguard|ollama|local-model) continue ;;
+    wireguard|ollama|local-model|hermes-delegate) continue ;;
   esac
   [ -n "$(sec_get SEC_SCOPE "$s")" ] || { other_bad="$other_bad missing:$s"; continue; }
   [ "$(sec_get SEC_SCOPE "$s")" = project ] || other_bad="$other_bad wrong:$s=$(sec_get SEC_SCOPE "$s")"
 done
-[ -z "$other_bad" ] || _fail "registry: SEC_SCOPE should default to project for every section except ollama/wireguard/local-model:$other_bad"
+[ -z "$other_bad" ] || _fail "registry: SEC_SCOPE should default to project for every section except ollama/wireguard/local-model/hermes-delegate:$other_bad"
 _ok "registry: SEC_SCOPE defaults to project for every non-machine-scoped section"
 
 _load_cbox_config_block() {

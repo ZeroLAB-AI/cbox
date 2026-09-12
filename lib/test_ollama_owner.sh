@@ -520,4 +520,15 @@ _ok "finding13: gpu-check's docker run argv carries a -- terminator before the i
 ) || _fail "finding13: _cbox_val_named_ollama_image must reject any value starting with - while still accepting well-formed image references"
 _ok "finding13: _cbox_val_named_ollama_image rejects a leading-dash value (docker run flag-injection guard)"
 
+OWNER_UP_FN="$(awk '/^_cbox_ollama_owner_up\(\) \{/,/^}$/' "$INSTALL_DIR/cbox")"
+[ -n "$OWNER_UP_FN" ] || _fail "cannot extract _cbox_ollama_owner_up from cbox"
+echo "$OWNER_UP_FN" | grep -q 'network "\*" not found' || _fail "_cbox_ollama_owner_up must recognise the stale-network failure a docker daemon restart leaves behind"
+echo "$OWNER_UP_FN" | grep -q 'rm -f -s' || _fail "_cbox_ollama_owner_up must remove the dead container before retrying (compose up alone retries the same stale network id)"
+for fn in _cbox_ollama_reconcile_cmd _cbox_ollama_up_cmd; do
+  body="$(awk -v fn="$fn" '$0 == fn"() {" , $0 == "}"' "$INSTALL_DIR/cbox")"
+  echo "$body" | grep -q '_cbox_ollama_owner_up ||' || _fail "$fn must start the owner through _cbox_ollama_owner_up and fail when it fails - it used to report 'applied' after a failed compose up"
+  ! echo "$body" | grep -q '_cbox_ollama_owner_compose up -d --remove-orphans$' || _fail "$fn must not call compose up directly any more"
+done
+_ok "owner up: stale network is healed by removing the dead container; reconcile and up no longer claim success after a failed start"
+
 echo "PASS: all ollama owner checks"

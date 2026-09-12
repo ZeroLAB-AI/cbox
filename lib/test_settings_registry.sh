@@ -225,6 +225,7 @@ DELTA = {
 MODIFIED = {
     "SEC_SCOPE": {
         "local-model": "machine",
+        "hermes-delegate": "machine",
     },
     "SEC_VARS": {
         "netaccess": "CBOX_NETACCESS_MODE CBOX_NETACCESS_APPLIED CBOX_NETACCESS_SCOPE CBOX_NETACCESS_NETWORKS CBOX_NETACCESS_CIDRS CBOX_NETACCESS_SOCKS_PORT CBOX_NETACCESS_EXEC_MODE CBOX_NETACCESS_EXEC_WORKSPACE_GUARD CBOX_NETACCESS_EXEC_TIMEOUT CBOX_NETACCESS_EXEC_MAX_BYTES CBOX_CONTAINER_EXEC_TOOL",
@@ -239,12 +240,19 @@ MODIFIED = {
     },
     "SEC_DESC": {
         "local-model": "Off by default. A text-only MCP delegate (local-qwen) backed by a local OpenAI-compatible endpoint such as ollama - see etc/docs/LOCAL_MODEL_RUNBOOK.md. Machine-scoped: the endpoint is a fact about this host, not about a project, so it is configured once and every project on the machine reads the same value.",
+        "hermes-delegate": "Off by default. A zero-cost MCP delegate tool (hermes-local) that shells out to a one-shot hermes -z call per invocation, in an ephemeral per-call home isolated from the hermes console engine. Machine-scoped: decided once per host and inherited by every project; the tool is rendered only in projects where the hermes console engine (CBOX_HERMES=on, project-scoped) is present, so a project without hermes simply does not get it.",
         "autoresume": "Wrap interactive sessions in tmux and let a per-container watchdog type the resume prompt after a usage-limit window resets (isolated session scope + claude mount only). Also carries the in-container sshd remote-attach feature (disabled by default): three layers - WireGuard, an ssh key, and this container's access level - gate list/attach/spawn against the tmux sessions the wrap creates.",
     },
     "SEC_DOCTOR_ROWS": {
         "netaccess": "netaccess container-exec container-exec-tool",
         "autoresume": "session-broker",
     },
+}
+
+
+REMOVED = {
+    "SEC_DEPS": ["hermes-delegate"],
+    "SEC_DEP_TEXT": ["disable:hermes-off"],
 }
 
 
@@ -265,6 +273,8 @@ for name, kind, payload in old:
         payload = [
             (k, MODIFIED[name].get(k, v)) for k, v in payload
         ]
+    if name in REMOVED and kind == "assoc":
+        payload = [(k, v) for k, v in payload if k not in REMOVED[name]]
     if name == "RAW" and kind == "raw":
         payload = payload.replace(
             'DOCTOR_EXTRA_ROWS="codex-profile context-manifest local-model local-model-egress managed-dirs config-pending sessions"',
@@ -282,9 +292,9 @@ if expected != new:
 EOF
 
 python3 "$ADOPTION_DELTA_PY" "$TMPBASE/old_norm.txt" "$TMPBASE/new_norm.txt" 2> "$TMPBASE/parity_diff.txt" \
-  || _fail "SEC_* arrays differ from the pre-registry snapshot by MORE than the declared shadow-setting adoption (sections autoupdate/dns/clipboard with their six variables, plus the netaccess CBOX_CONTAINER_EXEC_TOOL variable/doctor-row addition, plus the mounts CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG variable addition, plus the autoresume CBOX_SESSION_MULTIPLEX variable addition, plus the wireguard CBOX_WG_FORWARDS variable addition, plus the autoresume CBOX_SESSION_BROKER_MODE variable and session-broker doctor-row addition, plus the autoresume CBOX_SSHD_LISTEN_ADDR and CBOX_SSHD_PORT variable additions and updated SEC_DESC for the in-container sshd ForceCommand entry, plus the new kernel-lang section with its two CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING variables, plus the capabilities and stale-binds doctor-extra-row additions to DOCTOR_EXTRA_ROWS, plus the clipboard doctor row on the clipboard section, plus the hermes CBOX_HERMES_HOOKS variable addition, plus the codex-mcp CBOX_CODEX_HOOKS variable addition, plus the codex-mcp CBOX_CODEX_MODEL and CBOX_CODEX_EFFORT variable additions, plus the ollama CBOX_OLLAMA_CONTEXT_LENGTH/CBOX_OLLAMA_FLASH_ATTENTION/CBOX_OLLAMA_KV_CACHE_TYPE/CBOX_OLLAMA_KEEP_ALIVE variable additions, plus the local-model CBOX_LOCAL_MODEL_TIMEOUT_SEC variable addition, plus local-model moving to machine scope because the endpoint is a fact about the host and every project on it reads the same one):
+  || _fail "SEC_* arrays differ from the pre-registry snapshot by MORE than the declared shadow-setting adoption (sections autoupdate/dns/clipboard with their six variables, plus the netaccess CBOX_CONTAINER_EXEC_TOOL variable/doctor-row addition, plus the mounts CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG variable addition, plus the autoresume CBOX_SESSION_MULTIPLEX variable addition, plus the wireguard CBOX_WG_FORWARDS variable addition, plus the autoresume CBOX_SESSION_BROKER_MODE variable and session-broker doctor-row addition, plus the autoresume CBOX_SSHD_LISTEN_ADDR and CBOX_SSHD_PORT variable additions and updated SEC_DESC for the in-container sshd ForceCommand entry, plus the new kernel-lang section with its two CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING variables, plus the capabilities and stale-binds doctor-extra-row additions to DOCTOR_EXTRA_ROWS, plus the clipboard doctor row on the clipboard section, plus the hermes CBOX_HERMES_HOOKS variable addition, plus the codex-mcp CBOX_CODEX_HOOKS variable addition, plus the codex-mcp CBOX_CODEX_MODEL and CBOX_CODEX_EFFORT variable additions, plus the ollama CBOX_OLLAMA_CONTEXT_LENGTH/CBOX_OLLAMA_FLASH_ATTENTION/CBOX_OLLAMA_KV_CACHE_TYPE/CBOX_OLLAMA_KEEP_ALIVE variable additions, plus the local-model CBOX_LOCAL_MODEL_TIMEOUT_SEC variable addition, plus local-model moving to machine scope because the endpoint is a fact about the host and every project on it reads the same one, plus hermes-delegate moving to machine scope and dropping its disable:hermes-off dependency - the hermes-local render gate on CBOX_HERMES replaces it, so the dependency text disappears from SEC_DEP_TEXT):
 $(cat "$TMPBASE/parity_diff.txt")"
-_ok "parity gate: generated sections.sh equals the pre-registry snapshot plus exactly the declared adoption delta (autoupdate/dns/clipboard sections, six variables, skip profile, project scope, empty doctor rows; plus CBOX_CONTAINER_EXEC_TOOL added to the existing netaccess section and its container-exec-tool doctor row; plus CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG added to the existing mounts section; plus CBOX_SESSION_MULTIPLEX added to the existing autoresume section; plus CBOX_SAFEGUARD_AUTOCONFIRM added to the existing autoresume section; plus CBOX_WG_FORWARDS added to the existing wireguard section; plus CBOX_SESSION_BROKER_MODE added to the existing autoresume section and its session-broker doctor row; plus CBOX_SSHD_LISTEN_ADDR and CBOX_SSHD_PORT added to the existing autoresume section with its SEC_DESC updated for sshd; plus the new kernel-lang section (CBOX_KERNEL_LANG_OUTPUT, CBOX_KERNEL_LANG_REASONING), apply_class none, skip profile, project scope, empty doctor rows; plus the capabilities and stale-binds doctor-extra-rows added to DOCTOR_EXTRA_ROWS; plus the clipboard section gaining its own clipboard doctor row; plus CBOX_HERMES_HOOKS added to the existing hermes section (M4 experiment gate, default off); plus CBOX_CODEX_HOOKS added to the existing codex-mcp section (M4 experiment gate, default off); plus CBOX_CODEX_MODEL and CBOX_CODEX_EFFORT added to the existing codex-mcp section (configurable codex profile model/effort, defaults gpt-5.6-terra/xhigh)) - nothing else moved"
+_ok "parity gate: generated sections.sh equals the pre-registry snapshot plus exactly the declared adoption delta (autoupdate/dns/clipboard sections, six variables, skip profile, project scope, empty doctor rows; plus CBOX_CONTAINER_EXEC_TOOL added to the existing netaccess section and its container-exec-tool doctor row; plus CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG added to the existing mounts section; plus CBOX_SESSION_MULTIPLEX added to the existing autoresume section; plus CBOX_SAFEGUARD_AUTOCONFIRM added to the existing autoresume section; plus CBOX_WG_FORWARDS added to the existing wireguard section; plus CBOX_SESSION_BROKER_MODE added to the existing autoresume section and its session-broker doctor row; plus CBOX_SSHD_LISTEN_ADDR and CBOX_SSHD_PORT added to the existing autoresume section with its SEC_DESC updated for sshd; plus the new kernel-lang section (CBOX_KERNEL_LANG_OUTPUT, CBOX_KERNEL_LANG_REASONING), apply_class none, skip profile, project scope, empty doctor rows; plus the capabilities and stale-binds doctor-extra-rows added to DOCTOR_EXTRA_ROWS; plus the clipboard section gaining its own clipboard doctor row; plus CBOX_HERMES_HOOKS added to the existing hermes section (M4 experiment gate, default off); plus CBOX_CODEX_HOOKS added to the existing codex-mcp section (M4 experiment gate, default off); plus CBOX_CODEX_MODEL and CBOX_CODEX_EFFORT added to the existing codex-mcp section (configurable codex profile model/effort, defaults gpt-5.6-terra/xhigh); plus hermes-delegate moving to machine scope with its hermes-off dependency and dependency text removed in favour of the render gate) - nothing else moved"
 
 NAMES="$(python3 "$PY" sections "$REG")"
 [ -n "$NAMES" ] || _fail "sections command returned nothing"

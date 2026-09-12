@@ -638,7 +638,8 @@
         "etc/mcp/delegates.json"
       ],
       "enabled_when_env": [
-        "CBOX_HERMES_DELEGATE"
+        "CBOX_HERMES_DELEGATE",
+        "CBOX_HERMES"
       ],
       "planes": [
         "mediated"

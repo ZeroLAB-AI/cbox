@@ -119,4 +119,12 @@ def_line="$(printf '%s\n' "$run_block" | grep -n '^    _cbox_reg_conf_defaults$'
   || _fail "_run_isolated must apply the registry defaults right after sourcing the project conf, so a value a previous registry persisted as empty (CBOX_HERMES_EFFORT='') picks up the current default instead of staying empty forever"
 _ok "run path: registry defaults are applied after sourcing the project conf (legacy empty values heal on the next run)"
 
+setup_main="$(awk '/^_cbox_setup_main\(\) \{/,/^}$/' "$INSTALL_DIR/lib/cbox-setup.sh")"
+printf '%s\n' "$setup_main" | grep -q '^    --from-global)$' \
+  || _fail "cbox setup --from-global (current directory) must be a first-class form"
+printf '%s\n' "$setup_main" | grep -q '_local_root="\$PWD"' \
+  || _fail "cbox setup --local must default the project root to the current directory"
+grep -q 'cbox setup --from-global' "$INSTALL_DIR/MANUAL.md" || _fail "MANUAL must document cbox setup --from-global"
+_ok "setup: --from-global works from inside a project and --local defaults to the current directory"
+
 echo "PASS: isolated template re-bless keeps project settings"

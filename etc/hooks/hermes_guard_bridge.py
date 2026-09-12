@@ -40,13 +40,18 @@ def main():
 
     if payload.get("hook_event_name") != "pre_tool_call":
         return _allow()
-    if payload.get("tool_name") != "terminal":
-        return _allow()
-
+    tool_name = payload.get("tool_name")
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
         return _allow()
-    command = tool_input.get("command")
+    if tool_name == "terminal":
+        command = tool_input.get("command")
+    elif tool_name == "process":
+        if tool_input.get("action") not in ("write", "submit"):
+            return _allow()
+        command = tool_input.get("data")
+    else:
+        return _allow()
     if not isinstance(command, str) or not command:
         return _allow()
 

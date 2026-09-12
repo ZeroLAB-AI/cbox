@@ -158,16 +158,11 @@
     {
       "id": "hermes-delegate",
       "title": "Hermes MCP delegate",
-      "description": "Off by default. A zero-cost MCP delegate tool (hermes-local) that shells out to a one-shot hermes -z call per invocation, in an ephemeral per-call home isolated from the hermes console engine; requires the hermes console engine.",
+      "description": "Off by default. A zero-cost MCP delegate tool (hermes-local) that shells out to a one-shot hermes -z call per invocation, in an ephemeral per-call home isolated from the hermes console engine. Machine-scoped: decided once per host and inherited by every project; the tool is rendered only in projects where the hermes console engine (CBOX_HERMES=on, project-scoped) is present, so a project without hermes simply does not get it.",
       "apply_class": "restart",
       "profile": "skip",
-      "scope": "project",
-      "dependencies": [
-        {
-          "kind": "disable",
-          "reason": "hermes-off"
-        }
-      ],
+      "scope": "machine",
+      "dependencies": [],
       "doctor_rows": null
     },
     {
@@ -388,8 +383,7 @@
     "dictate:shim-hook": "auto-deploys the codex_mcp_shim hook when enabled",
     "dictate:continuity-hooks": "history=1 auto-deploys the continuity hooks (commit log, ledger sweep, session digest)",
     "disable:isolated-mode": "disabled in isolated mode - container lifecycle managed per-project",
-    "disable:no-cdi": "disabled until nvidia-ctk and /etc/cdi/nvidia.yaml are present",
-    "disable:hermes-off": "disabled until the hermes console engine (CBOX_HERMES=on) is enabled"
+    "disable:no-cdi": "disabled until nvidia-ctk and /etc/cdi/nvidia.yaml are present"
   },
   "doctor_extra_rows": [
     "codex-profile",
@@ -1344,14 +1338,15 @@
       "type": {
         "kind": "enum-or-empty",
         "values": [
-          "qa"
+          "qa",
+          "agent"
         ]
       },
       "default": "",
       "role": "setting",
       "export": true,
       "prompt": null,
-      "help": "qa mode (the only mode implemented) pins the hermes child's terminal, file, web, code_execution, delegation, browser, and computer_use toolsets off per call (see CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS to override).",
+      "help": "Empty means qa. qa pins the hermes child's terminal, file, web, code_execution, delegation, browser, and computer_use toolsets off per call, so it only reasons and answers. agent makes the child an autonomous agent inside the workspace (working directory = project root): terminal and file tools stay on, code_execution, web, delegation, browser, computer_use and cronjob are pinned off, and the call refuses to run unless the hermes guard hooks block is rendered (CBOX_HERMES_HOOKS=on) and its guard scripts are present read-only, so the child runs under the same PreToolUse guards as the hermes console (hook acceptance is set explicitly for the child, hermes would otherwise skip hooks on a non-interactive stdin). CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS extends either floor.",
       "validator": null
     },
     {
@@ -1365,7 +1360,7 @@
       "role": "setting",
       "export": true,
       "prompt": null,
-      "help": "Adds to the mandatory disabled toolset list (terminal,file,web,code_execution,delegation,browser,computer_use) - this floor can never be shrunk, only extended with extra toolset names.",
+      "help": "Adds to the mandatory disabled toolset list of the active mode (qa: terminal,file,web,code_execution,delegation,browser,computer_use; agent: code_execution,web,delegation,browser,computer_use,cronjob) - the floor can never be shrunk, only extended with extra toolset names.",
       "validator": null
     },
     {

@@ -444,6 +444,10 @@
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
+    "lib/test_ollama_owner_heal.sh": {
+      "layer": "test",
+      "purpose": "ollama owner self-heal on engine start: a dead owner container is started, a stale network is healed by reconcile, a rootless copy-up symptom asks for a docker restart (tty only, warns about other sessions), failures never block the session; wiring before every compose-up"
+    },
     "lib/test_ollama_section.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"

@@ -186,16 +186,36 @@ _cbox_reg_conf_write_whitelist() {
     printf 'CBOX_HERMES_MODEL_URL=%q\n' "${CBOX_HERMES_MODEL_URL-}"
     printf 'CBOX_HERMES_MODEL_NAME=%q\n' "${CBOX_HERMES_MODEL_NAME-}"
     printf 'CBOX_HERMES_HOOKS=%q\n' "${CBOX_HERMES_HOOKS-}"
-    printf 'CBOX_HERMES_DELEGATE=%q\n' "${CBOX_HERMES_DELEGATE-}"
-    printf 'CBOX_HERMES_DELEGATE_PROVIDER=%q\n' "${CBOX_HERMES_DELEGATE_PROVIDER-}"
-    printf 'CBOX_HERMES_DELEGATE_BASE_URL=%q\n' "${CBOX_HERMES_DELEGATE_BASE_URL-}"
-    printf 'CBOX_HERMES_DELEGATE_MODEL=%q\n' "${CBOX_HERMES_DELEGATE_MODEL-}"
-    printf 'CBOX_HERMES_DELEGATE_MAX_CONCURRENCY=%q\n' "${CBOX_HERMES_DELEGATE_MAX_CONCURRENCY-}"
-    printf 'CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC=%q\n' "${CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC-}"
-    printf 'CBOX_HERMES_DELEGATE_LOCK_DIR=%q\n' "${CBOX_HERMES_DELEGATE_LOCK_DIR-}"
-    printf 'OLLAMA_NUM_PARALLEL=%q\n' "${OLLAMA_NUM_PARALLEL-}"
-    printf 'CBOX_HERMES_DELEGATE_MODE=%q\n' "${CBOX_HERMES_DELEGATE_MODE-}"
-    printf 'CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS=%q\n' "${CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS-}"
+    if [ "$skip_machine" != 1 ]; then
+      printf 'CBOX_HERMES_DELEGATE=%q\n' "${CBOX_HERMES_DELEGATE-}"
+    fi
+    if [ "$skip_machine" != 1 ]; then
+      printf 'CBOX_HERMES_DELEGATE_PROVIDER=%q\n' "${CBOX_HERMES_DELEGATE_PROVIDER-}"
+    fi
+    if [ "$skip_machine" != 1 ]; then
+      printf 'CBOX_HERMES_DELEGATE_BASE_URL=%q\n' "${CBOX_HERMES_DELEGATE_BASE_URL-}"
+    fi
+    if [ "$skip_machine" != 1 ]; then
+      printf 'CBOX_HERMES_DELEGATE_MODEL=%q\n' "${CBOX_HERMES_DELEGATE_MODEL-}"
+    fi
+    if [ "$skip_machine" != 1 ]; then
+      printf 'CBOX_HERMES_DELEGATE_MAX_CONCURRENCY=%q\n' "${CBOX_HERMES_DELEGATE_MAX_CONCURRENCY-}"
+    fi
+    if [ "$skip_machine" != 1 ]; then
+      printf 'CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC=%q\n' "${CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC-}"
+    fi
+    if [ "$skip_machine" != 1 ]; then
+      printf 'CBOX_HERMES_DELEGATE_LOCK_DIR=%q\n' "${CBOX_HERMES_DELEGATE_LOCK_DIR-}"
+    fi
+    if [ "$skip_machine" != 1 ]; then
+      printf 'OLLAMA_NUM_PARALLEL=%q\n' "${OLLAMA_NUM_PARALLEL-}"
+    fi
+    if [ "$skip_machine" != 1 ]; then
+      printf 'CBOX_HERMES_DELEGATE_MODE=%q\n' "${CBOX_HERMES_DELEGATE_MODE-}"
+    fi
+    if [ "$skip_machine" != 1 ]; then
+      printf 'CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS=%q\n' "${CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS-}"
+    fi
     if [ "$skip_machine" != 1 ]; then
       printf 'CBOX_OLLAMA_MODE=%q\n' "${CBOX_OLLAMA_MODE-}"
     fi

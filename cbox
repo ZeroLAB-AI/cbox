@@ -723,6 +723,26 @@ _cbox_ollama_shared_store_guard() {
   return 0
 }
 
+_cbox_ollama_owner_up() {
+  local out
+  if out="$(_cbox_ollama_owner_compose up -d --remove-orphans 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    return 0
+  fi
+  case "$out" in
+    *"network "*" not found"*)
+      echo "cbox: ollama owner: a container points at a network that no longer exists (typical after a docker daemon restart) - removing the dead container and starting again" >&2
+      _cbox_ollama_owner_compose rm -f -s >/dev/null 2>&1 || true
+      if out="$(_cbox_ollama_owner_compose up -d --remove-orphans 2>&1)"; then
+        printf '%s\n' "$out" >&2
+        return 0
+      fi
+      ;;
+  esac
+  printf '%s\n' "$out" >&2
+  return 1
+}
+
 _cbox_ollama_reconcile_cmd() {
   local dir
   dir="$(_cbox_ollama_owner_dir)"
@@ -753,7 +773,7 @@ _cbox_ollama_reconcile_cmd() {
   gen_ollama_owner_compose_into "$dir"
   gen_wireguard_conf
   _cbox_ollama_manifest_write "$dir"
-  _cbox_ollama_owner_compose up -d --remove-orphans
+  _cbox_ollama_owner_up || { echo "cbox: ollama reconcile: owner project $(_cbox_ollama_owner_name) rendered at $dir but its containers failed to start - see the error above" >&2; return 1; }
   _cbox_ollama_reconcile_networks_impl || echo "cbox: ollama reconcile: owner project is up but per-scope network reconciliation reported an error - run 'cbox ollama reconcile' again" >&2
   if [ "${CBOX_OLLAMA_MODE:-off}" = on ]; then
     echo "cbox: ollama reconcile: owner project $(_cbox_ollama_owner_name) applied at $dir"
@@ -771,7 +791,7 @@ _cbox_ollama_up_cmd() {
   fi
   _cbox_ollama_shared_store_guard || return 1
   _cbox_ollama_adopt_or_refuse "$dir" || return 1
-  _cbox_ollama_owner_compose up -d --remove-orphans
+  _cbox_ollama_owner_up || { echo "cbox: ollama up: owner project rendered but its containers failed to start - see the error above" >&2; return 1; }
   _cbox_ollama_reconcile_networks_impl || echo "cbox: ollama up: per-scope network reconciliation reported an error - run 'cbox ollama reconcile' again" >&2
 }
 
@@ -1012,6 +1032,94 @@ _cbox_ollama_reconcile_networks() {
   fi
   _cbox_ollama_reconcile_networks_impl || rc=1
   exec 9>&-
+  return "$rc"
+}
+
+_cbox_ollama_heal_can_prompt() {
+  [ -t 0 ] && [ -t 1 ]
+}
+
+_cbox_docker_restart_rootless() {
+  local i
+  systemctl --user restart docker || return 1
+  for i in $(seq 1 30); do
+    docker info >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  echo "cbox: the docker daemon did not answer within 30s after the restart" >&2
+  return 1
+}
+
+_cbox_ollama_owner_heal_impl() {
+  local dir cid state out ans
+  [ "${CBOX_OLLAMA_MODE:-off}" = on ] || return 0
+  dir="$(_cbox_ollama_owner_dir)"
+  [ -f "$dir/docker-compose.yml" ] || return 0
+  cid="$(_cbox_ollama_owner_compose ps -q -a ollama 2>/dev/null | head -n1)" || cid=""
+  [ -n "$cid" ] || return 0
+  state="$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null)" || state=unknown
+  [ "$state" != running ] || return 0
+  echo "cbox: ollama owner container is $state - starting it before this session" >&2
+  if out="$(_cbox_ollama_owner_compose up -d ollama 2>&1)"; then
+    return 0
+  fi
+  case "$out" in
+    *"network "*" not found"*)
+      echo "cbox: the ollama owner container points at a network that no longer exists (typical after a docker daemon restart) - recreating it through the owner reconcile" >&2
+      _cbox_ollama_owner_compose rm -f -s ollama >/dev/null 2>&1 || true
+      if out="$(_cbox_ollama_reconcile_cmd 2>&1)"; then
+        return 0
+      fi
+      ;;
+  esac
+  case "$out" in
+    *"nvidia-persistenced/socket"*|*"unresolvable CDI devices"*)
+      echo "cbox: the ollama owner cannot start because the rootless docker daemon still sees the /etc and /run snapshot from its own start (copy-up) - a CDI spec or persistenced socket created since then is invisible to it" >&2
+      if ! _cbox_is_rootless_docker; then
+        echo "cbox: docker is not rootless here - restart the daemon yourself (sudo systemctl restart docker) and then run 'cbox ollama reconcile'" >&2
+        return 1
+      fi
+      if ! _cbox_ollama_heal_can_prompt; then
+        echo "cbox: no terminal to ask on - run 'systemctl --user restart docker && cbox ollama reconcile' yourself" >&2
+        return 1
+      fi
+      printf 'cbox: restart the docker daemon now? This stops EVERY container on this daemon, including other cbox sessions. [Y/n] ' >&2
+      read -r -t 60 ans || ans=n
+      case "$ans" in
+        n|N)
+          echo "cbox: skipped - run 'systemctl --user restart docker && cbox ollama reconcile' when ready" >&2
+          return 1
+          ;;
+      esac
+      _cbox_docker_restart_rootless || return 1
+      if out="$(_cbox_ollama_reconcile_cmd 2>&1)"; then
+        echo "cbox: docker restarted and the ollama owner project reconciled" >&2
+        return 0
+      fi
+      ;;
+  esac
+  echo "cbox: the ollama owner container could not be started - run 'cbox ollama reconcile' on the host; this session continues without the local model" >&2
+  printf '%s\n' "$out" | tail -n 3 >&2
+  return 1
+}
+
+_cbox_ollama_owner_heal() {
+  local lockfile rc=0 fd
+  [ "${CBOX_OLLAMA_MODE:-off}" = on ] || return 0
+  mkdir -p "$HOME/.config/cbox/infra"
+  lockfile="$(_cbox_ollama_lock_file)"
+  if [ -L "$lockfile" ]; then
+    echo "cbox: refusing - $lockfile is a symlink, not a plain lock file" >&2
+    return 1
+  fi
+  exec {fd}>> "$lockfile" || return 1
+  if ! _cbox_flock -x -w 30 "$fd"; then
+    echo "cbox: could not lock $lockfile for the ollama owner check" >&2
+    exec {fd}>&-
+    return 1
+  fi
+  _cbox_ollama_owner_heal_impl || rc=1
+  exec {fd}>&-
   return "$rc"
 }
 
@@ -1638,6 +1746,7 @@ _run_global() {
     _clip_bridge_stop
     return 1
   }
+  _cbox_ollama_owner_heal || true
   _cbox_compose_up "$HOME/.config/cbox/compose.up.stamp" "${COMPOSE[@]}" >/dev/null || {
     _container_exec_bridge_stop
     _clip_bridge_stop
@@ -2371,6 +2480,7 @@ _session_run() {
     exec 8>&-
     return 1
   }
+  _cbox_ollama_owner_heal || true
   _cbox_compose_up "$eff/.compose.up.stamp" docker compose --project-directory "$eff" -f "$eff/docker-compose.yml" || {
     trap - INT TERM HUP
     _container_exec_bridge_stop
@@ -2611,6 +2721,7 @@ shell_isolated() {
     exec 8>&-
     return 1
   }
+  _cbox_ollama_owner_heal || true
   _cbox_compose_up "$eff/.compose.up.stamp" docker compose --project-directory "$eff" -f "$eff/docker-compose.yml" || {
     _container_exec_bridge_stop
     _clip_bridge_stop
@@ -2865,6 +2976,7 @@ up() {
     mkdir -p -m 0700 "$(_cbox_container_exec_dir "${CBOX_NAME:-cbox}")/sockets"
     chmod 0700 "$(_cbox_container_exec_dir "${CBOX_NAME:-cbox}")" "$(_cbox_container_exec_dir "${CBOX_NAME:-cbox}")/sockets"
   fi
+  _cbox_ollama_owner_heal || true
   _cbox_compose_up "$HOME/.config/cbox/compose.up.stamp" "${COMPOSE[@]}"
   _cbox_probe_exes_seed "$INSTALL_DIR" "$("${COMPOSE[@]}" ps -q "$SERVICE" 2>/dev/null | head -n1)"
   _cbox_netaccess_apply_global || {
@@ -4940,7 +5052,6 @@ _cbox_config_dep_gate() {
     case "$cond" in
       isolated-mode) [ "${CBOX_MODE:-global}" = isolated ] && met=0 ;;
       no-cdi) command -v nvidia-ctk >/dev/null 2>&1 && [ -f /etc/cdi/nvidia.yaml ] && met=0 ;;
-      hermes-off) [ "${CBOX_HERMES:-off}" != on ] && met=0 ;;
       hooks|continuity-hooks) met=0 ;;
     esac
     if [ "$mech" = disable ] && [ "$met" = 0 ]; then
@@ -5384,7 +5495,7 @@ _cbox_config_set_global() {
 
   if [ "${CBOX_CONFIG_MACHINE_ROUTED:-0}" = 1 ]; then
     echo "cbox: machine-scoped keys were written to the machine-level $conf, which every project on this host shares"
-    echo "cbox: apply them with the owning verb - 'cbox ollama reconcile' for ollama, 'cbox wg up' for wireguard - the pending record above lives next to that conf, not in your project"
+    echo "cbox: apply them with the owning verb - 'cbox ollama reconcile' for ollama, 'cbox wg up' for wireguard; local-model and hermes-delegate keys reach a project on its next start, so restart each project that should pick them up (cbox down && cbox run <bin>) - the pending record above lives next to that conf, not in your project"
   fi
 
   echo "cbox: previous global cbox.conf kept at $backup"

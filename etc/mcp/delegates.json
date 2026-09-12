@@ -215,7 +215,10 @@
       "side_effects": [
         "spawns-hermes-subprocess"
       ],
-      "enabled_when_env": "CBOX_HERMES_DELEGATE"
+      "enabled_when_env": [
+        "CBOX_HERMES_DELEGATE",
+        "CBOX_HERMES"
+      ]
     }
   }
 }

@@ -1136,5 +1136,184 @@ class PerCallEffortTests(unittest.TestCase):
         self.assertIn("effort must be one of", body)
 
 
+class AgentModeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.control_file = os.path.join(self.tmpdir, "control.json")
+        write_control(self.control_file)
+        self.stub = make_stub(self.tmpdir, self.control_file)
+        self.template_home = make_template_home(self.tmpdir)
+        self.env_backup = dict(os.environ)
+        os.environ["HERMES_BIN"] = self.stub
+        os.environ["CBOX_HERMES_DELEGATE_HOME_TEMPLATE"] = self.template_home
+        os.environ["CBOX_HERMES_DELEGATE_PROVIDER"] = "local"
+        os.environ["CBOX_HERMES_DELEGATE_BASE_URL"] = "http://127.0.0.1:11434"
+        os.environ["CBOX_HERMES_DELEGATE_MODE"] = "agent"
+        for k in ("CBOX_HERMES_DELEGATE_MODEL", "CBOX_HERMES_PROVIDER",
+                  "CBOX_HERMES_MODEL_URL", "CBOX_HERMES_MODEL_NAME",
+                  "CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS",
+                  "CBOX_DELEGATION_DEPTH", "CBOX_MCP_DEPTH",
+                  "CBOX_HERMES_DELEGATE_LOCK_DIR", "CBOX_SCOPE_ROOT"):
+            os.environ.pop(k, None)
+        os.environ["CBOX_HERMES_DELEGATE_LOCK_DIR"] = os.path.join(self.tmpdir, "locks")
+        self.guard_script = os.path.join(self.tmpdir, "hermes_guard_bridge.py")
+        with open(self.guard_script, "w") as fh:
+            fh.write("import sys\nsys.exit(0)\n")
+        os.chmod(self.guard_script, 0o444)
+        self.hooks_file = os.path.join(self.tmpdir, "hooks.yaml")
+        self._write_hooks_file([{"matcher": "terminal",
+                                 "command": "python3 " + self.guard_script,
+                                 "timeout": 10}])
+        os.environ["CBOX_HERMES_DELEGATE_HOOKS_FILE"] = self.hooks_file
+
+    def _write_hooks_file(self, entries):
+        if os.path.exists(self.hooks_file):
+            os.chmod(self.hooks_file, 0o644)
+        with open(self.hooks_file, "w") as fh:
+            fh.write(json.dumps({"hooks": {"pre_tool_call": entries}}) + "\n")
+        os.chmod(self.hooks_file, 0o444)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.env_backup)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _run_and_record_pin(self, tag):
+        marker = os.path.join(self.tmpdir, "marker_%s.txt" % tag)
+        record = os.path.join(self.tmpdir, "record_%s.json" % tag)
+        write_control(self.control_file, marker=marker, toolset_record=record)
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        stored = None
+        if os.path.exists(record):
+            with open(record) as fh:
+                stored = json.loads(fh.read())
+        return result, stored
+
+    def test_agent_mode_is_valid_and_qa_stays_default(self):
+        self.assertIsNone(MOD.validate_mode("agent"))
+        self.assertEqual(MOD.DEFAULT_MODE, "qa")
+        self.assertIn("agent", MOD.VALID_MODES)
+        self.assertNotIn("workspace", MOD.VALID_MODES)
+
+    def test_agent_floor_keeps_terminal_and_file_but_pins_fanout_off(self):
+        floor = MOD.mandatory_disabled_toolsets("agent")
+        for name in ("code_execution", "web", "delegation", "browser", "computer_use", "cronjob"):
+            self.assertIn(name, floor)
+        for name in ("terminal", "file"):
+            self.assertNotIn(name, floor)
+        self.assertEqual(MOD.mandatory_disabled_toolsets("qa"),
+                         MOD.MANDATORY_DISABLED_TOOLSETS_ORDER)
+
+    def test_agent_mode_pins_its_floor_and_runs_with_hooks_present(self):
+        result, stored = self._run_and_record_pin("agent")
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(stored, list(MOD.AGENT_MANDATORY_DISABLED_TOOLSETS_ORDER))
+
+    def test_agent_mode_override_extends_the_floor_never_shrinks_it(self):
+        os.environ["CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS"] = "memory,delegation"
+        result, stored = self._run_and_record_pin("agent_override")
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(stored, list(MOD.AGENT_MANDATORY_DISABLED_TOOLSETS_ORDER) + ["memory"])
+
+    def test_agent_mode_refuses_without_the_guard_hooks_block(self):
+        os.environ["CBOX_HERMES_DELEGATE_HOOKS_FILE"] = os.path.join(self.tmpdir, "missing.yaml")
+        result, stored = self._run_and_record_pin("agent_nohooks")
+        self.assertTrue(result["isError"], result)
+        text = result["content"][0]["text"]
+        self.assertIn("CBOX_HERMES_HOOKS=on", text)
+        self.assertIn("agent mode", text)
+
+    def test_agent_mode_refuses_a_writable_hooks_block(self):
+        os.chmod(self.hooks_file, 0o666)
+        result, stored = self._run_and_record_pin("agent_writable")
+        self.assertTrue(result["isError"], result)
+        self.assertIn("writable", result["content"][0]["text"])
+
+    def test_qa_mode_ignores_the_hooks_file_entirely(self):
+        os.environ["CBOX_HERMES_DELEGATE_MODE"] = "qa"
+        os.environ["CBOX_HERMES_DELEGATE_HOOKS_FILE"] = os.path.join(self.tmpdir, "missing.yaml")
+        result, stored = self._run_and_record_pin("qa_nohooks")
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(stored, list(MOD.MANDATORY_DISABLED_TOOLSETS_ORDER))
+
+    def _fresh_home(self, name):
+        home = os.path.join(self.tmpdir, name)
+        os.makedirs(home)
+        with open(os.path.join(home, "config.yaml"), "w") as fh:
+            fh.write(json.dumps({"model": {"provider": "custom"}}) + "\n")
+        return home
+
+    def test_guard_hooks_land_in_the_ephemeral_config_and_are_accepted(self):
+        home = self._fresh_home("eph")
+        env_base = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": home}
+        err = MOD._apply_guard_hooks(home, env_base)
+        self.assertIsNone(err)
+        with open(os.path.join(home, "config.yaml")) as fh:
+            text = fh.read()
+        self.assertIn("pre_tool_call", text)
+        self.assertIn("hermes_guard_bridge.py", text)
+        self.assertIn("hooks_auto_accept", text)
+        self.assertIn("provider", text)
+        self.assertEqual(env_base.get("HERMES_ACCEPT_HOOKS"), "1")
+
+    def test_qa_mode_never_sets_hook_acceptance(self):
+        os.environ["CBOX_HERMES_DELEGATE_MODE"] = "qa"
+        home = self._fresh_home("eph_qa")
+        env_base = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": home}
+        err = MOD._apply_config(home, env_base)
+        self.assertIsNone(err, err)
+        self.assertNotIn("HERMES_ACCEPT_HOOKS", env_base)
+
+    def test_hooks_block_without_a_pre_tool_call_hook_is_refused(self):
+        self._write_hooks_file([])
+        result, stored = self._run_and_record_pin("agent_emptyhooks")
+        self.assertTrue(result["isError"], result)
+        self.assertIn("pre_tool_call", result["content"][0]["text"])
+
+    def test_hooks_block_naming_a_missing_guard_script_is_refused(self):
+        self._write_hooks_file([{"matcher": "terminal",
+                                 "command": "python3 " + os.path.join(self.tmpdir, "gone.py"),
+                                 "timeout": 10}])
+        result, stored = self._run_and_record_pin("agent_goneguard")
+        self.assertTrue(result["isError"], result)
+        self.assertIn("gone.py", result["content"][0]["text"])
+
+    def test_hooks_block_naming_a_writable_guard_script_is_refused(self):
+        os.chmod(self.guard_script, 0o666)
+        result, stored = self._run_and_record_pin("agent_wguard")
+        self.assertTrue(result["isError"], result)
+        self.assertIn("writable", result["content"][0]["text"])
+
+    def test_agent_workspace_refuses_a_directory_outside_a_git_tree(self):
+        os.environ["CBOX_SCOPE_ROOT"] = self.tmpdir
+        root, err = MOD.agent_workspace()
+        self.assertIsNone(root)
+        self.assertIn("git work tree", err)
+        os.environ.pop("CBOX_SCOPE_ROOT", None)
+        root, err = MOD.agent_workspace()
+        self.assertIsNone(err, err)
+        self.assertEqual(root, os.getcwd())
+
+    def test_workspace_dir_prefers_scope_root_and_falls_back_to_cwd(self):
+        os.environ["CBOX_SCOPE_ROOT"] = self.tmpdir
+        self.assertEqual(MOD.workspace_dir(), self.tmpdir)
+        os.environ["CBOX_SCOPE_ROOT"] = os.path.join(self.tmpdir, "does-not-exist")
+        self.assertEqual(MOD.workspace_dir(), os.getcwd())
+        os.environ.pop("CBOX_SCOPE_ROOT", None)
+        self.assertEqual(MOD.workspace_dir(), os.getcwd())
+
+    def test_scope_root_reaches_the_child_environment(self):
+        os.environ["CBOX_SCOPE_ROOT"] = self.tmpdir
+        os.environ["CBOX_SCOPE_SLUG"] = "-x"
+        self.assertEqual(MOD._scope_env(), {"CBOX_SCOPE_ROOT": self.tmpdir, "CBOX_SCOPE_SLUG": "-x"})
+
+    def test_tool_description_names_the_active_mode(self):
+        self.assertIn("agent mode", MOD.tool_description())
+        self.assertIn("workspace", MOD.tool_description())
+        os.environ["CBOX_HERMES_DELEGATE_MODE"] = "qa"
+        self.assertIn("qa mode", MOD.tool_description())
+        self.assertNotIn("agent mode", MOD.tool_description())
+
+
 if __name__ == "__main__":
     unittest.main()

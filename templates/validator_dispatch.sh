@@ -189,7 +189,7 @@ _cbox_reg_validate_var_dispatch() {
       _cbox_val_kind_uint_or_empty "$val" || return 1
       ;;
     CBOX_HERMES_DELEGATE_MODE)
-      _cbox_val_kind_enum_or_empty "$val" 'qa' || return 1
+      _cbox_val_kind_enum_or_empty "$val" 'qa' 'agent' || return 1
       ;;
     CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS)
       _cbox_val_named_no_validator "$val" || return 1

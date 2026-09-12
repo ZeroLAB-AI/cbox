@@ -46,6 +46,37 @@ assert doc.get('reason'), 'missing reason'
 " || _fail "deny fixture did not drive hermes_guard_bridge.py to a block decision: $DENY_OUT"
 _ok "DENY observation: rm-glob-shaped hermes pre_tool_call fixture drives hermes_guard_bridge.py to {\"decision\": \"block\"}"
 
+PROC_DENY_OUT="$(python3 -c "
+import json, sys
+doc = json.load(open('$DENY_FX'))
+cmd = doc['tool_input']['command']
+doc['tool_name'] = 'process'
+doc['tool_input'] = {'action': 'submit', 'session_id': 'abc', 'data': cmd}
+print(json.dumps(doc))
+" | python3 "$BRIDGE")"
+printf '%s' "$PROC_DENY_OUT" | python3 -c "
+import json, sys
+doc = json.load(sys.stdin)
+assert doc.get('decision') == 'block', 'process submit was not blocked: %r' % doc
+" || _fail "the same rm-glob command sent as stdin through the process tool (action=submit) must be blocked, got: $PROC_DENY_OUT"
+_ok "DENY observation: the process tool's submit data goes through the same rm guard as a terminal command"
+
+PROC_POLL_OUT="$(python3 -c "
+import json, sys
+doc = json.load(open('$DENY_FX'))
+doc['tool_name'] = 'process'
+doc['tool_input'] = {'action': 'poll', 'session_id': 'abc'}
+print(json.dumps(doc))
+" | python3 "$BRIDGE")"
+case "$PROC_POLL_OUT" in
+  *'"decision": "block"'*) _fail "a process poll (no stdin) must not be blocked: $PROC_POLL_OUT" ;;
+esac
+_ok "process actions that send no stdin pass through"
+
+python3 "$INSTALL_DIR/etc/adapters/hermes.py" hooks-yaml /home/x/.claude/hooks | grep -q 'matcher: terminal|process' \
+  || _fail "the rendered hooks block must match the process tool as well as terminal"
+_ok "render: the hooks block matcher covers terminal and process"
+
 ALLOW_OUT="$(python3 "$BRIDGE" < "$ALLOW_FX")"
 ALLOW_RC=$?
 [ "$ALLOW_RC" -eq 0 ] || _fail "bridge exited non-zero on the innocuous fixture (rc=$ALLOW_RC)"
