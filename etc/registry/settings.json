@@ -115,7 +115,7 @@
       "title": "MCP servers",
       "description": "Select which MCP delegates from delegates.json are available in the container.",
       "apply_class": "restart",
-      "profile": "skip",
+      "profile": "auto",
       "scope": "project",
       "dependencies": [],
       "doctor_rows": []
@@ -206,7 +206,7 @@
       "title": "Agents",
       "description": "Select which agents from etc/agents are installed; codex-* need their MCP server.",
       "apply_class": "none",
-      "profile": "skip",
+      "profile": "auto",
       "scope": "project",
       "dependencies": [],
       "doctor_rows": []
@@ -216,7 +216,7 @@
       "title": "Codex MCP",
       "description": "Register claude as an MCP tool inside codex for reverse orchestration.",
       "apply_class": "none",
-      "profile": "skip",
+      "profile": "auto",
       "scope": "project",
       "dependencies": [
         {
@@ -308,7 +308,9 @@
       "profile": "skip",
       "scope": "project",
       "dependencies": [],
-      "doctor_rows": []
+      "doctor_rows": [
+        "binaries"
+      ]
     },
     {
       "id": "restart-policy",
@@ -2081,6 +2083,23 @@
       "export": false,
       "prompt": "setup: binaries scope",
       "help": "Binaries scope: global or pinned.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_BINS_HEALTH_GATE",
+      "section": "binaries",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: automatic start-time binary health gate",
+      "help": "Off by default. When on, every cbox start runs one cached health probe per enabled tool that has no verdict yet for its current (version, probe) pair, and rolls back a definitively unhealthy install; flip on only after verifying the probe live on this host.",
       "validator": null
     },
     {

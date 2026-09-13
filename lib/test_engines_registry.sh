@@ -432,4 +432,49 @@ grep -qE 'verify-check v_fail:.*shared-session capability fields' "$TMPBASE/clau
 $(cat "$TMPBASE/claude_caps_missing_check.out")"
 _ok "verify asserts shared-session capability fields are populated"
 
+CODEX_HEALTH_KIND="$(python3 "$PY" get "$REG" codex health.kind)"
+[ "$CODEX_HEALTH_KIND" = "subcommand-handshake" ] || _fail "codex health.kind mismatch: $CODEX_HEALTH_KIND"
+_ok "get codex health.kind == subcommand-handshake"
+
+CODEX_HEALTH_EXPECT="$(python3 "$PY" get "$REG" codex health.expect)"
+[ "$CODEX_HEALTH_EXPECT" = "developer-instructions" ] || _fail "codex health.expect mismatch: $CODEX_HEALTH_EXPECT"
+_ok "get codex health.expect == developer-instructions"
+
+for eng in claude hermes; do
+  hk="$(python3 "$PY" get "$REG" "$eng" health.kind)"
+  [ "$hk" = "version" ] || _fail "$eng health.kind should be version, got $hk"
+done
+_ok "claude and hermes health.kind == version"
+
+cat > "$W/health_bad_kind.json" <<'EOF'
+{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "health": {"kind": "made-up"}}}}
+EOF
+if python3 "$PY" validate "$W/health_bad_kind.json" >/dev/null 2>&1; then
+  _fail "unknown health.kind was accepted"
+fi
+_ok "unknown health.kind rejected"
+
+cat > "$W/health_handshake_missing_expect.json" <<'EOF'
+{"schema": 1, "engines": {"codex": {"bin": "codex", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "health": {"kind": "subcommand-handshake"}}}}
+EOF
+if python3 "$PY" validate "$W/health_handshake_missing_expect.json" >/dev/null 2>&1; then
+  _fail "subcommand-handshake health missing expect was accepted"
+fi
+_ok "subcommand-handshake health missing expect rejected"
+
+cat > "$W/health_version_extra_field.json" <<'EOF'
+{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "health": {"kind": "version", "expect": "y"}}}}
+EOF
+if python3 "$PY" validate "$W/health_version_extra_field.json" >/dev/null 2>&1; then
+  _fail "version health with a foreign expect field was accepted"
+fi
+_ok "version health with foreign field (expect) rejected"
+
+cat > "$W/health_absent.json" <<'EOF'
+{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none"}}}
+EOF
+python3 "$PY" validate "$W/health_absent.json" >/dev/null 2>&1 \
+  || _fail "registry entry with no health field at all should still validate (backward compatible)"
+_ok "engine entries with no health field at all still validate (field is optional)"
+
 echo "PASS: all engines_registry checks"

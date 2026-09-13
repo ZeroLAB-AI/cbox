@@ -295,7 +295,7 @@ sec_get() {
           printf '%s\n' 'CBOX_APT_EXTRA'
           ;;
         binaries)
-          printf '%s\n' 'CBOX_CLAUDE_TARGET CBOX_CODEX_VERSION CBOX_CODEX_TARGET CBOX_BINS_SCOPE'
+          printf '%s\n' 'CBOX_CLAUDE_TARGET CBOX_CODEX_VERSION CBOX_CODEX_TARGET CBOX_BINS_SCOPE CBOX_BINS_HEALTH_GATE'
           ;;
         restart-policy)
           printf '%s\n' 'CBOX_RESTART_POLICY'
@@ -459,7 +459,7 @@ sec_get() {
           printf '%s\n' 'auto'
           ;;
         mcp-servers)
-          printf '%s\n' 'skip'
+          printf '%s\n' 'auto'
           ;;
         codex-progress)
           printf '%s\n' 'skip'
@@ -483,10 +483,10 @@ sec_get() {
           printf '%s\n' 'skip'
           ;;
         agents)
-          printf '%s\n' 'skip'
+          printf '%s\n' 'auto'
           ;;
         codex-mcp)
-          printf '%s\n' 'skip'
+          printf '%s\n' 'auto'
           ;;
         continuity)
           printf '%s\n' 'auto'
@@ -727,7 +727,7 @@ sec_get() {
           printf '%s\n' ''
           ;;
         binaries)
-          printf '%s\n' ''
+          printf '%s\n' 'binaries'
           ;;
         restart-policy)
           printf '%s\n' ''

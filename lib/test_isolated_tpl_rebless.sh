@@ -20,6 +20,7 @@ VERIFY_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_manifest_verify_conf_interact
 set +eu
 . "$INSTALL_DIR/_common.sh" >/dev/null 2>&1
 . "$INSTALL_DIR/templates/generators.sh" >/dev/null 2>&1
+. "$INSTALL_DIR/templates/conf_lib.sh" >/dev/null 2>&1
 set -eu
 eval "$REBLESS_FN"
 eval "$VERIFY_FN"
@@ -76,6 +77,13 @@ grep -q '^CBOX_HERMES_EFFORT=xhigh$' "$EFF/cbox.conf" || _fail "re-bless dropped
 grep -q "^CBOX_MCP_SERVERS='codex-sol hermes-local'$" "$EFF/cbox.conf" || _fail "re-bless dropped the project's mcp server selection"
 _ok "re-bless keeps every project-level setting (delegate, effort, mcp selection)"
 
+grep -q '^CBOX_HERMES_EFFORT=' "$EFF/cbox.override" || _fail "rebless adopt must preserve CBOX_HERMES_EFFORT as a project override"
+grep -q '^CBOX_MCP_SERVERS=' "$EFF/cbox.override" || _fail "rebless adopt must preserve CBOX_MCP_SERVERS as a project override"
+grep -q '^CBOX_HERMES_DELEGATE=' "$EFF/cbox.override" \
+  && _fail "rebless adopt must never turn the machine-scoped CBOX_HERMES_DELEGATE into a project override"
+grep -q '^CBOX_HERMES_DELEGATE=on$' "$EFF/cbox.conf" || _fail "rebless must still preserve CBOX_HERMES_DELEGATE in cbox.conf itself"
+_ok "rebless: [G7] adopt-on-first-touch preserves hermes effort and mcp-servers as overrides, hermes-delegate stays machine-scoped (not an override)"
+
 ! grep -q '^CBOX_LOCAL_MODEL_URL=' "$EFF/cbox.conf" || _fail "re-bless must strip stale machine-scoped keys from the project conf"
 _ok "re-bless strips stale machine-scoped keys (local-model moved to machine scope)"
 
@@ -102,8 +110,10 @@ fi
 grep -q '^CBOX_EXTRA=hand-edited$' "$EFF/cbox.conf" || _fail "refusal must not touch the conf"
 _ok "verify: a conf edited outside cbox is still refused (no silent re-bless, no re-derive)"
 
-grep -q 'Re-derive from the global profile now? This replaces every project-level setting' "$INSTALL_DIR/cbox" \
-  || _fail "the re-derive prompt must warn that project-level settings are replaced"
+grep -q "Re-derive from the global profile now? Keeps this project's overrides" "$INSTALL_DIR/cbox" \
+  || _fail "the re-derive prompt must say it keeps this project's overrides"
+grep -q 'drops only those whose global value changed since the last derive' "$INSTALL_DIR/cbox" \
+  || _fail "the re-derive prompt must say it only drops overrides whose global value moved"
 grep -q '\[y/N\]' <<< "$(_extract_fn "$INSTALL_DIR/cbox" _cbox_manifest_verify_conf_interactive)" \
   || _fail "the re-derive prompt must default to no"
 _ok "prompt: re-derive warns about the replacement and defaults to no"
@@ -126,5 +136,42 @@ printf '%s\n' "$setup_main" | grep -q '_local_root="\$PWD"' \
   || _fail "cbox setup --local must default the project root to the current directory"
 grep -q 'cbox setup --from-global' "$INSTALL_DIR/MANUAL.md" || _fail "MANUAL must document cbox setup --from-global"
 _ok "setup: --from-global works from inside a project and --local defaults to the current directory"
+
+_write_conf
+_cbox_manifest_write "$EFF" "$ROOT" "$EFF/cbox.conf"
+_cbox_layered_bootstrap_adopt "$EFF" "$ROOT" >/dev/null
+ovr_field_before="$(grep '^override=' "$EFF/manifest.sha256")"
+printf 'CBOX_INJECTED=tampered\n' >> "$EFF/cbox.override"
+sed -i 's/^generators=.*/generators=deadbeef/' "$EFF/manifest.sha256"
+[ "$(_cbox_manifest_status "$EFF" "$ROOT")" = tpl-drifted ] \
+  || _fail "setup: a tampered override plus a template bump must still read tpl-drifted"
+if _cbox_rebless_local_templates "$ROOT" "$EFF" 2>/dev/null; then
+  _fail "[HIGH] template re-bless must refuse when cbox.override drifted outside cbox, not silently re-stamp the manifest"
+fi
+grep -qF "$ovr_field_before" "$EFF/manifest.sha256" \
+  || _fail "[HIGH] a refused re-bless must not launder the manifest's override= field to match the tampered file"
+grep -q '^CBOX_INJECTED=tampered$' "$EFF/cbox.override" || _fail "test setup lost the tamper"
+_ok "[HIGH] template re-bless refuses (does not launder) a cbox.override tampered outside cbox"
+
+awk '/^_cbox_rebless_local_templates\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q '_cbox_layered_require_ok "\$eff"' \
+  || _fail "[HIGH] template re-bless must gate on _cbox_layered_require_ok before adopting/writing the manifest"
+_ok "[HIGH] template re-bless is wired to the layered status gate"
+
+run_local_block="$(awk '/^run_local\(\) \{/,/^}$/' "$INSTALL_DIR/lib/cbox-setup.sh")"
+gate_line="$(printf '%s\n' "$run_local_block" | grep -n '_cbox_layered_require_ok "\$eff"' | head -1 | cut -d: -f1)"
+src_ovr_line="$(printf '%s\n' "$run_local_block" | grep -n '^    \. "\$eff/cbox.override"$' | head -1 | cut -d: -f1)"
+[ -n "$gate_line" ] && [ -n "$src_ovr_line" ] && [ "$gate_line" -lt "$src_ovr_line" ] \
+  || _fail "[HIGH] run_local must verify the layered config is not drifted before sourcing cbox.override"
+_ok "[HIGH] run_local gates the layered status before sourcing cbox.override"
+
+force_set_line="$(printf '%s\n' "$run_local_block" | grep -n '^    CBOX_WORKSPACES="\$root"$' | tail -1 | cut -d: -f1)"
+[ -n "$src_ovr_line" ] && [ -n "$force_set_line" ] && [ "$force_set_line" -gt "$src_ovr_line" ] \
+  || _fail "[MEDIUM] run_local must re-assert CBOX_MODE/CBOX_WORKSPACES/CBOX_WORKDIR after sourcing cbox.override, so an override cannot widen the container mounts"
+_ok "[MEDIUM] run_local re-asserts the excluded mount keys after sourcing cbox.override"
+
+config_set_block="$(awk '/^_cbox_config_set_isolated\(\) \{/,/^}$/' "$INSTALL_DIR/cbox")"
+printf '%s\n' "$config_set_block" | grep -q '_cbox_layered_require_ok "\$eff"' \
+  || _fail "[HIGH] cbox config set (isolated) must gate on _cbox_layered_require_ok before writing overrides"
+_ok "[HIGH] cbox config set (isolated) is wired to the layered status gate"
 
 echo "PASS: isolated template re-bless keeps project settings"

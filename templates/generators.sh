@@ -335,7 +335,8 @@ _cbox_path_within() {
 
 _cbox_check_workspace_overlap() {
   local -a ws=("$@")
-  local w reserved_label reserved_path w_real reserved_real
+  local w reserved_label reserved_path w_real reserved_real cfg_root
+  cfg_root="${HOME:-}/.config/cbox"
   for w in "${ws[@]}"; do
     [ -n "$w" ] || continue
     w_real="$(_cbox_realpath_m "$w")"
@@ -347,6 +348,12 @@ _cbox_check_workspace_overlap() {
         die "workspace path conflicts with $reserved_label ($reserved_real): $w_real"
       fi
     done
+    if [ -n "${HOME:-}" ]; then
+      reserved_real="$(_cbox_realpath_m "$cfg_root")"
+      if _cbox_path_within "$w_real" "$reserved_real" || _cbox_path_within "$reserved_real" "$w_real"; then
+        die "workspace path conflicts with the cbox config root ($reserved_real): $w_real"
+      fi
+    fi
   done
 }
 
@@ -441,6 +448,12 @@ _cbox_manifest_write() {
     printf 'workspace=%s\n' "$root"
     printf 'conf=%s\n' "$conf_sha"
     printf 'generators=%s\n' "$gen_sha"
+    if [ -f "$eff/cbox.base" ]; then
+      printf 'base=%s\n' "$(_cbox_sha256 "$eff/cbox.base")"
+    fi
+    if [ -f "$eff/cbox.override" ]; then
+      printf 'override=%s\n' "$(_cbox_sha256 "$eff/cbox.override")"
+    fi
   } | _cbox_write "$eff/manifest.sha256"
   printf '%s\n' "$root" | _cbox_write "$eff/workspace"
 }
@@ -455,6 +468,12 @@ _cbox_manifest_write_keep_generated() {
     printf 'workspace=%s\n' "$root"
     printf 'conf=%s\n' "$conf_sha"
     printf 'generators=%s\n' "$gen_sha"
+    if [ -f "$eff/cbox.base" ]; then
+      printf 'base=%s\n' "$(_cbox_sha256 "$eff/cbox.base")"
+    fi
+    if [ -f "$eff/cbox.override" ]; then
+      printf 'override=%s\n' "$(_cbox_sha256 "$eff/cbox.override")"
+    fi
     if [ -f "$eff/manifest.sha256" ]; then
       grep -E '^(compose|dockerfile|entrypoint|env)=' "$eff/manifest.sha256" || true
     fi
@@ -2931,6 +2950,196 @@ _cbox_strip_machine_scoped_vars() {
   done < <(_cbox_machine_scoped_vars)
   chmod 0644 "$tmp"
   mv "$tmp" "$conf"
+}
+
+_cbox_override_excluded_vars() {
+  local v
+  for v in CBOX_MODE CBOX_WORKSPACES CBOX_WORKDIR \
+           CBOX_EGRESS_APPLIED CBOX_NETACCESS_APPLIED CBOX_HOST_ROUTE_APPLIED \
+           CBOX_NAME CBOX_TPL_SHA; do
+    printf '%s\n' "$v"
+  done
+  _cbox_machine_scoped_vars
+}
+
+_cbox_layered_is_excluded() {
+  local key="$1" v
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    [ "$v" = "$key" ] && return 0
+  done < <(_cbox_override_excluded_vars)
+  return 1
+}
+
+_cbox_conf_kv() {
+  local src="$1" out="$2"
+  (
+    if [ -f "$src" ]; then
+      . "$src"
+    fi
+    _cbox_reg_conf_defaults
+    _cbox_reg_conf_write_whitelist "$out" 1
+  )
+}
+
+_cbox_conf_changed_keys() {
+  local a="$1" b="$2" line k va vb
+  [ -f "$a" ] || return 0
+  while IFS= read -r line; do
+    case "$line" in
+      [A-Za-z_]*=*) : ;;
+      *) continue ;;
+    esac
+    k="${line%%=*}"
+    va="${line#*=}"
+    vb=""
+    if [ -f "$b" ]; then
+      vb="$(grep -m1 "^${k}=" "$b" 2>/dev/null)" || vb=""
+      vb="${vb#*=}"
+    fi
+    [ "$va" = "$vb" ] || printf '%s\n' "$k"
+  done < "$a"
+}
+
+_cbox_override_canonical_order() {
+  local tmp
+  tmp="$(mktemp)"
+  _cbox_reg_conf_write_whitelist "$tmp" 1 >/dev/null 2>&1 || true
+  sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$tmp"
+  rm -f "$tmp"
+}
+
+_cbox_override_keys() {
+  local eff="$1" ovr
+  ovr="$eff/cbox.override"
+  [ -f "$ovr" ] || return 0
+  sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$ovr"
+}
+
+_cbox_override_set() {
+  local eff="$1" key="$2" val_q="$3" ovr tmp k
+  ovr="$eff/cbox.override"
+  tmp="$(mktemp "$eff/.cbox.XXXXXX")"
+  {
+    while IFS= read -r k; do
+      [ -n "$k" ] || continue
+      if [ "$k" = "$key" ]; then
+        printf '%s=%s\n' "$key" "$val_q"
+      elif [ -f "$ovr" ] && grep -q "^${k}=" "$ovr" 2>/dev/null; then
+        grep -m1 "^${k}=" "$ovr"
+      fi
+    done < <(_cbox_override_canonical_order)
+  } > "$tmp"
+  chmod 0644 "$tmp"
+  mv "$tmp" "$ovr"
+}
+
+_cbox_override_del() {
+  local eff="$1" key="$2" ovr tmp
+  ovr="$eff/cbox.override"
+  [ -f "$ovr" ] || return 0
+  tmp="$(mktemp "$eff/.cbox.XXXXXX")"
+  grep -v "^${key}=" "$ovr" > "$tmp" 2>/dev/null || true
+  chmod 0644 "$tmp"
+  mv "$tmp" "$ovr"
+}
+
+_cbox_layered_status() {
+  local eff="$1" mf have want
+  mf="$eff/manifest.sha256"
+  if [ -f "$eff/cbox.base" ]; then
+    want="$(_cbox_manifest_field "$mf" base)" || { printf 'drifted'; return 0; }
+    have="$(_cbox_sha256 "$eff/cbox.base")"
+    [ "$have" = "$want" ] || { printf 'drifted'; return 0; }
+  fi
+  if [ -f "$eff/cbox.override" ]; then
+    want="$(_cbox_manifest_field "$mf" override)" || { printf 'drifted'; return 0; }
+    have="$(_cbox_sha256 "$eff/cbox.override")"
+    [ "$have" = "$want" ] || { printf 'drifted'; return 0; }
+  fi
+  printf 'ok'
+}
+
+_cbox_layered_require_ok() {
+  local eff="$1" status
+  [ -f "$eff/cbox.base" ] || [ -f "$eff/cbox.override" ] || return 0
+  status="$(_cbox_layered_status "$eff")"
+  [ "$status" = ok ]
+}
+
+_cbox_layered_key_conflict() {
+  local old_base="$1" new_base="$2" key="$3" vold vnew
+  [ -f "$old_base" ] || return 1
+  vold="$(grep -m1 "^${key}=" "$old_base" 2>/dev/null)" || return 1
+  vold="${vold#*=}"
+  vnew="$(grep -m1 "^${key}=" "$new_base" 2>/dev/null)" || vnew=""
+  vnew="${vnew#*=}"
+  [ "$vold" != "$vnew" ]
+}
+
+_cbox_layered_merge() {
+  local eff="$1" old_base new_base ovr dropped_log tmp line k vovr vold vnew
+  old_base="$eff/cbox.base"
+  new_base="$eff/cbox.base.new"
+  ovr="$eff/cbox.override"
+  dropped_log="$eff/override.dropped.log"
+  [ -h "$dropped_log" ] && rm -f "$dropped_log"
+  [ -f "$ovr" ] || { [ -h "$ovr" ] && rm -f "$ovr"; : > "$ovr"; return 0; }
+  tmp="$(mktemp "$eff/.cbox.XXXXXX")"
+  : > "$tmp"
+  while IFS= read -r line; do
+    case "$line" in
+      [A-Za-z_]*=*) : ;;
+      *) continue ;;
+    esac
+    k="${line%%=*}"
+    vovr="${line#*=}"
+    if _cbox_layered_key_conflict "$old_base" "$new_base" "$k"; then
+      vold="$(grep -m1 "^${k}=" "$old_base" 2>/dev/null)"; vold="${vold#*=}"
+      vnew="$(grep -m1 "^${k}=" "$new_base" 2>/dev/null)" || vnew=""
+      vnew="${vnew#*=}"
+      printf '%s dropped (global changed): old=%s new=%s override=%s\n' \
+        "$k" "$vold" "$vnew" "$vovr" >> "$dropped_log"
+      printf 'cbox: dropping project override for %s - global value changed since the last derive\n' "$k" >&2
+      continue
+    fi
+    printf '%s\n' "$line" >> "$tmp"
+  done < "$ovr"
+  chmod 0644 "$tmp"
+  mv "$tmp" "$ovr"
+}
+
+_cbox_layered_bootstrap_adopt() {
+  local eff="$1" root="$2" status k vline keys n
+  [ -f "$eff/cbox.base" ] && return 0
+  [ -f "$eff/cbox.conf" ] || return 0
+  status="$(_cbox_manifest_status "$eff" "$root")"
+  case "$status" in
+    ok|tpl-drifted) : ;;
+    *)
+      printf 'cbox: refusing to adopt layered config for %s - effective config is %s; review it, then fix with cbox config set/unset or re-derive with cbox setup --local %s --from-global --reset\n' \
+        "$root" "$status" "$root" >&2
+      return 1
+      ;;
+  esac
+  _cbox_conf_kv "$INSTALL_DIR/cbox.conf" "$eff/cbox.base.new" || return 1
+  [ -h "$eff/cbox.override" ] && rm -f "$eff/cbox.override"
+  : > "$eff/cbox.override"
+  while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    _cbox_layered_is_excluded "$k" && continue
+    vline="$(grep -m1 "^${k}=" "$eff/cbox.conf")"
+    _cbox_override_set "$eff" "$k" "${vline#*=}"
+  done < <(_cbox_conf_changed_keys "$eff/cbox.conf" "$eff/cbox.base.new")
+  mv "$eff/cbox.base.new" "$eff/cbox.base"
+  _cbox_manifest_write_keep_generated "$eff" "$root" "$eff/cbox.conf"
+  keys="$(_cbox_override_keys "$eff")"
+  if [ -n "$keys" ]; then
+    n="$(printf '%s\n' "$keys" | wc -l | tr -d ' ')"
+    printf 'cbox: adopted %s project overrides: %s (review: cbox config diff)\n' \
+      "$n" "$(printf '%s' "$keys" | tr '\n' ' ' | sed 's/ *$//')"
+  fi
+  return 0
 }
 
 _cbox_conf_set_tpl_sha() {

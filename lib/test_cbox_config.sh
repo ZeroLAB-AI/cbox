@@ -44,6 +44,8 @@ _load_cbox_functions
 declare -f _cbox_config_set_var >/dev/null || _fail "extraction failed: _cbox_config_set_var not defined"
 declare -f config_cmd >/dev/null || _fail "extraction failed: config_cmd not defined"
 declare -f _cbox_config_dep_gate >/dev/null || _fail "extraction failed: _cbox_config_dep_gate not defined"
+declare -f _cbox_config_diff >/dev/null || _fail "extraction failed: _cbox_config_diff not defined"
+declare -f _cbox_config_unset >/dev/null || _fail "extraction failed: _cbox_config_unset not defined"
 
 HOME="$TMPBASE/home"
 mkdir -p "$HOME"
@@ -494,6 +496,11 @@ grep -q "regen-called eff=$EFF root=$ROOT" "$REGEN_LOG" || _fail "e2e success: r
 [ -f "$EFF/pending.apply" ] || _fail "e2e success: pending.apply not written"
 grep -qx 'hermes=recreate' "$EFF/pending.apply" || _fail "e2e success: pending.apply missing hermes=recreate"
 
+[ -f "$EFF/cbox.override" ] || _fail "e2e success: config set must write cbox.override"
+grep -q '^CBOX_HERMES=' "$EFF/cbox.override" || _fail "e2e success: cbox.override missing the staged CBOX_HERMES key"
+grep -q '^CBOX_HERMES_VERSION=' "$EFF/cbox.override" || _fail "e2e success: cbox.override missing the staged CBOX_HERMES_VERSION key"
+_ok "e2e success: config set turns every staged key into a project override"
+
 conf_sha_now="$(sha256sum "$EFF/cbox.conf" | awk '{print $1}')"
 manifest_conf_sha="$(_cbox_manifest_field "$EFF/manifest.sha256" conf)"
 [ "$conf_sha_now" = "$manifest_conf_sha" ] || _fail "e2e success: manifest conf sha does not match post-set cbox.conf"
@@ -550,9 +557,12 @@ _gen_effective() {
 _cbox_path_hash() { printf 'failhash'; }
 EFF3="$HOME/.config/cbox/projects/failhash"
 _setup_fixture_eff "$EFF3" "$ROOT"
+_cbox_layered_bootstrap_adopt "$EFF3" "$ROOT" >/dev/null || _fail "setup: bootstrap adopt for the failure fixture must not fail"
+[ -f "$EFF3/cbox.base" ] || _fail "setup: bootstrap adopt must have created cbox.base for the failure fixture"
 cp "$EFF3/cbox.conf" "$TMPBASE/pre-conf"
 cp -a "$EFF3/generated" "$TMPBASE/pre-generated"
 cp "$EFF3/manifest.sha256" "$TMPBASE/pre-manifest.sha256"
+cp "$EFF3/cbox.override" "$TMPBASE/pre-override"
 
 (
   cd "$ROOT"
@@ -566,9 +576,10 @@ cp "$EFF3/manifest.sha256" "$TMPBASE/pre-manifest.sha256"
 cmp -s "$TMPBASE/pre-conf" "$EFF3/cbox.conf" || _fail "e2e failure: cbox.conf not byte-identical to pre-state after regen failure"
 diff -rq "$TMPBASE/pre-generated" "$EFF3/generated" >/dev/null || _fail "e2e failure: generated/ not byte-identical to pre-state after regen failure"
 cmp -s "$TMPBASE/pre-manifest.sha256" "$EFF3/manifest.sha256" || _fail "e2e failure: manifest.sha256 changed despite regen failure"
+cmp -s "$TMPBASE/pre-override" "$EFF3/cbox.override" || _fail "e2e failure: cbox.override not byte-identical to pre-state after regen failure"
 [ -f "$EFF3/pending.apply" ] && _fail "e2e failure: pending.apply should not have been written on failure"
 grep -qi "restored" "$TMPBASE/fail.stderr" || _fail "e2e failure: failure message does not mention restoration"
-_ok "e2e failure: conf and generated left byte-identical to pre-state, no manifest/pending written, failure reported"
+_ok "e2e failure: conf, generated and override left byte-identical to pre-state, no manifest/pending written, failure reported"
 
 DEPFAIL="$HOME/.config/cbox/projects/depfailhash"
 mkdir -p "$DEPFAIL/generated"
@@ -843,5 +854,278 @@ _ok "machine scope: the local-model keys are machine-scoped"
 grep -q '_cbox_strip_machine_scoped_vars "$eff/cbox.conf"' "$INSTALL_DIR/lib/cbox-setup.sh" \
   || _fail "machine scope: the derivation path must strip machine-scoped keys from a project conf - that strip is the ONLY writer that removes them, so a project carrying stale copies is repaired by the re-derive a template bump already forces, and nothing writes to a project conf from the normal run path"
 _ok "machine scope: stale project copies are cleared by the derivation strip, not by a writer on the run path"
+
+
+
+DIFFROOT="$TMPBASE/diff-root"
+mkdir -p "$DIFFROOT"
+DIFFGLOBAL="$TMPBASE/diff-global"
+mkdir -p "$DIFFGLOBAL"
+DIFFEFF="$HOME/.config/cbox/projects/diffhash"
+mkdir -p "$DIFFEFF" "$DIFFEFF/generated"
+
+cat > "$DIFFGLOBAL/cbox.conf" <<'EOF'
+CBOX_MODE=global
+CBOX_HERMES_EFFORT=medium
+CBOX_GPU=0
+CBOX_HERMES_VERSION=0.19.0
+EOF
+
+_cbox_conf_kv "$DIFFGLOBAL/cbox.conf" "$DIFFEFF/cbox.base"
+cp "$DIFFEFF/cbox.base" "$DIFFEFF/cbox.conf"
+sed -i "s#^CBOX_MODE=.*#CBOX_MODE=isolated#" "$DIFFEFF/cbox.conf"
+sed -i "s#^CBOX_WORKSPACES=.*#CBOX_WORKSPACES=$DIFFROOT#" "$DIFFEFF/cbox.conf"
+sed -i "s#^CBOX_WORKDIR=.*#CBOX_WORKDIR=$DIFFROOT#" "$DIFFEFF/cbox.conf"
+
+: > "$DIFFEFF/cbox.override"
+_cbox_override_set "$DIFFEFF" CBOX_HERMES_EFFORT xhigh
+_cbox_override_set "$DIFFEFF" CBOX_GPU 0
+_cbox_override_set "$DIFFEFF" CBOX_HERMES_VERSION 0.19.0
+
+_cbox_manifest_write "$DIFFEFF" "$DIFFROOT" "$DIFFEFF/cbox.conf"
+
+cat > "$DIFFGLOBAL/cbox.conf" <<'EOF'
+CBOX_MODE=global
+CBOX_HERMES_EFFORT=medium
+CBOX_GPU=1
+CBOX_HERMES_VERSION=0.19.0
+EOF
+
+_cbox_workspace_root() { printf '%s' "$DIFFROOT"; }
+_cbox_path_hash() { printf 'diffhash'; }
+_cbox_config_in_container() { return 1; }
+
+INSTALL_DIR_SAVE_DIFF="$INSTALL_DIR"
+INSTALL_DIR="$DIFFGLOBAL"
+diff_out="$(_cbox_config_diff)" || _fail "config diff: must succeed on a project with overrides"
+INSTALL_DIR="$INSTALL_DIR_SAVE_DIFF"
+
+case "$diff_out" in
+  *"CBOX_HERMES_EFFORT=xhigh  base=medium  global-now=medium"*) ;;
+  *) _fail "diff: unchanged-global override line malformed, got: $diff_out" ;;
+esac
+case "$diff_out" in
+  *"CBOX_HERMES_EFFORT=xhigh  base=medium  global-now=medium  CONFLICT"*) _fail "diff: an unmoved global key must not carry a CONFLICT marker" ;;
+esac
+_ok "diff: K=<override> base=<base> global-now=<global> renders for an unmoved key, no CONFLICT"
+
+case "$diff_out" in
+  *"CBOX_GPU=0  base=0  global-now=1  CONFLICT"*) ;;
+  *) _fail "diff: CONFLICT line for a moved global key malformed, got: $diff_out" ;;
+esac
+_ok "[G9] diff: CONFLICT marks exactly the key the next derive would drop (base != global-now)"
+
+case "$diff_out" in
+  *"CBOX_HERMES_VERSION= global  base=0.19.0  global-now=0.19.0"*) ;;
+  *) _fail "diff: an override equal to the current global value must render as '= global', got: $diff_out" ;;
+esac
+_ok "diff: an override equal to the current global value is shown as '= global', not hidden"
+
+ORIG_KEY_CONFLICT_FN="$(declare -f _cbox_layered_key_conflict)"
+_cbox_layered_key_conflict() { return 1; }
+INSTALL_DIR="$DIFFGLOBAL"
+neutered_out="$(_cbox_config_diff)"
+INSTALL_DIR="$INSTALL_DIR_SAVE_DIFF"
+case "$neutered_out" in
+  *"CBOX_GPU"*CONFLICT*) _fail "negative control: neutering the conflict predicate must remove the CONFLICT marker" ;;
+esac
+eval "$ORIG_KEY_CONFLICT_FN"
+_ok "negative control: CONFLICT marker disappears when the shared drop predicate is neutered, proving the assertion is not vacuous"
+
+: > "$DIFFEFF/cbox.override"
+_cbox_override_set "$DIFFEFF" CBOX_HERMES_VERSION 9.9.9
+_cbox_manifest_write "$DIFFEFF" "$DIFFROOT" "$DIFFEFF/cbox.conf"
+INSTALL_DIR="$DIFFGLOBAL"
+moved_out="$(_cbox_config_diff)"
+INSTALL_DIR="$INSTALL_DIR_SAVE_DIFF"
+case "$moved_out" in
+  *"CBOX_HERMES_VERSION=9.9.9  base=0.19.0  global-now=0.19.0"*) ;;
+  *) _fail "negative control: an override no longer equal to global-now must not render as '= global', got: $moved_out" ;;
+esac
+case "$moved_out" in
+  *"CBOX_HERMES_VERSION= global"*) _fail "negative control: '= global' must not appear once the override diverges from the current global value" ;;
+esac
+_ok "negative control: '= global' rendering tracks the actual value comparison, not a hardcoded string"
+
+DIFF_CLEAN="$TMPBASE/diff-clean"
+mkdir -p "$DIFF_CLEAN"
+mv "$DIFFEFF" "$DIFF_CLEAN/eff"
+mv "$DIFFGLOBAL" "$DIFF_CLEAN/global"
+mv "$DIFFROOT" "$DIFF_CLEAN/root"
+rm -rf "$DIFF_CLEAN"
+
+NOOVR_ROOT="$TMPBASE/noovr-root"
+mkdir -p "$NOOVR_ROOT"
+NOOVR_EFF="$HOME/.config/cbox/projects/noovrhash"
+mkdir -p "$NOOVR_EFF"
+cat > "$NOOVR_EFF/cbox.conf" <<EOF
+CBOX_MODE=isolated
+CBOX_WORKSPACES=$NOOVR_ROOT
+CBOX_WORKDIR=$NOOVR_ROOT
+CBOX_HERMES_EFFORT=medium
+EOF
+_cbox_workspace_root() { printf '%s' "$NOOVR_ROOT"; }
+_cbox_path_hash() { printf 'noovrhash'; }
+_cbox_config_in_container() { return 1; }
+noovr_out="$(_cbox_config_diff)" || _fail "diff: a project with no overrides yet must still succeed"
+case "$noovr_out" in
+  *"no project overrides"*) ;;
+  *) _fail "diff: a project with no overrides yet should say so plainly, got: $noovr_out" ;;
+esac
+_ok "diff: a project with no cbox.base/cbox.override yet reports plainly instead of erroring"
+
+NOOVR_CLEAN="$TMPBASE/noovr-clean"
+mkdir -p "$NOOVR_CLEAN"
+mv "$NOOVR_EFF" "$NOOVR_CLEAN/eff"
+mv "$NOOVR_ROOT" "$NOOVR_CLEAN/root"
+rm -rf "$NOOVR_CLEAN"
+
+
+UNSETROOT="$TMPBASE/unset-root"
+mkdir -p "$UNSETROOT"
+UNSETGLOBAL="$TMPBASE/unset-global"
+mkdir -p "$UNSETGLOBAL/templates"
+cp "$INSTALL_DIR/_common.sh" "$UNSETGLOBAL/_common.sh"
+cp "$INSTALL_DIR/templates/generators.sh" "$UNSETGLOBAL/templates/generators.sh"
+UNSETEFF="$HOME/.config/cbox/projects/unsethash"
+mkdir -p "$UNSETEFF" "$UNSETEFF/generated"
+
+INSTALL_DIR_SAVE_UNSET="$INSTALL_DIR"
+INSTALL_DIR="$UNSETGLOBAL"
+
+cat > "$UNSETGLOBAL/cbox.conf" <<'EOF'
+CBOX_MODE=global
+CBOX_HERMES_EFFORT=medium
+CBOX_GPU=0
+CBOX_HERMES_VERSION=0.19.0
+EOF
+
+_cbox_conf_kv "$UNSETGLOBAL/cbox.conf" "$UNSETEFF/cbox.base"
+cp "$UNSETEFF/cbox.base" "$UNSETEFF/cbox.conf"
+sed -i "s#^CBOX_MODE=.*#CBOX_MODE=isolated#" "$UNSETEFF/cbox.conf"
+sed -i "s#^CBOX_WORKSPACES=.*#CBOX_WORKSPACES=$UNSETROOT#" "$UNSETEFF/cbox.conf"
+sed -i "s#^CBOX_WORKDIR=.*#CBOX_WORKDIR=$UNSETROOT#" "$UNSETEFF/cbox.conf"
+
+sed -i '/^CBOX_HERMES_VERSION=/d' "$UNSETEFF/cbox.base"
+printf 'CBOX_HERMES_VERSION=0.30.0\n' >> "$UNSETGLOBAL/cbox.conf"
+
+: > "$UNSETEFF/cbox.override"
+_cbox_override_set "$UNSETEFF" CBOX_HERMES_EFFORT xhigh
+_cbox_override_set "$UNSETEFF" CBOX_GPU 1
+_cbox_override_set "$UNSETEFF" CBOX_HERMES_VERSION 0.25.0
+
+_cbox_manifest_write "$UNSETEFF" "$UNSETROOT" "$UNSETEFF/cbox.conf"
+
+REGEN_LOG_UNSET="$TMPBASE/regen-unset.log"
+_gen_effective() {
+  local eff="$1" root="$2"
+  printf 'regen-called eff=%s root=%s\n' "$eff" "$root" >> "$REGEN_LOG_UNSET"
+  echo "regenerated-marker" > "$eff/generated/marker.txt"
+}
+_cbox_workspace_root() { printf '%s' "$UNSETROOT"; }
+_cbox_path_hash() { printf 'unsethash'; }
+_cbox_config_in_container() { return 1; }
+
+(
+  _cbox_config_unset CBOX_HERMES_EFFORT
+) > "$TMPBASE/unset1.stdout" 2>"$TMPBASE/unset1.stderr" || _fail "unset: base fallback must succeed: $(cat "$TMPBASE/unset1.stderr")"
+grep -q '^CBOX_HERMES_EFFORT=medium$' "$UNSETEFF/cbox.conf" \
+  || _fail "unset: CBOX_HERMES_EFFORT must revert to its base value (medium), got: $(grep '^CBOX_HERMES_EFFORT=' "$UNSETEFF/cbox.conf")"
+grep -q '^CBOX_HERMES_EFFORT=' "$UNSETEFF/cbox.override" \
+  && _fail "unset: CBOX_HERMES_EFFORT override entry must be removed"
+_ok "unset: a key present in base reverts to base[K] and the override entry is removed"
+
+(
+  _cbox_config_unset CBOX_HERMES_VERSION
+) > "$TMPBASE/unset2.stdout" 2>"$TMPBASE/unset2.stderr" || _fail "unset: global fallback must succeed: $(cat "$TMPBASE/unset2.stderr")"
+grep -q '^CBOX_HERMES_VERSION=0.30.0$' "$UNSETEFF/cbox.conf" \
+  || _fail "unset: a key absent from base must fall back to the current global value (0.30.0), got: $(grep '^CBOX_HERMES_VERSION=' "$UNSETEFF/cbox.conf")"
+grep -q '^CBOX_HERMES_VERSION=' "$UNSETEFF/cbox.override" \
+  && _fail "unset: CBOX_HERMES_VERSION override entry must be removed"
+_ok "unset: a key missing from cbox.base falls back to the current global value"
+
+unset CBOX_HERMES_VERSION
+sed -i '/^CBOX_HERMES_VERSION=/d' "$UNSETGLOBAL/cbox.conf"
+_cbox_override_set "$UNSETEFF" CBOX_HERMES_VERSION 0.28.0
+_cbox_manifest_write "$UNSETEFF" "$UNSETROOT" "$UNSETEFF/cbox.conf"
+(
+  _cbox_config_unset CBOX_HERMES_VERSION
+) > "$TMPBASE/unset2b.stdout" 2>"$TMPBASE/unset2b.stderr" || _fail "unset: registry-default fallback must succeed: $(cat "$TMPBASE/unset2b.stderr")"
+grep -q '^CBOX_HERMES_VERSION=latest$' "$UNSETEFF/cbox.conf" \
+  || _fail "unset: a key missing from both cbox.base and the on-disk global conf must fall back to the registry default (latest), got: $(grep '^CBOX_HERMES_VERSION=' "$UNSETEFF/cbox.conf")"
+grep -q '^CBOX_HERMES_VERSION=' "$UNSETEFF/cbox.override" \
+  && _fail "unset: CBOX_HERMES_VERSION override entry must be removed"
+_ok "unset: a key missing from both cbox.base and the on-disk global conf falls back to the registry default, not an empty value"
+
+ORIG_OVERRIDE_DEL_FN="$(declare -f _cbox_override_del)"
+_cbox_override_set "$UNSETEFF" CBOX_HERMES_EFFORT xhigh
+_cbox_manifest_write "$UNSETEFF" "$UNSETROOT" "$UNSETEFF/cbox.conf"
+_cbox_override_del() { :; }
+(
+  _cbox_config_unset CBOX_HERMES_EFFORT
+) > "$TMPBASE/unset3.stdout" 2>"$TMPBASE/unset3.stderr" || true
+if ! grep -q '^CBOX_HERMES_EFFORT=' "$UNSETEFF/cbox.override" 2>/dev/null; then
+  _fail "negative control: test setup broken, override should still be present with _cbox_override_del neutered"
+fi
+eval "$ORIG_OVERRIDE_DEL_FN"
+_ok "negative control: neutering _cbox_override_del leaves the override in place, proving the removal assertion is not vacuous"
+_cbox_override_del "$UNSETEFF" CBOX_HERMES_EFFORT
+_cbox_manifest_write "$UNSETEFF" "$UNSETROOT" "$UNSETEFF/cbox.conf"
+
+case "$(cat "$TMPBASE/unset1.stderr")" in
+  *"CBOX_GPU"*) _fail "unset: unrelated keys must not be touched by a single-key unset" ;;
+esac
+grep -q '^CBOX_GPU=' "$UNSETEFF/cbox.override" || _fail "unset: an untouched override must survive an unrelated unset"
+_ok "unset: a single-key unset never touches an unrelated override"
+
+_STUB_SET_CALLED=0
+ORIG_CBOX_CONFIG_SET_FN="$(declare -f _cbox_config_set)"
+_cbox_config_set() { _STUB_SET_CALLED=1; echo "cbox: config set staged - apply status:"; return 0; }
+noop_out="$(_cbox_config_unset CBOX_HERMES_MODEL_NAME)"
+eval "$ORIG_CBOX_CONFIG_SET_FN"
+[ "$_STUB_SET_CALLED" = 0 ] || _fail "unset: a key that is not a project override must never reach the config set transaction"
+case "$noop_out" in
+  *"CBOX_HERMES_MODEL_NAME is not a project override"*"nothing to unset"*) ;;
+  *) _fail "unset: a clean no-op needs a clear message, got: $noop_out" ;;
+esac
+_ok "unset: a key that is not currently an override is a clean no-op with a clear message, and never reaches config set"
+
+INSTALL_DIR="$INSTALL_DIR_SAVE_UNSET"
+UNSET_CLEAN="$TMPBASE/unset-clean"
+mkdir -p "$UNSET_CLEAN"
+mv "$UNSETEFF" "$UNSET_CLEAN/eff"
+mv "$UNSETGLOBAL" "$UNSET_CLEAN/global"
+mv "$UNSETROOT" "$UNSET_CLEAN/root"
+rm -rf "$UNSET_CLEAN"
+
+
+GETSTABLE_ROOT="$TMPBASE/getstable-root"
+GETSTABLE_EFF="$HOME/.config/cbox/projects/getstablehash"
+mkdir -p "$GETSTABLE_EFF"
+cat > "$GETSTABLE_EFF/cbox.conf" <<EOF
+CBOX_MODE=isolated
+CBOX_WORKSPACES=$GETSTABLE_ROOT
+CBOX_WORKDIR=$GETSTABLE_ROOT
+CBOX_HERMES_EFFORT=medium
+CBOX_GPU=0
+EOF
+_cbox_workspace_root() { printf '%s' "$GETSTABLE_ROOT"; }
+_cbox_path_hash() { printf 'getstablehash'; }
+
+get_out="$(_cbox_config_get CBOX_HERMES_EFFORT)"
+[ "$get_out" = "CBOX_HERMES_EFFORT=medium" ] \
+  || _fail "config get: byte-exact single-key output changed, got: $get_out"
+_ok "config get: single-key output stays the byte-exact KEY=VALUE line scripts parse"
+
+_broken_config_get_check() { _cbox_config_get "$@"; printf '!'; }
+broken_out="$(_broken_config_get_check CBOX_HERMES_EFFORT)"
+[ "$broken_out" != "CBOX_HERMES_EFFORT=medium" ] \
+  || _fail "negative control: appending a stray byte must break the byte-exact comparison"
+_ok "negative control: a corrupted config get output is caught by the byte-exact check, proving it is not vacuous"
+
+GETSTABLE_CLEAN="$TMPBASE/getstable-clean"
+mkdir -p "$GETSTABLE_CLEAN"
+mv "$GETSTABLE_EFF" "$GETSTABLE_CLEAN/eff"
+rm -rf "$GETSTABLE_CLEAN"
 
 echo "PASS: all cbox config tests"

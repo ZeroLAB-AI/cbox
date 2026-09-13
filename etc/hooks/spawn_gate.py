@@ -21,7 +21,9 @@ READONLY_RE = re.compile(
     r"do not modify|produce findings|design(?: document)?|proposal only)\b",
     re.I,
 )
-DECISION_RE = re.compile(r"\b(DECISION|RULING|ACCEPTED|OWNER RULING)\b")
+DECISION_RE = re.compile(
+    r"\b(DECISION|RULING|ACCEPTED|APPROVED|GREENLIGHT|PER DESIGN)\b"
+)
 
 
 def deny(reason, hint):
@@ -83,7 +85,7 @@ def main():
         state = {"head": head, "unlanded": 0}
     unlanded = int(state.get("unlanded") or 0)
 
-    builds = bool(BUILD_RE.search(text)) and not READONLY_RE.search(text)
+    builds = bool(BUILD_RE.search(text)) and not READONLY_RE.search(text[:400])
 
     if builds and not DECISION_RE.search(text):
         deny(

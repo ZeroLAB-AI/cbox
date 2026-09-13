@@ -5,6 +5,11 @@ INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMPBASE="$(mktemp -d)"
 trap 'rm -rf "$TMPBASE"' EXIT
 
+unset CBOX_CLAUDE_TARGET CBOX_CODEX_VERSION CBOX_CODEX_TARGET CBOX_HERMES CBOX_HERMES_VERSION \
+  CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME CBOX_BINS_SCOPE \
+  CBOX_BINS_HEALTH_GATE CBOX_AUTOUPDATE CBOX_AUTOUPDATE_TTL_HOURS CBOX_EGRESS_MODE \
+  CBOX_LIMIT_AUTORESUME CBOX_SESSION_MULTIPLEX CBOX_SAFEGUARD_AUTOCONFIRM
+
 _fail() {
   echo "FAIL: $1" >&2
   exit 1
@@ -97,8 +102,9 @@ python3 -c "import py_compile; py_compile.compile('$INSTALL_DIR/lib/cbox_hub.py'
   || _fail "lib/cbox_hub.py does not py_compile"
 _ok "lib/cbox_hub.py exists and py_compiles cleanly"
 
-grep -q "config (read-only view)" "$LOG_Q" || _fail "PTY hub did not render the python-hub-specific config row label - the dispatch may not be routing to lib/cbox_hub.py"
-_ok "PTY hub with python3 present is routed through lib/cbox_hub.py (config row label confirms the python implementation, not the bash fallback)"
+grep -Eq '  [0-9]+\) settings' "$LOG_Q" || _fail "PTY hub did not render the settings row label"
+grep -q '^egress: ' "$LOG_Q" || _fail "PTY hub did not render the python-hub-specific standalone egress line - the dispatch may not be routing to lib/cbox_hub.py"
+_ok "PTY hub with python3 present is routed through lib/cbox_hub.py (standalone 'egress: ' line confirms the python implementation, not the bash fallback)"
 
 DOCKERSPY_LOG="$TMPBASE/docker_spy.log"
 DOCKERSPYBIN="$TMPBASE/dockerspybin"
@@ -144,7 +150,7 @@ rc=0
     script -qec "$(printf '%q' "$INSTALLCOPY/cbox")" /dev/null ) < "$IN_NOPY" > "$LOG_NOPY" 2>&1 || rc=$?
 [ "$rc" = 0 ] || _fail "PTY hub with python3 absent (global mode) exited $rc, expected 0 ($(cat "$LOG_NOPY"))"
 grep -q "cbox - $TMPBASE" "$LOG_NOPY" || _fail "python3-missing fallback did not open the bash hub ($(cat "$LOG_NOPY"))"
-grep -q "config (read-only view)" "$LOG_NOPY" && _fail "python3-missing fallback rendered the python hub's marker - the fallback guard did not engage"
+grep -q '^egress: ' "$LOG_NOPY" && _fail "python3-missing fallback rendered the python hub's standalone egress line - the fallback guard did not engage"
 _ok "python3-missing: bare cbox in global mode falls back to the bash hub (no cbox_hub.py marker present), not a crash"
 
 BROKENHOME="$TMPBASE/home-broken"
@@ -164,7 +170,7 @@ rc=0
     script -qec "$(printf '%q' "$INSTALLBROKEN/cbox")" /dev/null ) < "$IN_BROKEN" > "$LOG_BROKEN" 2>&1 || rc=$?
 [ "$rc" = 0 ] || _fail "PTY hub with a broken cbox_hub.py exited $rc, expected 0 ($(cat "$LOG_BROKEN"))"
 grep -q "cbox - $TMPBASE" "$LOG_BROKEN" || _fail "broken cbox_hub.py did not fall back to the bash hub ($(cat "$LOG_BROKEN"))"
-grep -q "config (read-only view)" "$LOG_BROKEN" && _fail "broken cbox_hub.py somehow rendered the python hub's marker"
+grep -q '^egress: ' "$LOG_BROKEN" && _fail "broken cbox_hub.py somehow rendered the python hub's standalone egress line"
 _ok "a syntactically broken lib/cbox_hub.py degrades to the bash hub instead of crashing bare cbox"
 
 INSTALLCRASH="$TMPBASE/cbox-install-crash"
@@ -194,7 +200,7 @@ rc=0
 [ "$rc" = 0 ] || _fail "PTY hub with a runtime-crashing cbox_hub.py exited $rc, expected 0 via bash-hub fallback ($(cat "$LOG_CRASH"))"
 grep -q "falling back to the bash hub" "$LOG_CRASH" || _fail "runtime-crash fallback note missing from stderr ($(cat "$LOG_CRASH"))"
 grep -q "cbox - $TMPBASE" "$LOG_CRASH" || _fail "runtime-crashing cbox_hub.py (py_compile passes, main raises) did not fall back to the bash hub ($(cat "$LOG_CRASH"))"
-grep -q "config (read-only view)" "$LOG_CRASH" && _fail "runtime-crashing cbox_hub.py somehow rendered the python hub's marker"
+grep -q '^egress: ' "$LOG_CRASH" && _fail "runtime-crashing cbox_hub.py somehow rendered the python hub's standalone egress line"
 _ok "a syntactically valid but runtime-crashing lib/cbox_hub.py (py_compile blind spot) also degrades to the bash hub via the reserved failure exit code"
 
 RUNGUARD_HOME="$TMPBASE/home-runguard"
@@ -237,5 +243,42 @@ CTX_OUT="$TMPBASE/ctx_iso.json"
 grep -q '"mode": "isolated"' "$CTX_OUT" || _fail "__hub_context did not resolve isolated mode: $(cat "$CTX_OUT")"
 grep -q '"egress": "on"' "$CTX_OUT" || _fail "__hub_context egress must come from the per-project isolated cbox.conf, not the global one: $(cat "$CTX_OUT")"
 _ok "__hub_context reads egress from the isolated project's own cbox.conf (per-project on is reported even though no global conf sets it)"
+
+BINSHOME="$TMPBASE/home-bins"
+mkdir -p "$BINSHOME/.config/cbox"
+BINSPROJ="$TMPBASE/bins-proj"
+mkdir -p "$BINSPROJ"
+BPHASH="$(printf '%s' "$BINSPROJ" | sha256sum)"
+BPHASH="${BPHASH:0:12}"
+BEFF="$BINSHOME/.config/cbox/projects/$BPHASH"
+mkdir -p "$BEFF"
+{
+  echo "CBOX_MODE=isolated"
+} > "$BEFF/cbox.conf"
+printf '%s' "$BINSPROJ" > "$BEFF/workspace"
+{
+  printf 'cbox-bins-claude|claude|stable|2.1.0|1000\n'
+  printf 'cbox-bins-codex|codex|latest|0.153.4|1000\n'
+} > "$BINSHOME/.config/cbox/bins.stamp"
+printf 'version=0.153.4\nbad=0.154.0\nreason=mcp-server handshake failed\nsince=1000\n' \
+  > "$BINSHOME/.config/cbox/bins.hold.cbox-bins-codex"
+
+BINSSPY_LOG="$TMPBASE/bins_spy.log"
+BINSSPYBIN="$TMPBASE/binsspybin"
+mkdir -p "$BINSSPYBIN"
+cat > "$BINSSPYBIN/docker" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$BINSSPY_LOG"
+exit 1
+EOF
+chmod +x "$BINSSPYBIN/docker"
+
+CTX_BINS_OUT="$TMPBASE/ctx_bins.json"
+( cd "$BINSPROJ" && HOME="$BINSHOME" PATH="$BINSSPYBIN:$PATH" "$INSTALLISO/cbox" __hub_context ) > "$CTX_BINS_OUT" 2>/dev/null \
+  || _fail "__hub_context failed for the bins-field project ($(cat "$CTX_BINS_OUT"))"
+grep -qF '"bins": "bins: claude 2.1.0 codex 0.153.4 [held] hermes off"' "$CTX_BINS_OUT" \
+  || _fail "__hub_context bins field did not render from the canned bins.stamp/bins.hold caches: $(cat "$CTX_BINS_OUT")"
+[ -f "$BINSSPY_LOG" ] && _fail "__hub_context bins field must never invoke docker, but the spy log is non-empty: $(cat "$BINSSPY_LOG")"
+_ok "__hub_context bins field renders claude/codex/hermes versions and the [held] marker from canned caches, with zero docker invocations"
 
 echo "PASS: all hub menu checks"

@@ -4,7 +4,7 @@
     "cbox": {
       "ip_route": 1,
       "proc_path": 4,
-      "raw_timeout": 2,
+      "raw_timeout": 5,
       "stat_c": 2
     },
     "etc/container/docker_exec_bridge.py": {
@@ -25,7 +25,7 @@
   "totals": {
     "ip_route": 1,
     "proc_path": 10,
-    "raw_timeout": 2,
+    "raw_timeout": 5,
     "stat_c": 2
   }
 }

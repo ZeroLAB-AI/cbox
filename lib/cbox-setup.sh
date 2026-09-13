@@ -1564,6 +1564,11 @@ step_mcp_servers() {
   if ! container_target_ok; then
     return 0
   fi
+  if [ "$SEC_AUTO" = 1 ]; then
+    note "auto: keeping CBOX_MCP_SERVERS=$CBOX_MCP_SERVERS"
+    mcp_apply_selection
+    return 0
+  fi
   local all=() name i out=() expanded
   read -r -a all <<< "$(mcp_all_names)"
   expanded="$(canonical_expand "$CBOX_MCP_SERVERS" "${all[*]-}")"
@@ -2058,6 +2063,11 @@ step_agents() {
   if ! container_target_ok; then
     return 0
   fi
+  if [ "$SEC_AUTO" = 1 ]; then
+    note "auto: keeping CBOX_AGENTS=$CBOX_AGENTS"
+    agents_install
+    return 0
+  fi
   local all=() name i out=() dis reason notice=0 expanded mcp_expanded
   read -r -a all <<< "$(agent_all_names)"
   expanded="$(canonical_expand "$CBOX_AGENTS" "${all[*]-}")"
@@ -2287,6 +2297,17 @@ continuity_ensure_hooks_dep() {
 
 step_codex_mcp() {
   echo "== section: codex-mcp =="
+  if [ "$SEC_AUTO" = 1 ]; then
+    note "auto: keeping CBOX_CODEX_MCP=$CBOX_CODEX_MCP CBOX_CODEX_MODEL=$CBOX_CODEX_MODEL CBOX_CODEX_EFFORT=$CBOX_CODEX_EFFORT"
+    if [ "$CBOX_CODEX_MCP" = 1 ]; then
+      section_dep_gate codex-mcp
+      if [ "$DEP_ACTION" = dictate ]; then
+        codex_mcp_ensure_hooks_dep
+      fi
+    fi
+    codex_mcp_apply
+    return 0
+  fi
   ask_choice "setup: register claude as a codex mcp tool (reverse orchestration via ask-claude)" "$CBOX_CODEX_MCP" 0 1
   CBOX_CODEX_MCP="$ASK_VALUE"
   if [ "$CBOX_CODEX_MCP" = 1 ]; then
@@ -3460,57 +3481,205 @@ default_preset_summary() {
   note "  claude target: $CBOX_CLAUDE_TARGET  codex version: $CBOX_CODEX_VERSION  bins scope: $CBOX_BINS_SCOPE"
   note "  container mode: $CBOX_MODE  restart policy: $CBOX_RESTART_POLICY"
   note "  history: $CBOX_HISTORY  git: $CBOX_GIT  diary: $CBOX_DIARY  open-questions: $CBOX_OPEN_QUESTIONS  context-profile: $CBOX_CONTEXT_PROFILE"
+  note "  ollama: $CBOX_OLLAMA_MODE  local-model: $CBOX_LOCAL_MODEL ($CBOX_LOCAL_MODEL_NAME)  hermes: $CBOX_HERMES ($CBOX_HERMES_MODEL_NAME)  hermes-delegate: $CBOX_HERMES_DELEGATE"
 }
 
-apply_default_setup() {
-  header "Default setup" "" ""
-  default_preset_set
-  default_preset_validate_paths
-  default_preset_summary
-  if ! ask_yn "setup: apply this default setup? [y/N]" y; then
-    note "default setup declined; switching to advanced (all sections)"
-    return 1
+_classic_feature_on() {
+  case "$1" in
+    ollama)
+      CBOX_OLLAMA_MODE=on
+      if _cbox_no_cdi; then
+        CBOX_OLLAMA_GPU=off
+      else
+        CBOX_OLLAMA_GPU=cdi
+      fi
+      CBOX_OLLAMA_STORE=dedicated
+      ;;
+    local-model)
+      _classic_feature_on ollama
+      CBOX_LOCAL_MODEL=on
+      CBOX_LOCAL_MODEL_URL="http://ollama:11434"
+      ask "setup: local model name (as known to the endpoint, e.g. qwen2.5:7b)" "$CBOX_LOCAL_MODEL_NAME"
+      CBOX_LOCAL_MODEL_NAME="$ASK_VALUE"
+      note "run 'cbox ollama pull $CBOX_LOCAL_MODEL_NAME' to download it - the endpoint 404s until the model is pulled"
+      ;;
+    hermes)
+      CBOX_HERMES=on
+      CBOX_HERMES_PROVIDER=local
+      CBOX_HERMES_MODEL_URL="$CBOX_LOCAL_MODEL_URL"
+      CBOX_HERMES_MODEL_NAME="$CBOX_LOCAL_MODEL_NAME"
+      CBOX_HERMES_EFFORT=medium
+      ;;
+    hermes-delegate)
+      CBOX_HERMES_DELEGATE=on
+      CBOX_HERMES_DELEGATE_MODE=agent
+      CBOX_HERMES_DELEGATE_PROVIDER="$CBOX_HERMES_PROVIDER"
+      CBOX_HERMES_DELEGATE_BASE_URL="$CBOX_HERMES_MODEL_URL"
+      CBOX_HERMES_DELEGATE_MODEL="$CBOX_HERMES_MODEL_NAME"
+      ;;
+  esac
+}
+
+_classic_feature_off() {
+  case "$1" in
+    ollama)
+      CBOX_OLLAMA_MODE=off
+      CBOX_OLLAMA_STORE_PATH=""
+      ;;
+    local-model)
+      CBOX_LOCAL_MODEL=off
+      CBOX_LOCAL_MODEL_URL=""
+      CBOX_LOCAL_MODEL_NAME=""
+      _classic_feature_off ollama
+      ;;
+    hermes)
+      CBOX_HERMES=off
+      ;;
+    hermes-delegate)
+      CBOX_HERMES_DELEGATE=off
+      CBOX_HERMES_DELEGATE_PROVIDER=""
+      CBOX_HERMES_DELEGATE_BASE_URL=""
+      CBOX_HERMES_DELEGATE_MODEL=""
+      CBOX_HERMES_DELEGATE_MODE=""
+      ;;
+  esac
+}
+
+_classic_features_select() {
+  header "Big features" "" ""
+  note "wireguard is advanced only (needs keys and peers): cbox setup menu -> wireguard"
+  CB_ITEMS=(hermes local-model hermes-delegate)
+  CB_STATE=()
+  CB_DISABLED=()
+  CB_REASON=()
+  local name
+  for name in "${CB_ITEMS[@]}"; do
+    case "$name" in
+      hermes) [ "${CBOX_HERMES:-off}" = on ] && CB_STATE+=(y) || CB_STATE+=(n) ;;
+      local-model) [ "${CBOX_LOCAL_MODEL:-off}" = on ] && CB_STATE+=(y) || CB_STATE+=(n) ;;
+      hermes-delegate) [ "${CBOX_HERMES_DELEGATE:-off}" = on ] && CB_STATE+=(y) || CB_STATE+=(n) ;;
+    esac
+    CB_DISABLED+=(0)
+    CB_REASON+=("")
+  done
+  local was_local=n was_hermes=n was_delegate=n wi
+  for wi in "${!CB_ITEMS[@]}"; do
+    case "${CB_ITEMS[wi]}" in
+      local-model) was_local="${CB_STATE[wi]}" ;;
+      hermes) was_hermes="${CB_STATE[wi]}" ;;
+      hermes-delegate) was_delegate="${CB_STATE[wi]}" ;;
+    esac
+  done
+  note "select features to enable"
+  checkbox_select
+  local sel_local=n sel_hermes=n sel_delegate=n i
+  for i in "${!CB_ITEMS[@]}"; do
+    case "${CB_ITEMS[i]}" in
+      local-model) sel_local="${CB_STATE[i]}" ;;
+      hermes) sel_hermes="${CB_STATE[i]}" ;;
+      hermes-delegate) sel_delegate="${CB_STATE[i]}" ;;
+    esac
+  done
+  if [ "$sel_local" != "$was_local" ]; then
+    if [ "$sel_local" = y ]; then
+      _classic_feature_on local-model
+    else
+      _classic_feature_off local-model
+    fi
   fi
-  SEC_AUTO=1
-  step_bashrc
+  if [ "$sel_hermes" != "$was_hermes" ]; then
+    if [ "$sel_hermes" = y ]; then
+      _classic_feature_on hermes
+    else
+      _classic_feature_off hermes
+    fi
+  fi
+  if [ "$sel_delegate" != "$was_delegate" ]; then
+    if [ "$sel_delegate" = y ]; then
+      _classic_feature_on hermes-delegate
+    else
+      _classic_feature_off hermes-delegate
+    fi
+  fi
   if container_target_ok; then
     mcp_apply_selection
-    agents_install
   fi
-  codex_mcp_ensure_hooks_dep
-  codex_progress_ensure_hooks_dep
-  codex_mcp_apply
-  step_continuity
-  step_claude_md
-  step_settings
-  step_hooks
-  step_git_identity
-  step_restart_policy
-  SEC_AUTO=0
-  return 0
+}
+
+run_classic() {
+  require_tty "cbox setup classic"
+  SETUP_MODE=classic
+  local fresh=0 s
+  [ -f "$CONF_FILE" ] || fresh=1
+  conf_load
+  load_generators
+  header "Classic setup" "" ""
+  if [ "$fresh" = 1 ]; then
+    note "fresh install: applying the classic preset defaults; review each value below and confirm at the end"
+    default_preset_set
+    default_preset_validate_paths
+  else
+    note "existing config found at $CONF_FILE; this is your reference config - nothing resets here, review each value below and confirm at the end"
+  fi
+  for s in "${SECTIONS[@]}"; do
+    case "$(sec_get SEC_PROFILE "$s")" in
+      ask)
+        header "$(section_title "$s")" "" ""
+        "step_${s//-/_}"
+        ;;
+      auto)
+        SEC_AUTO=1
+        "step_${s//-/_}"
+        SEC_AUTO=0
+        ;;
+      skip)
+        :
+        ;;
+    esac
+  done
+  _classic_features_select
+  default_preset_summary
+  if ! ask_yn "setup: apply this configuration? [y/N]" y; then
+    note "classic setup declined; no changes applied to $CONF_FILE"
+    return 1
+  fi
+  run_phase
+}
+
+run_menu() {
+  local menu_py="$INSTALL_DIR/lib/cbox_settings.py"
+  if [ -f "$menu_py" ] && command -v python3 >/dev/null 2>&1; then
+    exec python3 "$menu_py" "$INSTALL_DIR" "$INSTALL_DIR/cbox"
+  fi
+  note "the advanced menu (lib/cbox_settings.py) is not shipped in this release yet"
+  note "use 'cbox setup walk' for the full section-by-section editor, or 'cbox setup update <section>' to edit one section"
 }
 
 run_wizard() {
-  require_tty "the wizard"
+  require_tty "cbox setup"
   SETUP_MODE=wizard
-  local fresh=0 is_default=0
-  [ -f "$CONF_FILE" ] || fresh=1
   conf_load
   load_generators
   printf '%s%s%s\n' "$C_MUTE" "$HR_HEAVY" "$C_RESET"
   printf '%scbox setup%s  %sprofile '\''%s'\''%s\n' "$C_HEAD" "$C_RESET" "$C_DIM" "$CBOX_NAME" "$C_RESET"
   printf '%s%s%s\n' "$C_MUTE" "$HR_HEAVY" "$C_RESET"
-  if [ "$fresh" = 1 ]; then
-    note "default applies a ready-made preset with one confirm; advanced walks every section"
-    ask_choice "setup: profile" default default advanced
-    if [ "$ASK_VALUE" = default ] && apply_default_setup; then
-      is_default=1
-    fi
-  fi
-  if [ "$is_default" = 1 ]; then
-    run_phase
-    return 0
-  fi
+  note "classic: a handful of important questions, big features toggled together, one confirm (cbox setup classic)"
+  note "menu: jump straight to any section (cbox setup menu)"
+  ask_choice "setup: setup profile" classic classic menu
+  case "$ASK_VALUE" in
+    classic) run_classic ;;
+    menu) run_menu ;;
+  esac
+}
+
+run_walk() {
+  require_tty "cbox setup walk"
+  SETUP_MODE=wizard
+  conf_load
+  load_generators
+  printf '%s%s%s\n' "$C_MUTE" "$HR_HEAVY" "$C_RESET"
+  printf '%scbox setup walk%s  %sprofile '\''%s'\''%s\n' "$C_HEAD" "$C_RESET" "$C_DIM" "$CBOX_NAME" "$C_RESET"
+  printf '%s%s%s\n' "$C_MUTE" "$HR_HEAVY" "$C_RESET"
   WIZ_SECTIONS=("${SECTIONS[@]}")
   note "sections: ${WIZ_SECTIONS[*]}"
   local i=0 fn hn
@@ -3611,7 +3780,7 @@ run_update() {
 run_list_steps() {
   local i
   for i in "${!SECTIONS[@]}"; do
-    printf '%2d  %-16s apply: %s\n' "$((i+1))" "${SECTIONS[i]}" "$(apply_action_for "${SECTIONS[i]}")"
+    printf '%2d  %-18s %-6s %-7s apply: %s\n' "$((i+1))" "${SECTIONS[i]}" "$(sec_get SEC_PROFILE "${SECTIONS[i]}")" "$(sec_get SEC_SCOPE "${SECTIONS[i]}")" "$(apply_action_for "${SECTIONS[i]}")"
   done
 }
 
@@ -3818,9 +3987,10 @@ run_local_wizard_subset() {
 }
 
 run_local() {
-  local root="$1" from_global="${2:-0}" eff
+  local root="$1" from_global="${2:-0}" reset="${3:-0}" eff
   [ "$from_global" = 1 ] || require_tty "cbox setup --local"
-  [ -n "$root" ] || die "usage: cbox setup --local [<root>] [--from-global]"
+  [ -n "$root" ] || die "usage: cbox setup --local [<root>] [--from-global] [--reset]"
+  [ "$reset" != 1 ] || [ "$from_global" = 1 ] || die "usage: --reset requires --from-global"
   [ -d "$root" ] || die "not a directory: $root"
   if root="$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)"; then
     root="$(_cbox_realpath "$root")"
@@ -3850,10 +4020,46 @@ run_local() {
   CBOX_WORKDIR="$root"
 
   if [ "$from_global" = 1 ]; then
-    note "deriving $eff/cbox.conf from the global profile (silent, no wizard) - project-level settings are replaced by the global profile; run cbox setup --local $root instead to keep them"
+    note "deriving $eff/cbox.conf from the global profile (silent, no wizard) - project overrides are kept (see cbox config diff); run cbox setup --local $root instead for the interactive subset"
+    if [ "$reset" = 1 ]; then
+      rm -f "$eff/cbox.override"
+      note "project reset to the global profile"
+    else
+      _cbox_layered_bootstrap_adopt "$eff" "$root" \
+        || die "refusing to derive $root - see the message above (fix with cbox config set/unset, or remove $eff and re-derive)"
+    fi
+    _cbox_layered_require_ok "$eff" \
+      || die "refusing to derive $root - layered config (cbox.base/cbox.override) drifted outside cbox; fix with cbox config set/unset, or remove $eff and re-derive"
+    _cbox_reg_conf_write_whitelist "$eff/cbox.base.new" 1
+    if [ ! -f "$eff/cbox.override" ]; then
+      [ -h "$eff/cbox.override" ] && rm -f "$eff/cbox.override"
+      : > "$eff/cbox.override"
+    fi
+    if [ -f "$eff/cbox.base" ]; then
+      _cbox_layered_merge "$eff"
+    fi
+    . "$eff/cbox.override"
+    CBOX_MODE=isolated
+    CBOX_WORKSPACES="$root"
+    CBOX_WORKDIR="$root"
+    mv "$eff/cbox.base.new" "$eff/cbox.base"
   else
     header "Isolated project: $root"
+    _cbox_layered_require_ok "$eff" \
+      || die "refusing the interactive setup for $root - layered config (cbox.base/cbox.override) drifted outside cbox; fix with cbox config set/unset, or re-derive with cbox setup --local $root --from-global --reset"
+    local _snap_before _snap_after _changed_key _changed_line
+    _snap_before="$(mktemp)"
+    _snap_after="$(mktemp)"
+    _cbox_reg_conf_write_whitelist "$_snap_before" 1
     run_local_wizard_subset "$root"
+    _cbox_reg_conf_write_whitelist "$_snap_after" 1
+    while IFS= read -r _changed_key; do
+      [ -n "$_changed_key" ] || continue
+      _cbox_layered_is_excluded "$_changed_key" && continue
+      _changed_line="$(grep -m1 "^${_changed_key}=" "$_snap_after")"
+      _cbox_override_set "$eff" "$_changed_key" "${_changed_line#*=}"
+    done < <(_cbox_conf_changed_keys "$_snap_before" "$_snap_after")
+    rm -f "$_snap_before" "$_snap_after"
   fi
 
   if [ "$CBOX_NETACCESS_MODE" != off ]; then
@@ -3899,14 +4105,36 @@ run_local() {
   note "run from $root: cbox run codex"
 }
 
+run_local_menu() {
+  local root="$1" menu_py="$INSTALL_DIR/lib/cbox_settings.py"
+  [ -n "$root" ] || root="$PWD"
+  if [ -f "$menu_py" ] && command -v python3 >/dev/null 2>&1; then
+    exec python3 "$menu_py" "$INSTALL_DIR" "$INSTALL_DIR/cbox" --local "$root"
+  fi
+  note "the advanced menu (lib/cbox_settings.py) is not shipped in this release yet"
+  note "use 'cbox setup --local $root' for the interactive project subset, or 'cbox config get/set' for scripted edits"
+}
+
 
 _cbox_setup_main() {
   case "${1:-}" in
     "")
       run_wizard
       ;;
+    classic)
+      run_classic
+      ;;
+    menu)
+      run_menu
+      ;;
+    walk)
+      run_walk
+      ;;
     --help|-h|help)
-      printf 'usage: cbox setup [update [<section>]|list-steps|--config <file>|--local [<root>] [--from-global]|--from-global|uninstall|--help]\n'
+      printf 'usage: cbox setup [classic|menu|walk|update [<section>]|list-steps|--config <file>|--local [<root>] [--from-global] [--reset]|--local [<root>] menu|--from-global|uninstall|--help]\n'
+      printf '  classic: a handful of important questions plus a big-feature checkbox, one confirm\n'
+      printf '  menu: jump straight to any section (advanced editor)\n'
+      printf '  walk: the linear section-by-section path (kept for one release)\n'
       printf '  update with no section: re-render all artifacts and re-bless the templates (CBOX_TPL_SHA)\n'
       print_settings_help
       exit 0
@@ -3926,16 +4154,30 @@ _cbox_setup_main() {
       run_config "$2"
       ;;
     --local)
-      local _local_root="${2:-}" _local_flag="${3:-}"
-      if [ -z "$_local_root" ] || [ "$_local_root" = --from-global ]; then
-        _local_flag="$_local_root"
-        _local_root="$PWD"
+      shift
+      local _local_root="" _local_from_global=0 _local_reset=0 _local_menu=0 _local_arg
+      while [ "$#" -gt 0 ]; do
+        _local_arg="$1"
+        case "$_local_arg" in
+          --from-global) _local_from_global=1 ;;
+          --reset) _local_reset=1 ;;
+          menu) _local_menu=1 ;;
+          -*) die "usage: cbox setup --local [<root>] [--from-global] [--reset] | cbox setup --local [<root>] menu" ;;
+          *)
+            [ -z "$_local_root" ] || die "usage: cbox setup --local [<root>] [--from-global] [--reset] | cbox setup --local [<root>] menu"
+            _local_root="$_local_arg"
+            ;;
+        esac
+        shift
+      done
+      [ -n "$_local_root" ] || _local_root="$PWD"
+      if [ "$_local_menu" = 1 ]; then
+        [ "$_local_from_global" = 0 ] && [ "$_local_reset" = 0 ] \
+          || die "usage: cbox setup --local [<root>] menu (does not combine with --from-global/--reset)"
+        run_local_menu "$_local_root"
+      else
+        run_local "$_local_root" "$_local_from_global" "$_local_reset"
       fi
-      case "$_local_flag" in
-        --from-global) run_local "$_local_root" 1 ;;
-        "") run_local "$_local_root" 0 ;;
-        *) die "usage: cbox setup --local [<root>] [--from-global]" ;;
-      esac
       ;;
     --from-global)
       [ -z "${2:-}" ] || die "usage: cbox setup --from-global (re-derives the project in the current directory; use --local <root> --from-global for another one)"
@@ -3945,7 +4187,7 @@ _cbox_setup_main() {
       run_uninstall
       ;;
     *)
-      die "usage: cbox setup [--help|update [<section>]|list-steps|--config <file>|--local [<root>] [--from-global]|--from-global|uninstall]"
+      die "usage: cbox setup [classic|menu|walk|--help|update [<section>]|list-steps|--config <file>|--local [<root>] [--from-global]|--local [<root>] menu|--from-global|uninstall]"
       ;;
   esac
 }

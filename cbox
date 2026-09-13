@@ -1785,12 +1785,18 @@ _first_run_init() {
     exec 7>&-
     return 0
   fi
-  printf 'cbox: new project %s\n  [n] configure from scratch\n  [d] derive from global config\n  [z] cancel\n> ' "$root"
+  printf 'cbox: new project %s\n  [n] configure from scratch\n  [d] derive from global config\n  [m] derive and open settings\n  [z] cancel\n> ' "$root"
   read -r ans
   rc=0
   case "$ans" in
     n) "$INSTALL_DIR/cbox" setup --local "$root" || rc=$? ;;
     d) "$INSTALL_DIR/cbox" setup --local "$root" --from-global || rc=$? ;;
+    m)
+      "$INSTALL_DIR/cbox" setup --local "$root" --from-global || rc=$?
+      if [ "$rc" -eq 0 ] && [ -f "$eff/cbox.conf" ]; then
+        "$INSTALL_DIR/cbox" setup --local "$root" menu || rc=$?
+      fi
+      ;;
     *) echo "cbox: cancelled" >&2; exec 7>&-; return 1 ;;
   esac
   exec 7>&-
@@ -1853,6 +1859,240 @@ _bins_lock_file() {
   printf '%s/.config/cbox/bins.lock' "$HOME"
 }
 
+_bins_history_file() {
+  printf '%s/.config/cbox/bins.history' "$HOME"
+}
+
+_bins_history_append() {
+  local volume="$1" tool="$2" want="$3" from_version="$4" to_version="$5" status="$6" note="$7" hist dir
+  hist="$(_bins_history_file)"
+  dir="$(dirname "$hist")"
+  mkdir -p "$dir"
+  printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$(date +%s)" "$(_bins_field_sanitize "$volume")" "$(_bins_field_sanitize "$tool")" "$(_bins_field_sanitize "$want")" "$(_bins_field_sanitize "$from_version")" "$(_bins_field_sanitize "$to_version")" "$(_bins_field_sanitize "$status")" "$(_bins_field_sanitize "$note")" >> "$hist"
+}
+
+_bins_history_prev_version() {
+  local tool="$1" hist line status
+  hist="$(_bins_history_file)"
+  [ -f "$hist" ] || return 1
+  line="$(awk -F'|' -v t="$tool" '$3 == t' "$hist" | tail -n1)"
+  [ -n "$line" ] || return 1
+  status="$(printf '%s' "$line" | awk -F'|' '{print $7}')"
+  case "$status" in
+    rollback) printf '%s' "$line" | awk -F'|' '{print $6}' ;;
+    *) printf '%s' "$line" | awk -F'|' '{print $5}' ;;
+  esac
+}
+
+_cbox_layered_recovery_hint() {
+  printf 'reset the project to the global profile with: cbox setup --local %s --from-global --reset (this drops the project overrides listed above); if that also refuses, the base snapshot itself is out of sync and the effective dir has to be rebuilt by removing its directory under %s/.config/cbox/projects and re-deriving' "$1" "$HOME"
+}
+
+_bins_field_sanitize() {
+  local raw="$1" clean
+  clean="$(printf '%s' "$raw" | tr '\n\t\r|' '    ')"
+  clean="$(printf '%s' "$clean" | LC_ALL=C tr -cd '\40-\176')"
+  printf '%s' "$clean" | cut -c1-160
+}
+
+_bins_hold_reason_sanitize() {
+  local raw="$1" clean
+  clean="$(printf '%s' "$raw" | tr '\n\t\r' '   ')"
+  clean="$(printf '%s' "$clean" | LC_ALL=C tr -cd '\40-\176')"
+  printf '%s' "$clean" | cut -c1-160
+}
+
+_bins_hold_file() {
+  printf '%s/.config/cbox/bins.hold.%s' "$HOME" "$1"
+}
+
+_bins_hold_write() {
+  local volume="$1" good="$2" bad="$3" reason="$4" file dir tmp clean
+  clean="$(_bins_hold_reason_sanitize "$reason")"
+  good="$(_bins_hold_reason_sanitize "$good")"
+  bad="$(_bins_hold_reason_sanitize "$bad")"
+  file="$(_bins_hold_file "$volume")"
+  dir="$(dirname "$file")"
+  mkdir -p "$dir"
+  tmp="$(mktemp "$dir/.cbox.XXXXXX")"
+  printf 'version=%s\nbad=%s\nreason=%s\nsince=%s\n' "$good" "$bad" "$clean" "$(date +%s)" > "$tmp"
+  mv "$tmp" "$file"
+}
+
+_bins_hold_read() {
+  local volume="$1" file
+  file="$(_bins_hold_file "$volume")"
+  [ -f "$file" ] || return 1
+  cat "$file"
+}
+
+_bins_hold_field() {
+  local blob="$1" key="$2"
+  printf '%s\n' "$blob" | sed -n "s/^${key}=//p" | head -n1
+}
+
+_bins_hold_exists() {
+  [ -f "$(_bins_hold_file "$1")" ]
+}
+
+_bins_hold_remove() {
+  rm -f "$(_bins_hold_file "$1")"
+}
+
+_bins_hold_notice() {
+  local tool="$1" volume blob good bad reason
+  volume="$(_cbox_bins_volume "$tool")"
+  blob="$(_bins_hold_read "$volume")" || return 0
+  good="$(_bins_hold_field "$blob" version)"
+  bad="$(_bins_hold_field "$blob" bad)"
+  reason="$(_bins_hold_field "$blob" reason)"
+  echo "cbox: $tool rolled back to $good and held there - $bad failed the start check ($reason); autoupdate paused for $tool, release with: $0 bins unhold $tool" >&2
+}
+
+_bins_health_file() {
+  printf '%s/.config/cbox/bins.health' "$HOME"
+}
+
+_bins_probe_sha() {
+  printf '%s' "$_CBOX_HEALTH_SH" | _cbox_sha256
+}
+
+_bins_health_put() {
+  local volume="$1" version="$2" probe_sha="$3" verdict="$4" file dir tmp
+  file="$(_bins_health_file)"
+  dir="$(dirname "$file")"
+  mkdir -p "$dir"
+  tmp="$(mktemp "$dir/.cbox.XXXXXX")"
+  {
+    if [ -f "$file" ]; then
+      grep -Fv "$volume|" "$file" 2>/dev/null || true
+    fi
+    printf '%s|%s|%s|%s|%s\n' "$(_bins_field_sanitize "$volume")" "$(_bins_field_sanitize "$version")" "$(_bins_field_sanitize "$probe_sha")" "$(_bins_field_sanitize "$verdict")" "$(date +%s)"
+  } > "$tmp"
+  mv "$tmp" "$file"
+}
+
+_bins_health_get() {
+  local volume="$1" file line
+  file="$(_bins_health_file)"
+  [ -f "$file" ] || return 1
+  line="$(grep -F "$volume|" "$file" 2>/dev/null | tail -n1)" || true
+  [ -n "$line" ] || return 1
+  printf '%s' "$line"
+}
+
+_bins_health_field() {
+  local line="$1" field="$2"
+  printf '%s' "$line" | awk -F'|' -v f="$field" '{
+    if (f == "volume") { print $1; next }
+    if (f == "version") { print $2; next }
+    if (f == "probe_sha") { print $3; next }
+    if (f == "verdict") { print $4; next }
+    if (f == "epoch") { print $5; next }
+  }'
+}
+
+_bins_doctor_last_probe() {
+  local tool line epoch latest=""
+  for tool in claude codex hermes; do
+    if [ "$tool" = hermes ]; then
+      _bins_hermes_on || continue
+    fi
+    line="$(_bins_health_get "$(_cbox_bins_volume "$tool")")" || continue
+    epoch="$(_bins_health_field "$line" epoch)"
+    case "$epoch" in ''|*[!0-9]*) continue ;; esac
+    if [ -z "$latest" ] || [ "$epoch" -gt "$latest" ]; then
+      latest="$epoch"
+    fi
+  done
+  if [ -z "$latest" ]; then
+    printf 'never'
+  else
+    _bins_doctor_utc "$latest"
+  fi
+}
+
+_bins_doctor_lock_suffix() {
+  local tool="$1" volume blob good bad reason
+  volume="$(_cbox_bins_volume "$tool")"
+  blob="$(_bins_hold_read "$volume")" || return 0
+  good="$(_bins_hold_field "$blob" version)"
+  bad="$(_bins_hold_field "$blob" bad)"
+  reason="$(_bins_hold_field "$blob" reason)"
+  printf ' [LOCKED %s (bad %s: %s)]' "$good" "$bad" "$reason"
+}
+
+_bins_doctor_utc() {
+  local epoch="$1"
+  date -u -d "@$epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -r "$epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf 'unknown'
+}
+
+_bins_hub_tool_field() {
+  local tool="$1" volume version line
+  if [ "$tool" = hermes ] && ! _bins_hermes_on; then
+    printf 'hermes off'
+    return 0
+  fi
+  volume="$(_cbox_bins_volume "$tool")"
+  version=unknown
+  line="$(_bins_cache_get "$volume")" && version="$(_bins_cache_field "$line" version)"
+  if _bins_hold_exists "$volume"; then
+    printf '%s %s [held]' "$tool" "$version"
+  else
+    printf '%s %s' "$tool" "$version"
+  fi
+}
+
+_bins_hub_line() {
+  printf 'bins: %s %s %s' "$(_bins_hub_tool_field claude)" "$(_bins_hub_tool_field codex)" "$(_bins_hub_tool_field hermes)"
+}
+
+_bins_doctor_last_refresh() {
+  local tool line epoch latest=""
+  for tool in claude codex hermes; do
+    if [ "$tool" = hermes ]; then
+      _bins_hermes_on || continue
+    fi
+    line="$(_bins_cache_get "$(_cbox_bins_volume "$tool")")" || continue
+    epoch="$(_bins_cache_field "$line" epoch)"
+    case "$epoch" in ''|*[!0-9]*) continue ;; esac
+    if [ -z "$latest" ] || [ "$epoch" -gt "$latest" ]; then
+      latest="$epoch"
+    fi
+  done
+  if [ -z "$latest" ]; then
+    printf 'never'
+  else
+    _bins_doctor_utc "$latest"
+  fi
+}
+
+_bins_doctor_next_check() {
+  local ttl_h="${CBOX_AUTOUPDATE_TTL_HOURS:-24}" tool stampdir stampf last next soonest=""
+  case "$ttl_h" in ''|*[!0-9]*) ttl_h=24 ;; esac
+  if [ "${CBOX_AUTOUPDATE:-on}" != on ]; then
+    printf 'autoupdate off'
+    return 0
+  fi
+  stampdir="$HOME/.config/cbox"
+  for tool in claude codex hermes; do
+    _bins_channel "$tool" || continue
+    _engine_autoupdate_off "$tool" && continue
+    stampf="$stampdir/autoupdate.$(_cbox_bins_volume "$tool").stamp"
+    last="$(cat "$stampf" 2>/dev/null || echo 0)"
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    next=$((last + ttl_h * 3600))
+    if [ -z "$soonest" ] || [ "$next" -lt "$soonest" ]; then
+      soonest="$next"
+    fi
+  done
+  if [ -z "$soonest" ]; then
+    printf 'n/a (no channel targets)'
+  else
+    _bins_doctor_utc "$soonest"
+  fi
+}
+
 _bins_want() {
   local tool="$1"
   case "$tool" in
@@ -1885,7 +2125,7 @@ _bins_cache_put() {
     if [ -f "$cache" ]; then
       grep -Fv "$volume|" "$cache" 2>/dev/null || true
     fi
-    printf '%s|%s|%s|%s|%s\n' "$volume" "$tool" "$want" "$version" "$(date +%s)"
+    printf '%s|%s|%s|%s|%s\n' "$(_bins_field_sanitize "$volume")" "$(_bins_field_sanitize "$tool")" "$(_bins_field_sanitize "$want")" "$(_bins_field_sanitize "$version")" "$(date +%s)"
   } > "$tmp"
   mv "$tmp" "$cache"
 }
@@ -1934,12 +2174,15 @@ _bins_run_install() {
 
 _bins_run_install_group() {
   local img_tag="$1" tools="$2" force="$3" claude_vol codex_vol hermes_vol rc line name version hash status status_word
+  local volume prior_line from_version
+  local prev_claude="" prev_codex="" prev_hermes=""
   local -a mounts=()
   case " $tools " in
     *" hermes "*)
       hermes_vol="$(_cbox_bins_volume hermes)"
       docker volume create "$hermes_vol" >/dev/null
       mounts+=(-v "$hermes_vol:/opt/hermes:rw")
+      prev_hermes="$(_bins_history_prev_version hermes)" || prev_hermes=""
       ;;
     *)
       claude_vol="$(_cbox_bins_volume claude)"
@@ -1947,6 +2190,8 @@ _bins_run_install_group() {
       docker volume create "$claude_vol" >/dev/null
       docker volume create "$codex_vol" >/dev/null
       mounts+=(-v "$claude_vol:$HOME/.local:rw" -v "$codex_vol:$HOME/.codex/packages:rw")
+      case " $tools " in *" claude "*) prev_claude="$(_bins_history_prev_version claude)" || prev_claude="" ;; esac
+      case " $tools " in *" codex "*) prev_codex="$(_bins_history_prev_version codex)" || prev_codex="" ;; esac
       ;;
   esac
   rc=0
@@ -1962,6 +2207,11 @@ _bins_run_install_group() {
     -e CBOX_HERMES_VERSION="${CBOX_HERMES_VERSION:-latest}" \
     -e CBOX_INSTALL_TOOLS="$tools" \
     -e CBOX_INSTALL_FORCE="$force" \
+    -e CBOX_HEALTH_SH="$_CBOX_HEALTH_SH" \
+    -e CBOX_PROBE_CODEX_ARGV="$(_cbox_probe_codex_argv)" \
+    -e CBOX_ROLLBACK_PREV_CLAUDE="$prev_claude" \
+    -e CBOX_ROLLBACK_PREV_CODEX="$prev_codex" \
+    -e CBOX_ROLLBACK_PREV_HERMES="$prev_hermes" \
     --entrypoint /opt/cbox/install-bins.sh \
     "$img_tag")" || rc=$?
   printf '%s\n' "$status" | while IFS= read -r line; do
@@ -1974,6 +2224,10 @@ _bins_run_install_group() {
     case "$line" in
       cbox-bins:*)
         name="$(printf '%s' "$line" | awk '{print $2}')"
+        case "$name" in
+          claude|codex|hermes) ;;
+          *) echo "cbox: ignoring install status line for unknown tool" >&2; continue ;;
+        esac
         version="$(printf '%s' "$line" | awk '{print $3}')"
         hash="$(printf '%s' "$line" | awk '{print $4}')"
         status_word="$(printf '%s' "$line" | awk '{print $5}')"
@@ -1983,7 +2237,60 @@ _bins_run_install_group() {
             rc=1
             ;;
           ok|adopt)
-            _bins_cache_put "$(_cbox_bins_volume "$name")" "$name" "$(_bins_want "$name")" "$version"
+            volume="$(_cbox_bins_volume "$name")"
+            from_version=""
+            prior_line="$(_bins_cache_get "$volume")" || prior_line=""
+            [ -z "$prior_line" ] || from_version="$(_bins_cache_field "$prior_line" version)"
+            _bins_cache_put "$volume" "$name" "$(_bins_want "$name")" "$version"
+            if [ "$from_version" != "$version" ]; then
+              _bins_history_append "$volume" "$name" "$(_bins_want "$name")" "$from_version" "$version" "$status_word" ""
+            fi
+            _bins_health_put "$volume" "$version" "$(_bins_probe_sha)" ok
+            ;;
+          rollback)
+            local badver reason
+            badver="$(_bins_field_sanitize "$(printf '%s' "$line" | awk '{print $6}')")"
+            reason="$(_bins_hold_reason_sanitize "$(printf '%s' "$line" | awk '{s=""; for (i=7;i<=NF;i++) s=s (i>7?" ":"") $i; print s}')")"
+            volume="$(_cbox_bins_volume "$name")"
+            _bins_cache_put "$volume" "$name" "$(_bins_want "$name")" "$version"
+            _bins_history_append "$volume" "$name" "$(_bins_want "$name")" "$badver" "$version" rollback "$reason"
+            _bins_hold_write "$volume" "$version" "$badver" "$reason"
+            _bins_health_put "$volume" "$version" "$(_bins_probe_sha)" ok
+            echo "cbox: $name rolled back to $version and held there - $badver failed the start check ($reason); autoupdate paused for $name, release with: $0 bins unhold $name" >&2
+            ;;
+          unreliable)
+            local ureason
+            ureason="$(_bins_hold_reason_sanitize "$(printf '%s' "$line" | awk '{s=""; for (i=6;i<=NF;i++) s=s (i>6?" ":"") $i; print s}')")"
+            volume="$(_cbox_bins_volume "$name")"
+            from_version=""
+            prior_line="$(_bins_cache_get "$volume")" || prior_line=""
+            [ -z "$prior_line" ] || from_version="$(_bins_cache_field "$prior_line" version)"
+            _bins_cache_put "$volume" "$name" "$(_bins_want "$name")" "$version"
+            if [ "$from_version" != "$version" ]; then
+              _bins_history_append "$volume" "$name" "$(_bins_want "$name")" "$from_version" "$version" unreliable "$ureason"
+            fi
+            _bins_health_put "$volume" "$version" "$(_bins_probe_sha)" unreliable
+            echo "cbox: $name health probe was unreliable (both the new install and the rollback candidate failed it) - kept $version running, no hold: $ureason" >&2
+            ;;
+          unhealthy)
+            local hbadver hreason
+            hbadver="$(_bins_field_sanitize "$(printf '%s' "$line" | awk '{print $3}')")"
+            hreason="$(printf '%s' "$line" | awk '{s=""; for (i=6;i<=NF;i++) s=s (i>6?" ":"") $i; print s}')"
+            volume="$(_cbox_bins_volume "$name")"
+            case "$hbadver" in
+              ''|unknown) ;;
+              *)
+                from_version=""
+                prior_line="$(_bins_cache_get "$volume")" || prior_line=""
+                [ -z "$prior_line" ] || from_version="$(_bins_cache_field "$prior_line" version)"
+                _bins_cache_put "$volume" "$name" "$(_bins_want "$name")" "$hbadver"
+                if [ "$from_version" != "$hbadver" ]; then
+                  _bins_history_append "$volume" "$name" "$(_bins_want "$name")" "$from_version" "$hbadver" unhealthy "$hreason"
+                fi
+                ;;
+            esac
+            _bins_health_put "$volume" "$hbadver" "$(_bins_probe_sha)" unhealthy
+            echo "cbox: $name failed its health check and could not be rolled back ($hreason) - the current install is left running, no hold" >&2
             ;;
         esac
         ;;
@@ -2028,8 +2335,129 @@ _ensure_bins() {
   return "$rc"
 }
 
+_bins_health_gate_probe() {
+  local img_tag="$1" tool="$2" vol out rc
+  local -a mounts=()
+  case "$tool" in
+    hermes)
+      vol="$(_cbox_bins_volume hermes)"
+      docker volume inspect "$vol" >/dev/null 2>&1 || return 97
+      mounts=(-v "$vol:/opt/hermes:ro")
+      ;;
+    claude)
+      vol="$(_cbox_bins_volume claude)"
+      docker volume inspect "$vol" >/dev/null 2>&1 || return 97
+      mounts=(-v "$vol:$HOME/.local:ro")
+      ;;
+    codex)
+      vol="$(_cbox_bins_volume codex)"
+      docker volume inspect "$vol" >/dev/null 2>&1 || return 97
+      mounts=(-v "$vol:$HOME/.codex/packages:ro")
+      ;;
+    *)
+      return 97
+      ;;
+  esac
+  out="$(docker run --rm \
+    -u "$(id -u):$(id -g)" \
+    --network none \
+    "${mounts[@]}" \
+    -e HOST_HOME="$HOME" \
+    -e CBOX_HEALTH_SH="$_CBOX_HEALTH_SH" \
+    -e CBOX_PROBE_CODEX_ARGV="$(_cbox_probe_codex_argv)" \
+    --entrypoint sh \
+    "$img_tag" -c '
+name="$1"
+case "$name" in
+  hermes) stamp="/opt/hermes/.cbox-stamp" ;;
+  claude) stamp="$HOST_HOME/.local/.cbox-stamp" ;;
+  codex) stamp="$HOST_HOME/.codex/packages/.cbox-stamp" ;;
+esac
+if [ ! -f "$stamp" ]; then
+  exit 3
+fi
+p="$(sed -n 2p "$stamp")"
+r="$(readlink -f "$p" 2>/dev/null)"
+[ -n "$r" ] || r="$p"
+sh -c "$CBOX_HEALTH_SH" cbox-health-probe health "$name" "$r"
+' sh "$tool" 2>&1)"
+  rc=$?
+  case "$rc" in
+    0|2|3) ;;
+    *) return 97 ;;
+  esac
+  return "$rc"
+}
+
+_bins_health_gate_rollback() {
+  local img_tag="$1" tool="$2" badver="$3" lock rc=0 volume line nowver
+  lock="$(_bins_lock_file)"
+  mkdir -p "$(dirname "$lock")"
+  exec 8> "$lock"
+  _cbox_flock -w 900 8 || {
+    exec 8>&-
+    echo "cbox: timed out waiting for another bins operation to finish - skipping the start-time rollback for $tool" >&2
+    return 1
+  }
+  volume="$(_cbox_bins_volume "$tool")"
+  line="$(_bins_cache_get "$volume")" && nowver="$(_bins_cache_field "$line" version)" || nowver=""
+  if [ -n "$badver" ] && [ -n "$nowver" ] && [ "$nowver" != "$badver" ]; then
+    exec 8>&-
+    return 0
+  fi
+  _bins_run_rollback_group "$img_tag" "$tool" health-gate || rc=1
+  exec 8>&-
+  return "$rc"
+}
+
+_bins_health_gate_tool() {
+  local img_tag="$1" tool="$2" volume line version probe_sha cached cached_ver cached_sha rc
+  volume="$(_cbox_bins_volume "$tool")"
+  line="$(_bins_cache_get "$volume")" || return 0
+  version="$(_bins_cache_field "$line" version)"
+  [ -n "$version" ] || return 0
+  probe_sha="$(_bins_probe_sha)"
+  if cached="$(_bins_health_get "$volume")"; then
+    cached_ver="$(_bins_health_field "$cached" version)"
+    cached_sha="$(_bins_health_field "$cached" probe_sha)"
+    [ "$cached_ver" = "$version" ] && [ "$cached_sha" = "$probe_sha" ] && return 0
+  fi
+  rc=0
+  _bins_health_gate_probe "$img_tag" "$tool" || rc=$?
+  case "$rc" in
+    0)
+      _bins_health_put "$volume" "$version" "$probe_sha" ok
+      ;;
+    2)
+      _bins_health_gate_rollback "$img_tag" "$tool" "$version"
+      ;;
+    3)
+      echo "cbox: $tool start-time health check was inconclusive - proceeding (run '$0 bins check $tool' for details)" >&2
+      ;;
+    *)
+      ;;
+  esac
+  return 0
+}
+
+_bins_health_gate() {
+  [ "${CBOX_BINS_HEALTH_GATE:-off}" = on ] || return 0
+  local img_tag="$1" tool
+  for tool in claude codex hermes; do
+    if [ "$tool" = hermes ]; then
+      _bins_hermes_on || continue
+    fi
+    _bins_health_gate_tool "$img_tag" "$tool"
+  done
+  return 0
+}
+
 _bins_soft() {
   _ensure_bins "$@" || echo "cbox: warning: bins install failed - continuing; affected tools stay unavailable until you fix the pin or network and run '$0 reinstall-bins'" >&2
+  _bins_hold_notice claude
+  _bins_hold_notice codex
+  _bins_hold_notice hermes
+  _bins_health_gate "$1"
   _bins_autoupdate_bg "$1"
   return 0
 }
@@ -2066,6 +2494,7 @@ _engine_autoupdate_off() {
 
 _bins_autoupdate() {
   local img_tag="$1" ttl_h="${CBOX_AUTOUPDATE_TTL_HOURS:-24}" tool stampdir stampf last now lock
+  local dtool dvol dline dver i
   case "$ttl_h" in ''|*[!0-9]*) ttl_h=24 ;; esac
   stampdir="$HOME/.config/cbox"
   now="$(date +%s)"
@@ -2073,6 +2502,7 @@ _bins_autoupdate() {
   for tool in claude codex hermes; do
     _bins_channel "$tool" || continue
     _engine_autoupdate_off "$tool" && continue
+    _bins_hold_exists "$(_cbox_bins_volume "$tool")" && continue
     stampf="$stampdir/autoupdate.$(_cbox_bins_volume "$tool").stamp"
     last="$(cat "$stampf" 2>/dev/null || echo 0)"
     case "$last" in ''|*[!0-9]*) last=0 ;; esac
@@ -2088,7 +2518,24 @@ _bins_autoupdate() {
     printf '%s\n' "$now" > "$stampdir/autoupdate.$(_cbox_bins_volume "$tool").stamp"
   done
   echo "cbox: autoupdate: refreshing channel bins (${due[*]}) at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  local -a due_before=()
+  for dtool in "${due[@]}"; do
+    dvol="$(_cbox_bins_volume "$dtool")"
+    dline="$(_bins_cache_get "$dvol")" || dline=""
+    dver=""
+    [ -z "$dline" ] || dver="$(_bins_cache_field "$dline" version)"
+    due_before+=("$dver")
+  done
   _bins_run_install "$img_tag" "${due[*]}" refresh || echo "cbox: autoupdate: install failed; next attempt after TTL"
+  i=0
+  for dtool in "${due[@]}"; do
+    dvol="$(_cbox_bins_volume "$dtool")"
+    dline="$(_bins_cache_get "$dvol")" || dline=""
+    dver=""
+    [ -z "$dline" ] || dver="$(_bins_cache_field "$dline" version)"
+    echo "cbox: autoupdate: $dtool ${due_before[$i]:-none} -> ${dver:-none}"
+    i=$((i + 1))
+  done
   exec 5>&-
 }
 
@@ -2127,6 +2574,296 @@ _bins_conflict_report() {
     hits_hermes="$(_bins_conflict_scan hermes "$(_bins_want hermes)")"
     [ -z "$hits_hermes" ] || echo "cbox: moving the shared hermes tuple will make these projects mismatch:$hits_hermes" >&2
   fi
+}
+
+_bins_run_rollback_group() {
+  local img_tag="$1" tools="$2" reason="${3:-manual}" claude_vol codex_vol hermes_vol rc line status
+  local name f3 f4 status_word volume version hash badver note
+  local prev_claude="" prev_codex="" prev_hermes=""
+  local -a mounts=()
+  case " $tools " in
+    *" hermes "*)
+      hermes_vol="$(_cbox_bins_volume hermes)"
+      docker volume create "$hermes_vol" >/dev/null
+      mounts+=(-v "$hermes_vol:/opt/hermes:rw")
+      prev_hermes="$(_bins_history_prev_version hermes)" || prev_hermes=""
+      ;;
+    *)
+      claude_vol="$(_cbox_bins_volume claude)"
+      codex_vol="$(_cbox_bins_volume codex)"
+      docker volume create "$claude_vol" >/dev/null
+      docker volume create "$codex_vol" >/dev/null
+      mounts+=(-v "$claude_vol:$HOME/.local:rw" -v "$codex_vol:$HOME/.codex/packages:rw")
+      case " $tools " in *" claude "*) prev_claude="$(_bins_history_prev_version claude)" || prev_claude="" ;; esac
+      case " $tools " in *" codex "*) prev_codex="$(_bins_history_prev_version codex)" || prev_codex="" ;; esac
+      ;;
+  esac
+  rc=0
+  status="$(docker run --rm \
+    "${mounts[@]}" \
+    -e HOST_USER="$(id -un)" \
+    -e HOST_UID="$(id -u)" \
+    -e HOST_GID="$(id -g)" \
+    -e HOST_HOME="$HOME" \
+    -e CBOX_CLAUDE_TARGET="${CBOX_CLAUDE_TARGET:-stable}" \
+    -e CBOX_CODEX_VERSION="${CBOX_CODEX_VERSION:-latest}" \
+    -e CBOX_CODEX_TARGET="${CBOX_CODEX_TARGET:-}" \
+    -e CBOX_HERMES_VERSION="${CBOX_HERMES_VERSION:-latest}" \
+    -e CBOX_INSTALL_TOOLS="$tools" \
+    -e CBOX_INSTALL_MODE=rollback \
+    -e CBOX_ROLLBACK_REASON="$reason" \
+    -e CBOX_ROLLBACK_PREV_CLAUDE="$prev_claude" \
+    -e CBOX_ROLLBACK_PREV_CODEX="$prev_codex" \
+    -e CBOX_ROLLBACK_PREV_HERMES="$prev_hermes" \
+    --entrypoint /opt/cbox/install-bins.sh \
+    "$img_tag")" || rc=$?
+  printf '%s\n' "$status" | while IFS= read -r line; do
+    case "$line" in
+      ""|cbox-bins:*) ;;
+      *) echo "$line" >&2 ;;
+    esac
+  done
+  while IFS= read -r line; do
+    case "$line" in
+      cbox-bins:*)
+        name="$(printf '%s' "$line" | awk '{print $2}')"
+        case "$name" in
+          claude|codex|hermes) ;;
+          *) echo "cbox: ignoring rollback status line for unknown tool" >&2; continue ;;
+        esac
+        f3="$(printf '%s' "$line" | awk '{print $3}')"
+        f4="$(printf '%s' "$line" | awk '{print $4}')"
+        status_word="$(printf '%s' "$line" | awk '{print $5}')"
+        case "$status_word" in
+          rollback)
+            version="$f3"
+            hash="$f4"
+            badver="$(_bins_field_sanitize "$(printf '%s' "$line" | awk '{print $6}')")"
+            note="$(_bins_hold_reason_sanitize "$(printf '%s' "$line" | awk '{s=""; for (i=7;i<=NF;i++) s=s (i>7?" ":"") $i; print s}')")"
+            volume="$(_cbox_bins_volume "$name")"
+            _bins_cache_put "$volume" "$name" "$(_bins_want "$name")" "$version"
+            _bins_history_append "$volume" "$name" "$(_bins_want "$name")" "$badver" "$version" rollback "$note"
+            _bins_hold_write "$volume" "$version" "$badver" "$note"
+            echo "cbox: $name rolled back to $version (was $badver: $note)" >&2
+            ;;
+          unhealthy)
+            badver="$f3"
+            note="$(_bins_hold_reason_sanitize "$(printf '%s' "$line" | awk '{s=""; for (i=6;i<=NF;i++) s=s (i>6?" ":"") $i; print s}')")"
+            echo "cbox: $name rollback could not restore any previous version (was $badver: $note) - the current install is left in place" >&2
+            rc=1
+            ;;
+        esac
+        ;;
+    esac
+  done <<< "$status"
+  return "$rc"
+}
+
+_bins_rollback_run() {
+  local img_tag="$1" tool="$2" rc=0 vendor="" hermes=""
+  if [ -n "$tool" ]; then
+    case "$tool" in
+      hermes) hermes=hermes ;;
+      *) vendor="$tool" ;;
+    esac
+  else
+    vendor="claude codex"
+    _bins_hermes_on && hermes=hermes
+  fi
+  [ -z "$vendor" ] || _bins_run_rollback_group "$img_tag" "$vendor" || rc=1
+  [ -z "$hermes" ] || _bins_run_rollback_group "$img_tag" "$hermes" || rc=1
+  return "$rc"
+}
+
+_bins_check_run() {
+  local img_tag="$1" tool="$2" vol out rc
+  local -a mounts=()
+  case "$tool" in
+    hermes)
+      vol="$(_cbox_bins_volume hermes)"
+      docker volume inspect "$vol" >/dev/null 2>&1 || { echo "cbox: $tool has no installed volume yet - nothing to check" >&2; return 1; }
+      mounts=(-v "$vol:/opt/hermes:ro")
+      ;;
+    claude)
+      vol="$(_cbox_bins_volume claude)"
+      docker volume inspect "$vol" >/dev/null 2>&1 || { echo "cbox: $tool has no installed volume yet - nothing to check" >&2; return 1; }
+      mounts=(-v "$vol:$HOME/.local:ro")
+      ;;
+    codex)
+      vol="$(_cbox_bins_volume codex)"
+      docker volume inspect "$vol" >/dev/null 2>&1 || { echo "cbox: $tool has no installed volume yet - nothing to check" >&2; return 1; }
+      mounts=(-v "$vol:$HOME/.codex/packages:ro")
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  out="$(docker run --rm \
+    -u "$(id -u):$(id -g)" \
+    --network none \
+    "${mounts[@]}" \
+    -e HOST_HOME="$HOME" \
+    -e CBOX_HEALTH_SH="$_CBOX_HEALTH_SH" \
+    -e CBOX_PROBE_CODEX_ARGV="$(_cbox_probe_codex_argv)" \
+    --entrypoint sh \
+    "$img_tag" -c '
+name="$1"
+case "$name" in
+  hermes) stamp="/opt/hermes/.cbox-stamp" ;;
+  claude) stamp="$HOST_HOME/.local/.cbox-stamp" ;;
+  codex) stamp="$HOST_HOME/.codex/packages/.cbox-stamp" ;;
+esac
+if [ ! -f "$stamp" ]; then
+  echo "no stamp recorded for $name yet"
+  exit 3
+fi
+p="$(sed -n 2p "$stamp")"
+v="$(sed -n 4p "$stamp")"
+r="$(readlink -f "$p" 2>/dev/null)"
+[ -n "$r" ] || r="$p"
+echo "checking $name $v ($r)"
+sh -c "$CBOX_HEALTH_SH" cbox-health-probe health "$name" "$r"
+' sh "$tool" 2>&1)"
+  rc=$?
+  printf '%s\n' "$out"
+  case "$rc" in
+    0) echo "cbox: $tool health check passed" >&2 ;;
+    3) echo "cbox: $tool health check inconclusive" >&2 ;;
+    *) echo "cbox: $tool health check failed" >&2 ;;
+  esac
+  return "$rc"
+}
+
+_bins_check_cmd() {
+  local tool="${1:-}" mode img_tag rc=0
+  case "$tool" in
+    ''|claude|codex|hermes) ;;
+    *) echo "cbox: usage: $0 bins check [claude|codex|hermes]" >&2; return 1 ;;
+  esac
+  mode="$(_cbox_effective_mode)"
+  case "$mode" in
+    isolated)
+      local root eff
+      root="$(_cbox_workspace_root)" || die "refusing to run in $PWD (home, /, or a mount root)"
+      eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
+      [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run codex' or 'cbox setup --local $root' first"
+      (
+        set -e
+        unset CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL CBOX_CODEX_TARGET CBOX_BINS_SCOPE
+        . "$eff/cbox.conf"
+        img_tag="$(_cbox_image_tag "$(_cbox_image_hash "$eff")")"
+        docker image inspect "$img_tag" >/dev/null 2>&1 || die "image $img_tag not built - run 'cbox run codex' first"
+        local t tools_
+        if [ -n "$tool" ]; then
+          tools_="$tool"
+        else
+          tools_="claude codex"
+          _bins_hermes_on && tools_="$tools_ hermes"
+        fi
+        rc=0
+        for t in $tools_; do
+          _bins_check_run "$img_tag" "$t" || rc=1
+        done
+        exit "$rc"
+      )
+      ;;
+    global)
+      require_global_conf
+      [ -f "$INSTALL_DIR/image.inputs" ] || die "global image inputs missing - run 'cbox up' first"
+      img_tag="$(_cbox_image_tag "$(_cbox_image_hash "$INSTALL_DIR")")"
+      docker image inspect "$img_tag" >/dev/null 2>&1 || die "image $img_tag not built - run 'cbox up' first"
+      local t tools_
+      if [ -n "$tool" ]; then
+        tools_="$tool"
+      else
+        tools_="claude codex"
+        _bins_hermes_on && tools_="$tools_ hermes"
+      fi
+      for t in $tools_; do
+        _bins_check_run "$img_tag" "$t" || rc=1
+      done
+      return "$rc"
+      ;;
+    *)
+      die_no_conf
+      ;;
+  esac
+}
+
+_bins_unhold_cmd() {
+  local tool="${1:-}" mode img_tag
+  case "$tool" in
+    claude|codex|hermes) ;;
+    *) echo "cbox: usage: $0 bins unhold <claude|codex|hermes>" >&2; return 1 ;;
+  esac
+  mode="$(_cbox_effective_mode)"
+  case "$mode" in
+    isolated)
+      local root eff
+      root="$(_cbox_workspace_root)" || die "refusing to run in $PWD (home, /, or a mount root)"
+      eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
+      [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run codex' or 'cbox setup --local $root' first"
+      (
+        set -e
+        unset CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL CBOX_CODEX_TARGET CBOX_BINS_SCOPE
+        . "$eff/cbox.conf"
+        img_tag="$(_cbox_image_tag "$(_cbox_image_hash "$eff")")"
+        docker image inspect "$img_tag" >/dev/null 2>&1 || die "image $img_tag not built - run 'cbox run codex' first"
+        _bins_hold_remove "$(_cbox_bins_volume "$tool")"
+        echo "cbox: $tool unheld - re-checking now, autoupdate resumes for $tool" >&2
+        _bins_run_install "$img_tag" "$tool" refresh
+      )
+      ;;
+    global)
+      require_global_conf
+      [ -f "$INSTALL_DIR/image.inputs" ] || die "global image inputs missing - run 'cbox up' first"
+      img_tag="$(_cbox_image_tag "$(_cbox_image_hash "$INSTALL_DIR")")"
+      docker image inspect "$img_tag" >/dev/null 2>&1 || die "image $img_tag not built - run 'cbox up' first"
+      _bins_hold_remove "$(_cbox_bins_volume "$tool")"
+      echo "cbox: $tool unheld - re-checking now, autoupdate resumes for $tool" >&2
+      _bins_run_install "$img_tag" "$tool" refresh
+      ;;
+    *)
+      die_no_conf
+      ;;
+  esac
+}
+
+_bins_rollback_cmd() {
+  local tool="${1:-}" mode img_tag
+  case "$tool" in
+    ''|claude|codex|hermes) ;;
+    *) echo "cbox: usage: $0 bins rollback [claude|codex|hermes]" >&2; return 1 ;;
+  esac
+  mode="$(_cbox_effective_mode)"
+  case "$mode" in
+    isolated)
+      local root eff
+      root="$(_cbox_workspace_root)" || die "refusing to run in $PWD (home, /, or a mount root)"
+      eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
+      [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run codex' or 'cbox setup --local $root' first"
+      (
+        set -e
+        unset CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL CBOX_CODEX_TARGET CBOX_BINS_SCOPE
+        . "$eff/cbox.conf"
+        img_tag="$(_cbox_image_tag "$(_cbox_image_hash "$eff")")"
+        docker image inspect "$img_tag" >/dev/null 2>&1 || die "image $img_tag not built - run 'cbox run codex' first"
+        _bins_conflict_report
+        _bins_rollback_run "$img_tag" "$tool"
+      )
+      ;;
+    global)
+      require_global_conf
+      [ -f "$INSTALL_DIR/image.inputs" ] || die "global image inputs missing - run 'cbox up' first"
+      img_tag="$(_cbox_image_tag "$(_cbox_image_hash "$INSTALL_DIR")")"
+      docker image inspect "$img_tag" >/dev/null 2>&1 || die "image $img_tag not built - run 'cbox up' first"
+      _bins_conflict_report
+      _bins_rollback_run "$img_tag" "$tool"
+      ;;
+    *)
+      die_no_conf
+      ;;
+  esac
 }
 
 reinstall_bins() {
@@ -2203,6 +2940,100 @@ reinstall_bins() {
   esac
 }
 
+_bins_status_print() {
+  local tool vol want line installed stale_state
+  for tool in claude codex hermes; do
+    if [ "$tool" = hermes ] && ! _bins_hermes_on; then
+      printf '%-8s off\n' hermes
+      continue
+    fi
+    vol="$(_cbox_bins_volume "$tool")"
+    want="$(_bins_want "$tool")"
+    installed=unknown
+    if line="$(_bins_cache_get "$vol")"; then
+      installed="$(_bins_cache_field "$line" version)"
+    fi
+    if _bins_stale "$vol" "$tool" "$want"; then
+      stale_state=stale
+    else
+      stale_state=fresh
+    fi
+    printf '%-8s volume=%s want=%s installed=%s %s\n' "$tool" "$vol" "$want" "$installed" "$stale_state"
+  done
+}
+
+_bins_status_cmd() {
+  local mode root eff
+  mode="$(_cbox_effective_mode)"
+  case "$mode" in
+    isolated)
+      root="$(_cbox_workspace_root)" || die "refusing to run in $PWD (home, /, or a mount root)"
+      eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
+      [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run codex' or 'cbox setup --local $root' first"
+      (
+        set -e
+        unset CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL CBOX_CODEX_TARGET CBOX_BINS_SCOPE
+        . "$eff/cbox.conf"
+        _bins_status_print
+      )
+      ;;
+    global)
+      require_global_conf
+      _bins_status_print
+      ;;
+    *)
+      die_no_conf
+      ;;
+  esac
+}
+
+_bins_history_cmd() {
+  local tool="${1:-}" hist
+  hist="$(_bins_history_file)"
+  if [ ! -f "$hist" ]; then
+    echo "cbox: no bins history recorded yet at $hist" >&2
+    return 0
+  fi
+  if [ -n "$tool" ]; then
+    awk -F'|' -v t="$tool" '$3 == t' "$hist"
+  else
+    cat "$hist"
+  fi
+}
+
+bins_cmd() {
+  local sub="${1:-}"
+  case "$sub" in
+    status|history|rollback|check|unhold) ;;
+    *)
+      echo "cbox: usage: $0 bins {status|history [tool]|check [tool]|rollback [tool]|unhold <tool>}" >&2
+      return 1
+      ;;
+  esac
+  shift
+  if _cbox_config_in_container; then
+    echo "cbox: bins $sub is host-only - claude/codex/hermes version pins and installs live on the host, run it there" >&2
+    return 1
+  fi
+  local lock rc=0
+  lock="$(_bins_lock_file)"
+  mkdir -p "$(dirname "$lock")"
+  exec 7> "$lock"
+  case "$sub" in
+    rollback|unhold) _cbox_flock -w 900 7 || { echo "cbox: cannot lock $lock" >&2; exec 7>&-; return 1; } ;;
+    *) _cbox_flock -s -w 30 7 || { echo "cbox: cannot lock $lock" >&2; exec 7>&-; return 1; } ;;
+  esac
+  case "$sub" in
+    status) _bins_status_cmd || rc=$? ;;
+    history) _bins_history_cmd "$@" || rc=$? ;;
+    check) _bins_check_cmd "$@" || rc=$? ;;
+    rollback) _bins_rollback_cmd "$@" || rc=$? ;;
+    unhold) _bins_unhold_cmd "$@" || rc=$? ;;
+  esac
+  exec 7>&-
+  return "$rc"
+}
+
 _ensure_volumes() {
   local eff="$1" p_hash
   p_hash="$(_cbox_path_hash "$(cat "$eff/workspace")")"
@@ -2257,6 +3088,106 @@ for p in /proc/[0-9]*/exe; do
 done
 printf %s "$n"
 '
+
+_CBOX_HEALTH_SH='
+to="${CBOX_HEALTH_PROBE_TIMEOUT:-10}"
+verb="$1"
+tool="$2"
+path="$3"
+if [ "$verb" != health ]; then
+  exit 3
+fi
+if [ -z "$path" ] || [ ! -x "$path" ]; then
+  echo "probe path missing or not executable"
+  exit 2
+fi
+case "$tool" in
+  codex)
+    argv="${CBOX_PROBE_CODEX_ARGV:-mcp-server}"
+    case "$argv" in
+      ''|*[!a-zA-Z0-9_-]*) argv=mcp-server ;;
+    esac
+    if ! timeout -k 5 "$to" "$path" $argv --help >/dev/null 2>&1; then
+      echo "mcp-server --help failed"
+      exit 2
+    fi
+    init="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"cbox-health-probe\",\"version\":\"1\"}}}"
+    ready="{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"
+    list="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}"
+    out="$(mktemp)" || { echo "cannot create probe scratch file"; exit 2; }
+    printf "%s\n%s\n%s\n" "$init" "$ready" "$list" | timeout -k 5 "$to" "$path" $argv >"$out" 2>/dev/null
+    hrc=$?
+    if [ "$hrc" = 124 ]; then
+      rm -f "$out"
+      echo "mcp-server handshake timed out"
+      exit 3
+    fi
+    if grep -qF developer-instructions "$out"; then
+      rm -f "$out"
+      exit 0
+    fi
+    rm -f "$out"
+    echo "mcp-server handshake: no developer-instructions"
+    exit 2
+    ;;
+  claude)
+    v="$(timeout -k 5 "$to" "$path" --version 2>/dev/null)"
+    vrc=$?
+    if [ "$vrc" = 124 ]; then
+      echo "claude --version timed out"
+      exit 3
+    fi
+    if printf "%s" "$v" | grep -Eq "^[0-9]+(\.[0-9]+)+"; then
+      exit 0
+    fi
+    echo "claude --version did not match the expected format"
+    exit 2
+    ;;
+  hermes)
+    pybin="$(dirname "$path")/python"
+    v="$(timeout -k 5 "$to" "$pybin" -c "import importlib.metadata as m; print(m.version(\"hermes-agent\"))" 2>/dev/null)"
+    vrc=$?
+    if [ "$vrc" = 124 ]; then
+      echo "hermes version probe timed out"
+      exit 3
+    fi
+    if printf "%s" "$v" | grep -Eq "^[0-9]+(\.[0-9]+)+"; then
+      exit 0
+    fi
+    echo "hermes version probe did not match the expected format"
+    exit 2
+    ;;
+  *)
+    echo "unknown probe tool $tool"
+    exit 3
+    ;;
+esac
+'
+
+_cbox_probe_codex_argv() {
+  python3 -c '
+import json, sys
+
+try:
+    data = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    print("mcp-server")
+    sys.exit(0)
+argv0s = set()
+for name, spec in data.items():
+    if not isinstance(name, str) or not name.startswith("codex-"):
+        continue
+    if not isinstance(spec, dict):
+        continue
+    args = spec.get("args") or []
+    if args:
+        argv0s.add(args[0])
+if len(argv0s) == 1:
+    print(next(iter(argv0s)))
+else:
+    print("mcp-server")
+' "$INSTALL_DIR/etc/mcp/delegates.json" 2>/dev/null || printf 'mcp-server'
+}
 
 _cbox_probe_exes_file() {
   local eff="$1"
@@ -2542,6 +3473,9 @@ _cbox_rebless_local_templates() {
     set -e
     exec 6> "$eff/.regen.lock"
     _cbox_flock -x 6 || { echo "cbox: cannot lock $eff/.regen.lock" >&2; exit 1; }
+    _cbox_layered_require_ok "$eff" \
+      || { echo "cbox: refusing template re-bless for $root - layered config (cbox.base/cbox.override) drifted outside cbox; review what the project holds with 'cbox config diff', then $(_cbox_layered_recovery_hint "$root")" >&2; exit 1; }
+    _cbox_layered_bootstrap_adopt "$eff" "$root"
     _cbox_strip_machine_scoped_vars "$eff/cbox.conf"
     _cbox_conf_set_tpl_sha "$eff/cbox.conf"
     _cbox_manifest_write_keep_generated "$eff" "$root" "$eff/cbox.conf"
@@ -2563,7 +3497,7 @@ _cbox_manifest_verify_conf_interactive() {
           malformed) reason="manifest malformed" ;;
           drifted)  reason="config edited outside cbox" ;;
         esac
-        printf 'cbox: effective config for %s: %s.\n  Re-derive from the global profile now? This replaces every project-level setting (hermes, delegates, mcp-servers, ...) with the global profile; answer n and run cbox setup --local %s to keep them. [y/N] ' "$root" "$reason" "$root"
+        printf "cbox: effective config for %s: %s.\n  Re-derive from the global profile now? Keeps this project's overrides (see cbox config diff) and drops only those whose global value changed since the last derive. [y/N] " "$root" "$reason"
         read -r ans || ans=n
         case "$ans" in
           y|Y) _cbox_rebless_local "$root" "$eff" || die "re-bless failed for $root" ;;
@@ -3435,10 +4369,9 @@ verify() {
 
   v_t "Codex MCP contract exposes developer-instructions"
   if "${X[@]}" env \
-    CBOX_CONTRACT_INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"cbox-contract-canary","version":"1"}}}' \
-    CBOX_CONTRACT_READY='{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-    CBOX_CONTRACT_LIST='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-    sh -c 'codex mcp-server --help >/dev/null 2>&1 && printf "%s\n" "$CBOX_CONTRACT_INIT" "$CBOX_CONTRACT_READY" "$CBOX_CONTRACT_LIST" | timeout 10 codex mcp-server 2>/dev/null | grep -qF developer-instructions'; then
+    CBOX_HEALTH_SH="$_CBOX_HEALTH_SH" \
+    CBOX_PROBE_CODEX_ARGV="$(_cbox_probe_codex_argv)" \
+    sh -c 'p="$(command -v codex)" && sh -c "$CBOX_HEALTH_SH" cbox-health-probe health codex "$p"'; then
     v_ok
   else
     v_fail "Codex MCP contract broken: developer-instructions not found"
@@ -3975,6 +4908,29 @@ _cbox_verify_engines_registry() {
       v_ok
     else
       v_fail "probe literals absent from _CBOX_PROBE_SH:${cp_missing}"
+    fi
+  fi
+
+  v_t "engines registry: subcommand-handshake health.expect literals appear verbatim in the _CBOX_HEALTH_SH heredoc"
+  if [ ! -f "$cbox_self" ]; then
+    v_skip "cbox script not present at $cbox_self (host-side check)"
+  else
+    local health_kind he_missing="" he_none=1 he_expect
+    for name in $names; do
+      health_kind="$(python3 "$py" get "$reg" "$name" health.kind 2>/dev/null)" || health_kind=""
+      [ "$health_kind" = "subcommand-handshake" ] || continue
+      he_none=0
+      he_expect="$(python3 "$py" get "$reg" "$name" health.expect 2>/dev/null)" || he_expect=""
+      if [ -z "$he_expect" ] || ! grep -qF "$he_expect" "$cbox_self"; then
+        he_missing="$he_missing $name.health.expect"
+      fi
+    done
+    if [ "$he_none" = 1 ]; then
+      v_skip "no subcommand-handshake health engines declared"
+    elif [ -z "$he_missing" ]; then
+      v_ok
+    else
+      v_fail "health literals absent from _CBOX_HEALTH_SH:${he_missing}"
     fi
   fi
 
@@ -4694,6 +5650,28 @@ doctor() {
     _cbox_doctor_row "container-exec-tool" OFF "CBOX_CONTAINER_EXEC_TOOL unset or off (default) - the exec bridge, if up, is reachable only via cbox-container by hand, not as an agent-callable MCP tool"
   fi
 
+  if [ "$in_container" = 1 ]; then
+    _cbox_doctor_row "binaries" HOST-CHECK "claude/codex/hermes version pins and installs are host-side - run 'cbox bins status' on the host"
+  else
+    local bins_claude=unknown bins_codex=unknown bins_hermes=off bins_line bins_status=MISSING
+    if bins_line="$(_bins_cache_get "$(_cbox_bins_volume claude)")"; then
+      bins_claude="$(_bins_cache_field "$bins_line" version)"
+      bins_status=ACTIVE
+    fi
+    if bins_line="$(_bins_cache_get "$(_cbox_bins_volume codex)")"; then
+      bins_codex="$(_bins_cache_field "$bins_line" version)"
+      bins_status=ACTIVE
+    fi
+    if _bins_hermes_on; then
+      bins_hermes=unknown
+      if bins_line="$(_bins_cache_get "$(_cbox_bins_volume hermes)")"; then
+        bins_hermes="$(_bins_cache_field "$bins_line" version)"
+        bins_status=ACTIVE
+      fi
+    fi
+    _cbox_doctor_row "binaries" "$bins_status" "claude=$bins_claude$(_bins_doctor_lock_suffix claude) codex=$bins_codex$(_bins_doctor_lock_suffix codex) hermes=$bins_hermes$(_bins_doctor_lock_suffix hermes); last probe $(_bins_doctor_last_probe); last refresh $(_bins_doctor_last_refresh); next autoupdate check $(_bins_doctor_next_check)"
+  fi
+
   if [ "${CBOX_HERMES:-off}" = on ]; then
     local hermes_managed="$INSTALL_DIR/generated/hermes/managed.env"
     local hermes_line hermes_installed=""
@@ -5364,17 +6342,27 @@ _cbox_config_set_isolated() {
       ;;
   esac
 
+  _cbox_layered_bootstrap_adopt "$eff" "$root" \
+    || { echo "cbox: refusing - layered config for $root could not be adopted; see the message above" >&2; return 1; }
+  _cbox_layered_require_ok "$eff" \
+    || { echo "cbox: refusing - layered config (cbox.base/cbox.override) for $root drifted outside cbox; review what the project holds with 'cbox config diff', then $(_cbox_layered_recovery_hint "$root")" >&2; return 1; }
+
   mkdir -p "$eff"
   local lockfile="$eff/.regen.lock"
   exec 6> "$lockfile"
   _cbox_flock -x 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
 
-  local backup_conf backup_gen rc=0
+  local backup_conf backup_gen backup_override rc=0 had_override=0
   backup_conf="$(mktemp)"
   backup_gen="$(mktemp -d)"
+  backup_override="$(mktemp)"
   cp "$eff/cbox.conf" "$backup_conf"
   if [ -d "$eff/generated" ]; then
     cp -a "$eff/generated" "$backup_gen/generated"
+  fi
+  if [ -f "$eff/cbox.override" ]; then
+    had_override=1
+    cp "$eff/cbox.override" "$backup_override"
   fi
 
   (
@@ -5388,7 +6376,18 @@ _cbox_config_set_isolated() {
     . "$eff/cbox.conf"
     _cbox_reg_export_vars
     _cbox_load_machine_scoped_vars
-    _cbox_config_regen_isolated "$eff" "$root"
+    _cbox_config_regen_isolated "$eff" "$root" || exit 1
+    local _i _key _vline
+    for _i in "${!CBOX_CONFIG_KEYS[@]}"; do
+      _key="${CBOX_CONFIG_KEYS[$_i]}"
+      _cbox_layered_is_excluded "$_key" && continue
+      if [ "${CBOX_CONFIG_UNSET_MODE:-0}" = 1 ]; then
+        _cbox_override_del "$eff" "$_key"
+      else
+        _vline="$(grep -m1 "^${_key}=" "$eff/cbox.conf")"
+        _cbox_override_set "$eff" "$_key" "${_vline#*=}"
+      fi
+    done
   ) || rc=$?
 
   if [ "$rc" -ne 0 ]; then
@@ -5406,14 +6405,23 @@ _cbox_config_set_isolated() {
       mv "$restore_gen_tmp" "$eff/generated"
       rm -rf "$eff/generated.stale.$$"
     fi
-    rm -f "$backup_conf"
+    if [ "$had_override" = 1 ]; then
+      local restore_ovr_tmp
+      restore_ovr_tmp="$(mktemp "$eff/.cbox.XXXXXX")"
+      cp "$backup_override" "$restore_ovr_tmp"
+      chmod 0644 "$restore_ovr_tmp"
+      mv "$restore_ovr_tmp" "$eff/cbox.override"
+    else
+      rm -f "$eff/cbox.override"
+    fi
+    rm -f "$backup_conf" "$backup_override"
     rm -rf "$backup_gen"
     exec 6>&-
     echo "cbox: config set failed - previous configuration and generated artifacts restored" >&2
     return 1
   fi
 
-  rm -f "$backup_conf"
+  rm -f "$backup_conf" "$backup_override"
   rm -rf "$backup_gen"
 
   _cbox_manifest_write "$eff" "$root" "$eff/cbox.conf"
@@ -5538,6 +6546,132 @@ _cbox_config_pending() {
   fi
 }
 
+_cbox_config_diff() {
+  if _cbox_config_in_container; then
+    echo "cbox: config diff is host-only - run it from a host shell, not inside the container (get is still allowed)" >&2
+    return 1
+  fi
+  local mode
+  mode="$(_cbox_effective_mode)"
+  if [ "$mode" != isolated ]; then
+    echo "cbox: config diff only applies to an isolated per-project config - there is nothing to diff in the global config" >&2
+    return 1
+  fi
+
+  local root eff
+  root="$(_cbox_workspace_root)" || die "refusing to operate in $PWD (home, /, or a mount root)"
+  eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
+  [ -f "$eff/cbox.conf" ] || { echo "cbox: no configuration at $eff/cbox.conf yet - run 'cbox setup --local $root' first" >&2; return 1; }
+
+  _cbox_config_load_conf_lib
+  _cbox_layered_require_ok "$eff" \
+    || echo "cbox: warning - layered config (cbox.base/cbox.override) for $root no longer matches the manifest; the values below are read straight from disk and every write verb refuses until this is resolved - once you have reviewed them, $(_cbox_layered_recovery_hint "$root")" >&2
+
+  local keys
+  keys="$(_cbox_override_keys "$eff")"
+  if [ -z "$keys" ]; then
+    echo "cbox: no project overrides for $root - every key matches the global profile"
+    return 0
+  fi
+
+  local now_tmp
+  now_tmp="$(mktemp)"
+  _cbox_conf_kv "$INSTALL_DIR/cbox.conf" "$now_tmp"
+
+  local k ov bv gv conflict
+  while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    ov="$(grep -m1 "^${k}=" "$eff/cbox.override" 2>/dev/null)"; ov="${ov#*=}"
+    bv="$(grep -m1 "^${k}=" "$eff/cbox.base" 2>/dev/null)"; bv="${bv#*=}"
+    gv="$(grep -m1 "^${k}=" "$now_tmp" 2>/dev/null)"; gv="${gv#*=}"
+    conflict=""
+    _cbox_layered_key_conflict "$eff/cbox.base" "$now_tmp" "$k" && conflict="  CONFLICT"
+    if [ "$ov" = "$gv" ]; then
+      printf '%s= global  base=%s  global-now=%s%s\n' "$k" "$bv" "$gv" "$conflict"
+    else
+      printf '%s=%s  base=%s  global-now=%s%s\n' "$k" "$ov" "$bv" "$gv" "$conflict"
+    fi
+  done <<< "$keys"
+  rm -f "$now_tmp"
+  return 0
+}
+
+_cbox_config_unset_key_value() {
+  local eff="$1" key="$2" val
+  if [ -f "$eff/cbox.base" ] && grep -q "^${key}=" "$eff/cbox.base" 2>/dev/null; then
+    val="$(unset "$key"; . "$eff/cbox.base" >/dev/null 2>&1; printf '%s' "${!key-}")"
+  else
+    local now_tmp
+    now_tmp="$(mktemp)"
+    _cbox_conf_kv "$INSTALL_DIR/cbox.conf" "$now_tmp"
+    val="$(grep -m1 "^${key}=" "$now_tmp" 2>/dev/null)"; val="${val#*=}"
+    rm -f "$now_tmp"
+  fi
+  printf '%s' "$val"
+}
+
+_cbox_config_unset() {
+  if _cbox_config_in_container; then
+    echo "cbox: config unset is host-only - run it from a host shell, not inside the container (get is still allowed)" >&2
+    return 1
+  fi
+  [ "$#" -ge 1 ] || { echo "cbox: usage: $0 config unset KEY [KEY...]" >&2; return 1; }
+
+  local mode
+  mode="$(_cbox_effective_mode)"
+  if [ "$mode" != isolated ]; then
+    echo "cbox: config unset only applies to an isolated per-project config - there is no override to remove in the global config" >&2
+    return 1
+  fi
+
+  local root eff
+  root="$(_cbox_workspace_root)" || die "refusing to operate in $PWD (home, /, or a mount root)"
+  eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
+  [ -f "$eff/cbox.conf" ] || { echo "cbox: no configuration at $eff/cbox.conf yet - run 'cbox setup --local $root' first" >&2; return 1; }
+
+  _cbox_config_load_sections
+  _cbox_config_load_conf_lib
+
+  _cbox_layered_require_ok "$eff" \
+    || { echo "cbox: refusing - layered config (cbox.base/cbox.override) for $root drifted outside cbox; review what the project holds with 'cbox config diff', then $(_cbox_layered_recovery_hint "$root")" >&2; return 1; }
+
+  local key
+  for key in "$@"; do
+    if ! printf '%s' "$key" | grep -Eq '^[A-Z][A-Z0-9_]*$'; then
+      echo "cbox: invalid key '$key' - must match ^[A-Z][A-Z0-9_]*\$" >&2
+      return 1
+    fi
+    if ! _cbox_config_is_whitelisted "$key"; then
+      echo "cbox: key '$key' is not in the settable whitelist" >&2
+      return 1
+    fi
+  done
+
+  local overridden_keys="" skipped_keys="" k
+  for k in "$@"; do
+    if [ -f "$eff/cbox.override" ] && grep -q "^${k}=" "$eff/cbox.override" 2>/dev/null; then
+      overridden_keys="$overridden_keys $k"
+    else
+      skipped_keys="$skipped_keys $k"
+    fi
+  done
+
+  for k in $skipped_keys; do
+    echo "cbox: $k is not a project override - nothing to unset"
+  done
+
+  overridden_keys="${overridden_keys# }"
+  [ -n "$overridden_keys" ] || return 0
+
+  local -a pairs=()
+  for k in $overridden_keys; do
+    pairs+=("$k=$(_cbox_config_unset_key_value "$eff" "$k")")
+  done
+
+  local CBOX_CONFIG_UNSET_MODE=1
+  _cbox_config_set "${pairs[@]}"
+}
+
 config_cmd() {
   local sub="${1:-}"
   case "$sub" in
@@ -5549,12 +6683,20 @@ config_cmd() {
       shift
       _cbox_config_set "$@"
       ;;
+    unset)
+      shift
+      _cbox_config_unset "$@"
+      ;;
+    diff)
+      shift
+      _cbox_config_diff "$@"
+      ;;
     pending)
       shift
       _cbox_config_pending "$@"
       ;;
     *)
-      echo "cbox: usage: $0 config {get [KEY|--section NAME|--all]|set KEY=VALUE...|pending [--clear]}" >&2
+      echo "cbox: usage: $0 config {get [KEY|--section NAME|--all]|set KEY=VALUE...|unset KEY...|diff|pending [--clear]}" >&2
       return 1
       ;;
   esac
@@ -5745,8 +6887,8 @@ _hub_render() {
   printf '  %d) doctor\n' "$i" >&2
   HUB_ROWS+=("doctor")
   i=$((i + 1))
-  printf '  %d) config\n' "$i" >&2
-  HUB_ROWS+=("config")
+  printf '  %d) settings\n' "$i" >&2
+  HUB_ROWS+=("settings")
   i=$((i + 1))
   if _cbox_netaccess_active; then
     printf '  %d) netaccess\n' "$i" >&2
@@ -5814,6 +6956,10 @@ _hub_config_submenu() {
     echo "  1) show all" >&2
     echo "  2) set one key" >&2
     echo "  3) pending" >&2
+    if [ "$mode" = isolated ]; then
+      echo "  4) diff (project overrides vs base/global)" >&2
+      echo "  5) unset a key (drop back to base/global)" >&2
+    fi
     echo "  b) back" >&2
     printf '> ' >&2
     local ans
@@ -5834,6 +6980,20 @@ _hub_config_submenu() {
       3)
         [ -f "$INSTALL_DIR/templates/sections.sh" ] && . "$INSTALL_DIR/templates/sections.sh"
         _cbox_config_pending 2>&1 | cat 1>&2 || true
+        ;;
+      4)
+        [ "$mode" = isolated ] || { echo "cbox: unrecognized choice '$ans'" >&2; continue; }
+        [ -f "$INSTALL_DIR/templates/sections.sh" ] && . "$INSTALL_DIR/templates/sections.sh"
+        _cbox_config_diff 2>&1 | cat 1>&2 || true
+        ;;
+      5)
+        [ "$mode" = isolated ] || { echo "cbox: unrecognized choice '$ans'" >&2; continue; }
+        printf 'KEY to unset: ' >&2
+        local uk
+        IFS= read -r uk || continue
+        [ -n "$uk" ] || continue
+        [ -f "$INSTALL_DIR/templates/sections.sh" ] && . "$INSTALL_DIR/templates/sections.sh"
+        _cbox_config_unset "$uk" 2>&1 | cat 1>&2 || true
         ;;
       b|B) return 0 ;;
       *) echo "cbox: unrecognized choice '$ans'" >&2 ;;
@@ -6114,8 +7274,22 @@ _hub_on_int() {
   echo "cbox: press q then Enter to quit, or Ctrl-C again to force quit" >&2
 }
 
+_hub_settings_dispatch() {
+  local mode="$1" root="$2" rc=0
+  if command -v python3 >/dev/null 2>&1 && [ -f "$INSTALL_DIR/lib/cbox_settings.py" ]; then
+    if [ "$mode" = isolated ]; then
+      python3 "$INSTALL_DIR/lib/cbox_settings.py" "$INSTALL_DIR" "$0" --local "$root" || rc=$?
+    else
+      python3 "$INSTALL_DIR/lib/cbox_settings.py" "$INSTALL_DIR" "$0" || rc=$?
+    fi
+  else
+    _hub_config_submenu "$mode"
+  fi
+  return "$rc"
+}
+
 _hub_dispatch_row() {
-  local mode="$1" row="$2" rc=0
+  local mode="$1" row="$2" root="$3" rc=0
   case "$row" in
     engine:*)
       local ename="${row#engine:}"
@@ -6134,7 +7308,7 @@ _hub_dispatch_row() {
       trap '_hub_on_int' INT
       ;;
     doctor) doctor || { rc=$?; echo "cbox: doctor exited non-zero ($rc)" >&2; } ;;
-    config) _hub_config_submenu "$mode" || true ;;
+    settings) _hub_settings_dispatch "$mode" "$root" || true ;;
     netaccess) _hub_netaccess_submenu "$mode" || true ;;
     ollama) _hub_ollama_submenu || true ;;
     wg) _hub_wg_submenu || true ;;
@@ -6183,7 +7357,7 @@ _hub_loop() {
         ;;
       *)
         if [ "$ans" -ge 1 ] && [ "$ans" -le "${#HUB_ROWS[@]}" ]; then
-          _hub_dispatch_row "$mode" "${HUB_ROWS[$((ans - 1))]}"
+          _hub_dispatch_row "$mode" "${HUB_ROWS[$((ans - 1))]}" "$root"
         else
           echo "cbox: unrecognized selection '$ans'" >&2
         fi
@@ -6224,13 +7398,14 @@ hub() {
 _hub_context_json() {
   local mode root eff conf compose_argv
   mode="$(_cbox_effective_mode)"
-  local egress
+  local egress bins
   case "$mode" in
     global)
       root="$PWD"
       eff="$INSTALL_DIR"
       conf="$INSTALL_DIR/cbox.conf"
       egress="${CBOX_EGRESS_MODE:-off}"
+      bins="$(_bins_hub_line)"
       ;;
     isolated)
       root="$(_cbox_workspace_root)" || { printf '{"mode": "none"}\n'; return 0; }
@@ -6241,6 +7416,10 @@ _hub_context_json() {
         CBOX_EGRESS_MODE=""
         . "$eff/cbox.conf" >/dev/null 2>&1 || true
         printf '%s' "${CBOX_EGRESS_MODE:-off}"
+      )"
+      bins="$(
+        . "$eff/cbox.conf" >/dev/null 2>&1 || true
+        _bins_hub_line
       )"
       ;;
     *)
@@ -6254,6 +7433,7 @@ _hub_context_json() {
   CBOX_HUB_CTX_CONF="$conf" \
   CBOX_HUB_CTX_SERVICE="$SERVICE" \
   CBOX_HUB_CTX_EGRESS="$egress" \
+  CBOX_HUB_CTX_BINS="$bins" \
   python3 -c '
 import json
 import os
@@ -6273,12 +7453,13 @@ print(json.dumps({
     "compose_argv": compose,
     "service": os.environ["CBOX_HUB_CTX_SERVICE"],
     "egress": os.environ["CBOX_HUB_CTX_EGRESS"],
+    "bins": os.environ["CBOX_HUB_CTX_BINS"],
 }))
 '
 }
 
 usage() {
-  echo "usage: $0 {run [--session <id>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force]|restart [--gpu]|shell|logs [args]|update|reinstall-bins [--fresh|--force|--if-stale]|install-hooks|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|pending}|netaccess {status|allow|deny}|ollama {status|up|down|pull <model>|reconcile|gpu-check}|wg {status|up|down|keygen|peer {add|rm|list|config}}|session-broker {status|access {disabled|viewer|full-attach}|window {off|<minutes>}|key {add <pubkey-file> [comment]|rm <fingerprint>|fingerprints}}|backup|login [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}"
+  echo "usage: $0 {run [--session <id>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force]|restart [--gpu]|shell|logs [args]|update|reinstall-bins [--fresh|--force|--if-stale]|bins {status|history [tool]|rollback [tool]}|install-hooks|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|unset|diff|pending}|netaccess {status|allow|deny}|ollama {status|up|down|pull <model>|reconcile|gpu-check}|wg {status|up|down|keygen|peer {add|rm|list|config}}|session-broker {status|access {disabled|viewer|full-attach}|window {off|<minutes>}|key {add <pubkey-file> [comment]|rm <fingerprint>|fingerprints}}|backup|login [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}"
   echo "cbox: with zero arguments and a TTY on stdin+stdout, bare '$0' opens the interactive hub instead of this usage text"
   echo "cbox: 'cbox ls' lists RUNNING isolated projects only, not every configured project"
   exit 1
@@ -6360,6 +7541,7 @@ case "${1:-}" in
     config_cmd "$@"
     ;;
   netaccess) shift; netaccess_cmd "$@";;
+  bins) shift; bins_cmd "$@";;
   ollama) shift; ollama_cmd "$@";;
   wg) shift; wg_cmd "$@";;
   session-broker) shift; session_broker_cmd "$@";;

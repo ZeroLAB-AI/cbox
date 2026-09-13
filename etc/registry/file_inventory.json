@@ -200,6 +200,10 @@
       "layer": "host",
       "purpose": "the H1 python hub core (cbox/docs/MULTIPLATFORM_DESIGN.md track H); invoked host-side by cbox's bare-invocation dispatch arm when python3 is present and the file py_compiles, reads scope context from 'cbox __hub_context' and renders/dispatches the interactive crossroads; falls back to the existing bash hub() otherwise"
     },
+    "lib/cbox_settings.py": {
+      "layer": "host",
+      "purpose": "INC8 advanced settings menu (docs/CONFIG_V2_DESIGN.md section 3.2 G6); invoked by 'cbox setup menu'/'cbox setup --local <root> menu' and the hub's settings row, reads etc/registry/settings.json directly plus 'cbox config get/pending/diff' and '__hub_context', writes only through 'cbox config set/unset', hands off host-side-effect sections to 'cbox setup update <section>'"
+    },
     "lib/cbox_netaccess.py": {
       "layer": "host",
       "purpose": "invoked by cbox on the host (cbox:177)"
@@ -256,6 +260,22 @@
       "layer": "test",
       "purpose": "bash+zsh shell-rc chooser: marker-block install into both rc files, mandatory cbox wrapper, refuse-on-duplicate-marker, uninstall from both"
     },
+    "lib/test_bins_provenance.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_bins_health.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_bins_health_gate.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_bins_rollback.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
     "lib/test_capabilities_registry.sh": {
       "layer": "test",
       "purpose": "M1 referential-integrity test for capabilities.json: engine/env/delegate cross-references, hook-command coverage, projection-aware dispatch-site inventory, null-history and two-live-mains negative fixtures"
@@ -277,6 +297,10 @@
       "purpose": "host-side test harness under the lib/test_* suite"
     },
     "lib/test_cbox_hub.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_cbox_settings.py": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
@@ -400,6 +424,10 @@
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
+    "lib/test_settings_menu.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
     "lib/test_image_inputs_materialization.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
@@ -407,6 +435,10 @@
     "lib/test_isolated_tpl_rebless.sh": {
       "layer": "test",
       "purpose": "isolated template re-bless: a template-only drift (conf untouched) re-blesses silently and keeps every project-level setting; a hand-edited conf is still refused; the re-derive prompt warns and defaults to no"
+    },
+    "lib/test_layered_config.sh": {
+      "layer": "test",
+      "purpose": "layered project config (INC5): base/override derive, KEEP/DROP merge against a moved global key, reset, bootstrap adopt, manifest base=/override= lines and the G8 drifted refusal"
     },
     "lib/test_jobs_farm_mirror.sh": {
       "layer": "test",
@@ -509,6 +541,10 @@
       "purpose": "host-side test harness under the lib/test_* suite"
     },
     "lib/test_settings_registry.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_setup_profiles.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },

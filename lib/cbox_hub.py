@@ -211,7 +211,7 @@ def build_screen(ctx, engine_names, status_rows):
     i += 1
     numbered.append((str(i), "doctor", "doctor"))
     i += 1
-    numbered.append((str(i), "config", "config (read-only view)"))
+    numbered.append((str(i), "settings", "settings"))
     i += 1
     numbered.append((str(i), "down", "down"))
     i += 1
@@ -223,23 +223,7 @@ def build_screen(ctx, engine_names, status_rows):
     return "\n".join(lines) + "\n", rows
 
 
-def read_config_lines(conf_path):
-    if not conf_path or not os.path.isfile(conf_path):
-        return None
-    out = []
-    try:
-        with open(conf_path, encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                stripped = line.rstrip("\n")
-                if not stripped or stripped.lstrip().startswith("#"):
-                    continue
-                out.append(stripped)
-    except OSError:
-        return None
-    return out
-
-
-def action_argv(cbox_path, row):
+def action_argv(install_dir, cbox_path, row, ctx):
     if row.startswith("engine:"):
         return [cbox_path, "run", row[len("engine:"):]]
     if row == "shell":
@@ -250,29 +234,20 @@ def action_argv(cbox_path, row):
         return [cbox_path, "doctor"]
     if row == "down":
         return [cbox_path, "down"]
-    if row == "config":
-        return None
+    if row == "settings":
+        script = os.path.join(install_dir, "lib", "cbox_settings.py")
+        argv = [sys.executable, script, install_dir, cbox_path]
+        if ctx.get("mode") == "isolated":
+            root = ctx.get("root")
+            if not root:
+                return None
+            argv += ["--local", root]
+        return argv
     return None
 
 
-def dispatch_config(ctx):
-    lines = read_config_lines(ctx.get("conf"))
-    sys.stderr.write("cbox config (read-only view):\n")
-    if lines is None:
-        sys.stderr.write("  <no configuration on disk at this scope>\n")
-        return
-    if not lines:
-        sys.stderr.write("  <empty>\n")
-        return
-    for line in lines:
-        sys.stderr.write("  %s\n" % line)
-
-
-def run_action(cbox_path, row, ctx):
-    if row == "config":
-        dispatch_config(ctx)
-        return 0
-    argv = action_argv(cbox_path, row)
+def run_action(install_dir, cbox_path, row, ctx):
+    argv = action_argv(install_dir, cbox_path, row, ctx)
     if argv is None:
         sys.stderr.write("cbox: internal error - unknown row '%s'\n" % row)
         return 1
@@ -305,7 +280,7 @@ def hub_loop(install_dir, cbox_path, ctx, probe, stdin_stream, stdout_write):
             stdout_write("cbox: unrecognized selection '%s'\n" % ans)
             continue
         row = rows[idx - 1]
-        rc = run_action(cbox_path, row, ctx)
+        rc = run_action(install_dir, cbox_path, row, ctx)
         if rc != 0:
             stdout_write("cbox: action exited non-zero (%d)\n" % rc)
         if ctx.get("mode") == "global" and (row == "shell" or row.startswith("engine:")):

@@ -113,6 +113,7 @@ CBOX_CLAUDE_TARGET='1.2.3'
 CBOX_CODEX_VERSION='1.0.0'
 CBOX_CODEX_TARGET='custom-target'
 CBOX_BINS_SCOPE='pinned'
+CBOX_BINS_HEALTH_GATE='on'
 CBOX_AUTOUPDATE='off'
 CBOX_AUTOUPDATE_TTL_HOURS='48'
 CBOX_DNS_MODE='host'
@@ -225,7 +226,8 @@ _strip_container_exec_tool_line() {
     | grep -v '^CBOX_OLLAMA_KV_CACHE_TYPE=' \
     | grep -v '^CBOX_OLLAMA_KEEP_ALIVE=' \
     | grep -v '^CBOX_LOCAL_MODEL_TIMEOUT_SEC=' \
-    | grep -v '^CBOX_HERMES_EFFORT=' > "$out"
+    | grep -v '^CBOX_HERMES_EFFORT=' \
+    | grep -v '^CBOX_BINS_HEALTH_GATE=' > "$out"
 }
 
 for fx in default full isolated special_chars; do
@@ -277,12 +279,14 @@ for fx in default full isolated special_chars; do
     || _fail "conf_save output for fixture '$fx' is missing the new CBOX_LOCAL_MODEL_TIMEOUT_SEC= line"
   grep -q '^CBOX_HERMES_EFFORT=' "$TMPBASE/new_$fx.conf" \
     || _fail "conf_save output for fixture '$fx' is missing the new CBOX_HERMES_EFFORT= line"
+  grep -q '^CBOX_BINS_HEALTH_GATE=' "$TMPBASE/new_$fx.conf" \
+    || _fail "conf_save output for fixture '$fx' is missing the new CBOX_BINS_HEALTH_GATE= line"
   _strip_container_exec_tool_line "$TMPBASE/new_$fx.conf" "$TMPBASE/new_stripped_$fx.conf"
   _normalize_ollama_image_default "$TMPBASE/old_$fx.conf" "$TMPBASE/old_normalized_$fx.conf"
   cmp -s "$TMPBASE/old_normalized_$fx.conf" "$TMPBASE/new_stripped_$fx.conf" \
-    || _fail "conf_save output diverged for fixture '$fx' beyond the new CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING/CBOX_HERMES_HOOKS/CBOX_CODEX_HOOKS/CBOX_CODEX_MODEL/CBOX_CODEX_EFFORT/CBOX_OLLAMA_CONTEXT_LENGTH/CBOX_OLLAMA_FLASH_ATTENTION/CBOX_OLLAMA_KV_CACHE_TYPE/CBOX_OLLAMA_KEEP_ALIVE/CBOX_LOCAL_MODEL_TIMEOUT_SEC/CBOX_HERMES_EFFORT lines (and the CBOX_OLLAMA_IMAGE default bump from 0.32.5 to 0.33.3):
+    || _fail "conf_save output diverged for fixture '$fx' beyond the new CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING/CBOX_HERMES_HOOKS/CBOX_CODEX_HOOKS/CBOX_CODEX_MODEL/CBOX_CODEX_EFFORT/CBOX_OLLAMA_CONTEXT_LENGTH/CBOX_OLLAMA_FLASH_ATTENTION/CBOX_OLLAMA_KV_CACHE_TYPE/CBOX_OLLAMA_KEEP_ALIVE/CBOX_LOCAL_MODEL_TIMEOUT_SEC/CBOX_HERMES_EFFORT/CBOX_BINS_HEALTH_GATE lines (and the CBOX_OLLAMA_IMAGE default bump from 0.32.5 to 0.33.3):
 $(diff -u "$TMPBASE/old_normalized_$fx.conf" "$TMPBASE/new_stripped_$fx.conf" || true)"
-  _ok "conf_save (setup.sh, legacy key order): byte-identical to pre-registry output for fixture '$fx' aside from the new CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING/CBOX_HERMES_HOOKS/CBOX_CODEX_HOOKS/CBOX_CODEX_MODEL/CBOX_CODEX_EFFORT/CBOX_OLLAMA_CONTEXT_LENGTH/CBOX_OLLAMA_FLASH_ATTENTION/CBOX_OLLAMA_KV_CACHE_TYPE/CBOX_OLLAMA_KEEP_ALIVE/CBOX_LOCAL_MODEL_TIMEOUT_SEC/CBOX_HERMES_EFFORT lines"
+  _ok "conf_save (setup.sh, legacy key order): byte-identical to pre-registry output for fixture '$fx' aside from the new CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING/CBOX_HERMES_HOOKS/CBOX_CODEX_HOOKS/CBOX_CODEX_MODEL/CBOX_CODEX_EFFORT/CBOX_OLLAMA_CONTEXT_LENGTH/CBOX_OLLAMA_FLASH_ATTENTION/CBOX_OLLAMA_KV_CACHE_TYPE/CBOX_OLLAMA_KEEP_ALIVE/CBOX_LOCAL_MODEL_TIMEOUT_SEC/CBOX_HERMES_EFFORT/CBOX_BINS_HEALTH_GATE lines"
 done
 
 _run_old_whitelist_writer() {
@@ -520,7 +524,7 @@ _normalize_ollama_image_default "$TMPBASE/bytelayout_old.conf" "$TMPBASE/bytelay
 old_hash="$(sha256sum "$TMPBASE/bytelayout_old_normalized.conf" | awk '{print $1}')"
 new_hash="$(sha256sum "$TMPBASE/bytelayout_new_stripped.conf" | awk '{print $1}')"
 [ "$old_hash" = "$new_hash" ] \
-  || _fail "byte layout of an isolated-project cbox.conf changed beyond the new CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING/CBOX_HERMES_HOOKS/CBOX_CODEX_HOOKS/CBOX_CODEX_MODEL/CBOX_CODEX_EFFORT/CBOX_OLLAMA_CONTEXT_LENGTH/CBOX_OLLAMA_FLASH_ATTENTION/CBOX_OLLAMA_KV_CACHE_TYPE/CBOX_OLLAMA_KEEP_ALIVE/CBOX_LOCAL_MODEL_TIMEOUT_SEC/CBOX_HERMES_EFFORT lines (this would be hashed into the manifest and would make existing isolated projects report drift): old=$old_hash new=$new_hash"
-_ok "manifest-hash safety: isolated-project cbox.conf sha256 unchanged aside from the new CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING/CBOX_HERMES_HOOKS/CBOX_CODEX_HOOKS/CBOX_CODEX_MODEL/CBOX_CODEX_EFFORT/CBOX_OLLAMA_CONTEXT_LENGTH/CBOX_OLLAMA_FLASH_ATTENTION/CBOX_OLLAMA_KV_CACHE_TYPE/CBOX_OLLAMA_KEEP_ALIVE/CBOX_LOCAL_MODEL_TIMEOUT_SEC/CBOX_HERMES_EFFORT lines ($old_hash) for a realistic isolated fixture; every real bless re-stamps the manifest against the current cbox.conf in the same transaction, so this new line does not itself cause drift reports on upgrade"
+  || _fail "byte layout of an isolated-project cbox.conf changed beyond the new CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING/CBOX_HERMES_HOOKS/CBOX_CODEX_HOOKS/CBOX_CODEX_MODEL/CBOX_CODEX_EFFORT/CBOX_OLLAMA_CONTEXT_LENGTH/CBOX_OLLAMA_FLASH_ATTENTION/CBOX_OLLAMA_KV_CACHE_TYPE/CBOX_OLLAMA_KEEP_ALIVE/CBOX_LOCAL_MODEL_TIMEOUT_SEC/CBOX_HERMES_EFFORT/CBOX_BINS_HEALTH_GATE lines (this would be hashed into the manifest and would make existing isolated projects report drift): old=$old_hash new=$new_hash"
+_ok "manifest-hash safety: isolated-project cbox.conf sha256 unchanged aside from the new CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING/CBOX_HERMES_HOOKS/CBOX_CODEX_HOOKS/CBOX_CODEX_MODEL/CBOX_CODEX_EFFORT/CBOX_OLLAMA_CONTEXT_LENGTH/CBOX_OLLAMA_FLASH_ATTENTION/CBOX_OLLAMA_KV_CACHE_TYPE/CBOX_OLLAMA_KEEP_ALIVE/CBOX_LOCAL_MODEL_TIMEOUT_SEC/CBOX_HERMES_EFFORT/CBOX_BINS_HEALTH_GATE lines ($old_hash) for a realistic isolated fixture; every real bless re-stamps the manifest against the current cbox.conf in the same transaction, so this new line does not itself cause drift reports on upgrade"
 
 echo "PASS: all conf_writer parity tests"

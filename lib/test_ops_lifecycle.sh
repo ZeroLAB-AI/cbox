@@ -6,7 +6,7 @@ PROJECT_DIR="$INSTALL_DIR"
 TMPBASE="$(mktemp -d)"
 trap 'rm -rf "$TMPBASE"' EXIT
 
-unset CBOX_CLAUDE_TARGET CBOX_CODEX_VERSION CBOX_CODEX_TARGET CBOX_HERMES CBOX_HERMES_VERSION CBOX_INSTALL_FORCE CBOX_AUTOUPDATE CBOX_AUTOUPDATE_TTL_HOURS CBOX_BINS_SCOPE
+unset CBOX_CLAUDE_TARGET CBOX_CODEX_VERSION CBOX_CODEX_TARGET CBOX_HERMES CBOX_HERMES_VERSION CBOX_INSTALL_FORCE CBOX_AUTOUPDATE CBOX_AUTOUPDATE_TTL_HOURS CBOX_BINS_SCOPE CBOX_BINS_HEALTH_GATE
 
 _fail() {
   echo "FAIL: $1" >&2
@@ -26,6 +26,8 @@ AUP_FN="$(_extract_fn "$INSTALL_DIR/cbox" _bins_autoupdate)"
 CHAN_FN="$(_extract_fn "$INSTALL_DIR/cbox" _bins_channel)"
 EOFF_FN="$(_extract_fn "$INSTALL_DIR/cbox" _engine_autoupdate_off)"
 HON_FN="$(_extract_fn "$INSTALL_DIR/cbox" _bins_hermes_on)"
+PROTOFIELDOK_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _protocol_field_ok)"
+PROTOFIELD_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _protocol_field)"
 INST_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _install_one)"
 WANT_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _want_string)"
 SPATH_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _stamp_path)"
@@ -39,6 +41,15 @@ RIB_FN="$(_extract_fn "$INSTALL_DIR/cbox" reinstall_bins)"
 BCR_FN="$(_extract_fn "$INSTALL_DIR/cbox" _bins_conflict_report)"
 BSF_FN="$(_extract_fn "$INSTALL_DIR/entrypoint.sh" _bins_start_fallback)"
 BCW_FN="$(_extract_fn "$INSTALL_DIR/entrypoint.sh" _bins_channel_want)"
+CACHEFILE_FN="$(_extract_fn "$INSTALL_DIR/cbox" _bins_cache_file)"
+CACHEGET_FN="$(_extract_fn "$INSTALL_DIR/cbox" _bins_cache_get)"
+FIELDSANITIZE_FN="$(_extract_fn "$INSTALL_DIR/cbox" _bins_field_sanitize)"
+CACHEPUT_FN="$(_extract_fn "$INSTALL_DIR/cbox" _bins_cache_put)"
+CACHEFIELD_FN="$(_extract_fn "$INSTALL_DIR/cbox" _bins_cache_field)"
+[ -n "$CACHEFILE_FN" ] || _fail "cannot extract _bins_cache_file"
+[ -n "$CACHEGET_FN" ] || _fail "cannot extract _bins_cache_get"
+[ -n "$CACHEPUT_FN" ] || _fail "cannot extract _bins_cache_put"
+[ -n "$CACHEFIELD_FN" ] || _fail "cannot extract _bins_cache_field"
 [ -n "$HON_FN" ] || _fail "cannot extract _bins_hermes_on"
 for _fn in WANT_FN SPATH_FN RHB_FN HHASH_FN RHI_FN; do
   [ -n "${!_fn}" ] || _fail "cannot extract install-bins function for $_fn"
@@ -190,6 +201,42 @@ run_autoupdate_hermes "$H6" off latest >/dev/null
 grep -q "hermes" "$H6/install.calls" && _fail "autoupdate: hermes off must stay out of the refresh set"
 _ok "autoupdate: hermes off stays out of the refresh set"
 
+run_autoupdate_versioned() {
+  INSTALL_DIR="$INSTALL_DIR" bash -c '
+    set -u
+    HOME="$1"; export HOME
+    source "$INSTALL_DIR/lib/portable.sh"
+    '"$AUP_FN"'
+    '"$CHAN_FN"'
+    '"$EOFF_FN"'
+    '"$HON_FN"'
+    '"$CACHEFILE_FN"'
+    '"$CACHEGET_FN"'
+    '"$FIELDSANITIZE_FN"'
+  '"$CACHEPUT_FN"'
+    '"$CACHEFIELD_FN"'
+    _cbox_bins_volume() { printf "vol-%s" "$1"; }
+    _bins_lock_file() { printf "%s/bins.lock" "$HOME"; }
+    _bins_run_install() {
+      local t
+      for t in $2; do
+        _bins_cache_put "vol-$t" "$t" "want-$t" "9.9.9"
+      done
+    }
+    _bins_cache_put "vol-claude" claude want-claude "1.0.0"
+    _bins_autoupdate img
+  ' aupv "$1"
+}
+
+H7="$TMPBASE/h7"
+mkdir -p "$H7/.config/cbox"
+AUP_OUT="$(run_autoupdate_versioned "$H7")"
+printf '%s\n' "$AUP_OUT" | grep -qx 'cbox: autoupdate: claude 1.0.0 -> 9.9.9' \
+  || _fail "autoupdate: log must record claude's before/after version change (got: $AUP_OUT)"
+printf '%s\n' "$AUP_OUT" | grep -qx 'cbox: autoupdate: codex none -> 9.9.9' \
+  || _fail "autoupdate: log must record codex's first-ever install as none -> version (got: $AUP_OUT)"
+_ok "autoupdate: log carries before/after versions per tool, including a first-ever install"
+
 run_install_one() {
   bash -c '
     set -u
@@ -197,6 +244,8 @@ run_install_one() {
     CBOX_INSTALL_FORCE="$force"
     CLROOT=/nonexistent-clroot
     CXPKG=/nonexistent-cxpkg
+    '"$PROTOFIELDOK_FN"'
+    '"$PROTOFIELD_FN"'
     '"$INST_FN"'
     _want_string() { printf "stable"; }
     _stamp_path() { printf "%s/stamp" "$marker"; }
@@ -233,6 +282,8 @@ run_install_one_hermes() {
     CLROOT=/nonexistent-clroot
     CXPKG=/nonexistent-cxpkg
     HXROOT="$marker/opt-hermes"
+    '"$PROTOFIELDOK_FN"'
+    '"$PROTOFIELD_FN"'
     '"$INST_FN"'
     '"$WANT_FN"'
     '"$SPATH_FN"'
@@ -288,6 +339,8 @@ run_install_one_codex() {
     CLROOT=/nonexistent-clroot
     CXPKG="$marker/cx"
     HXROOT=/nonexistent-hxroot
+    '"$PROTOFIELDOK_FN"'
+    '"$PROTOFIELD_FN"'
     '"$INST_FN"'
     '"$WANT_FN"'
     '"$SPATH_FN"'

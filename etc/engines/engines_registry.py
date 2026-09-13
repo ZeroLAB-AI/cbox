@@ -7,7 +7,7 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 TOP_KEYS = {"schema", "engines"}
 ENGINE_REQUIRED_KEYS = {"bin", "install", "probe", "version_vars", "enabled_var", "login"}
-ENGINE_OPTIONAL_KEYS = {"preassign_id", "resume_argv", "seed_channel", "history_read"}
+ENGINE_OPTIONAL_KEYS = {"preassign_id", "resume_argv", "seed_channel", "history_read", "health"}
 ENGINE_KEYS = ENGINE_REQUIRED_KEYS | ENGINE_OPTIONAL_KEYS
 INSTALL_VALUES = {"bins-volume", "image"}
 LOGIN_PREFIXES = ("oauth-bridge", "port-bridge:", "none")
@@ -16,6 +16,9 @@ HISTORY_READ_VALUES = {"claude-jsonl", "codex-jsonl", "hermes-sqlite"}
 
 PROBE_KEYS_EXE_STAMP = {"kind", "stamp", "infra_filter_argv1"}
 PROBE_KEYS_CANONICAL_PATHS = {"kind", "exe_realpath_prefix", "argv0_prefix", "argv1"}
+
+HEALTH_KEYS_VERSION = {"kind"}
+HEALTH_KEYS_HANDSHAKE = {"kind", "expect"}
 
 
 class RegistryError(ValueError):
@@ -79,6 +82,27 @@ def _check_capabilities(name, spec):
         hr = spec["history_read"]
         _require(hr is None or (isinstance(hr, str) and hr in HISTORY_READ_VALUES),
                   "engine %s: history_read must be null or one of %s" % (name, sorted(HISTORY_READ_VALUES)))
+
+    if "health" in spec:
+        _check_health(name, spec["health"])
+
+
+def _check_health(name, health):
+    _require(isinstance(health, dict), "engine %s: health must be an object" % name)
+    _require("kind" in health, "engine %s: health missing kind" % name)
+    kind = health["kind"]
+    _require(isinstance(kind, str), "engine %s: health.kind must be a string" % name)
+    if kind == "version":
+        extra = set(health.keys()) - HEALTH_KEYS_VERSION
+        _require(not extra, "engine %s: health has unknown keys for version: %s" % (name, sorted(extra)))
+    elif kind == "subcommand-handshake":
+        extra = set(health.keys()) - HEALTH_KEYS_HANDSHAKE
+        _require(not extra, "engine %s: health has unknown keys for subcommand-handshake: %s" % (name, sorted(extra)))
+        missing = HEALTH_KEYS_HANDSHAKE - set(health.keys())
+        _require(not missing, "engine %s: health missing keys for subcommand-handshake: %s" % (name, sorted(missing)))
+        _require(isinstance(health["expect"], str) and health["expect"], "engine %s: health.expect must be a non-empty string" % name)
+    else:
+        raise RegistryError("engine %s: health.kind must be version or subcommand-handshake, got %r" % (name, kind))
 
 
 def _check_engine(name, spec):

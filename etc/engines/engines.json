@@ -11,7 +11,8 @@
       "preassign_id": true,
       "resume_argv": "--resume {id}",
       "seed_channel": "sessionstart-hook",
-      "history_read": "claude-jsonl"
+      "history_read": "claude-jsonl",
+      "health": {"kind": "version"}
     },
     "codex": {
       "bin": "codex",
@@ -23,7 +24,8 @@
       "preassign_id": false,
       "resume_argv": "resume {id}",
       "seed_channel": "sessionstart-hook",
-      "history_read": "codex-jsonl"
+      "history_read": "codex-jsonl",
+      "health": {"kind": "subcommand-handshake", "expect": "developer-instructions"}
     },
     "hermes": {
       "bin": "hermes",
@@ -35,7 +37,8 @@
       "preassign_id": false,
       "resume_argv": "--resume {id}",
       "seed_channel": "ephemeral-system-prompt",
-      "history_read": "hermes-sqlite"
+      "history_read": "hermes-sqlite",
+      "health": {"kind": "version"}
     }
   }
 }

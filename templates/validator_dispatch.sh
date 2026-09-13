@@ -335,6 +335,9 @@ _cbox_reg_validate_var_dispatch() {
     CBOX_BINS_SCOPE)
       _cbox_val_kind_enum "$val" 'global' 'pinned' || return 1
       ;;
+    CBOX_BINS_HEALTH_GATE)
+      _cbox_val_kind_enum "$val" 'off' 'on' || return 1
+      ;;
     CBOX_RESTART_POLICY)
       _cbox_val_kind_enum "$val" 'no' 'unless-stopped' || return 1
       ;;

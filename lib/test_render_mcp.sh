@@ -324,6 +324,26 @@ assert sorted(data.keys()) == sorted(expected_avail.keys()), sorted(data.keys())
   echo "PASS: delegates.json reproduces the current default set exactly (5 codex tiers available to claude+hermes, ask-claude codex+hermes, local-qwen/container-exec/hermes-local claude+codex+hermes env-gated, no other new entry)"
 }
 
+test_codex_delegates_share_one_probe_argv0() {
+  python3 -c '
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+argv0s = set()
+for name, spec in data.items():
+    if not name.startswith("codex-"):
+        continue
+    args = spec.get("args") or []
+    assert args, "%s has no args to derive a probe argv0 from" % name
+    argv0s.add(args[0])
+assert argv0s, "no codex-* delegates found"
+assert len(argv0s) == 1, "codex-* delegates disagree on args[0]: %r" % sorted(argv0s)
+assert next(iter(argv0s)) == "mcp-server", "codex-* delegates args[0] is not mcp-server: %r" % argv0s
+' "$INSTALL_DIR/etc/mcp/delegates.json"
+  echo "PASS: all codex-* delegates share one args[0] (mcp-server) - the INC3 health probe derives CBOX_PROBE_CODEX_ARGV from this single source"
+}
+
 test_render_refuses_codex_named_non_codex_mcp_adapter() {
   local bad="$TMPBASE/bad_named_codex.json"
   echo '{"codex-bad":{"type":"stdio","command":"codex","args":["mcp-server"],"_cbox":{"adapter":"stdio-mcp","available_to":["claude"]}}}' > "$bad"
@@ -926,6 +946,7 @@ test_codex_profile_toml_hermes_local_gated_on
 test_shim_behavioral_pin_via_existing_suite
 test_no_dangling_mcp_servers_json_refs
 test_delegates_registry_reproduces_current_default_set
+test_codex_delegates_share_one_probe_argv0
 test_render_refuses_codex_named_non_codex_mcp_adapter
 test_render_refuses_codex_mcp_adapter_without_codex_prefix
 test_available_to_enforced_codex_gains_no_new_tools

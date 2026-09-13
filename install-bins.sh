@@ -17,6 +17,15 @@ case " $CBOX_INSTALL_TOOLS " in
     ;;
 esac
 CBOX_INSTALL_FORCE="${CBOX_INSTALL_FORCE:-0}"
+CBOX_INSTALL_MODE="${CBOX_INSTALL_MODE:-install}"
+case "$CBOX_INSTALL_MODE" in
+  install|rollback)
+    ;;
+  *)
+    echo "install-bins: CBOX_INSTALL_MODE must be install or rollback" >&2
+    exit 1
+    ;;
+esac
 
 CLROOT="$HOST_HOME/.local"
 CXPKG="$HOST_HOME/.codex/packages"
@@ -93,6 +102,17 @@ _tool_hash() {
 
 _user_version_raw() {
   _gosu timeout 30 "$1" --version 2>/dev/null
+}
+
+_protocol_field_ok() {
+  case "$1" in
+    ""|*[!0-9A-Za-z._:+-]*) return 1 ;;
+  esac
+  return 0
+}
+
+_protocol_field() {
+  printf '%s' "$1" | LC_ALL=C tr -cd '0-9A-Za-z._:+-' | cut -c1-80
 }
 
 _parsed_version() {
@@ -208,7 +228,7 @@ _run_claude_install() {
     trap "rm -rf \"$tmp\" \"$cfg\"" EXIT
     curl -fsSL --connect-timeout 10 --retry 2 --retry-connrefused -o "$tmp" https://claude.ai/install.sh
     CLAUDE_CONFIG_DIR="$cfg" bash "$tmp" "$1"
-  ' claude-install "$CBOX_CLAUDE_TARGET"
+  ' claude-install "$CBOX_CLAUDE_TARGET" >&2
 }
 
 _run_codex_install() {
@@ -218,7 +238,7 @@ _run_codex_install() {
     trap "rm -f \"$tmp\"" EXIT
     curl -fsSL --connect-timeout 10 --retry 2 --retry-connrefused -o "$tmp" https://chatgpt.com/codex/install.sh
     sh "$tmp"
-  '
+  ' >&2
 }
 
 _hermes_stamp_install_method() {
@@ -364,9 +384,7 @@ _hermes_backup_take() {
 }
 
 _hermes_backup_commit() {
-  local prev
-  prev="$(_hermes_backup_dir)"
-  rm -rf "$prev"
+  :
 }
 
 _hermes_backup_restore() {
@@ -392,6 +410,74 @@ _hermes_backup_restore() {
     }
   done < <(find "$prev" -mindepth 1 -maxdepth 1 -print0)
   rm -rf "$prev"
+}
+
+_prev_root() {
+  case "$1" in
+    claude) printf '%s/.cbox-prev' "$CLROOT" ;;
+    codex) printf '%s/.cbox-prev' "$CXPKG" ;;
+  esac
+}
+
+_prev_marker() {
+  printf '%s/.cbox-backup-complete' "$(_prev_root "$1")"
+}
+
+_prev_is_real_dir() {
+  local prev="$1"
+  [ -e "$prev" ] || return 1
+  [ -L "$prev" ] && return 1
+  [ -d "$prev" ]
+}
+
+_prev_root_recover() {
+  local root="$1" orphan="${1}.orphan"
+  if [ ! -e "$root" ] && [ ! -L "$root" ] && { [ -e "$orphan" ] || [ -L "$orphan" ]; }; then
+    mv "$orphan" "$root" 2>/dev/null || true
+  fi
+}
+
+_prev_take() {
+  local name="$1" stamp cur_path root tmp orphan release_dir
+  case "$name" in
+    claude|codex)
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+  stamp="$(_stamp_path "$name")"
+  [ -f "$stamp" ] || return 0
+  cur_path="$(_resolve_tool_bin "$name" 2>/dev/null)" || return 0
+  root="$(_prev_root "$name")"
+  tmp="${root}.tmp"
+  orphan="${root}.orphan"
+  _prev_root_recover "$root"
+  rm -rf "$orphan"
+  rm -rf "$tmp"
+  mkdir -p "$tmp" || return 1
+  case "$name" in
+    claude)
+      cp -p "$cur_path" "$tmp/payload" || { rm -rf "$tmp"; return 1; }
+      ;;
+    codex)
+      release_dir="$(dirname "$(dirname "$cur_path")")"
+      case "$release_dir" in
+        "$CXPKG"/*/*) ;;
+        *) rm -rf "$tmp"; return 1 ;;
+      esac
+      [ -d "$release_dir" ] || { rm -rf "$tmp"; return 1; }
+      cp -a "$release_dir" "$tmp/payload" || { rm -rf "$tmp"; return 1; }
+      ;;
+  esac
+  cp -p "$stamp" "$tmp/.cbox-stamp" || { rm -rf "$tmp"; return 1; }
+  : > "$tmp/.cbox-backup-complete" || { rm -rf "$tmp"; return 1; }
+  if [ -e "$root" ] || [ -L "$root" ]; then
+    mv "$root" "$orphan" || return 1
+  fi
+  mv "$tmp" "$root" || return 1
+  rm -rf "$orphan"
+  return 0
 }
 
 _HERMES_INSTALL_VERIFIED=""
@@ -425,7 +511,7 @@ _run_hermes_install() {
   if [ -d "$(_hermes_backup_dir)" ]; then backed_up=1; fi
   if [ "$take_rc" = 0 ]; then
     if _hermes_venv_reset; then
-      _hxgosu "$HXROOT/bin/pip" install --no-cache-dir "$spec" && _hermes_stamp_install_method && _hermes_seed_delegate_home || rc=1
+      { _hxgosu "$HXROOT/bin/pip" install --no-cache-dir "$spec" && _hermes_stamp_install_method && _hermes_seed_delegate_home || rc=1; } >&2
     else
       rc=1
     fi
@@ -473,6 +559,339 @@ _verify_tool() {
   printf '%s\n%s\n%s\n' "$path" "$hash" "$ver"
 }
 
+_HEALTH_CHECK_NOTE=""
+
+_health_check() {
+  local name="$1" path="$2" out rc
+  _HEALTH_CHECK_NOTE=""
+  if [ -z "${CBOX_HEALTH_SH:-}" ]; then
+    return 3
+  fi
+  out="$(_gosu timeout -k 5 60 sh -c "$CBOX_HEALTH_SH" cbox-health-probe health "$name" "$path" 2>/dev/null)"
+  rc=$?
+  case "$rc" in
+    0|2|3)
+      ;;
+    *) rc=3 ;;
+  esac
+  out="$(printf '%s' "$out" | tr '\n' ' ')"
+  _HEALTH_CHECK_NOTE="$out"
+  return "$rc"
+}
+
+_health_rollforward() {
+  local name="$1" path="$2" hash="$3" ver="$4" release_dir standalone_dir
+  case "$name" in
+    claude)
+      ln -sfn "$path" "$(_link_for claude)" || return 1
+      ;;
+    codex)
+      release_dir="$(dirname "$(dirname "$path")")"
+      standalone_dir="$(dirname "$(dirname "$release_dir")")"
+      ln -sfn "$release_dir" "$standalone_dir/current" || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  _stamp_write "$(_stamp_path "$name")" "$(_want_string "$name")" "$path" "$hash" "$ver"
+}
+
+_install_health_gate() {
+  local name="$1" new_path="$2" new_hash="$3" new_ver="$4"
+  local rc note out rrc restored_path rprc
+  _health_check "$name" "$new_path"; rc=$?
+  note="$_HEALTH_CHECK_NOTE"
+  case "$rc" in
+    0)
+      printf 'cbox-bins: %s %s %s ok\n' "$name" "$new_ver" "$new_hash"
+      return 0
+      ;;
+    3)
+      echo "install-bins: $name health probe inconclusive (${note:-timeout}) - continuing without rollback" >&2
+      printf 'cbox-bins: %s %s %s ok\n' "$name" "$new_ver" "$new_hash"
+      return 0
+      ;;
+  esac
+  out="$(CBOX_ROLLBACK_REASON="${note:-health check failed}" _prev_restore "$name")"
+  rrc=$?
+  if [ "$rrc" != 0 ]; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  restored_path="$(_resolve_tool_bin "$name" 2>/dev/null)" || restored_path=""
+  _health_check "$name" "$restored_path"; rprc=$?
+  if [ "$rprc" = 2 ]; then
+    case "$name" in
+      claude|codex)
+        if _health_rollforward "$name" "$new_path" "$new_hash" "$new_ver"; then
+          printf 'cbox-bins: %s %s %s unreliable probe unreliable on both candidates, kept the new install\n' "$name" "$new_ver" "$new_hash"
+        else
+          local live_ver
+          live_ver="$(_parsed_version "$name" "$restored_path" 2>/dev/null)"
+          [ -n "$live_ver" ] || live_ver=unknown
+          printf 'cbox-bins: %s %s - unhealthy rollforward-failed\n' "$name" "$live_ver"
+        fi
+        ;;
+      *)
+        echo "install-bins: hermes rollback target also failed its health check - hermes has no roll-forward, keeping the restored (previous) version live" >&2
+        printf '%s\n' "$out"
+        ;;
+    esac
+    return 0
+  fi
+  printf '%s\n' "$out"
+  return 0
+}
+
+_prev_claude_zero_copy() {
+  local prevver="$1" base cand p resolved
+  printf '%s' "$prevver" | grep -Eq '^[0-9]+(\.[0-9]+)+(-[0-9A-Za-z.]+)?$' || return 1
+  base="$(_resolve_tool_bin claude 2>/dev/null)" && base="$(dirname "$(dirname "$base")")" \
+    || base="$HOST_HOME/.local/share/claude/versions"
+  [ -d "$base" ] || return 1
+  for cand in "$base/$prevver" "$base/$prevver"*; do
+    [ -d "$cand" ] || continue
+    for p in "$cand/claude" "$cand"/*/claude; do
+      [ -f "$p" ] || continue
+      resolved="$(_resolve_bin "$p" 2>/dev/null)" || continue
+      [ "$(_parsed_version claude "$resolved" 2>/dev/null)" = "$prevver" ] || continue
+      ln -sfn "$resolved" "$(_link_for claude)" || return 1
+      return 0
+    done
+  done
+  return 1
+}
+
+_prev_restore_fallback() {
+  local name="$1" prevver badver="" cur_path verified path hash ver
+  case "$name" in
+    claude) prevver="${CBOX_ROLLBACK_PREV_CLAUDE:-}" ;;
+    codex) prevver="${CBOX_ROLLBACK_PREV_CODEX:-}" ;;
+    hermes) prevver="${CBOX_ROLLBACK_PREV_HERMES:-}" ;;
+  esac
+  cur_path="$(_resolve_tool_bin "$name" 2>/dev/null)" || cur_path=""
+  [ -z "$cur_path" ] || badver="$(_parsed_version "$name" "$cur_path" 2>/dev/null)"
+  [ -n "$badver" ] || badver=unknown
+  if [ -z "$prevver" ]; then
+    echo "install-bins: $name has no usable local backup and no previous version recorded in history - nothing to roll back to; the current install is left in place" >&2
+    printf 'cbox-bins: %s %s - unhealthy no-history\n' "$name" "$badver"
+    return 1
+  fi
+  case "$name" in
+    claude)
+      if ! _prev_claude_zero_copy "$prevver"; then
+        if ! ( CBOX_CLAUDE_TARGET="$prevver" _run_claude_install ); then
+          echo "install-bins: $name network fallback reinstall of $prevver failed - the current (bad) install is left in place" >&2
+          printf 'cbox-bins: %s %s - unhealthy fallback-failed\n' "$name" "$badver"
+          return 1
+        fi
+      fi
+      verified="$(_verify_tool claude)" || {
+        echo "install-bins: $name network fallback post-install verification failed" >&2
+        printf 'cbox-bins: %s %s - unhealthy fallback-verify-failed\n' "$name" "$badver"
+        return 1
+      }
+      path="$(printf '%s' "$verified" | sed -n '1p')"
+      hash="$(printf '%s' "$verified" | sed -n '2p')"
+      ver="$(printf '%s' "$verified" | sed -n '3p')"
+      ;;
+    codex)
+      if ! ( CBOX_CODEX_VERSION="$prevver" _run_codex_install ); then
+        echo "install-bins: $name network fallback reinstall of $prevver failed - the current (bad) install is left in place" >&2
+        printf 'cbox-bins: %s %s - unhealthy fallback-failed\n' "$name" "$badver"
+        return 1
+      fi
+      verified="$(_verify_tool codex)" || {
+        echo "install-bins: $name network fallback post-install verification failed" >&2
+        printf 'cbox-bins: %s %s - unhealthy fallback-verify-failed\n' "$name" "$badver"
+        return 1
+      }
+      path="$(printf '%s' "$verified" | sed -n '1p')"
+      hash="$(printf '%s' "$verified" | sed -n '2p')"
+      ver="$(printf '%s' "$verified" | sed -n '3p')"
+      ;;
+    hermes)
+      local saved_hermes_version="$CBOX_HERMES_VERSION" hermes_rc=0
+      CBOX_HERMES_VERSION="$prevver"
+      _run_hermes_install || hermes_rc=1
+      CBOX_HERMES_VERSION="$saved_hermes_version"
+      if [ "$hermes_rc" != 0 ]; then
+        echo "install-bins: $name network fallback reinstall of $prevver failed - the current (bad) install is left in place" >&2
+        printf 'cbox-bins: %s %s - unhealthy fallback-failed\n' "$name" "$badver"
+        return 1
+      fi
+      path="${_HERMES_INSTALL_VERIFIED:-}"
+      hash="${_HERMES_INSTALL_HASH:-}"
+      ver="${_HERMES_INSTALL_VER:-}"
+      ;;
+  esac
+  if [ -z "$path" ] || [ -z "$hash" ] || [ -z "$ver" ]; then
+    echo "install-bins: $name network fallback verification incomplete" >&2
+    printf 'cbox-bins: %s %s - unhealthy fallback-verify-failed\n' "$name" "$badver"
+    return 1
+  fi
+  if ! _stamp_write "$(_stamp_path "$name")" "$(_want_string "$name")" "$path" "$hash" "$ver"; then
+    echo "install-bins: $name network fallback stamp write failed" >&2
+    return 1
+  fi
+  printf 'cbox-bins: %s %s %s rollback %s network-fallback\n' "$name" "$ver" "$hash" "$badver"
+}
+
+_prev_restore_generic() {
+  local name="$1" root marker stamp path hash ver cur_path cur_hash badver reason release_dir standalone_dir resolved final_hash
+  local allowed_root rel backup_path backup_hash
+  root="$(_prev_root "$name")"
+  _prev_root_recover "$root"
+  marker="$(_prev_marker "$name")"
+  if ! _prev_is_real_dir "$root" || [ ! -f "$marker" ] || [ -L "$marker" ]; then
+    _prev_restore_fallback "$name"
+    return $?
+  fi
+  stamp="$root/.cbox-stamp"
+  if [ ! -f "$stamp" ]; then
+    _prev_restore_fallback "$name"
+    return $?
+  fi
+  path="$(_stamp_field "$stamp" 2)" || { _prev_restore_fallback "$name"; return $?; }
+  hash="$(_stamp_field "$stamp" 3)" || { _prev_restore_fallback "$name"; return $?; }
+  ver="$(_stamp_field "$stamp" 4)" || { _prev_restore_fallback "$name"; return $?; }
+  printf '%s' "$ver" | grep -Eq '^[0-9]+(\.[0-9]+)+(-[0-9A-Za-z.]+)?$' || { _prev_restore_fallback "$name"; return $?; }
+  case "$name" in
+    claude) allowed_root="$CLROOT" ;;
+    codex) allowed_root="$CXPKG" ;;
+  esac
+  case "$path" in
+    "$allowed_root"/*) ;;
+    *) _prev_restore_fallback "$name"; return $? ;;
+  esac
+  case "$path" in
+    *"/../"*|*"/..") _prev_restore_fallback "$name"; return $? ;;
+  esac
+  case "$name" in
+    claude)
+      backup_path="$root/payload"
+      ;;
+    codex)
+      release_dir="$(dirname "$(dirname "$path")")"
+      standalone_dir="$(dirname "$(dirname "$release_dir")")"
+      case "$release_dir" in
+        "$allowed_root"/*/*) ;;
+        *) _prev_restore_fallback "$name"; return $? ;;
+      esac
+      case "$standalone_dir" in
+        "$allowed_root"/*) ;;
+        *) _prev_restore_fallback "$name"; return $? ;;
+      esac
+      case "$path" in
+        "$release_dir"/*) rel="${path#"$release_dir"/}" ;;
+        *) _prev_restore_fallback "$name"; return $? ;;
+      esac
+      backup_path="$root/payload/$rel"
+      ;;
+  esac
+  if [ ! -f "$backup_path" ] || [ -L "$backup_path" ]; then
+    _prev_restore_fallback "$name"
+    return $?
+  fi
+  backup_hash="$(_tool_hash "$name" "$backup_path" 2>/dev/null)" || { _prev_restore_fallback "$name"; return $?; }
+  [ "$backup_hash" = "$hash" ] || { _prev_restore_fallback "$name"; return $?; }
+  cur_path="$(_resolve_tool_bin "$name" 2>/dev/null)" || cur_path=""
+  badver=""
+  [ -z "$cur_path" ] || badver="$(_parsed_version "$name" "$cur_path" 2>/dev/null)"
+  [ -n "$badver" ] || badver=unknown
+  cur_hash=""
+  if [ -f "$path" ] && [ ! -L "$path" ]; then
+    cur_hash="$(_tool_hash "$name" "$path" 2>/dev/null)"
+  fi
+  if [ ! -f "$path" ] || [ -L "$path" ] || [ "$cur_hash" != "$hash" ]; then
+    case "$name" in
+      claude)
+        mkdir -p "$(dirname "$path")" || return 1
+        chown "$HOST_UID:$HOST_GID" "$(dirname "$path")" 2>/dev/null || true
+        cp -p "$root/payload" "$path" || return 1
+        ;;
+      codex)
+        rm -rf "$release_dir"
+        mkdir -p "$(dirname "$release_dir")" || return 1
+        chown "$HOST_UID:$HOST_GID" "$(dirname "$release_dir")" 2>/dev/null || true
+        cp -a "$root/payload" "$release_dir" || return 1
+        ;;
+    esac
+  fi
+  case "$name" in
+    claude)
+      ln -sfn "$path" "$(_link_for claude)" || return 1
+      ;;
+    codex)
+      ln -sfn "$release_dir" "$standalone_dir/current" || return 1
+      ;;
+  esac
+  resolved="$(_resolve_tool_bin "$name")" || {
+    echo "install-bins: $name rollback verification failed - resolved path missing after restore" >&2
+    return 1
+  }
+  [ "$resolved" = "$path" ] || {
+    echo "install-bins: $name rollback verification failed - resolved path $resolved does not match restored path $path" >&2
+    return 1
+  }
+  final_hash="$(_tool_hash "$name" "$resolved")" || {
+    echo "install-bins: $name rollback verification failed - cannot hash restored binary" >&2
+    return 1
+  }
+  [ "$final_hash" = "$hash" ] || {
+    echo "install-bins: $name rollback verification failed - restored hash does not match backup" >&2
+    return 1
+  }
+  if ! _stamp_write "$(_stamp_path "$name")" "$(_want_string "$name")" "$path" "$hash" "$ver"; then
+    echo "install-bins: $name rollback stamp write failed" >&2
+    return 1
+  fi
+  reason="${CBOX_ROLLBACK_REASON:-manual}"
+  printf 'cbox-bins: %s %s %s rollback %s %s\n' "$name" "$ver" "$hash" "$badver" "$reason"
+}
+
+_prev_restore_hermes() {
+  local badver="" reason="${CBOX_ROLLBACK_REASON:-manual}" cur_path stamp path hash ver want
+  cur_path="$(_resolve_tool_bin hermes 2>/dev/null)" || cur_path=""
+  [ -z "$cur_path" ] || badver="$(_parsed_version hermes "$cur_path" 2>/dev/null)"
+  [ -n "$badver" ] || badver=unknown
+  if ! _hermes_backup_is_complete; then
+    _prev_restore_fallback hermes
+    return $?
+  fi
+  if ! _hermes_backup_restore; then
+    echo "install-bins: hermes rollback restore failed" >&2
+    return 1
+  fi
+  stamp="$(_stamp_path hermes)"
+  if [ ! -f "$stamp" ]; then
+    echo "install-bins: hermes rollback restore left no stamp behind" >&2
+    return 1
+  fi
+  path="$(_stamp_field "$stamp" 2)" || path=""
+  hash="$(_stamp_field "$stamp" 3)" || hash=""
+  ver="$(_stamp_field "$stamp" 4)" || ver=""
+  printf '%s' "$ver" | grep -Eq '^[0-9]+(\.[0-9]+)+(-[0-9A-Za-z.]+)?$' || {
+    echo "install-bins: hermes rollback restore produced an unusable stamp version" >&2
+    return 1
+  }
+  want="$(_want_string hermes)"
+  if ! _stamp_write "$stamp" "$want" "$path" "$hash" "$ver"; then
+    echo "install-bins: hermes rollback stamp rewrite failed" >&2
+    return 1
+  fi
+  printf 'cbox-bins: %s %s %s rollback %s %s\n' hermes "$ver" "$hash" "$badver" "$reason"
+}
+
+_prev_restore() {
+  case "$1" in
+    hermes) _prev_restore_hermes ;;
+    claude|codex) _prev_restore_generic "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
 _wipe_volume() {
   local dir="$1"
   if [ "$dir" = "$HXROOT" ]; then
@@ -506,7 +925,7 @@ _install_one() {
     cur_want="$(_want_compat "$name" "$cur_want")"
     if [ -n "$cur_want" ] && [ "$cur_want" != "$want" ]; then
       echo "install-bins: $name pin mismatch - volume stamped for $cur_want, requested $want - run 'cbox reinstall-bins --force' to move the shared tuple, or use CBOX_BINS_SCOPE=pinned for a private volume" >&2
-      printf 'cbox-bins: %s %s %s refuse\n' "$name" "$cur_want" "$want"
+      printf 'cbox-bins: %s %s %s refuse\n' "$name" "$(_protocol_field "$cur_want")" "$(_protocol_field "$want")"
       return 1
     fi
   fi
@@ -515,9 +934,18 @@ _install_one() {
     local v3 v4
     v3="$(_stamp_field "$stamp" 3)"
     v4="$(_stamp_field "$stamp" 4)"
-    printf 'cbox-bins: %s %s %s adopt\n' "$name" "$v4" "$v3"
-    return 0
+    if _protocol_field_ok "$v4" && _protocol_field_ok "$v3"; then
+      printf 'cbox-bins: %s %s %s adopt\n' "$name" "$v4" "$v3"
+      return 0
+    fi
+    echo "install-bins: $name stamp holds a version or hash that is not a single plain token - reinstalling instead of adopting it" >&2
   fi
+
+  case "$name" in
+    claude|codex)
+      _prev_take "$name" || echo "install-bins: warning: could not take a pre-install backup for $name - offline rollback will be unavailable until the next successful install" >&2
+      ;;
+  esac
 
   case "$name" in
     claude) runfn=_run_claude_install ;;
@@ -537,7 +965,7 @@ _install_one() {
       printf 'cbox-bins: %s - - fail\n' "$name"
       return 1
     fi
-    printf 'cbox-bins: %s %s %s ok\n' "$name" "${_HERMES_INSTALL_VER:-}" "${_HERMES_INSTALL_HASH:-}"
+    _install_health_gate hermes "$_HERMES_INSTALL_VERIFIED" "$_HERMES_INSTALL_HASH" "$_HERMES_INSTALL_VER"
     return 0
   fi
 
@@ -555,7 +983,7 @@ _install_one() {
     printf 'cbox-bins: %s - - fail\n' "$name"
     return 1
   fi
-  printf 'cbox-bins: %s %s %s ok\n' "$name" "$ver" "$hash"
+  _install_health_gate "$name" "$path" "$hash" "$ver"
 }
 
 main() {
@@ -572,7 +1000,11 @@ main() {
         continue
         ;;
     esac
-    _install_one "$name" || status=1
+    if [ "$CBOX_INSTALL_MODE" = rollback ]; then
+      _prev_restore "$name" || status=1
+    else
+      _install_one "$name" || status=1
+    fi
   done
   return "$status"
 }

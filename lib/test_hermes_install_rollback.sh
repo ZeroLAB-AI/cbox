@@ -31,8 +31,12 @@ BCOMMIT_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _hermes_backup_commit)"
 BRESTORE_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _hermes_backup_restore)"
 RHI_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _run_hermes_install)"
 WIPE_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _wipe_volume)"
+PREVRESTOREHERMES_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _prev_restore_hermes)"
+STAMPFIELD_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _stamp_field)"
+STAMPWRITE_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _stamp_write)"
 
-for _fn in VRESET_FN BDIR_FN TREEOK_FN BMARKER_FN PREVREAL_FN BISCOMPLETE_FN BUNWIND_FN RECOVER_FN BTAKE_FN BCOMMIT_FN BRESTORE_FN RHI_FN WIPE_FN; do
+for _fn in VRESET_FN BDIR_FN TREEOK_FN BMARKER_FN PREVREAL_FN BISCOMPLETE_FN BUNWIND_FN RECOVER_FN BTAKE_FN BCOMMIT_FN BRESTORE_FN RHI_FN WIPE_FN \
+  PREVRESTOREHERMES_FN STAMPFIELD_FN STAMPWRITE_FN; do
   [ -n "${!_fn}" ] || _fail "cannot extract install-bins function for $_fn"
 done
 
@@ -127,19 +131,21 @@ diff "$TMPBASE/snap_before_a" "$TMPBASE/snap_after_a" >/dev/null \
 [ "$(cat "$RA/bin/pip")" = "old-pip" ] || _fail "case a: old pip binary must be restored"
 _ok "hermes install rollback: transient pip failure restores the previous tree bytewise, no .prev left"
 
-echo "--- case b: successful refresh leaves the new tree with no .prev ---"
+echo "--- case b: successful refresh keeps the pre-refresh tree in .prev (owner decision 1) ---"
 RB="$TMPBASE/case-b/opt-hermes"
 mkdir -p "$RB"
 _seed_old_venv "$RB"
 rc=0
 _run_install "$RB" ok latest >"$TMPBASE/b.out" 2>"$TMPBASE/b.err" || rc=$?
 [ "$rc" = 0 ] || _fail "case b: _run_hermes_install must succeed when pip succeeds: $(cat "$TMPBASE/b.err")"
-[ -e "$RB/.prev" ] && _fail "case b: .prev must not survive a successful refresh"
+[ -d "$RB/.prev" ] || _fail "case b: .prev must survive a successful refresh (owner decision 1)"
+[ -f "$RB/.prev/.cbox-backup-complete" ] || _fail "case b: the surviving backup must carry the completion marker"
+[ "$(cat "$RB/.prev/bin/python" 2>/dev/null)" = "old-python" ] || _fail "case b: the surviving backup must be the pre-refresh tree"
 [ "$(cat "$RB/bin/python")" = "new-python" ] || _fail "case b: new venv binaries must be in place"
 [ "$(cat "$RB/lib/marker-pkg/data.txt")" = "new-marker-contents" ] || _fail "case b: new package contents must be in place"
 grep -q SEEDED "$TMPBASE/seed.log" || _fail "case b: seed step must have run"
 [ "$(sed -n '1p' "$RB/.cbox-stamp" 2>/dev/null)" = "latest" ] || _fail "case b: stamp must be written on full success"
-_ok "hermes install rollback: successful refresh leaves the new tree with no .prev"
+_ok "hermes install rollback: successful refresh keeps the pre-refresh tree in .prev instead of deleting it"
 
 echo "--- case c: fresh empty-volume install still works with no .prev ---"
 RC_="$TMPBASE/case-c/opt-hermes"
@@ -223,10 +229,12 @@ printf 'half-written\n' > "$RG/bin/pip"
 rc=0
 _run_install "$RG" ok latest >"$TMPBASE/g.out" 2>"$TMPBASE/g.err" || rc=$?
 [ "$rc" = 0 ] || _fail "case g: install after stale .prev recovery must succeed: $(cat "$TMPBASE/g.err")"
-[ -e "$RG/.prev" ] && _fail "case g: .prev must not survive after recovery and a fresh successful install"
+[ -d "$RG/.prev" ] || _fail "case g: .prev must survive a successful install that followed stale-backup recovery (owner decision 1)"
+[ -f "$RG/.prev/.cbox-backup-complete" ] || _fail "case g: the surviving backup must carry the completion marker"
+[ "$(cat "$RG/.prev/bin/python" 2>/dev/null)" = "old-python" ] || _fail "case g: the surviving backup must be the recovered pre-install tree"
 [ "$(cat "$RG/bin/python")" = "new-python" ] || _fail "case g: recovered tree must have been used as the base for the new install"
 grep -q SEEDED "$TMPBASE/seed.log" || _fail "case g: seed step must have run after recovery"
-_ok "hermes install rollback: stale .prev from an interrupted run is recovered as the last good install, not destroyed"
+_ok "hermes install rollback: stale .prev from an interrupted run is recovered as the base install, then re-backed-up and kept after the new install succeeds"
 
 echo "--- case g2: a .prev with no completion marker (crash mid-backup_take) is never combined with an incomplete live tree ---"
 RG2="$TMPBASE/case-g2/opt-hermes"
@@ -254,9 +262,12 @@ _seed_old_venv "$RH"
 rc=0
 _run_install "$RH" ok latest >"$TMPBASE/h.out" 2>"$TMPBASE/h.err" || rc=$?
 [ "$rc" = 0 ] || _fail "case h: install with a stale .prev beside a complete live tree must succeed: $(cat "$TMPBASE/h.err")"
-[ -e "$RH/.prev" ] && _fail "case h: stale .prev beside a complete live tree must not survive"
+[ -d "$RH/.prev" ] || _fail "case h: a fresh backup of the pre-install tree must survive a successful install (owner decision 1)"
+[ -f "$RH/.prev/.cbox-backup-complete" ] || _fail "case h: the surviving backup must carry the completion marker"
+[ "$(cat "$RH/.prev/bin/pip" 2>/dev/null)" = "old-pip" ] || _fail "case h: the surviving backup must be the pre-install (old) tree, not the discarded orphan fragment"
+[ ! -e "$RH/.prev/orphan.txt" ] || _fail "case h: the discarded orphan fragment must not leak into the freshly taken backup"
 [ "$(cat "$RH/bin/python")" = "new-python" ] || _fail "case h: the complete live tree must have been used as the base for the new install"
-_ok "hermes install rollback: a stale .prev beside a complete live tree is discarded, live tree wins"
+_ok "hermes install rollback: an orphan .prev beside a complete live tree is discarded and replaced by a fresh backup of the pre-install tree, which survives the successful install"
 
 echo "--- case h2: a symlinked .prev is refused, never followed, live tree left untouched ---"
 RH2="$TMPBASE/case-h2/opt-hermes"
@@ -306,5 +317,46 @@ wipe_line="$(grep -n '^WIPE_RETURNED$' "$TMPBASE/lock.log" | head -1 | cut -d: -
 [ "$wipe_line" -gt "$release_line" ] || _fail "case i: _wipe_volume returned before the install lock was released - it wiped without waiting for the lock"
 [ "$(cat "$RI/bin/pip" 2>/dev/null)" != "old-pip" ] || _fail "case i: wipe must have run (old tree must be gone) once the lock was free"
 _ok "hermes install rollback: force wipe of the hermes volume waits for the install lock instead of racing it"
+
+echo "--- case j: cbox bins rollback for hermes restores the previous tree and rewrites only the stamp's want line ---"
+RJ="$TMPBASE/case-j/opt-hermes"
+mkdir -p "$RJ/bin" "$RJ/lib/marker-pkg" "$RJ/.prev/bin" "$RJ/.prev/lib/marker-pkg"
+printf 'new-pip\n' > "$RJ/bin/pip"
+printf 'new-python\n' > "$RJ/bin/python"
+printf 'new-hermes\n' > "$RJ/bin/hermes"
+printf 'new-marker-contents\n' > "$RJ/lib/marker-pkg/data.txt"
+printf 'latest\n%s/bin/hermes\nnewhash\n2.0.0\n' "$RJ" > "$RJ/.cbox-stamp"
+printf 'old-pip\n' > "$RJ/.prev/bin/pip"
+printf 'old-python\n' > "$RJ/.prev/bin/python"
+printf 'old-hermes\n' > "$RJ/.prev/bin/hermes"
+printf 'old-marker-contents\n' > "$RJ/.prev/lib/marker-pkg/data.txt"
+printf 'BACKUP-WANT-SENTINEL\n%s/bin/hermes\noldhash\n1.0.0\n' "$RJ" > "$RJ/.prev/.cbox-stamp"
+: > "$RJ/.prev/.cbox-backup-complete"
+rc=0
+HXROOT="$RJ" CBOX_HERMES_VERSION=latest bash -c '
+  set -u
+  '"$BDIR_FN"'
+  '"$BMARKER_FN"'
+  '"$PREVREAL_FN"'
+  '"$BISCOMPLETE_FN"'
+  '"$BRESTORE_FN"'
+  '"$STAMPFIELD_FN"'
+  '"$STAMPWRITE_FN"'
+  '"$PREVRESTOREHERMES_FN"'
+  _resolve_tool_bin() { printf "%s/bin/hermes" "$HXROOT"; }
+  _parsed_version() { printf "2.0.0"; }
+  _stamp_path() { printf "%s/.cbox-stamp" "$HXROOT"; }
+  _want_string() { printf "%s" "$CBOX_HERMES_VERSION"; }
+  _prev_restore_hermes
+' >"$TMPBASE/j.out" 2>"$TMPBASE/j.err" || rc=$?
+[ "$rc" = 0 ] || _fail "case j: hermes rollback restore must succeed: $(cat "$TMPBASE/j.err")"
+grep -q "^cbox-bins: hermes 1.0.0 oldhash rollback 2.0.0 manual$" "$TMPBASE/j.out" || _fail "case j: rollback output line missing or malformed: $(cat "$TMPBASE/j.out")"
+[ -e "$RJ/.prev" ] && _fail "case j: .prev must be consumed by the restore (moved back into place)"
+[ "$(cat "$RJ/bin/python" 2>/dev/null)" = "old-python" ] || _fail "case j: the live tree must be the restored (old) tree after rollback"
+[ "$(sed -n '1p' "$RJ/.cbox-stamp")" = "latest" ] || _fail "case j: stamp line 1 (want) must be rewritten to the current want string, not the backed-up one"
+[ "$(sed -n '2p' "$RJ/.cbox-stamp")" = "$RJ/bin/hermes" ] || _fail "case j: stamp line 2 (path) must come from the restored backup"
+[ "$(sed -n '3p' "$RJ/.cbox-stamp")" = "oldhash" ] || _fail "case j: stamp line 3 (hash) must come from the restored backup"
+[ "$(sed -n '4p' "$RJ/.cbox-stamp")" = "1.0.0" ] || _fail "case j: stamp line 4 (version) must come from the restored backup"
+_ok "hermes install rollback: cbox bins rollback restores the previous tree and rewrites only the stamp's want line, want never changes on rollback"
 
 echo "ALL TESTS PASSED"

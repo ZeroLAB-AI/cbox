@@ -100,12 +100,12 @@ class BuildScreenTests(unittest.TestCase):
         self.assertIn("1) claude", screen)
         self.assertIn("2) codex", screen)
         self.assertNotIn("(ends hub)", screen)
-        self.assertEqual(rows, ["engine:claude", "engine:codex", "shell", "logs", "doctor", "config", "down"])
+        self.assertEqual(rows, ["engine:claude", "engine:codex", "shell", "logs", "doctor", "settings", "down"])
 
     def test_empty_engine_list_isolated_rows(self):
         status_rows = MOD.build_status_rows(ISOLATED_CTX, StubProbeDown(), [])
         screen, rows = MOD.build_screen(ISOLATED_CTX, [], status_rows)
-        self.assertEqual(rows, ["shell", "logs", "doctor", "config", "down"])
+        self.assertEqual(rows, ["shell", "logs", "doctor", "settings", "down"])
         self.assertIn("1) shell", screen)
 
     def test_global_mode_marks_ends_hub(self):
@@ -122,25 +122,39 @@ class BuildScreenTests(unittest.TestCase):
 
 class ActionArgvTests(unittest.TestCase):
     def test_engine_row_maps_to_run(self):
-        self.assertEqual(MOD.action_argv("/x/cbox", "engine:claude"), ["/x/cbox", "run", "claude"])
+        self.assertEqual(MOD.action_argv("/x", "/x/cbox", "engine:claude", ISOLATED_CTX), ["/x/cbox", "run", "claude"])
 
     def test_shell_row_maps_to_shell(self):
-        self.assertEqual(MOD.action_argv("/x/cbox", "shell"), ["/x/cbox", "shell"])
+        self.assertEqual(MOD.action_argv("/x", "/x/cbox", "shell", ISOLATED_CTX), ["/x/cbox", "shell"])
 
     def test_logs_row_maps_to_logs(self):
-        self.assertEqual(MOD.action_argv("/x/cbox", "logs"), ["/x/cbox", "logs"])
+        self.assertEqual(MOD.action_argv("/x", "/x/cbox", "logs", ISOLATED_CTX), ["/x/cbox", "logs"])
 
     def test_doctor_row_maps_to_doctor(self):
-        self.assertEqual(MOD.action_argv("/x/cbox", "doctor"), ["/x/cbox", "doctor"])
+        self.assertEqual(MOD.action_argv("/x", "/x/cbox", "doctor", ISOLATED_CTX), ["/x/cbox", "doctor"])
 
     def test_down_row_maps_to_down(self):
-        self.assertEqual(MOD.action_argv("/x/cbox", "down"), ["/x/cbox", "down"])
+        self.assertEqual(MOD.action_argv("/x", "/x/cbox", "down", ISOLATED_CTX), ["/x/cbox", "down"])
 
-    def test_config_row_has_no_argv_handled_separately(self):
-        self.assertIsNone(MOD.action_argv("/x/cbox", "config"))
+    def test_settings_row_isolated_adds_local_root(self):
+        argv = MOD.action_argv("/x", "/x/cbox", "settings", ISOLATED_CTX)
+        self.assertEqual(argv[:2], [MOD.sys.executable, "/x/lib/cbox_settings.py"])
+        self.assertEqual(argv[2:], ["/x", "/x/cbox", "--local", "/tmp/proj"])
+
+    def test_settings_row_global_has_no_local_flag(self):
+        argv = MOD.action_argv("/x", "/x/cbox", "settings", GLOBAL_CTX)
+        self.assertEqual(argv, [MOD.sys.executable, "/x/lib/cbox_settings.py", "/x", "/x/cbox"])
 
     def test_unknown_row_returns_none(self):
-        self.assertIsNone(MOD.action_argv("/x/cbox", "bogus"))
+        self.assertIsNone(MOD.action_argv("/x", "/x/cbox", "bogus", ISOLATED_CTX))
+
+    def test_settings_row_isolated_without_root_returns_none(self):
+        ctx = dict(ISOLATED_CTX)
+        ctx["root"] = ""
+        self.assertIsNone(MOD.action_argv("/x", "/x/cbox", "settings", ctx))
+        ctx2 = dict(ISOLATED_CTX)
+        del ctx2["root"]
+        self.assertIsNone(MOD.action_argv("/x", "/x/cbox", "settings", ctx2))
 
 
 class RunActionDispatchTests(unittest.TestCase):
@@ -154,32 +168,34 @@ class RunActionDispatchTests(unittest.TestCase):
         old = MOD.subprocess.call
         MOD.subprocess.call = fake_call
         try:
-            rc = MOD.run_action("/x/cbox", "engine:claude", ISOLATED_CTX)
+            rc = MOD.run_action("/x", "/x/cbox", "engine:claude", ISOLATED_CTX)
         finally:
             MOD.subprocess.call = old
         self.assertEqual(rc, 0)
         self.assertEqual(calls, [["/x/cbox", "run", "claude"]])
 
-    def test_config_action_never_invokes_subprocess(self):
+    def test_settings_action_invokes_subprocess_with_settings_script(self):
+        calls = []
+
+        def fake_call(argv):
+            calls.append(argv)
+            return 0
+
         old = MOD.subprocess.call
-        MOD.subprocess.call = lambda argv: (_ for _ in ()).throw(AssertionError("must not exec for config row"))
+        MOD.subprocess.call = fake_call
         try:
-            with tempfile.TemporaryDirectory() as tmp:
-                conf = os.path.join(tmp, "cbox.conf")
-                with open(conf, "w", encoding="ascii") as fh:
-                    fh.write("CBOX_MODE=isolated\n")
-                ctx = dict(ISOLATED_CTX)
-                ctx["conf"] = conf
-                rc = MOD.run_action("/x/cbox", "config", ctx)
-            self.assertEqual(rc, 0)
+            rc = MOD.run_action("/x", "/x/cbox", "settings", ISOLATED_CTX)
         finally:
             MOD.subprocess.call = old
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1], "/x/lib/cbox_settings.py")
 
     def test_unknown_row_returns_nonzero_without_exec(self):
         old = MOD.subprocess.call
         MOD.subprocess.call = lambda argv: (_ for _ in ()).throw(AssertionError("must not exec for unknown row"))
         try:
-            rc = MOD.run_action("/x/cbox", "bogus", ISOLATED_CTX)
+            rc = MOD.run_action("/x", "/x/cbox", "bogus", ISOLATED_CTX)
         finally:
             MOD.subprocess.call = old
         self.assertNotEqual(rc, 0)
@@ -191,32 +207,10 @@ class RunActionDispatchTests(unittest.TestCase):
         old = MOD.subprocess.call
         MOD.subprocess.call = raising_call
         try:
-            rc = MOD.run_action("/x/cbox", "shell", ISOLATED_CTX)
+            rc = MOD.run_action("/x", "/x/cbox", "shell", ISOLATED_CTX)
         finally:
             MOD.subprocess.call = old
         self.assertEqual(rc, 1)
-
-
-class ReadConfigLinesTests(unittest.TestCase):
-    def test_missing_conf_returns_none(self):
-        self.assertIsNone(MOD.read_config_lines("/does/not/exist/cbox.conf"))
-
-    def test_none_conf_path_returns_none(self):
-        self.assertIsNone(MOD.read_config_lines(None))
-
-    def test_reads_kv_lines_skips_comments_and_blank(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            conf = os.path.join(tmp, "cbox.conf")
-            with open(conf, "w", encoding="ascii") as fh:
-                fh.write("# comment\nCBOX_MODE=isolated\n\nCBOX_EGRESS_MODE=off\n")
-            lines = MOD.read_config_lines(conf)
-            self.assertEqual(lines, ["CBOX_MODE=isolated", "CBOX_EGRESS_MODE=off"])
-
-    def test_empty_file_returns_empty_list_not_none(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            conf = os.path.join(tmp, "cbox.conf")
-            open(conf, "w", encoding="ascii").close()
-            self.assertEqual(MOD.read_config_lines(conf), [])
 
 
 class EnginesFromRegistryTests(unittest.TestCase):

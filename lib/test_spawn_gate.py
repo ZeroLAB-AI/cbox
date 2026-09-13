@@ -55,6 +55,24 @@ class DecisionGateTests(unittest.TestCase):
                 proc = run(prompt, state=self.state)
                 self.assertEqual(proc.returncode, 0, proc.stderr)
 
+    def test_an_owner_approval_marker_is_accepted_like_a_ruling(self):
+        for prompt in (
+            "APPROVED at its recommended default. implement increment three",
+            "GREENLIGHT from the owner: implement the layered config",
+            "PER DESIGN section 6: implement the health probe",
+        ):
+            with self.subTest(prompt=prompt):
+                proc = run(prompt, state=self.state)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_a_read_only_word_late_in_a_long_brief_does_not_excuse_building(self):
+        prompt = ("implement the rollback path and wire it into the dispatch. "
+                  + ("filler context line. " * 40)
+                  + "then a code review pass follows")
+        proc = run(prompt, state=self.state)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("name the decision", proc.stderr)
+
     def test_other_tools_are_untouched(self):
         proc = run("implement everything", tool="Bash", state=self.state)
         self.assertEqual(proc.returncode, 0, proc.stderr)
