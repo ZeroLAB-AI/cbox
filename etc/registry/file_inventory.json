@@ -468,6 +468,10 @@
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
+    "lib/test_ollama_gpu_preflight.sh": {
+      "layer": "test",
+      "purpose": "ollama gpu preflight: the on-demand CDI device nodes are created before every owner start, a start that still fails on a missing node is retried exactly once, an uncreatable node names gpu-check, and the preflight never blocks a start on its own"
+    },
     "lib/test_ollama_network.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
