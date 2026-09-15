@@ -1,6 +1,6 @@
 ---
 name: debugger
-description: Root cause analysis and minimal fixes for errors, stack traces, failing behavior, or regressions. Use when something is broken and the cause is unclear.
+description: Root cause analysis and minimal fixes for errors, stack traces, failing behavior, or regressions. Use when something is broken and the cause is unclear. Priority 5 (paid): while hermes-local is installed, spawn it only with a 'local-skip: <reason>' or 'local-verify:' marker in the description - the agent_label_guard refuses it otherwise.
 tools: Read, Edit, Bash, Grep, Glob
 model: claude-opus-5[1m]
 effort: max

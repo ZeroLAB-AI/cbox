@@ -799,6 +799,16 @@ _cbox_ollama_owner_up() {
         echo "cbox: ollama owner: the CDI spec lists a host device node that does not exist and cbox could not create it - run 'cbox ollama gpu-check' for the fix list" >&2
       fi
       ;;
+    *"nvidia-persistenced/socket"*|*"unresolvable CDI devices"*)
+      if _cbox_ollama_copyup_recover; then
+        echo "cbox: ollama owner: docker restarted - starting the owner project again" >&2
+        if out="$(_cbox_ollama_owner_compose up -d --remove-orphans 2>&1)"; then
+          printf '%s\n' "$out" >&2
+          _cbox_ollama_heal_recreate_clear
+          return 0
+        fi
+      fi
+      ;;
   esac
   printf '%s\n' "$out" >&2
   return 1
@@ -971,22 +981,28 @@ _cbox_ollama_endpoint_networks() {
   docker inspect --type container --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' -- "$1" 2>/dev/null | sed '/^$/d'
 }
 
+_cbox_ollama_err_line() {
+  printf '%s' "$1" | head -n 1 | tr -d '\000-\037\177' | cut -c1-300
+}
+
 _cbox_ollama_connect_scope_network() {
   local netname="$1" ollama_cid="$2" cbox_cid="$3"
-  local ollama_nets cbox_nets connected_ollama=0 connected_cbox=0
+  local ollama_nets cbox_nets connected_ollama=0 connected_cbox=0 err
   ollama_nets="$(_cbox_ollama_endpoint_networks "$ollama_cid")"
   cbox_nets="$(_cbox_ollama_endpoint_networks "$cbox_cid")"
   if ! printf '%s\n' "$ollama_nets" | grep -qxF "$netname"; then
-    if docker network connect --alias ollama -- "$netname" "$ollama_cid" >/dev/null 2>&1; then
+    if err="$(docker network connect --alias ollama -- "$netname" "$ollama_cid" 2>&1 >/dev/null)"; then
       connected_ollama=1
     else
-      echo "cbox: failed to attach ollama to $netname" >&2
+      err="$(_cbox_ollama_err_line "$err")"
+      echo "cbox: failed to attach ollama to $netname${err:+: $err}" >&2
       return 1
     fi
   fi
   if ! printf '%s\n' "$cbox_nets" | grep -qxF "$netname"; then
-    if ! docker network connect -- "$netname" "$cbox_cid" >/dev/null 2>&1; then
-      echo "cbox: failed to attach $cbox_cid to $netname" >&2
+    if ! err="$(docker network connect -- "$netname" "$cbox_cid" 2>&1 >/dev/null)"; then
+      err="$(_cbox_ollama_err_line "$err")"
+      echo "cbox: failed to attach $cbox_cid to $netname${err:+: $err}" >&2
       if [ "$connected_ollama" = 1 ]; then
         docker network disconnect -f -- "$netname" "$ollama_cid" >/dev/null 2>&1 || true
       fi
@@ -1024,12 +1040,18 @@ _cbox_ollama_reconcile_one_scope() {
   _cbox_wg_connect_client_alias "$cbox_cid"
 }
 
+_cbox_ollama_scope_network_prefix() {
+  printf 'cbox-ollama-u%s-p' "$(id -u)"
+}
+
 _cbox_ollama_disconnect_stale_scope_networks() {
-  local owner="$1" name endpoint_count endpoint_name
+  local owner="$1" name endpoint_count endpoint_name prefix
+  prefix="$(_cbox_ollama_scope_network_prefix)"
   docker network ls --filter label=cbox.component=ollama-net --filter "label=cbox.owner=$owner" --format '{{.Name}}' 2>/dev/null | while IFS= read -r name; do
     [ -n "$name" ] || continue
     case "$name" in
-      *-global) continue ;;
+      "$prefix"*) ;;
+      *) continue ;;
     esac
     endpoint_count="$(docker network inspect --format '{{len .Containers}}' -- "$name" 2>/dev/null)" || continue
     [ "${endpoint_count:-0}" = 1 ] || continue
@@ -1074,10 +1096,15 @@ _cbox_gc_orphan_proxy_networks() {
 }
 
 _cbox_ollama_gc_scope_networks_impl() {
-  local name endpoints owner
+  local name endpoints owner prefix
   owner="$(_cbox_ollama_owner_name)"
+  prefix="$(_cbox_ollama_scope_network_prefix)"
   docker network ls --filter label=cbox.component=ollama-net --filter "label=cbox.owner=$owner" --format '{{.Name}}' 2>/dev/null | while IFS= read -r name; do
     [ -n "$name" ] || continue
+    case "$name" in
+      "$prefix"*|*-global) ;;
+      *) continue ;;
+    esac
     endpoints="$(docker network inspect --format '{{len .Containers}}' -- "$name" 2>/dev/null)" || continue
     if [ "${endpoints:-0}" = 0 ]; then
       docker network rm -- "$name" >/dev/null 2>&1 || true
@@ -1115,8 +1142,36 @@ _cbox_docker_restart_rootless() {
   return 1
 }
 
+_cbox_ollama_copyup_recover() {
+  local ans
+  if [ "${CBOX_OLLAMA_COPYUP_RESTARTED:-0}" = 1 ]; then
+    echo "cbox: docker was already restarted once in this run and the ollama owner still fails on the copy-up symptom - not asking again; run 'cbox ollama gpu-check' for the fix list" >&2
+    return 1
+  fi
+  echo "cbox: the ollama owner cannot start because the rootless docker daemon still sees the /etc and /run snapshot from its own start (copy-up) - a CDI spec or persistenced socket created since then is invisible to it" >&2
+  if ! _cbox_is_rootless_docker; then
+    echo "cbox: docker is not rootless here - restart the daemon yourself (sudo systemctl restart docker) and then run 'cbox ollama reconcile'" >&2
+    return 1
+  fi
+  if ! _cbox_ollama_heal_can_prompt; then
+    echo "cbox: no terminal to ask on - run 'systemctl --user restart docker && cbox ollama reconcile' yourself" >&2
+    return 1
+  fi
+  printf 'cbox: restart the docker daemon now? This stops EVERY container on this daemon, including other cbox sessions. [Y/n] ' >&2
+  read -r -t 60 ans || ans=n
+  case "$ans" in
+    n|N)
+      echo "cbox: skipped - run 'systemctl --user restart docker && cbox ollama reconcile' when ready" >&2
+      return 1
+      ;;
+  esac
+  _cbox_docker_restart_rootless || return 1
+  CBOX_OLLAMA_COPYUP_RESTARTED=1
+  return 0
+}
+
 _cbox_ollama_owner_heal_impl() {
-  local dir cid state out ans
+  local dir cid state out
   [ "${CBOX_OLLAMA_MODE:-off}" = on ] || return 0
   dir="$(_cbox_ollama_owner_dir)"
   [ -f "$dir/docker-compose.yml" ] || return 0
@@ -1161,24 +1216,7 @@ _cbox_ollama_owner_heal_impl() {
   esac
   case "$out" in
     *"nvidia-persistenced/socket"*|*"unresolvable CDI devices"*)
-      echo "cbox: the ollama owner cannot start because the rootless docker daemon still sees the /etc and /run snapshot from its own start (copy-up) - a CDI spec or persistenced socket created since then is invisible to it" >&2
-      if ! _cbox_is_rootless_docker; then
-        echo "cbox: docker is not rootless here - restart the daemon yourself (sudo systemctl restart docker) and then run 'cbox ollama reconcile'" >&2
-        return 1
-      fi
-      if ! _cbox_ollama_heal_can_prompt; then
-        echo "cbox: no terminal to ask on - run 'systemctl --user restart docker && cbox ollama reconcile' yourself" >&2
-        return 1
-      fi
-      printf 'cbox: restart the docker daemon now? This stops EVERY container on this daemon, including other cbox sessions. [Y/n] ' >&2
-      read -r -t 60 ans || ans=n
-      case "$ans" in
-        n|N)
-          echo "cbox: skipped - run 'systemctl --user restart docker && cbox ollama reconcile' when ready" >&2
-          return 1
-          ;;
-      esac
-      _cbox_docker_restart_rootless || return 1
+      _cbox_ollama_copyup_recover || return 1
       if out="$(_cbox_ollama_reconcile_cmd 2>&1)"; then
         echo "cbox: docker restarted and the ollama owner project reconciled" >&2
         _cbox_ollama_heal_recreate_clear

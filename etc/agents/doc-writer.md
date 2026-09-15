@@ -1,6 +1,6 @@
 ---
 name: doc-writer
-description: Writes and updates documentation - README sections, docstrings, changelogs, usage examples. Use for documentation tasks.
+description: Writes and updates documentation - README sections, docstrings, changelogs, usage examples. Use for documentation tasks. Priority 5 (paid): while hermes-local is installed, spawn it only with a 'local-skip: <reason>' or 'local-verify:' marker in the description - the agent_label_guard refuses it otherwise.
 tools: Read, Write, Edit, Glob, Grep
 model: haiku
 ---

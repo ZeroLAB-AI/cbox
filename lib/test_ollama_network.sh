@@ -26,8 +26,10 @@ LABELSOK_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_ollama_network_labels_ok)"
 ENSURE_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_ollama_ensure_scope_network)"
 ENDPOINTS_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_ollama_endpoint_networks)"
 CONNECT_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_ollama_connect_scope_network)"
+ERRLINE_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_ollama_err_line)"
 ONESCOPE_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_ollama_reconcile_one_scope)"
 DISCONNECT_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_ollama_disconnect_stale_scope_networks)"
+PREFIX_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_ollama_scope_network_prefix)"
 RECONCILE_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_ollama_reconcile_networks_impl)"
 GC_NET_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_ollama_gc_scope_networks_impl)"
 RECONCILE_LOCK_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_ollama_reconcile_networks)"
@@ -35,7 +37,7 @@ GC_NET_LOCK_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_ollama_gc_scope_networks
 OWNERNAME_FN="$(_extract_fn "$INSTALL_DIR/templates/generators.sh" _cbox_ollama_owner_name)"
 OWNERDIR_FN="$(_extract_fn "$INSTALL_DIR/templates/generators.sh" _cbox_ollama_owner_dir)"
 
-for f in NAME_FN LABELSOK_FN ENSURE_FN ENDPOINTS_FN CONNECT_FN ONESCOPE_FN DISCONNECT_FN RECONCILE_FN GC_NET_FN RECONCILE_LOCK_FN GC_NET_LOCK_FN OWNERNAME_FN OWNERDIR_FN; do
+for f in NAME_FN LABELSOK_FN ENSURE_FN ENDPOINTS_FN CONNECT_FN ERRLINE_FN ONESCOPE_FN DISCONNECT_FN PREFIX_FN RECONCILE_FN GC_NET_FN RECONCILE_LOCK_FN GC_NET_LOCK_FN OWNERNAME_FN OWNERDIR_FN; do
   [ -n "${!f}" ] || _fail "cannot extract $f"
 done
 
@@ -128,6 +130,7 @@ run_connect() {
     CALLS="'"$TMPBASE"'/connect.calls"
     : > "$CALLS"
     '"$ENDPOINTS_FN"'
+    '"$ERRLINE_FN"'
     '"$CONNECT_FN"'
     docker() {
       echo "$*" >> "$CALLS"
@@ -143,9 +146,9 @@ run_connect() {
           case "$2" in
             connect)
               if [ "${@: -1}" = ollama-cid ]; then
-                [ "'"$connect_ollama_ok"'" = 1 ] && return 0 || return 1
+                [ "'"$connect_ollama_ok"'" = 1 ] && return 0 || { echo "daemon-said-no-ollama" >&2; return 1; }
               else
-                [ "'"$connect_cbox_ok"'" = 1 ] && return 0 || return 1
+                [ "'"$connect_cbox_ok"'" = 1 ] && return 0 || { printf "daemon-said-no-cbox\001\nsecond line hidden\n" >&2; return 1; }
               fi
               ;;
             disconnect) return 0 ;;
@@ -173,6 +176,12 @@ out="$(run_connect 0 0 1 0)"
 echo "$out" | grep -q 'RC=1' || _fail "a failed cbox-side connect must be reported as an error: $out"
 grep -q 'network disconnect -f -- testnet ollama-cid' "$TMPBASE/connect.calls" || _fail "a failed cbox-side connect must roll back the ollama-side connect: $(cat "$TMPBASE/connect.calls")"
 _ok "connect_scope_network: rollback - if the second endpoint's connect fails, the first endpoint's new attachment is rolled back"
+echo "$out" | grep -q 'failed to attach cbox-cid to testnet: daemon-said-no-cbox$' || _fail "the daemon's own reason for a failed cbox-side connect must reach the operator as one clean line (first line only, control bytes stripped): $out"
+! echo "$out" | grep -q 'second line hidden' || _fail "only the first line of the daemon error may reach the operator: $out"
+out="$(run_connect 0 0 0 1)"
+echo "$out" | grep -q 'RC=1' || _fail "a failed ollama-side connect must be reported as an error: $out"
+echo "$out" | grep -q 'failed to attach ollama to testnet: daemon-said-no-ollama' || _fail "the daemon's own reason for a failed ollama-side connect must reach the operator: $out"
+_ok "connect_scope_network: a failed connect carries the docker daemon's reason instead of a bare failure line"
 
 RECONCILE_CALLS="$TMPBASE/reconcile.calls"
 run_reconcile() {
@@ -242,13 +251,15 @@ run_disconnect_stale() {
   bash -c '
     set -u
     CALLS="'"$DISCONNECT_CALLS"'"
+    '"$PREFIX_FN"'
     '"$DISCONNECT_FN"'
+    id() { printf "1000"; }
     docker() {
       echo "$*" >> "$CALLS"
       case "$1" in
         network)
           case "$2" in
-            ls) printf "cbox-ollama-u1000-pabc\n" ;;
+            ls) printf "cbox-infra-u1000_default\ncbox-ollama-u1000-global\ncbox-ollama-u1000-pabc\n" ;;
             inspect)
               case "$*" in
                 *"len .Containers"*) printf "%s" "'"$endpoint_count"'" ;;
@@ -272,8 +283,11 @@ run_disconnect_stale 2 cbox-infra-u1000-ollama-1
 ! grep -q 'network disconnect' "$DISCONNECT_CALLS" || _fail "a per-scope network with both endpoints still attached must not be disconnected: $(cat "$DISCONNECT_CALLS")"
 _ok "disconnect_stale_scope_networks: a per-scope network still holding both endpoints is left alone"
 
-echo "$DISCONNECT_FN" | grep -q -- '-global' || _fail "disconnect_stale_scope_networks must skip the global scope network"
-_ok "disconnect_stale_scope_networks: the global scope network is never targeted (it always has a live global container while ollama is up)"
+run_disconnect_stale 1 cbox-infra-u1000-ollama-1
+! grep -q 'network disconnect -- cbox-ollama-u1000-global' "$DISCONNECT_CALLS" || _fail "the global scope network must never be targeted: $(cat "$DISCONNECT_CALLS")"
+! grep -q 'network disconnect -- cbox-infra-u1000_default' "$DISCONNECT_CALLS" || _fail "the owner project's own compose default network carries the same labels and must never be disconnected from ollama: $(cat "$DISCONNECT_CALLS")"
+! grep -q 'network inspect.*cbox-infra-u1000_default' "$DISCONNECT_CALLS" || _fail "networks outside the per-scope name prefix must be skipped before any inspect: $(cat "$DISCONNECT_CALLS")"
+_ok "disconnect_stale_scope_networks: only cbox-ollama-u<uid>-p* networks are candidates - the global scope network and the owner's compose default network (same labels) are never touched"
 
 run_gc_net() {
   local count="$1"
@@ -282,6 +296,7 @@ run_gc_net() {
     CALLS="'"$TMPBASE"'/gc.calls"
     : > "$CALLS"
     '"$OWNERNAME_FN"'
+    '"$PREFIX_FN"'
     id() { printf "1000"; }
     '"$GC_NET_FN"'
     docker() {
@@ -289,7 +304,7 @@ run_gc_net() {
       case "$1" in
         network)
           case "$2" in
-            ls) printf "cbox-ollama-u1000-global\n" ;;
+            ls) printf "cbox-infra-u1000_default\ncbox-ollama-u1000-global\ncbox-ollama-u1000-pabc\n" ;;
             inspect) printf "%s" "'"$count"'" ;;
             rm) return 0 ;;
           esac
@@ -302,7 +317,9 @@ run_gc_net() {
 
 run_gc_net 0
 grep -q 'network rm -- cbox-ollama-u1000-global' "$TMPBASE/gc.calls" || _fail "gc must remove a per-scope network with zero attached endpoints: $(cat "$TMPBASE/gc.calls")"
-_ok "gc_scope_networks: a labeled per-scope network with zero attached containers is removed"
+grep -q 'network rm -- cbox-ollama-u1000-pabc' "$TMPBASE/gc.calls" || _fail "gc must remove an isolated per-scope network with zero attached endpoints: $(cat "$TMPBASE/gc.calls")"
+! grep -q 'cbox-infra-u1000_default' "$TMPBASE/gc.calls" || _fail "gc must never touch the owner project's compose default network even at zero endpoints (ollama stopped) - removing it makes the next owner start fail with 'network not found' and forces a recreate that drops every per-scope attachment: $(cat "$TMPBASE/gc.calls")"
+_ok "gc_scope_networks: zero-endpoint per-scope networks (global and isolated) are removed, the owner's compose default network never is"
 
 run_gc_net 2
 ! grep -q 'network rm' "$TMPBASE/gc.calls" || _fail "gc must not remove a per-scope network while endpoints remain attached: $(cat "$TMPBASE/gc.calls")"

@@ -4,6 +4,11 @@ import re
 import sys
 
 EXEMPT = {"", "Explore", "Plan", "general-purpose", "claude", "fork"}
+SUBSTITUTABLE = {"worker", "code-reviewer", "debugger", "test-runner", "doc-writer"}
+LOCAL_REASONS = "unavailable|verify-failed|edge-case-spec|cross-cutting|owner-explanation|security-gate"
+LOCAL_MARKER_RE = re.compile(
+    r"\blocal-skip:[ \t]*(?:" + LOCAL_REASONS + r")\b|\blocal-verify:[ \t]*\S"
+)
 
 
 def label_re(atype):
@@ -27,6 +32,20 @@ def frontmatter(path):
     except OSError:
         pass
     return meta
+
+
+def local_tier_installed():
+    return os.path.isfile(os.path.expanduser("~/.claude/agents/hermes-local.md"))
+
+
+def refuse(reason):
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }))
 
 
 def main():
@@ -54,6 +73,14 @@ def main():
             }
         }))
         return
+    if atype in SUBSTITUTABLE and local_tier_installed():
+        text = "%s\n%s" % (desc, ti.get("prompt") or "")
+        if not LOCAL_MARKER_RE.search(text):
+            refuse("hermes-local is installed (priority 0) and '%s' is a priority-5 paid substitute for it; "
+                 "send the task to hermes-local first, or retry with 'local-skip: <%s>' "
+                 "(or 'local-verify:' when this spawn checks a local result) in the description - "
+                 "convenience is not a reason" % (atype, LOCAL_REASONS))
+            return
     effort = meta.get("effort") or ""
     if effort:
         prefix = "%s (%s/%s): " % (atype, model, effort)

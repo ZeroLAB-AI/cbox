@@ -1,6 +1,6 @@
 ---
 name: worker
-description: Main worker for all default tasks in workflows.
+description: Main worker for all default tasks in workflows. Priority 5 (paid): while hermes-local is installed, spawn it only with a 'local-skip: <reason>' or 'local-verify:' marker in the description - the agent_label_guard refuses it otherwise.
 tools: Read, Write, Edit, Bash, Grep, Glob, WebSearch, WebFetch
 model: sonnet
 effort: high

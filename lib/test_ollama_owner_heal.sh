@@ -14,10 +14,16 @@ _extract_fn() {
 
 HEAL_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_ollama_owner_heal_impl)"
 RESTART_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_docker_restart_rootless)"
+RECOVER_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_ollama_copyup_recover)"
+OWNER_UP_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_ollama_owner_up)"
 [ -n "$HEAL_FN" ] || _fail "cannot extract _cbox_ollama_owner_heal_impl from cbox"
 [ -n "$RESTART_FN" ] || _fail "cannot extract _cbox_docker_restart_rootless from cbox"
+[ -n "$RECOVER_FN" ] || _fail "cannot extract _cbox_ollama_copyup_recover from cbox"
+[ -n "$OWNER_UP_FN" ] || _fail "cannot extract _cbox_ollama_owner_up from cbox"
 eval "$HEAL_FN"
 eval "$RESTART_FN"
+eval "$RECOVER_FN"
+eval "$OWNER_UP_FN"
 for fn in _cbox_ollama_heal_recreate_marker _cbox_ollama_heal_recreate_set _cbox_ollama_heal_recreate_clear; do
   body="$(_extract_fn "$INSTALL_DIR/cbox" "$fn")"
   [ -n "$body" ] || _fail "cannot extract $fn from cbox"
@@ -63,7 +69,7 @@ _cbox_ollama_owner_compose() {
 
 _reset() {
   : > "$CALLS"
-  unset T_UP_ERR T_UP_ERR_ONCE T_STATE T_CID T_TTY T_RECONCILE_RC T_ROOTLESS T_UVM_RC
+  unset T_UP_ERR T_UP_ERR_ONCE T_STATE T_CID T_TTY T_RECONCILE_RC T_ROOTLESS T_UVM_RC CBOX_OLLAMA_COPYUP_RESTARTED
   rm -f "$OWNER/.heal-recreate" "$TMPBASE/up-failed-once"
 }
 
@@ -167,6 +173,31 @@ if out="$(_cbox_ollama_owner_heal_impl 2>&1)"; then _fail "an unknown failure mu
 case "$out" in *"this session continues without the local model"*) ;; *) _fail "an unknown failure must say the session continues, got: $out" ;; esac
 _ok "unknown failure: reported, never blocks the session"
 
+_reset; T_UP_ERR='OCI runtime create failed: failed to fulfil mount request: open /run/nvidia-persistenced/socket: no such file or directory'; T_TTY=0
+if out="$(_cbox_ollama_owner_up 2>&1)"; then _fail "owner up: copy-up symptom without a tty must report failure"; fi
+! grep -q '^systemctl' "$CALLS" || _fail "owner up: without a tty docker must never be restarted"
+case "$out" in *"copy-up"*"systemctl --user restart docker && cbox ollama reconcile"*) ;; *) _fail "owner up: without a tty the message must explain copy-up and hand over the exact command, got: $out" ;; esac
+_ok "owner up (reconcile/up verbs), copy-up symptom, no tty: explained, command printed, no restart"
+
+_reset; T_UP_ERR='failed to fulfil mount request: open /run/nvidia-persistenced/socket: no such file or directory'; T_UP_ERR_ONCE=1; T_TTY=1
+out="$(printf '\n' | _cbox_ollama_owner_up 2>&1)" || _fail "owner up: enter (default Y) must restart docker and start again, got: $out"
+grep -q '^systemctl --user restart docker$' "$CALLS" || _fail "owner up: default Y must restart the rootless daemon via systemctl --user"
+[ "$(grep -c '^compose up -d --remove-orphans$' "$CALLS")" = 2 ] || _fail "owner up: after the restart compose up must run exactly once more"
+! grep -q '^reconcile$' "$CALLS" || _fail "owner up: must never call reconcile - it is what reconcile itself runs"
+_ok "owner up, copy-up symptom, tty, enter: docker restarted, compose up retried once, no recursion into reconcile"
+
+_reset; T_UP_ERR='docker: Error response from daemon: unresolvable CDI devices nvidia.com/gpu=all'; T_TTY=1
+if out="$(printf 'n\n' | _cbox_ollama_owner_up 2>&1)"; then _fail "owner up: answering n must report failure"; fi
+! grep -q '^systemctl' "$CALLS" || _fail "owner up: answering n must not restart docker"
+[ "$(grep -c '^compose up -d --remove-orphans$' "$CALLS")" = 1 ] || _fail "owner up: answering n must not retry the start"
+_ok "owner up, copy-up symptom, tty, answer n: nothing restarted, no retry"
+
+_reset; T_UP_ERR='failed to fulfil mount request: open /run/nvidia-persistenced/socket: no such file or directory'; T_TTY=1; T_ROOTLESS=0
+if out="$(printf '\n' | _cbox_ollama_owner_up 2>&1)"; then _fail "owner up: on rootful docker nothing must be restarted"; fi
+! grep -q '^systemctl' "$CALLS" || _fail "owner up: rootful docker must never be restarted by cbox"
+case "$out" in *"sudo systemctl restart docker"*) ;; *) _fail "owner up: rootful docker must get the sudo hint, got: $out" ;; esac
+_ok "owner up, rootful docker: no restart, sudo hint only"
+
 for site in '_run_global' '_session_run' 'shell_isolated' 'up'; do
   body="$(awk -v fn="$site" '$0 == fn"() {" , $0 == "}"' "$INSTALL_DIR/cbox")"
   printf '%s\n' "$body" | grep -B1 '_cbox_compose_up ' | grep -q '_cbox_ollama_owner_heal || true' \
@@ -185,7 +216,7 @@ printf '%s\n' "$wrapper" | grep -q 'exec {fd}>>' \
 ! printf '%s\n' "$wrapper" | grep -q 'exec 9' \
   || _fail "the heal wrapper must not touch fd 9"
 _ok "lock: the heal serialises against the ollama verbs on a dynamic fd, never on the session's fd 9"
-printf '%s\n' "$HEAL_FN" | grep -q 'read -r -t 60 ans' \
+printf '%s\n' "$RECOVER_FN" | grep -q 'read -r -t 60 ans' \
   || _fail "the restart prompt must time out (a tty without a human, e.g. a detached pane, must not hang the run)"
 _ok "prompt: the restart question times out and counts as no"
 
@@ -212,6 +243,31 @@ _ok "down: an explicit teardown clears the recreate marker"
     || _fail "a de-rendering reconcile must succeed"
   [ ! -f "$OWNER/.heal-recreate" ] || _fail "a de-rendering 'cbox ollama reconcile' must clear the recreate marker - the owner is deliberately gone and the next heal must not resurrect it"
   _ok "de-rendering reconcile: the real function clears the recreate marker"
+)
+
+(
+  reconcile_fn="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_ollama_reconcile_cmd)"
+  eval "$reconcile_fn"
+  _cbox_wg_active() { return 1; }
+  gen_ollama_owner_compose_into() { :; }
+  gen_wireguard_conf() { :; }
+  _cbox_ollama_manifest_write() { :; }
+  _cbox_ollama_shared_store_guard() { return 0; }
+  _cbox_ollama_adopt_or_refuse() { return 0; }
+  _cbox_ollama_reconcile_networks_impl() { return 0; }
+  _cbox_ollama_owner_name() { printf 'owner'; }
+  _reset; T_STATE=created; T_UP_ERR='failed to fulfil mount request: open /run/nvidia-persistenced/socket: no such file or directory'; T_TTY=1
+  export CBOX_OLLAMA_MODE=on
+  if out="$(printf '\n\n' | _cbox_ollama_owner_heal_impl 2>&1)"; then _fail "heal through the real reconcile: a start still failing after the restart must report failure"; fi
+  [ "$(grep -c '^systemctl --user restart docker$' "$CALLS")" = 1 ] || _fail "heal -> real reconcile -> owner_up must restart docker exactly once per run, got: $(grep -c '^systemctl' "$CALLS")"
+  [ "$(grep -c 'restart the docker daemon now' <<<"$out")" = 1 ] || _fail "the restart prompt must be shown once, not again inside the reconcile the heal runs after the restart, got: $out"
+  case "$out" in *"already restarted once in this run"*) ;; *) _fail "the second hit must say docker was already restarted, got: $out" ;; esac
+  _ok "heal -> real reconcile -> owner_up: one restart, one prompt, the second copy-up hit is reported instead of asked again"
+
+  _reset; T_STATE=created; T_UP_ERR='failed to fulfil mount request: open /run/nvidia-persistenced/socket: no such file or directory'; T_UP_ERR_ONCE=1; T_TTY=1
+  out="$(printf '\n' | _cbox_ollama_owner_heal_impl 2>&1)" || _fail "heal through the real reconcile: a start that works after the restart must succeed, got: $out"
+  [ "$(grep -c '^systemctl --user restart docker$' "$CALLS")" = 1 ] || _fail "one restart when the retried start works"
+  _ok "heal -> real reconcile -> owner_up: restart once, the retried start works, success"
 )
 
 echo "PASS: ollama owner self-heal on engine start"

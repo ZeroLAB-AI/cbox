@@ -1,6 +1,16 @@
 # Subagent routing policy
 
-- For delegating work to agents in workflows, always use worker agent, except cases below.
+Priority tiers. Selection follows tier order, never what happens to be closest at hand:
+
+- P0, local and free: hermes-local (the local model on this machine). It is available when the hermes-local agent or the mcp__hermes-local__hermes-delegate tool is listed. While available it is the default destination for every delegable task: extraction and summarization of files, logs and diffs; hunting a defect in a bounded piece of code; reviewing one file or one diff; a narrow question over given text; and, in agent mode, mechanical edits with an acceptance test the caller runs afterwards. Prompts to it are written in English.
+- P5, paid Claude tiers: worker, code-reviewer, debugger, test-runner, doc-writer - and the driver's own hands. The driver's model is the most expensive tier of all, so reading a large file into the driver's context or reviewing a diff inline IS a P5 spend, not a free alternative to P0.
+- Escalation (alien, codex-*) and gates (security-reviewer) keep their own rules below; they are not P0 substitutes.
+
+Descending from P0 to P5 needs one reason from this closed list, written into the spawn label as `local-skip: <reason>` - or `local-verify:` when the P5 spawn checks a P0 result: `unavailable` (tool absent, or a connection error on THIS attempt), `verify-failed` (the local result did not pass its test/grep/diff check), `edge-case-spec` (implementation against a specification with edge cases), `cross-cutting` (design or refactor across files), `owner-explanation` (prose meant for the owner), `security-gate` (the security-reviewer rule). "It was at hand", "it was faster", "I do not know who pays" are not reasons: the tier order exists so that convenience never decides. While hermes-local is installed, the agent_label_guard refuses a P5 substitutable spawn (worker, code-reviewer, debugger, test-runner, doc-writer) that carries no such marker.
+
+Every P0 result is verified empirically by the driver (test, grep, diff) - the check decides, not the task type. When hermes-local is absent or answers with a connection error, route classically at once with `local-skip: unavailable`; never wait on it or retry it in a loop.
+
+- For delegating work to agents in workflows, use worker for what P0 does not cover, except cases below.
 - After writing or modifying code, proactively run the code-reviewer subagent on the diff.
 - Before committing changes that touch auth, API endpoints, or input handling, run the security-reviewer subagent. Blocking: CRITICAL and HIGH findings must be fixed first.
 - Failing tests: use the test-runner subagent. Runtime errors or unclear bugs: use the debugger subagent.

@@ -1,6 +1,6 @@
 ---
 name: test-runner
-description: Runs the test suite and fixes failing tests. Use proactively after code changes or whenever tests fail.
+description: Runs the test suite and fixes failing tests. Use proactively after code changes or whenever tests fail. Priority 5 (paid): while hermes-local is installed, spawn it only with a 'local-skip: <reason>' or 'local-verify:' marker in the description - the agent_label_guard refuses it otherwise.
 tools: Read, Edit, Bash, Grep, Glob
 model: sonnet
 effort: medium

@@ -1,6 +1,6 @@
 ---
 name: code-reviewer
-description: Reviews code changes for correctness, quality, and maintainability. Use proactively immediately after writing or modifying code.
+description: Reviews code changes for correctness, quality, and maintainability. Use proactively immediately after writing or modifying code. Priority 5 (paid): while hermes-local is installed, spawn it only with a 'local-skip: <reason>' or 'local-verify:' marker in the description - the agent_label_guard refuses it otherwise.
 tools: Read, Grep, Glob, Bash
 model: sonnet
 effort: high

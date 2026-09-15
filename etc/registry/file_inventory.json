@@ -482,7 +482,7 @@
     },
     "lib/test_ollama_owner_heal.sh": {
       "layer": "test",
-      "purpose": "ollama owner self-heal on engine start: a dead owner container is started, a stale network is healed by reconcile, a rootless copy-up symptom asks for a docker restart (tty only, warns about other sessions), failures never block the session; wiring before every compose-up"
+      "purpose": "ollama owner self-heal on engine start: a dead owner container is started, a stale network is healed by reconcile, a rootless copy-up symptom asks for a docker restart (tty only, warns about other sessions), failures never block the session; wiring before every compose-up; the same copy-up recovery in the owner up shared by the reconcile and up verbs"
     },
     "lib/test_ollama_section.sh": {
       "layer": "test",
