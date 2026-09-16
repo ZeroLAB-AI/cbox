@@ -2,7 +2,7 @@
 
 Priority tiers. Selection follows tier order, never what happens to be closest at hand:
 
-- P0, local and free: hermes-local (the local model on this machine). It is available when the hermes-local agent or the mcp__hermes-local__hermes-delegate tool is listed. While available it is the default destination for every delegable task: extraction and summarization of files, logs and diffs; hunting a defect in a bounded piece of code; reviewing one file or one diff; a narrow question over given text; and, in agent mode, mechanical edits with an acceptance test the caller runs afterwards. Prompts to it are written in English.
+- P0, local and free: hermes-local (the local model on this machine). It is available when the hermes-local agent or the mcp__hermes-local__hermes-delegate tool is listed. While available it is the default destination for every delegable task: extraction and summarization of files, logs and diffs; hunting a defect in a bounded piece of code; reviewing one file or one diff; a narrow question over given text; and, in agent mode, mechanical edits with an acceptance test the caller runs afterwards. Prompts to it are written in English - the local model understands Slovak but performs markedly worse in it; quoted material stays verbatim; use another language only when the task cannot be expressed in English.
 - P5, paid Claude tiers: worker, code-reviewer, debugger, test-runner, doc-writer - and the driver's own hands. The driver's model is the most expensive tier of all, so reading a large file into the driver's context or reviewing a diff inline IS a P5 spend, not a free alternative to P0.
 - Escalation (alien, codex-*) and gates (security-reviewer) keep their own rules below; they are not P0 substitutes.
 

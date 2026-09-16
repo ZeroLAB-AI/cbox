@@ -499,6 +499,15 @@ class HermesDelegateUnitTests(unittest.TestCase):
         for name in MOD.DEFAULT_DISABLED_TOOLSETS.split(","):
             self.assertIn(name, desc)
 
+    def test_tool_description_and_schema_require_english_prompts(self):
+        for mode in ("qa", "agent"):
+            os.environ["CBOX_HERMES_DELEGATE_MODE"] = mode
+            self.assertIn("in English", MOD.tool_description())
+        os.environ.pop("CBOX_HERMES_DELEGATE_MODE", None)
+        props = MOD.build_tool()["inputSchema"]["properties"]
+        self.assertIn("English", props["prompt"]["description"])
+        self.assertIn("English", props["system"]["description"])
+
     def test_disabled_toolsets_falls_back_to_default_when_var_empty(self):
         os.environ["CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS"] = ""
         result, calls, stored = self._run_and_record_pin("toolsets3")

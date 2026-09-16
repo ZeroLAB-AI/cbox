@@ -320,7 +320,13 @@ def tool_description():
         "local-model tier). Each call spawns a fresh, ephemeral hermes home "
         "with no skills, no auth, and no retained memory - state never "
         "survives past this one call. Model, provider, and endpoint are "
-        "fixed by the container operator, not the caller. ")
+        "fixed by the container operator, not the caller. Write the prompt "
+        "and any system message in English: the local model understands "
+        "Slovak but performs markedly worse in it, so keep every "
+        "instruction English and quote non-English material (code, log "
+        "lines, text under analysis) verbatim as data; use another "
+        "language only when the task itself cannot be expressed in "
+        "English. ")
     common_tail = (
         " This is a config-level restriction, not a sandbox around the "
         "process: the hermes process runs with the same filesystem and "
@@ -369,11 +375,13 @@ def build_tool():
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": "The prompt to send to hermes."},
+                    "description": "The prompt to send to hermes. Written in "
+                                   "English; quoted material may stay in its "
+                                   "original language."},
                 "system": {
                     "type": "string",
                     "description": "Optional system message, prepended to "
-                                    "the prompt."},
+                                    "the prompt. Written in English."},
                 "effort": {
                     "type": "string",
                     "enum": list(VALID_EFFORTS),

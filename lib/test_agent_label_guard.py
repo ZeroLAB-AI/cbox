@@ -105,6 +105,27 @@ class LocalFirstGateTests(unittest.TestCase):
         self.assertEqual(out["permissionDecision"], "allow")
         self.assertTrue(out["updatedInput"]["description"].startswith("worker (sonnet/high): "))
 
+    def test_delegate_on_env_forces_the_gate_even_when_the_agent_file_is_absent(self):
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".claude", "agents", "hermes-local.md")))
+        for atype in ("worker", "debugger", "test-runner"):
+            with self.subTest(atype=atype):
+                out = run(self.home, atype, "review the diff",
+                          env={"CBOX_HERMES_DELEGATE": "on"})
+                self.assertEqual(out["permissionDecision"], "deny")
+                self.assertIn("local-skip:", out["permissionDecisionReason"])
+        # a closed-list reason still passes under the env gate
+        out = run(self.home, "worker", "local-skip: cross-cutting - build it",
+                  env={"CBOX_HERMES_DELEGATE": "on"})
+        self.assertEqual(out["permissionDecision"], "allow")
+
+    def test_delegate_off_env_does_not_reactivate_the_gate(self):
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".claude", "agents", "hermes-local.md")))
+        for val in ("off", "0", "false", "no", ""):
+            with self.subTest(val=val):
+                out = run(self.home, "worker", "review the diff",
+                          env={"CBOX_HERMES_DELEGATE": val})
+                self.assertEqual(out["permissionDecision"], "allow")
+
     def test_escalation_and_relay_agents_are_not_gated(self):
         write_agent(self.home, "hermes-local", model="haiku", effort="low")
         out = run(self.home, "alien", "cross-cutting design")

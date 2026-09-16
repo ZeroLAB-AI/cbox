@@ -34,8 +34,17 @@ def frontmatter(path):
     return meta
 
 
+LOCAL_TIER_FALSY = ("", "off", "0", "false", "no")
+
+
+def _delegate_on():
+    return (os.environ.get("CBOX_HERMES_DELEGATE", "").strip().lower()
+            not in LOCAL_TIER_FALSY)
+
+
 def local_tier_installed():
-    return os.path.isfile(os.path.expanduser("~/.claude/agents/hermes-local.md"))
+    return (os.path.isfile(os.path.expanduser("~/.claude/agents/hermes-local.md"))
+            or _delegate_on())
 
 
 def refuse(reason):
