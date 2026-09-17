@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -101,6 +102,50 @@ def load_fallback_model_map():
         if clean:
             out[key] = clean
     return out
+
+
+MODEL_DENY_ENV = "CBOX_AGENT_MODEL_DENY"
+MODEL_BAN_ENV = "CBOX_AGENT_MODEL_BAN"
+
+
+def resolve_model_alias(model):
+    if isinstance(model, str) and model.isalpha():
+        return os.environ.get("ANTHROPIC_DEFAULT_%s_MODEL" % model.upper()) or model
+    return model
+
+
+SAFETY_NOTE_RE = re.compile(r"(?m)^[ \t]*safety-fallback:")
+
+
+def model_banned(model):
+    ban = os.environ.get(MODEL_BAN_ENV) or ""
+    if not ban:
+        return None
+    if isinstance(model, str) and model.isalpha() \
+            and not os.environ.get("ANTHROPIC_DEFAULT_%s_MODEL" % model.upper()) \
+            and re.search(re.escape(model), ban, re.IGNORECASE):
+        return ("alias '%s' is not pinned (ANTHROPIC_DEFAULT_%s_MODEL unset) "
+                "while the ban pattern mentions it - refusing the unresolved "
+                "alias" % (model, model.upper()))
+    resolved = resolve_model_alias(model)
+    if re.search(ban, resolved, re.IGNORECASE):
+        return ("model '%s' matches the ban pattern (%s); it has no fallback "
+                "exception - use the pinned tier instead" % (resolved, MODEL_BAN_ENV))
+    return None
+
+
+def model_refusal(model, prompt):
+    banned = model_banned(model)
+    if banned:
+        return banned
+    resolved = resolve_model_alias(model)
+    deny = os.environ.get(MODEL_DENY_ENV) or ""
+    if deny and re.search(deny, resolved, re.IGNORECASE) \
+            and not SAFETY_NOTE_RE.search(prompt or ""):
+        return ("model '%s' matches the deny pattern (%s); it is allowed only as a "
+                "safety fallback - retry with a 'safety-fallback:' note at the "
+                "start of a line in the prompt" % (resolved, MODEL_DENY_ENV))
+    return None
 
 
 def default_fallback_chain(model):
@@ -328,6 +373,10 @@ def run_claude(args):
     if mode not in MODE_LEVELS:
         return tool_text("ask-claude refused: mode must be one of "
                          "analyse, plan, full", True)
+    refusal = model_refusal(model, prompt)
+    if refusal:
+        audit("deny", "model-policy", args, mode)
+        return tool_text("ask-claude refused: " + refusal, True)
     max_turns = args.get("max_turns")
     if max_turns is None:
         max_turns = 50 if mode == "full" else 30
@@ -389,7 +438,7 @@ def run_claude(args):
     audit("allow", "", args, mode)
     attempts = [model]
     for m in fallback_models:
-        if m not in attempts:
+        if m not in attempts and model_banned(m) is None:
             attempts.append(m)
     deadline = time.monotonic() + CALL_TIMEOUT
     proc = None

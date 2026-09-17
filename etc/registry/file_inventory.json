@@ -244,6 +244,10 @@
       "layer": "host",
       "purpose": "bash-3.2-safe pre-flight sourced at the very top of cbox and setup.sh, before sections.sh/generators.sh (step 0 pre-flight, section 3)"
     },
+    "lib/test_agent_label_guard.py": {
+      "layer": "test",
+      "purpose": "agent-label guard unit tests: label rewrite from the agent definition, the model deny (safety-fallback) and ban patterns, the fable alias pin, and the local-first P0 over P5 gate keyed to hermes-local or CBOX_HERMES_DELEGATE"
+    },
     "lib/test_ask_claude_fallback.py": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
@@ -404,6 +408,10 @@
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
+    "lib/test_hermes_delegate_compose_env.sh": {
+      "layer": "test",
+      "purpose": "compose renderers carry CBOX_HERMES_DELEGATE into the container environment (on, unset renders off, absent while hermes is off) for both the global and the isolated service block, so the local-first gate inside the agent-label guard can read it"
+    },
     "lib/test_hermes_guard_bridge.sh": {
       "layer": "test",
       "purpose": "M4 hermes guard dialect bridge test: block on a spec-based rm-glob pre_tool_call fixture, allow on an innocuous fixture, no-crash degrade-to-allow on malformed input (fail-open armor proof), confirms test_m3_oracle.sh/test_hermes_gen.sh still pass (knob off = byte-identical default render), a CBOX_HERMES_HOOKS=on render assertion for the hooks: pre_tool_call block, and _hermes_hooks_preflight refuse/pass observations under an unprivileged runner (setpriv+nobody, since root bypasses chmod bits)"
@@ -459,6 +467,10 @@
     "lib/test_m3_oracle.sh": {
       "layer": "test",
       "purpose": "the frozen pre-M3 adapter-extraction oracle: renders the moved capability-brain surfaces from lib/fixtures/m3_oracle/install_dir_snapshot into a scratch dir, freeze mode writes lib/fixtures/m3_oracle/digests.txt, verify mode (default) byte-compares against it and includes a mutation-check self-test proving the compare actually fires on a changed byte"
+    },
+    "lib/test_model_policy_compose_env.sh": {
+      "layer": "test",
+      "purpose": "settings.merge.json pins the fable and opus tiers and bans the fable point release, and both compose renderers carry that model policy env (ANTHROPIC_DEFAULT_*_MODEL, CBOX_AGENT_MODEL_DENY, CBOX_AGENT_MODEL_BAN) into the container so hooks, codex and ask-claude see one source of truth"
     },
     "lib/test_netaccess_runtime.sh": {
       "layer": "test",

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+unset CBOX_HERMES_DELEGATE CBOX_HERMES
 TMPBASE="$(mktemp -d)"
 trap 'rm -rf "$TMPBASE"' EXIT
 

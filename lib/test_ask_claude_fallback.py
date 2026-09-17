@@ -370,5 +370,60 @@ class AuditCallerAttributionTests(unittest.TestCase):
         self.assertEqual(MOD._CALLER_NAME, "hermes")
 
 
+class ModelPolicyTests(unittest.TestCase):
+    ENV = {
+        "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-fable-5[1m]",
+        "CBOX_AGENT_MODEL_DENY": r"opus-4",
+        "CBOX_AGENT_MODEL_BAN": r"fable-5-1",
+    }
+
+    def test_alias_resolves_through_env(self):
+        with mock.patch.dict(os.environ, self.ENV, clear=False):
+            self.assertEqual(MOD.resolve_model_alias("fable"), "claude-fable-5[1m]")
+            self.assertEqual(MOD.resolve_model_alias("claude-opus-5[1m]"), "claude-opus-5[1m]")
+
+    def test_pinned_tiers_pass(self):
+        with mock.patch.dict(os.environ, self.ENV, clear=False):
+            self.assertIsNone(MOD.model_refusal("fable", "task"))
+            self.assertIsNone(MOD.model_refusal("claude-fable-5[1m]", "task"))
+            self.assertIsNone(MOD.model_refusal("claude-opus-5[1m]", "task"))
+
+    def test_banned_point_release_refused_even_with_fallback_note(self):
+        with mock.patch.dict(os.environ, self.ENV, clear=False):
+            self.assertIsNotNone(MOD.model_refusal("claude-fable-5-1[1m]", "task"))
+            self.assertIsNotNone(MOD.model_refusal("claude-fable-5-1", "safety-fallback: task"))
+
+    def test_denied_model_needs_the_fallback_note(self):
+        with mock.patch.dict(os.environ, self.ENV, clear=False):
+            self.assertIsNotNone(MOD.model_refusal("claude-opus-4-8[1m]", "task"))
+            self.assertIsNone(MOD.model_refusal("claude-opus-4-8[1m]", "safety-fallback: task"))
+
+    def test_the_note_only_counts_at_the_start_of_a_line(self):
+        with mock.patch.dict(os.environ, self.ENV, clear=False):
+            quoted = "review this diff which mentions safety-fallback: markers in prose"
+            self.assertIsNotNone(MOD.model_refusal("claude-opus-4-8[1m]", quoted))
+            self.assertIsNone(MOD.model_refusal("claude-opus-4-8[1m]", "context\nsafety-fallback: retry"))
+
+    def test_an_unpinned_alias_named_by_the_ban_pattern_is_refused(self):
+        env = dict(self.ENV, ANTHROPIC_DEFAULT_FABLE_MODEL="")
+        with mock.patch.dict(os.environ, env, clear=False):
+            self.assertIsNotNone(MOD.model_banned("fable"))
+            self.assertIsNone(MOD.model_banned("sonnet"))
+            self.assertIsNone(MOD.model_banned("opus"))
+
+    def test_no_policy_env_means_no_refusal(self):
+        stripped = {k: "" for k in self.ENV}
+        with mock.patch.dict(os.environ, stripped, clear=False):
+            self.assertIsNone(MOD.model_refusal("claude-fable-5-1", "task"))
+
+    def test_banned_entries_never_survive_into_the_attempt_chain(self):
+        with mock.patch.dict(os.environ, self.ENV, clear=False):
+            chain = ["claude-fable-5-1[1m]", "claude-opus-5[1m]", "claude-opus-4-8[1m]"]
+            kept = [m for m in chain if MOD.model_banned(m) is None]
+            self.assertEqual(kept, ["claude-opus-5[1m]", "claude-opus-4-8[1m]"])
+            self.assertIsNotNone(MOD.model_banned("claude-fable-5-1[1m]"))
+            self.assertIsNotNone(MOD.model_banned("claude-fable-5-1"))
+
+
 if __name__ == "__main__":
     unittest.main()

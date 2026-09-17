@@ -21,14 +21,27 @@ def write_agent(home, name, model="sonnet", effort="high"):
         fh.write(body)
 
 
+def run_with_model(home, atype, model, description, prompt="do it", env=None):
+    payload = {
+        "tool_name": "Agent",
+        "tool_input": {"subagent_type": atype, "description": description,
+                       "prompt": prompt, "model": model},
+    }
+    return _run_payload(home, payload, env)
+
+
 def run(home, atype, description, prompt="do it", env=None):
     payload = {
         "tool_name": "Agent",
         "tool_input": {"subagent_type": atype, "description": description, "prompt": prompt},
     }
+    return _run_payload(home, payload, env)
+
+
+def _run_payload(home, payload, env=None):
     e = {
         k: v for k, v in os.environ.items()
-        if k != "CBOX_AGENT_MODEL_DENY"
+        if k not in ("CBOX_AGENT_MODEL_DENY", "CBOX_AGENT_MODEL_BAN", "CBOX_HERMES_DELEGATE")
         and not (k.startswith("ANTHROPIC_DEFAULT_") and k.endswith("_MODEL"))
     }
     e["HOME"] = home
@@ -150,6 +163,65 @@ class ModelDenyTests(unittest.TestCase):
         self.assertEqual(out["permissionDecision"], "deny")
         out = run(self.home, "old-opus", "safety-fallback: retry after the refusal", env=env)
         self.assertEqual(out["permissionDecision"], "allow")
+
+
+class FableTierTests(unittest.TestCase):
+    ENV = {
+        "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-fable-5[1m]",
+        "CBOX_AGENT_MODEL_DENY": r"opus-4",
+        "CBOX_AGENT_MODEL_BAN": r"fable-5-1",
+    }
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        write_agent(self.home, "fab-alias", model="fable", effort="high")
+        write_agent(self.home, "fab-pinned", model="claude-fable-5[1m]", effort="max")
+        write_agent(self.home, "fab-point", model="claude-fable-5-1[1m]", effort="max")
+
+    def test_the_fable_alias_resolves_to_the_pinned_tier(self):
+        out = run(self.home, "fab-alias", "design", env=self.ENV)
+        self.assertEqual(out["permissionDecision"], "allow")
+        self.assertTrue(out["updatedInput"]["description"].startswith("fab-alias (claude-fable-5[1m]/high): "))
+
+    def test_the_pinned_fable_tier_passes(self):
+        out = run(self.home, "fab-pinned", "design", env=self.ENV)
+        self.assertEqual(out["permissionDecision"], "allow")
+
+    def test_the_point_release_is_banned_even_with_the_safety_fallback_note(self):
+        out = run(self.home, "fab-point", "design", env=self.ENV)
+        self.assertEqual(out["permissionDecision"], "deny")
+        out = run(self.home, "fab-point", "safety-fallback: design", env=self.ENV)
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("ban", out["permissionDecisionReason"])
+
+    def test_an_exempt_agent_with_an_explicit_banned_model_is_denied(self):
+        for atype in ("general-purpose", "Explore", "Plan", "fork", ""):
+            payload_env = dict(self.ENV)
+            out = run_with_model(self.home, atype, "claude-fable-5-1[1m]", "scan", env=payload_env)
+            self.assertEqual(out["permissionDecision"], "deny", atype)
+
+    def test_an_exempt_agent_with_a_denied_model_needs_the_note(self):
+        out = run_with_model(self.home, "general-purpose", "claude-opus-4-8[1m]", "scan", env=self.ENV)
+        self.assertEqual(out["permissionDecision"], "deny")
+        out = run_with_model(self.home, "general-purpose", "claude-opus-4-8[1m]",
+                             "safety-fallback: retry after the refusal", env=self.ENV)
+        self.assertIsNone(out)
+
+    def test_an_unpinned_alias_named_by_the_ban_pattern_is_refused(self):
+        env = {k: v for k, v in self.ENV.items() if k != "ANTHROPIC_DEFAULT_FABLE_MODEL"}
+        env["ANTHROPIC_DEFAULT_FABLE_MODEL"] = ""
+        out = run_with_model(self.home, "general-purpose", "fable", "scan", env=env)
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("not pinned", out["permissionDecisionReason"])
+        out = run_with_model(self.home, "general-purpose", "sonnet", "scan", env=env)
+        self.assertIsNone(out)
+
+    def test_an_explicit_point_release_override_is_banned_too(self):
+        out = run(self.home, "fab-pinned", "design", env=self.ENV)
+        self.assertEqual(out["permissionDecision"], "allow")
+        payload_env = dict(self.ENV)
+        out = run(self.home, "fab-alias", "design", env=dict(payload_env, ANTHROPIC_DEFAULT_FABLE_MODEL="claude-fable-5-1"))
+        self.assertEqual(out["permissionDecision"], "deny")
 
 
 if __name__ == "__main__":

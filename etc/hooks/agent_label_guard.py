@@ -37,6 +37,34 @@ def frontmatter(path):
 LOCAL_TIER_FALSY = ("", "off", "0", "false", "no")
 
 
+def resolve_model(model):
+    if model.isalpha():
+        return os.environ.get("ANTHROPIC_DEFAULT_%s_MODEL" % model.upper()) or model
+    return model
+
+
+def model_policy_reason(model, note_text):
+    ban = os.environ.get("CBOX_AGENT_MODEL_BAN") or ""
+    resolved = resolve_model(model)
+    if ban:
+        if model.isalpha() and resolved == model \
+                and re.search(re.escape(model), ban, re.IGNORECASE):
+            return ("alias '%s' is not pinned (ANTHROPIC_DEFAULT_%s_MODEL unset) "
+                    "while the spawn ban pattern mentions it - refusing the "
+                    "unresolved alias" % (model, model.upper()))
+        if re.search(ban, resolved, re.IGNORECASE):
+            return ("model '%s' matches the spawn ban pattern (CBOX_AGENT_MODEL_BAN); "
+                    "it has no fallback exception - use the pinned tier "
+                    "(ANTHROPIC_DEFAULT_*_MODEL) instead" % resolved)
+    deny = os.environ.get("CBOX_AGENT_MODEL_DENY") or ""
+    if deny and re.search(deny, resolved, re.IGNORECASE) \
+            and "safety-fallback" not in (note_text or ""):
+        return ("model '%s' matches the spawn deny pattern; it is allowed only "
+                "as a safety fallback - retry with a 'safety-fallback:' note "
+                "in the description" % resolved)
+    return None
+
+
 def _delegate_on():
     return (os.environ.get("CBOX_HERMES_DELEGATE", "").strip().lower()
             not in LOCAL_TIER_FALSY)
@@ -63,25 +91,24 @@ def main():
         return
     ti = data.get("tool_input") or {}
     atype = ti.get("subagent_type") or ""
+    desc = ti.get("description") or ""
+    explicit_model = ti.get("model") or ""
+    if isinstance(explicit_model, str) and explicit_model:
+        reason = model_policy_reason(explicit_model, desc)
+        if reason:
+            refuse(reason)
+            return
     if atype in EXEMPT:
         return
     if "/" in atype or "\\" in atype or ".." in atype:
         return
-    desc = ti.get("description") or ""
     meta = frontmatter(os.path.expanduser("~/.claude/agents/%s.md" % atype))
-    model = ti.get("model") or meta.get("model") or "inherit"
-    if model.isalpha():
-        model = os.environ.get("ANTHROPIC_DEFAULT_%s_MODEL" % model.upper()) or model
-    deny = os.environ.get("CBOX_AGENT_MODEL_DENY") or ""
-    if deny and re.search(deny, model) and "safety-fallback" not in desc:
-        print(json.dumps({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": "model '%s' matches the spawn deny pattern; it is allowed only as a safety fallback - retry with a 'safety-fallback:' note in the description" % model,
-            }
-        }))
+    model = explicit_model or meta.get("model") or "inherit"
+    reason = model_policy_reason(model, desc)
+    if reason:
+        refuse(reason)
         return
+    model = resolve_model(model)
     if atype in SUBSTITUTABLE and local_tier_installed():
         text = "%s\n%s" % (desc, ti.get("prompt") or "")
         if not LOCAL_MARKER_RE.search(text):
@@ -113,12 +140,12 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        if os.environ.get("CBOX_AGENT_MODEL_DENY"):
+        if os.environ.get("CBOX_AGENT_MODEL_DENY") or os.environ.get("CBOX_AGENT_MODEL_BAN"):
             print(json.dumps({
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "deny",
-                    "permissionDecisionReason": "agent_label_guard could not evaluate the spawn (%s); the model deny pattern is active, so the spawn is refused rather than allowed unchecked - fix the agent definition or payload and retry" % exc,
+                    "permissionDecisionReason": "agent_label_guard could not evaluate the spawn (%s); a model deny or ban pattern is active, so the spawn is refused rather than allowed unchecked - fix the agent definition or payload and retry" % exc,
                 }
             }))
         sys.exit(0)

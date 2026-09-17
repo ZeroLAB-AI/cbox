@@ -120,8 +120,9 @@ assert spec['env'] == {
 assert 'CBOX_HERMES_PROVIDER' in spec['env'], 'console vars must reach the server, else the fallback is dead code'
 assert spec['startup_timeout_sec'] == 30, spec
 assert spec['tool_timeout_sec'] == 3600, spec
+assert spec.get('alwaysLoad') is True, 'claude target must load hermes-local eagerly, not behind ToolSearch deferral'
 "
-_ok "hermes-local renders with substituted env when CBOX_HERMES_DELEGATE and inputs are set"
+_ok "hermes-local renders with substituted env when CBOX_HERMES_DELEGATE and inputs are set, and loads eagerly"
 
 RENDERED_CONCURRENCY_EMPTY="$TMPBASE/concurrency_empty.json"
 CBOX_HERMES_DELEGATE=on \

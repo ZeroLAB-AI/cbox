@@ -279,6 +279,8 @@ def render(delegates, selection, hooks_dir, shim_mode, target, explicit=None):
             chosen[name] = wrap_codex_entry(name, spec, cbox, hooks_dir, shim_mode)
         elif adapter == "stdio-mcp":
             chosen[name] = render_stdio_entry(name, spec, hooks_dir, cbox)
+            if target == "claude" and cbox.get("always_load") is True:
+                chosen[name]["alwaysLoad"] = True
         elif adapter == "claude-cli":
             chosen[name] = render_claude_cli_entry(name, cbox, hooks_dir)
     return chosen

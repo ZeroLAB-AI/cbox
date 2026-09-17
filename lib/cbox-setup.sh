@@ -1783,6 +1783,7 @@ step_hermes_delegate() {
     mcp_apply_selection
   fi
   note "host claude picks the change up on next start; the container needs re-bless + restart"
+  note "the hermes-local agent file follows this switch: run cbox setup update agents to install or prune it"
 }
 
 step_ollama() {

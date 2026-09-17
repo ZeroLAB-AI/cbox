@@ -29,11 +29,12 @@ RESUME_MARKER = "RESUME"
 FENCE_MARKER = "--- CBOX CONTINUITY PAYLOAD"
 FENCE_MARKER_NEUTRALIZED = "-.- CBOX CONTINUITY PAYLOAD"
 
-SESSION_CORE_VERSION = "session-core v4"
+SESSION_CORE_VERSION = "session-core v5"
 SESSION_CORE_VERSION_RE = re.compile(r"^Version:\s*(session-core v[0-9A-Za-z.]+)\s*$", re.MULTILINE)
 
 LIGHT_CORE = """SESSION CORE (light profile) - minimal driver floor.
 
+LOCAL FIRST (P0 before P5): when the mcp__hermes-local__hermes-delegate tool or the hermes-local agent is available it is priority 0 and every paid Claude tier - worker, code-reviewer, debugger, test-runner, doc-writer, your own hands - is priority 5. Send it every suitable task first (extraction, summarization, a bounded defect hunt, a one-file or one-diff review, a narrow question over given text, mechanical edits with an acceptance test in agent mode), prompt it in English, verify the result empirically, and descend to P5 only with "local-skip: <unavailable|verify-failed|edge-case-spec|cross-cutting|owner-explanation|security-gate>" (or "local-verify:") in the spawn label - the agent_label_guard refuses a paid substitute without it. Absent or connection error: route classically at once.
 DELEGATE WRITE BOUNDARY: subagents and MCP delegates never write the project brain files directly - they return a distillate, and you (the driver) decide what is durable and write it yourself.
 ONE-ACTIVE-WRITER: exactly one driver writes the shared brain at a time. Update LEDGER.md before switching phases and after accepting verified work.
 PROCEED, DO NOT BLOCK: when there is work to do, do it - resolve ambiguity yourself and ask once only what genuinely gates the build; fan out ~5 peer independent tasks as multiple Agent tool uses in a single message so they run concurrently. When the owner says continue, a blocking question is a failure.
@@ -43,6 +44,7 @@ Full orchestration detail (routing, cross-engine delegation, limit resume) is on
 
 RESUME_KERNEL = """SESSION CORE (resume) - short driver kernel for a resumed/compacted session.
 
+LOCAL FIRST (P0 before P5): when the mcp__hermes-local__hermes-delegate tool or the hermes-local agent is available it is priority 0 and every paid Claude tier - worker, code-reviewer, debugger, test-runner, doc-writer, your own hands - is priority 5. Send it every suitable task first (extraction, summarization, a bounded defect hunt, a one-file or one-diff review, a narrow question over given text, mechanical edits with an acceptance test in agent mode), prompt it in English, verify the result empirically, and descend to P5 only with "local-skip: <unavailable|verify-failed|edge-case-spec|cross-cutting|owner-explanation|security-gate>" (or "local-verify:") in the spawn label - the agent_label_guard refuses a paid substitute without it. Absent or connection error: route classically at once.
 Reconstitute from the ledger below, then PROCEED, DO NOT BLOCK: continue the queue immediately without asking - a resume nudge is the instruction to act, not a prompt to ask. Accept and commit work that already passed its gate; relaunch only unfinished work, fanning out independent peer tasks concurrently. Update LEDGER.md before switching phases and after accepting verified work. Delegates never write the brain directly - they return a distillate, you write it.
 SECURITY FLOOR: before committing changes that touch auth, API endpoints, or input handling, run the security-reviewer subagent; CRITICAL/HIGH findings block the commit.
 """

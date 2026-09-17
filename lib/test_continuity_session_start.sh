@@ -112,6 +112,38 @@ JSON
   echo "PASS: light profile retains security-reviewer gate rule"
 }
 
+test_light_profile_has_local_first_first() {
+  local d="$TMPBASE/light_lf" payload
+  _make_repo "$d"
+  payload="$(CBOX_CONTEXT_PROFILE=light python3 "$HOOK" <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+  case "$payload" in
+    *"minimal driver floor."*"LOCAL FIRST (P0 before P5)"*"DELEGATE WRITE BOUNDARY"*) : ;;
+    *) _fail "light profile core payload does not open with the LOCAL FIRST rule" ;;
+  esac
+  echo "PASS: light profile opens with the LOCAL FIRST rule"
+}
+
+test_resume_profile_has_local_first_first() {
+  local d="$TMPBASE/resume_lf" payload
+  _make_repo "$d"
+  payload="$(python3 "$HOOK" <<JSON
+{"source":"resume","cwd":"$d"}
+JSON
+)"
+  case "$payload" in
+    *"resumed/compacted session."*"LOCAL FIRST (P0 before P5)"*"Reconstitute from the ledger"*) : ;;
+    *) _fail "resume profile core payload does not open with the LOCAL FIRST rule" ;;
+  esac
+  case "$payload" in
+    *"session-core v5 resume"*) : ;;
+    *) _fail "resume profile core version is not session-core v5" ;;
+  esac
+  echo "PASS: resume profile opens with the LOCAL FIRST rule"
+}
+
 test_resume_profile_has_security_floor() {
   local d="$TMPBASE/resume" payload
   _make_repo "$d"
@@ -530,6 +562,8 @@ test_section_bogus_falls_back_with_warning
 test_section_emissions_under_persist_threshold
 test_light_profile_has_security_floor
 test_resume_profile_has_security_floor
+test_light_profile_has_local_first_first
+test_resume_profile_has_local_first_first
 test_shared_session_memory_injection
 test_empty_sid_reject_is_scoped_not_global
 test_shared_memory_tail_retention_vs_ledger_prefix
