@@ -138,8 +138,8 @@ JSON
     *) _fail "resume profile core payload does not open with the LOCAL FIRST rule" ;;
   esac
   case "$payload" in
-    *"session-core v5 resume"*) : ;;
-    *) _fail "resume profile core version is not session-core v5" ;;
+    *"session-core v6 resume"*) : ;;
+    *) _fail "resume profile core version is not session-core v6" ;;
   esac
   echo "PASS: resume profile opens with the LOCAL FIRST rule"
 }
