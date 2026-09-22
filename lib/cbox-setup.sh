@@ -1877,7 +1877,7 @@ step_wireguard() {
     prev_listen_port="$CBOX_WG_LISTEN_PORT" prev_publish_addr="$CBOX_WG_PUBLISH_ADDR" \
     prev_peer_endpoint="$CBOX_WG_PEER_ENDPOINT" prev_peer_pubkey="$CBOX_WG_PEER_PUBKEY" \
     prev_peer_address="$CBOX_WG_PEER_ADDRESS" prev_keepalive="$CBOX_WG_KEEPALIVE" \
-    prev_forwards="$CBOX_WG_FORWARDS"
+    prev_forwards="$CBOX_WG_FORWARDS" prev_client_attach="$CBOX_WG_CLIENT_ATTACH"
   ask_choice "setup: wireguard mode (off, server = share this machine's ollama, client = consume a remote ollama, both)" "$CBOX_WG_MODE" off server client both
   CBOX_WG_MODE="$ASK_VALUE"
   if [ "$CBOX_WG_MODE" != off ]; then
@@ -1941,6 +1941,8 @@ step_wireguard() {
           CBOX_WG_PEER_ADDRESS="$ASK_VALUE"
         fi
         note "client mode dials out only - no inbound port; a forwarder inside the infra network exposes the remote ollama under a stable internal alias, so cbox containers use a plain http URL with no NET_ADMIN and no route awareness"
+        ask_choice "setup: attach cbox sessions to the wg-remote-ollama alias (global session joins the shared infra network; each isolated project gets a private hub-and-spoke network - projects never see each other)" "$CBOX_WG_CLIENT_ATTACH" off on
+        CBOX_WG_CLIENT_ATTACH="$ASK_VALUE"
         ;;
     esac
     ask "setup: wireguard persistent keepalive seconds (0 disables)" "$CBOX_WG_KEEPALIVE"
@@ -1956,7 +1958,8 @@ step_wireguard() {
       && [ "$CBOX_WG_ADDRESS" = "$prev_address" ] && [ "$CBOX_WG_LISTEN_PORT" = "$prev_listen_port" ] \
       && [ "$CBOX_WG_PUBLISH_ADDR" = "$prev_publish_addr" ] && [ "$CBOX_WG_PEER_ENDPOINT" = "$prev_peer_endpoint" ] \
       && [ "$CBOX_WG_PEER_PUBKEY" = "$prev_peer_pubkey" ] && [ "$CBOX_WG_PEER_ADDRESS" = "$prev_peer_address" ] \
-      && [ "$CBOX_WG_KEEPALIVE" = "$prev_keepalive" ] && [ "$CBOX_WG_FORWARDS" = "$prev_forwards" ]; then
+      && [ "$CBOX_WG_KEEPALIVE" = "$prev_keepalive" ] && [ "$CBOX_WG_FORWARDS" = "$prev_forwards" ] \
+      && [ "$CBOX_WG_CLIENT_ATTACH" = "$prev_client_attach" ]; then
     return 0
   fi
   note "wireguard is an infra-reconcile change (SEC_APPLY[wireguard]=infra-reconcile): run 'cbox ollama reconcile' to create/update/tear down the owner project - a plain 'cbox down && cbox run' does not touch it"

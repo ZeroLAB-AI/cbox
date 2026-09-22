@@ -698,6 +698,34 @@ _cbox_ollama_status_cmd() {
   echo "ollama: ACTIVE (container $cid, state=$state, owner=$(_cbox_ollama_owner_name), store=${CBOX_OLLAMA_STORE:-dedicated}, gpu=${CBOX_OLLAMA_GPU:-off}, port=${CBOX_OLLAMA_PORT:-11434})"
 }
 
+_cbox_ollama_ps_cmd() {
+  local dir cid state
+  dir="$(_cbox_ollama_owner_dir)"
+  if [ "${CBOX_OLLAMA_MODE:-off}" != on ]; then
+    echo "ollama: OFF (CBOX_OLLAMA_MODE=off)"
+    return 0
+  fi
+  if [ ! -f "$dir/docker-compose.yml" ]; then
+    echo "ollama: CONFIG-ONLY (owner project not yet rendered - run 'cbox ollama reconcile')"
+    return 0
+  fi
+  cid="$(_cbox_ollama_owner_compose ps -q ollama 2>/dev/null)" || cid=""
+  if [ -z "$cid" ]; then
+    echo "ollama: not running - run 'cbox ollama up'"
+    return 0
+  fi
+  state="$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null)" || state=unknown
+  if [ "$state" != running ]; then
+    echo "ollama: container $cid present but state=$state - run 'cbox ollama up'"
+    return 0
+  fi
+  docker exec -- "$cid" ollama ps || {
+    echo "cbox: 'ollama ps' failed inside the owner container" >&2
+    return 1
+  }
+  docker stats --no-stream --format 'container memory: {{.MemUsage}}  cpu: {{.CPUPerc}}' -- "$cid" 2>/dev/null || true
+}
+
 _cbox_ollama_shared_store_guard() {
   [ "${CBOX_OLLAMA_STORE:-dedicated}" = shared ] || return 0
   [ -n "${CBOX_OLLAMA_STORE_PATH:-}" ] || { echo "cbox: CBOX_OLLAMA_STORE=shared needs CBOX_OLLAMA_STORE_PATH set" >&2; return 1; }
@@ -820,6 +848,7 @@ _cbox_ollama_reconcile_cmd() {
   mkdir -p "$dir"
   if [ "${CBOX_OLLAMA_MODE:-off}" != on ] && ! _cbox_wg_active; then
     if [ -f "$dir/docker-compose.yml" ]; then
+      _cbox_ollama_reconcile_networks_impl >/dev/null 2>&1 || true
       _cbox_ollama_owner_compose down >/dev/null 2>&1 || true
     fi
     gen_ollama_owner_compose_into "$dir"
@@ -1018,26 +1047,111 @@ _cbox_wg_infra_default_network() {
   docker network ls --filter "label=com.docker.compose.project=$owner" --filter "label=com.docker.compose.network=default" --format '{{.Name}}' 2>/dev/null | head -n1
 }
 
-_cbox_wg_connect_client_alias() {
-  local cbox_cid="$1" owner netname cbox_nets
-  _cbox_wg_active && _cbox_wg_client_role || return 0
-  owner="$(_cbox_ollama_owner_name)"
-  netname="$(_cbox_wg_infra_default_network "$owner")"
-  [ -n "$netname" ] || return 0
-  cbox_nets="$(_cbox_ollama_endpoint_networks "$cbox_cid")"
-  printf '%s\n' "$cbox_nets" | grep -qxF "$netname" && return 0
-  docker network connect -- "$netname" "$cbox_cid" >/dev/null 2>&1 || {
-    echo "cbox: failed to attach $cbox_cid to the wireguard client alias network $netname" >&2
+_cbox_wg_client_attach_on() {
+  _cbox_wg_active && _cbox_wg_client_role || return 1
+  [ "${CBOX_WG_CLIENT_ATTACH:-off}" = on ]
+}
+
+_cbox_wg_scope_net_ip() {
+  local netname="$1" wg_cid="$2"
+  docker inspect --type container --format '{{with index .NetworkSettings.Networks "'"$netname"'"}}{{.IPAddress}}{{end}}' -- "$wg_cid" 2>/dev/null
+}
+
+_cbox_wg_scope_forward_ensure() {
+  local wg_cid="$1" netname="$2" ip peer port
+  peer="${CBOX_WG_PEER_ADDRESS%%/*}"
+  [ -n "$peer" ] || return 0
+  port="$(_cbox_wg_client_forward_port)"
+  ip="$(_cbox_wg_scope_net_ip "$netname" "$wg_cid")" || ip=""
+  if [ -z "$ip" ]; then
+    echo "cbox: the wireguard sidecar has no address on $netname yet - run 'cbox ollama reconcile' (or 'cbox wg up') again" >&2
+    return 1
+  fi
+  docker exec -d -- "$wg_cid" /bin/sh -c "pgrep -f 'bind=$ip,' >/dev/null 2>&1 || exec socat TCP-LISTEN:$port,bind=$ip,fork,reuseaddr TCP:$peer:$port" >/dev/null 2>&1 || {
+    echo "cbox: failed to start the scope-network forwarder inside the wireguard sidecar for $netname" >&2
     return 1
   }
 }
 
-_cbox_ollama_reconcile_one_scope() {
-  local scope="$1" cbox_cid="$2" p_hash="${3:-}" ollama_cid="$4" netname
-  netname="$(_cbox_ollama_scope_network_name "$scope" "$p_hash")"
+_cbox_wg_scope_forward_stop() {
+  local wg_cid="$1" netname="$2" ip
+  ip="$(_cbox_wg_scope_net_ip "$netname" "$wg_cid")" || ip=""
+  [ -n "$ip" ] || return 0
+  docker exec -- "$wg_cid" /bin/sh -c "pkill -f 'bind=$ip,' 2>/dev/null; exit 0" >/dev/null 2>&1 || true
+}
+
+_cbox_wg_connect_client_alias() {
+  local scope="$1" cbox_cid="$2" netname="${3:-}" owner default_net wg_cid cbox_nets wg_nets
+  owner="$(_cbox_ollama_owner_name)"
+  if [ "$scope" = global ]; then
+    default_net="$(_cbox_wg_infra_default_network "$owner")"
+    [ -n "$default_net" ] || return 0
+    cbox_nets="$(_cbox_ollama_endpoint_networks "$cbox_cid")"
+    printf '%s\n' "$cbox_nets" | grep -qxF "$default_net" && return 0
+    docker network connect -- "$default_net" "$cbox_cid" >/dev/null 2>&1 || {
+      echo "cbox: failed to attach $cbox_cid to the wireguard client alias network $default_net" >&2
+      return 1
+    }
+    return 0
+  fi
+  [ -n "$netname" ] || return 0
+  wg_cid="$(_cbox_wg_owner_container_id)" || wg_cid=""
+  [ -n "$wg_cid" ] || return 0
   _cbox_ollama_ensure_scope_network "$netname" || return 1
-  _cbox_ollama_connect_scope_network "$netname" "$ollama_cid" "$cbox_cid" || return 1
-  _cbox_wg_connect_client_alias "$cbox_cid"
+  wg_nets="$(_cbox_ollama_endpoint_networks "$wg_cid")"
+  if ! printf '%s\n' "$wg_nets" | grep -qxF "$netname"; then
+    docker network connect --alias "$(_cbox_wg_client_alias)" -- "$netname" "$wg_cid" >/dev/null 2>&1 || {
+      echo "cbox: failed to attach the wireguard sidecar to $netname" >&2
+      return 1
+    }
+  fi
+  cbox_nets="$(_cbox_ollama_endpoint_networks "$cbox_cid")"
+  if ! printf '%s\n' "$cbox_nets" | grep -qxF "$netname"; then
+    docker network connect -- "$netname" "$cbox_cid" >/dev/null 2>&1 || {
+      echo "cbox: failed to attach $cbox_cid to the wireguard client alias network $netname" >&2
+      return 1
+    }
+  fi
+  _cbox_wg_scope_forward_ensure "$wg_cid" "$netname" || return 1
+  return 0
+}
+
+_cbox_wg_detach_client_alias() {
+  local scope="$1" cbox_cid="$2" netname="${3:-}" owner default_net wg_cid cbox_nets wg_nets
+  owner="$(_cbox_ollama_owner_name)"
+  if [ "$scope" = global ]; then
+    default_net="$(_cbox_wg_infra_default_network "$owner")"
+    [ -n "$default_net" ] || return 0
+    cbox_nets="$(_cbox_ollama_endpoint_networks "$cbox_cid")"
+    if printf '%s\n' "$cbox_nets" | grep -qxF "$default_net"; then
+      docker network disconnect -- "$default_net" "$cbox_cid" >/dev/null 2>&1 || true
+    fi
+    return 0
+  fi
+  [ -n "$netname" ] || return 0
+  wg_cid="$(_cbox_wg_owner_container_id)" || wg_cid=""
+  [ -n "$wg_cid" ] || return 0
+  wg_nets="$(_cbox_ollama_endpoint_networks "$wg_cid")"
+  if printf '%s\n' "$wg_nets" | grep -qxF "$netname"; then
+    _cbox_wg_scope_forward_stop "$wg_cid" "$netname"
+    docker network disconnect -- "$netname" "$wg_cid" >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
+_cbox_ollama_reconcile_one_scope() {
+  local scope="$1" cbox_cid="$2" p_hash="${3:-}" ollama_cid="$4" netname rc=0
+  netname="$(_cbox_ollama_scope_network_name "$scope" "$p_hash")"
+  if [ -n "$ollama_cid" ]; then
+    _cbox_ollama_ensure_scope_network "$netname" || return 1
+    _cbox_ollama_connect_scope_network "$netname" "$ollama_cid" "$cbox_cid" || return 1
+  fi
+  if _cbox_wg_client_attach_on; then
+    _cbox_wg_connect_client_alias "$scope" "$cbox_cid" "$netname" || rc=1
+  else
+    _cbox_wg_detach_client_alias "$scope" "$cbox_cid" "$netname"
+  fi
+  return "$rc"
 }
 
 _cbox_ollama_scope_network_prefix() {
@@ -1045,7 +1159,7 @@ _cbox_ollama_scope_network_prefix() {
 }
 
 _cbox_ollama_disconnect_stale_scope_networks() {
-  local owner="$1" name endpoint_count endpoint_name prefix
+  local owner="$1" name members member prefix
   prefix="$(_cbox_ollama_scope_network_prefix)"
   docker network ls --filter label=cbox.component=ollama-net --filter "label=cbox.owner=$owner" --format '{{.Name}}' 2>/dev/null | while IFS= read -r name; do
     [ -n "$name" ] || continue
@@ -1053,22 +1167,28 @@ _cbox_ollama_disconnect_stale_scope_networks() {
       "$prefix"*) ;;
       *) continue ;;
     esac
-    endpoint_count="$(docker network inspect --format '{{len .Containers}}' -- "$name" 2>/dev/null)" || continue
-    [ "${endpoint_count:-0}" = 1 ] || continue
-    endpoint_name="$(docker network inspect --format '{{range $k, $v := .Containers}}{{$v.Name}}{{"\n"}}{{end}}' -- "$name" 2>/dev/null | grep 'ollama' | head -n1)"
-    if [ -n "$endpoint_name" ]; then
-      docker network disconnect -- "$name" "$endpoint_name" >/dev/null 2>&1 || true
+    members="$(docker network inspect --format '{{range $k, $v := .Containers}}{{$v.Name}}{{"\n"}}{{end}}' -- "$name" 2>/dev/null | sed '/^$/d')" || continue
+    [ -n "$members" ] || continue
+    if printf '%s\n' "$members" | grep -qvE "^${owner}-(ollama|wireguard)-[0-9]+$"; then
+      continue
     fi
+    while IFS= read -r member; do
+      [ -n "$member" ] || continue
+      docker network disconnect -- "$name" "$member" >/dev/null 2>&1 || true
+    done <<EOF_MEMBERS
+$members
+EOF_MEMBERS
   done
 }
 
 _cbox_ollama_reconcile_networks_impl() {
-  [ "${CBOX_OLLAMA_MODE:-off}" = on ] || return 0
   local dir ollama_cid rc=0
   dir="$(_cbox_ollama_owner_dir)"
   [ -f "$dir/docker-compose.yml" ] || return 0
-  ollama_cid="$(_cbox_ollama_owner_compose ps -q ollama 2>/dev/null)" || ollama_cid=""
-  [ -n "$ollama_cid" ] || return 0
+  ollama_cid=""
+  if [ "${CBOX_OLLAMA_MODE:-off}" = on ]; then
+    ollama_cid="$(_cbox_ollama_owner_compose ps -q ollama 2>/dev/null)" || ollama_cid=""
+  fi
   local cid
   cid="$("${COMPOSE[@]}" ps -q "$SERVICE" 2>/dev/null)" || cid=""
   if [ -n "$cid" ]; then
@@ -1267,9 +1387,9 @@ _cbox_ollama_gc_scope_networks() {
 ollama_cmd() {
   local sub="${1:-}"
   case "$sub" in
-    status|up|down|pull|reconcile|gpu-check) ;;
+    status|ps|up|down|pull|reconcile|gpu-check) ;;
     *)
-      echo "cbox: usage: $0 ollama {status|up|down|pull <model>|reconcile|gpu-check}" >&2
+      echo "cbox: usage: $0 ollama {status|ps|up|down|pull <model>|reconcile|gpu-check}" >&2
       return 1
       ;;
   esac
@@ -1280,8 +1400,12 @@ ollama_cmd() {
   fi
   [ -f "$INSTALL_DIR/templates/sections.sh" ] || die "$INSTALL_DIR/templates/sections.sh missing"
   . "$INSTALL_DIR/templates/sections.sh"
-  if [ "$sub" != status ] && [ "$sub" != gpu-check ]; then
-    _cbox_ollama_guard || return 1
+  if [ "$sub" != status ] && [ "$sub" != ps ] && [ "$sub" != gpu-check ]; then
+    if [ "$sub" = reconcile ] && _cbox_wg_active; then
+      :
+    else
+      _cbox_ollama_guard || return 1
+    fi
   fi
   mkdir -p "$HOME/.config/cbox/infra"
   local lockfile rc=0
@@ -1291,6 +1415,10 @@ ollama_cmd() {
     status)
       _cbox_flock -s -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
       _cbox_ollama_status_cmd || rc=$?
+      ;;
+    ps)
+      _cbox_flock -s -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+      _cbox_ollama_ps_cmd || rc=$?
       ;;
     up)
       _cbox_flock -x -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
@@ -1525,17 +1653,25 @@ _cbox_wg_peer_config_cmd() {
   echo "[Peer]"
   if [ "$genkey" = "--generate-key" ]; then
     echo "cbox: --generate-key requested - generating a private key for peer '$name' on THIS machine (not the documented preference; the peer generating its own key is preferred)" >&2
-    local tmp_priv tmp_pub
+    local tmp_priv tmp_pub key_file
     _cbox_wg_tools_available || { echo "cbox: wireguard-tools ('wg') not found on this host - cannot generate a key" >&2; return 1; }
+    key_file="$(_cbox_wg_dir)/peer-$name.key"
     tmp_priv="$(wg genkey)"
+    printf '%s\n' "$tmp_priv" | _cbox_wg_write_secret "$key_file"
     tmp_pub="$(printf '%s' "$tmp_priv" | wg pubkey)"
-    echo "# generated private key for '$name' - copy this to the peer's machine and delete it from here; it is never stored by cbox"
-    echo "PrivateKey = $tmp_priv"
+    tmp_priv=""
+    echo "# generated private key for '$name' saved to $key_file (0600, never printed) -"
+    echo "# move that file to the peer's machine and delete it from here, then put its contents on the PrivateKey line"
+    echo "PrivateKey = <contents of $key_file>"
     echo "# this node's [Peer] entry to use $name's newly generated public key: $tmp_pub"
   fi
   echo "PublicKey = $my_pub"
   echo "Endpoint = ${endpoint_host}:${CBOX_WG_LISTEN_PORT:-51820}"
-  echo "AllowedIPs = $paddr"
+  if [ -n "${CBOX_WG_ADDRESS:-}" ]; then
+    echo "AllowedIPs = ${CBOX_WG_ADDRESS%%/*}/32"
+  else
+    echo "AllowedIPs = <this node's tunnel address>/32"
+  fi
   [ "${CBOX_WG_KEEPALIVE:-25}" -gt 0 ] 2>/dev/null && echo "PersistentKeepalive = ${CBOX_WG_KEEPALIVE}"
   return 0
 }
@@ -7585,7 +7721,7 @@ print(json.dumps({
 }
 
 usage() {
-  echo "usage: $0 {run [--session <id>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force]|restart [--gpu]|shell|logs [args]|update|reinstall-bins [--fresh|--force|--if-stale]|bins {status|history [tool]|rollback [tool]}|install-hooks|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|unset|diff|pending}|netaccess {status|allow|deny}|ollama {status|up|down|pull <model>|reconcile|gpu-check}|wg {status|up|down|keygen|peer {add|rm|list|config}}|session-broker {status|access {disabled|viewer|full-attach}|window {off|<minutes>}|key {add <pubkey-file> [comment]|rm <fingerprint>|fingerprints}}|backup|login [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}"
+  echo "usage: $0 {run [--session <id>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force]|restart [--gpu]|shell|logs [args]|update|reinstall-bins [--fresh|--force|--if-stale]|bins {status|history [tool]|rollback [tool]}|install-hooks|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|unset|diff|pending}|netaccess {status|allow|deny}|ollama {status|ps|up|down|pull <model>|reconcile|gpu-check}|wg {status|up|down|keygen|peer {add|rm|list|config}}|session-broker {status|access {disabled|viewer|full-attach}|window {off|<minutes>}|key {add <pubkey-file> [comment]|rm <fingerprint>|fingerprints}}|backup|login [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}"
   echo "cbox: with zero arguments and a TTY on stdin+stdout, bare '$0' opens the interactive hub instead of this usage text"
   echo "cbox: 'cbox ls' lists RUNNING isolated projects only, not every configured project"
   exit 1

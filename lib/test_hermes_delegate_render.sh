@@ -81,6 +81,8 @@ CBOX_HERMES_MODEL_URL=http://127.0.0.1:11434 \
 CBOX_HERMES_MODEL_NAME=qwen2.5:7b \
 CBOX_HERMES_DELEGATE_MAX_CONCURRENCY=2 \
 CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC=900 \
+CBOX_HERMES_DELEGATE_TIMEOUT_SEC=2400 \
+CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC=600 \
 CBOX_HERMES_DELEGATE_LOCK_DIR=/tmp/hermes-locks \
 OLLAMA_NUM_PARALLEL=4 \
 CBOX_OLLAMA_CONTEXT_LENGTH=65536 \
@@ -108,6 +110,8 @@ assert spec['env'] == {
     'CBOX_HERMES_MODEL_NAME': 'qwen2.5:7b',
     'CBOX_HERMES_DELEGATE_MAX_CONCURRENCY': '2',
     'CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC': '900',
+    'CBOX_HERMES_DELEGATE_TIMEOUT_SEC': '2400',
+    'CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC': '600',
     'CBOX_HERMES_DELEGATE_LOCK_DIR': '/tmp/hermes-locks',
     'OLLAMA_NUM_PARALLEL': '4',
     'CBOX_OLLAMA_CONTEXT_LENGTH': '65536',
@@ -129,6 +133,7 @@ CBOX_HERMES_DELEGATE=on \
 CBOX_HERMES=on \
   env -u CBOX_HERMES_DELEGATE_MAX_CONCURRENCY -u CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC \
       -u CBOX_HERMES_DELEGATE_LOCK_DIR -u OLLAMA_NUM_PARALLEL \
+      -u CBOX_HERMES_DELEGATE_TIMEOUT_SEC -u CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC \
   python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
   "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$RENDERED_CONCURRENCY_EMPTY"
 python3 -c "
@@ -139,6 +144,8 @@ assert spec['env']['CBOX_HERMES_DELEGATE_MAX_CONCURRENCY'] == '', spec
 assert spec['env']['CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC'] == '', spec
 assert spec['env']['CBOX_HERMES_DELEGATE_LOCK_DIR'] == '', spec
 assert spec['env']['OLLAMA_NUM_PARALLEL'] == '', spec
+assert spec['env']['CBOX_HERMES_DELEGATE_TIMEOUT_SEC'] == '', spec
+assert spec['env']['CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC'] == '', spec
 "
 _ok "hermes-local concurrency knobs render as empty string (not the @VAR@ placeholder) when unset, so the server falls back to its own defaults"
 

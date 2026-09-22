@@ -182,6 +182,12 @@ _cbox_reg_validate_var_dispatch() {
     CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC)
       _cbox_val_kind_uint_or_empty "$val" || return 1
       ;;
+    CBOX_HERMES_DELEGATE_TIMEOUT_SEC)
+      _cbox_val_kind_uint_or_empty "$val" || return 1
+      ;;
+    CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC)
+      _cbox_val_kind_uint_or_empty "$val" || return 1
+      ;;
     CBOX_HERMES_DELEGATE_LOCK_DIR)
       _cbox_val_named_path_slash_or_empty "$val" || return 1
       ;;
@@ -256,6 +262,9 @@ _cbox_reg_validate_var_dispatch() {
       ;;
     CBOX_WG_FORWARDS)
       _cbox_val_kind_wg_forward_list "$val" || return 1
+      ;;
+    CBOX_WG_CLIENT_ATTACH)
+      _cbox_val_kind_enum "$val" 'off' 'on' || return 1
       ;;
     CBOX_LIMIT_AUTORESUME)
       _cbox_val_kind_enum "$val" 'off' 'on' || return 1

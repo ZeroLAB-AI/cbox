@@ -246,7 +246,7 @@ _ok "reconcile_networks: a clean no-op (returns immediately) when CBOX_OLLAMA_MO
 
 DISCONNECT_CALLS="$TMPBASE/disconnect.calls"
 run_disconnect_stale() {
-  local endpoint_count="$1" member="$2"
+  local members="$1"
   : > "$DISCONNECT_CALLS"
   bash -c '
     set -u
@@ -260,32 +260,42 @@ run_disconnect_stale() {
         network)
           case "$2" in
             ls) printf "cbox-infra-u1000_default\ncbox-ollama-u1000-global\ncbox-ollama-u1000-pabc\n" ;;
-            inspect)
-              case "$*" in
-                *"len .Containers"*) printf "%s" "'"$endpoint_count"'" ;;
-                *) printf "%s\n" "'"$member"'" ;;
-              esac
-              ;;
+            inspect) printf "%s\n" "'"$members"'" ;;
             disconnect) return 0 ;;
           esac
           ;;
       esac
     }
-    _cbox_ollama_disconnect_stale_scope_networks myowner
+    _cbox_ollama_disconnect_stale_scope_networks cbox-infra-u1000
   ' disconnecttest 2>&1
 }
 
-run_disconnect_stale 1 cbox-infra-u1000-ollama-1
-grep -q 'network disconnect -- cbox-ollama-u1000-pabc cbox-infra-u1000-ollama-1' "$DISCONNECT_CALLS" || _fail "a per-scope network whose only member is the real compose-generated ollama container name must be disconnected by that name, not the literal string 'ollama': $(cat "$DISCONNECT_CALLS")"
-_ok "disconnect_stale_scope_networks: a per-scope network with only ollama attached (cbox side gone) is disconnected from ollama by its real container name"
+run_disconnect_stale 'cbox-infra-u1000-ollama-1'
+grep -q 'network disconnect -- cbox-ollama-u1000-pabc cbox-infra-u1000-ollama-1' "$DISCONNECT_CALLS" || _fail "a per-scope network whose only member is the real compose-generated ollama container name must be disconnected from it: $(cat "$DISCONNECT_CALLS")"
+_ok "disconnect_stale_scope_networks: a per-scope network with only ollama attached (cbox side gone) is drained"
 
-run_disconnect_stale 2 cbox-infra-u1000-ollama-1
-! grep -q 'network disconnect' "$DISCONNECT_CALLS" || _fail "a per-scope network with both endpoints still attached must not be disconnected: $(cat "$DISCONNECT_CALLS")"
-_ok "disconnect_stale_scope_networks: a per-scope network still holding both endpoints is left alone"
+run_disconnect_stale 'cbox-infra-u1000-wireguard-1'
+grep -q 'network disconnect -- cbox-ollama-u1000-pabc cbox-infra-u1000-wireguard-1' "$DISCONNECT_CALLS" || _fail "a per-scope network whose only member is the wireguard sidecar (dead project) must be drained too: $(cat "$DISCONNECT_CALLS")"
+_ok "disconnect_stale_scope_networks: a per-scope network holding only the wireguard sidecar hub is drained"
 
-run_disconnect_stale 1 cbox-infra-u1000-ollama-1
+run_disconnect_stale 'cbox-infra-u1000-ollama-1
+cbox-infra-u1000-wireguard-1'
+grep -q 'network disconnect -- cbox-ollama-u1000-pabc cbox-infra-u1000-ollama-1' "$DISCONNECT_CALLS" || _fail "a dead project's network holding both hubs must be drained of ollama: $(cat "$DISCONNECT_CALLS")"
+grep -q 'network disconnect -- cbox-ollama-u1000-pabc cbox-infra-u1000-wireguard-1' "$DISCONNECT_CALLS" || _fail "a dead project's network holding both hubs must be drained of the sidecar: $(cat "$DISCONNECT_CALLS")"
+_ok "disconnect_stale_scope_networks: a dead project's network holding both hubs (ollama + sidecar) is fully drained"
+
+run_disconnect_stale 'cbox-infra-u1000-ollama-1
+cbox-proj-live'
+! grep -q 'network disconnect' "$DISCONNECT_CALLS" || _fail "a per-scope network still holding a session container must not be touched: $(cat "$DISCONNECT_CALLS")"
+_ok "disconnect_stale_scope_networks: a network with a live session container attached is left alone"
+
+run_disconnect_stale 'my-ollama-project'
+! grep -q 'network disconnect' "$DISCONNECT_CALLS" || _fail "a session container merely containing 'ollama' in its name must not be mistaken for the owner service: $(cat "$DISCONNECT_CALLS")"
+_ok "disconnect_stale_scope_networks: owner services are matched by exact compose name, never by substring"
+
+run_disconnect_stale 'cbox-infra-u1000-ollama-1'
 ! grep -q 'network disconnect -- cbox-ollama-u1000-global' "$DISCONNECT_CALLS" || _fail "the global scope network must never be targeted: $(cat "$DISCONNECT_CALLS")"
-! grep -q 'network disconnect -- cbox-infra-u1000_default' "$DISCONNECT_CALLS" || _fail "the owner project's own compose default network carries the same labels and must never be disconnected from ollama: $(cat "$DISCONNECT_CALLS")"
+! grep -q 'network disconnect -- cbox-infra-u1000_default' "$DISCONNECT_CALLS" || _fail "the owner project's own compose default network carries the same labels and must never be drained: $(cat "$DISCONNECT_CALLS")"
 ! grep -q 'network inspect.*cbox-infra-u1000_default' "$DISCONNECT_CALLS" || _fail "networks outside the per-scope name prefix must be skipped before any inspect: $(cat "$DISCONNECT_CALLS")"
 _ok "disconnect_stale_scope_networks: only cbox-ollama-u<uid>-p* networks are candidates - the global scope network and the owner's compose default network (same labels) are never touched"
 
@@ -385,5 +395,325 @@ OLLAMA_DOWN_CMD_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_ollama_down_cmd)"
 [ -n "$OLLAMA_DOWN_CMD_FN" ] || _fail "cannot extract _cbox_ollama_down_cmd"
 echo "$OLLAMA_DOWN_CMD_FN" | grep -q '_cbox_ollama_gc_scope_networks' || _fail "cbox ollama down does not sweep orphaned per-scope networks"
 _ok "wiring: cbox ollama down sweeps per-scope networks after stopping the owner"
+
+WG_ATTACH_ON_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_wg_client_attach_on)"
+WG_CONNECT_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_wg_connect_client_alias)"
+WG_DETACH_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_wg_detach_client_alias)"
+WG_DEFAULTNET_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_wg_infra_default_network)"
+for f in WG_ATTACH_ON_FN WG_CONNECT_FN WG_DETACH_FN WG_DEFAULTNET_FN; do
+  [ -n "${!f}" ] || _fail "cannot extract $f"
+done
+
+run_attach_on() {
+  bash -c '
+    set -u
+    '"$WG_ATTACH_ON_FN"'
+    _cbox_wg_active() { [ "$1" = active ]; }
+    _cbox_wg_client_role() { [ "$2" = client ]; }
+    _cbox_wg_active_arg="$1"; _cbox_wg_client_arg="$2"
+    _cbox_wg_active() { [ "$_cbox_wg_active_arg" = active ]; }
+    _cbox_wg_client_role() { [ "$_cbox_wg_client_arg" = client ]; }
+    CBOX_WG_CLIENT_ATTACH="$3"
+    _cbox_wg_client_attach_on && echo YES || echo NO
+  ' attachontest "$@"
+}
+[ "$(run_attach_on active client on)" = YES ] || _fail "attach gate must open with wg active, client role, and the var on"
+[ "$(run_attach_on active client off)" = NO ] || _fail "attach gate must stay closed with the var off"
+[ "$(run_attach_on active server on)" = NO ] || _fail "attach gate must stay closed without the client role"
+[ "$(run_attach_on inactive client on)" = NO ] || _fail "attach gate must stay closed with wg off"
+_ok "wg client attach gate: needs wg active + client role + CBOX_WG_CLIENT_ATTACH=on, default off"
+
+WGC_CALLS="$TMPBASE/wgconnect.calls"
+run_wg_connect() {
+  local scope="$1" cbox_nets="$2" wg_nets="$3" wg_cid="$4"
+  : > "$WGC_CALLS"
+  bash -c '
+    set -u
+    CALLS="'"$WGC_CALLS"'"
+    '"$WG_CONNECT_FN"'
+    '"$WG_DEFAULTNET_FN"'
+    _cbox_ollama_owner_name() { printf "cbox-infra-u1000"; }
+    _cbox_wg_client_alias() { printf "wg-remote-ollama"; }
+    _cbox_wg_owner_container_id() { printf "%s" "'"$wg_cid"'"; }
+    _cbox_wg_scope_forward_ensure() { echo "FWD-ENSURE $1 $2" >> "$CALLS"; return 0; }
+    _cbox_ollama_ensure_scope_network() { echo "ENSURE $1" >> "$CALLS"; return 0; }
+    _cbox_ollama_endpoint_networks() {
+      if [ "$1" = wg-cid ]; then printf "%s\n" "'"$wg_nets"'"; else printf "%s\n" "'"$cbox_nets"'"; fi
+    }
+    docker() {
+      echo "docker $*" >> "$CALLS"
+      case "$*" in
+        "network ls"*) printf "infra_default\n" ;;
+        "network connect"*) return 0 ;;
+      esac
+    }
+    _cbox_wg_connect_client_alias "'"$scope"'" cbox-cid scopenet
+  ' wgconnecttest 2>&1
+  echo "RC=$?"
+}
+
+out="$(run_wg_connect global none none wg-cid)"
+echo "$out" | grep -q 'RC=0' || _fail "global attach must succeed: $out"
+grep -q 'docker network connect -- infra_default cbox-cid' "$WGC_CALLS" || _fail "global scope must join the shared infra default network: $(cat "$WGC_CALLS")"
+! grep -q 'ENSURE' "$WGC_CALLS" || _fail "global scope must not touch per-project scope networks: $(cat "$WGC_CALLS")"
+_ok "wg client attach: the global session container joins the shared infra default network directly"
+
+out="$(run_wg_connect global infra_default none wg-cid)"
+! grep -q 'network connect' "$WGC_CALLS" || _fail "an already-attached global container must not be reconnected: $(cat "$WGC_CALLS")"
+_ok "wg client attach: global attach is idempotent"
+
+out="$(run_wg_connect isolated none none wg-cid)"
+echo "$out" | grep -q 'RC=0' || _fail "isolated attach must succeed: $out"
+grep -q 'ENSURE scopenet' "$WGC_CALLS" || _fail "isolated scope must ensure its private scope network: $(cat "$WGC_CALLS")"
+grep -q 'docker network connect --alias wg-remote-ollama -- scopenet wg-cid' "$WGC_CALLS" || _fail "the wireguard sidecar must join the scope network under the wg-remote-ollama alias: $(cat "$WGC_CALLS")"
+grep -q 'docker network connect -- scopenet cbox-cid' "$WGC_CALLS" || _fail "the isolated container must join its own scope network: $(cat "$WGC_CALLS")"
+! grep -q 'infra_default cbox-cid' "$WGC_CALLS" || _fail "an isolated container must NEVER join the shared infra default network: $(cat "$WGC_CALLS")"
+grep -q 'FWD-ENSURE wg-cid scopenet' "$WGC_CALLS" || _fail "the isolated attach must also ensure the per-scope-network forwarder inside the sidecar (the supervisord one binds only the infra network address): $(cat "$WGC_CALLS")"
+_ok "wg client attach: isolated projects get hub-and-spoke - sidecar aliased into the private scope network, never the shared network, with its per-network forwarder ensured"
+
+out="$(run_wg_connect isolated scopenet scopenet wg-cid)"
+! grep -q 'network connect' "$WGC_CALLS" || _fail "already-attached isolated endpoints must not be reconnected: $(cat "$WGC_CALLS")"
+grep -q 'FWD-ENSURE wg-cid scopenet' "$WGC_CALLS" || _fail "the forwarder ensure must run even when the network memberships already exist (it heals a restarted sidecar): $(cat "$WGC_CALLS")"
+_ok "wg client attach: isolated attach is idempotent, and the forwarder ensure still runs (sidecar-restart heal)"
+
+out="$(run_wg_connect isolated none none "")"
+echo "$out" | grep -q 'RC=0' || _fail "a missing sidecar container must be a clean no-op, not an error: $out"
+! grep -q 'network connect' "$WGC_CALLS" || _fail "no sidecar, no attachments: $(cat "$WGC_CALLS")"
+_ok "wg client attach: isolated attach is a clean no-op while the sidecar is not running"
+
+WGD_CALLS="$TMPBASE/wgdetach.calls"
+run_wg_detach() {
+  local scope="$1" cbox_nets="$2" wg_nets="$3"
+  : > "$WGD_CALLS"
+  bash -c '
+    set -u
+    CALLS="'"$WGD_CALLS"'"
+    '"$WG_DETACH_FN"'
+    '"$WG_DEFAULTNET_FN"'
+    _cbox_ollama_owner_name() { printf "cbox-infra-u1000"; }
+    _cbox_wg_owner_container_id() { printf "wg-cid"; }
+    _cbox_wg_scope_forward_stop() { echo "FWD-STOP $1 $2" >> "$CALLS"; }
+    _cbox_ollama_endpoint_networks() {
+      if [ "$1" = wg-cid ]; then printf "%s\n" "'"$wg_nets"'"; else printf "%s\n" "'"$cbox_nets"'"; fi
+    }
+    docker() {
+      echo "docker $*" >> "$CALLS"
+      case "$*" in
+        "network ls"*) printf "infra_default\n" ;;
+        "network disconnect"*) return 0 ;;
+      esac
+    }
+    _cbox_wg_detach_client_alias "'"$scope"'" cbox-cid scopenet
+  ' wgdetachtest 2>&1
+  echo "RC=$?"
+}
+
+out="$(run_wg_detach global infra_default none)"
+grep -q 'docker network disconnect -- infra_default cbox-cid' "$WGD_CALLS" || _fail "detach must remove the global container from the shared infra network: $(cat "$WGD_CALLS")"
+_ok "wg client detach: turning attach off removes the global session from the shared infra network"
+
+out="$(run_wg_detach isolated scopenet scopenet)"
+grep -q 'FWD-STOP wg-cid scopenet' "$WGD_CALLS" || _fail "detach must stop the per-scope-network forwarder before disconnecting the sidecar: $(cat "$WGD_CALLS")"
+grep -q 'docker network disconnect -- scopenet wg-cid' "$WGD_CALLS" || _fail "detach must remove the sidecar hub from the per-project scope network: $(cat "$WGD_CALLS")"
+! grep -q 'disconnect -- scopenet cbox-cid' "$WGD_CALLS" || _fail "detach must not touch the session container's own scope-network membership (the local-ollama path owns it): $(cat "$WGD_CALLS")"
+_ok "wg client detach: the per-network forwarder is stopped, the sidecar hub leaves the per-project scope network; the session's own membership is left to the ollama path"
+
+out="$(run_wg_detach global none none)"
+! grep -q 'network disconnect' "$WGD_CALLS" || _fail "detach with nothing attached must be a no-op: $(cat "$WGD_CALLS")"
+_ok "wg client detach: idempotent no-op when nothing is attached"
+
+ONE_CALLS="$TMPBASE/onescope.calls"
+run_one_scope_wg() {
+  local ollama_cid="$1" attach="$2"
+  : > "$ONE_CALLS"
+  bash -c '
+    set -u
+    CALLS="'"$ONE_CALLS"'"
+    '"$ONESCOPE_FN"'
+    id() { printf "1000"; }
+    _cbox_ollama_scope_network_name() { printf "scopenet"; }
+    _cbox_ollama_ensure_scope_network() { echo "ENSURE $1" >> "$CALLS"; return 0; }
+    _cbox_ollama_connect_scope_network() { echo "OLLAMA-CONNECT $1 $2 $3" >> "$CALLS"; return 0; }
+    _cbox_wg_client_attach_on() { [ "'"$attach"'" = on ]; }
+    _cbox_wg_connect_client_alias() { echo "WG-CONNECT $1 $2 $3" >> "$CALLS"; return 0; }
+    _cbox_wg_detach_client_alias() { echo "WG-DETACH $1 $2 $3" >> "$CALLS"; return 0; }
+    _cbox_ollama_reconcile_one_scope isolated cbox-cid phash1 "'"$ollama_cid"'"
+  ' onescopewgtest 2>&1
+  echo "RC=$?"
+}
+
+out="$(run_one_scope_wg "" on)"
+echo "$out" | grep -q 'RC=0' || _fail "wg-only scope reconcile must succeed: $out"
+! grep -q 'OLLAMA-CONNECT' "$ONE_CALLS" || _fail "with no ollama container there is nothing to attach ollama-side: $(cat "$ONE_CALLS")"
+grep -q 'WG-CONNECT isolated cbox-cid scopenet' "$ONE_CALLS" || _fail "the wg attach must run even with local ollama off (the pure consumer case): $(cat "$ONE_CALLS")"
+_ok "one_scope: a pure consumer (local ollama off, wg attach on) still gets its wg hub attachment"
+
+out="$(run_one_scope_wg ollama-cid off)"
+grep -q 'OLLAMA-CONNECT scopenet ollama-cid cbox-cid' "$ONE_CALLS" || _fail "the ollama path must be untouched by the wg gate: $(cat "$ONE_CALLS")"
+grep -q 'WG-DETACH isolated cbox-cid scopenet' "$ONE_CALLS" || _fail "attach off must run the detach sweep: $(cat "$ONE_CALLS")"
+_ok "one_scope: attach off keeps the ollama path and sweeps any prior wg attachments"
+
+run_reconcile_wg_only() {
+  bash -c '
+    set -u
+    CALLS="'"$RECONCILE_CALLS"'"
+    '"$OWNERDIR_FN"'
+    '"$OWNERNAME_FN"'
+    id() { printf "1000"; }
+    HOME="'"$TMPBASE"'/home-wgonly"
+    mkdir -p "$(_cbox_ollama_owner_dir)"
+    touch "$(_cbox_ollama_owner_dir)/docker-compose.yml"
+    CBOX_OLLAMA_MODE=off
+    _cbox_wg_active() { return 0; }
+    _cbox_wg_client_role() { return 0; }
+    COMPOSE=(docker compose -f /fake/docker-compose.yml)
+    SERVICE=cbox
+    _cbox_ollama_owner_compose() { docker "$@"; }
+    _cbox_ollama_reconcile_one_scope() {
+      echo "SCOPE $1 CID=$2 PHASH=$3 OLLAMA=$4" >> "$CALLS"
+      return 0
+    }
+    _cbox_ollama_disconnect_stale_scope_networks() { :; }
+    '"$RECONCILE_FN"'
+    docker() {
+      echo "docker $*" >> "$CALLS"
+      case "$*" in
+        *"cbox.kind=isolated"*) printf "iso-cid-1\tphash1\n" ;;
+        *"-q cbox"*) printf "global-cid\n" ;;
+      esac
+    }
+    _cbox_ollama_reconcile_networks_impl
+  ' reconcilewgonlytest 2>&1
+}
+: > "$RECONCILE_CALLS"
+run_reconcile_wg_only >/dev/null
+grep -q 'SCOPE global CID=global-cid PHASH= OLLAMA=$' "$RECONCILE_CALLS" || _fail "wg-only reconcile must cover the global scope with an empty ollama cid: $(cat "$RECONCILE_CALLS")"
+grep -q 'SCOPE isolated CID=iso-cid-1 PHASH=phash1 OLLAMA=$' "$RECONCILE_CALLS" || _fail "wg-only reconcile must cover isolated scopes with an empty ollama cid: $(cat "$RECONCILE_CALLS")"
+! grep -q 'docker compose.*-q ollama' "$RECONCILE_CALLS" || _fail "with ollama off the reconcile must not ask compose for an ollama container: $(cat "$RECONCILE_CALLS")"
+_ok "reconcile_networks: runs for a wg client machine with local ollama off (the pure consumer), passing an empty ollama cid"
+
+FWD_ENSURE_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_wg_scope_forward_ensure)"
+FWD_STOP_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_wg_scope_forward_stop)"
+SCOPE_IP_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_wg_scope_net_ip)"
+for f in FWD_ENSURE_FN FWD_STOP_FN SCOPE_IP_FN; do
+  [ -n "${!f}" ] || _fail "cannot extract $f"
+done
+
+FWD_CALLS="$TMPBASE/fwd.calls"
+run_fwd_ensure() {
+  local peer="$1" ip="$2"
+  : > "$FWD_CALLS"
+  bash -c '
+    set -u
+    CALLS="'"$FWD_CALLS"'"
+    '"$FWD_ENSURE_FN"'
+    '"$SCOPE_IP_FN"'
+    CBOX_WG_PEER_ADDRESS="'"$peer"'"
+    _cbox_wg_client_forward_port() { printf "11434"; }
+    docker() {
+      echo "docker $*" >> "$CALLS"
+      case "$1" in
+        inspect) printf "%s" "'"$ip"'" ;;
+        exec) return 0 ;;
+      esac
+    }
+    _cbox_wg_scope_forward_ensure wg-cid scopenet
+  ' fwdensuretest 2>&1
+  echo "RC=$?"
+}
+
+out="$(run_fwd_ensure 10.90.0.1/32 172.30.0.2)"
+echo "$out" | grep -q 'RC=0' || _fail "forwarder ensure with a resolvable scope-net address must succeed: $out"
+grep -q 'bind=172.30.0.2,fork,reuseaddr TCP:10.90.0.1:11434' "$FWD_CALLS" || _fail "the forwarder must bind the sidecar's own scope-network address and dial the peer tunnel address on the fixed port: $(cat "$FWD_CALLS")"
+grep -qE 'docker exec -d -- wg-cid /bin/sh -c .*pgrep -f' "$FWD_CALLS" || _fail "the forwarder start must be guarded by a pgrep so a live listener is never doubled: $(cat "$FWD_CALLS")"
+_ok "wg scope forwarder: started inside the sidecar, bound to its scope-network address, dialing the peer tunnel address, idempotent via pgrep"
+
+out="$(run_fwd_ensure 10.90.0.1/32 "")"
+echo "$out" | grep -q 'RC=1' || _fail "no scope-network address yet must be a loud rc=1 (reconcile retries): $out"
+echo "$out" | grep -q 'no address on scopenet' || _fail "the failure must say the sidecar has no address on the network yet: $out"
+_ok "wg scope forwarder: a not-yet-addressed sidecar fails loudly instead of silently starting a dead listener"
+
+out="$(run_fwd_ensure "" 172.30.0.2)"
+echo "$out" | grep -q 'RC=0' || _fail "an empty peer address must be a clean no-op: $out"
+! grep -q 'docker exec' "$FWD_CALLS" || _fail "no peer address, no forwarder: $(cat "$FWD_CALLS")"
+_ok "wg scope forwarder: clean no-op while CBOX_WG_PEER_ADDRESS is unset"
+
+run_fwd_stop() {
+  local ip="$1"
+  : > "$FWD_CALLS"
+  bash -c '
+    set -u
+    CALLS="'"$FWD_CALLS"'"
+    '"$FWD_STOP_FN"'
+    '"$SCOPE_IP_FN"'
+    docker() {
+      echo "docker $*" >> "$CALLS"
+      case "$1" in
+        inspect) printf "%s" "'"$ip"'" ;;
+        exec) return 0 ;;
+      esac
+    }
+    _cbox_wg_scope_forward_stop wg-cid scopenet
+  ' fwdstoptest 2>&1
+  echo "RC=$?"
+}
+
+out="$(run_fwd_stop 172.30.0.2)"
+grep -q "pkill -f 'bind=172.30.0.2,'" "$FWD_CALLS" || _fail "forwarder stop must pkill the listener bound to the scope-network address: $(cat "$FWD_CALLS")"
+_ok "wg scope forwarder: detach kills the per-network listener by its bind address"
+
+run_reconcile_sweep_off() {
+  bash -c '
+    set -u
+    CALLS="'"$RECONCILE_CALLS"'"
+    '"$OWNERDIR_FN"'
+    '"$OWNERNAME_FN"'
+    id() { printf "1000"; }
+    HOME="'"$TMPBASE"'/home-sweepoff"
+    mkdir -p "$(_cbox_ollama_owner_dir)"
+    touch "$(_cbox_ollama_owner_dir)/docker-compose.yml"
+    CBOX_OLLAMA_MODE=off
+    COMPOSE=(docker compose -f /fake/docker-compose.yml)
+    SERVICE=cbox
+    _cbox_ollama_owner_compose() { docker "$@"; }
+    _cbox_ollama_reconcile_one_scope() {
+      echo "SCOPE $1 CID=$2 PHASH=$3 OLLAMA=$4" >> "$CALLS"
+      return 0
+    }
+    _cbox_ollama_disconnect_stale_scope_networks() { :; }
+    '"$RECONCILE_FN"'
+    docker() {
+      case "$*" in
+        *"cbox.kind=isolated"*) printf "iso-cid-1\tphash1\n" ;;
+        *"-q cbox"*) printf "global-cid\n" ;;
+      esac
+    }
+    _cbox_ollama_reconcile_networks_impl
+  ' reconcilesweepofftest 2>&1
+}
+: > "$RECONCILE_CALLS"
+run_reconcile_sweep_off >/dev/null
+grep -q 'SCOPE global CID=global-cid' "$RECONCILE_CALLS" || _fail "with the owner project still rendered, reconcile must enumerate scopes even when both modules are off, so the detach sweep can undo prior attachments: $(cat "$RECONCILE_CALLS")"
+grep -q 'SCOPE isolated CID=iso-cid-1' "$RECONCILE_CALLS" || _fail "the module-off sweep must also cover isolated containers: $(cat "$RECONCILE_CALLS")"
+_ok "reconcile_networks: while the owner project stays rendered, the sweep runs even with ollama and wg both off - turning modules off cannot strand attachments"
+
+run_reconcile_all_off() {
+  bash -c '
+    set -u
+    '"$OWNERDIR_FN"'
+    HOME="'"$TMPBASE"'/home-alloff"
+    CBOX_OLLAMA_MODE=off
+    _cbox_wg_active() { return 1; }
+    _cbox_wg_client_role() { return 1; }
+    '"$RECONCILE_FN"'
+    docker() { echo "DOCKER-TOUCHED"; }
+    _cbox_ollama_reconcile_networks_impl
+    echo "REACHED-END"
+  ' reconcilealloff 2>&1
+}
+out="$(run_reconcile_all_off)"
+echo "$out" | grep -q 'REACHED-END' || _fail "reconcile must return cleanly when the owner project is not rendered: $out"
+! echo "$out" | grep -q 'DOCKER-TOUCHED' || _fail "reconcile must not touch docker while the owner project is not rendered: $out"
+_ok "reconcile_networks: a clean no-op while the owner project is not rendered (nothing can be attached, nothing to sweep)"
 
 echo "PASS: all ollama network checks"

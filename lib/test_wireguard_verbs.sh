@@ -167,11 +167,11 @@ awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q 'Pu
   || _fail "peer config output does not include this node's public key"
 awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q 'Endpoint = ' \
   || _fail "peer config output does not include this node's endpoint"
-awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q 'AllowedIPs = \$paddr' \
-  || _fail "peer config output does not include the peer's own allowed address"
+awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q 'AllowedIPs = ${CBOX_WG_ADDRESS%%/\*}/32' \
+  || _fail "peer config AllowedIPs must carry THIS node's tunnel address as a /32 - the [Peer] block describes this node from the peer's side; emitting the peer's own address produced a config that never routed tunnel traffic"
 awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -Eiq 'privatekey|PrivateKey' \
   || _fail "peer config generate-key path (optional) must exist to test the never-by-default private key path"
-_ok "peer config: prints this node's public key, endpoint, and the peer's allowed address"
+_ok "peer config: prints this node's public key, endpoint, and this node's tunnel address as AllowedIPs"
 
 awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" \
   | awk '/generate-key/,0' | grep -q 'PrivateKey' \
@@ -179,6 +179,11 @@ awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" \
 awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -Eiq 'preferred|preference' \
   || _fail "peer config does not document that the peer generating its own key is preferred"
 _ok "peer config: generating the peer's private key locally is optional (--generate-key) and the docs/output state the peer-generates-its-own-key preference"
+awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q '_cbox_wg_write_secret' \
+  || _fail "peer config --generate-key must write the generated private key to a 0600 file via _cbox_wg_write_secret"
+! awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q 'PrivateKey = \$tmp_priv' \
+  || _fail "peer config --generate-key must never print the raw private key to stdout (it lands in session transcripts and shell history)"
+_ok "peer config --generate-key: the key goes to a 0600 file, never to stdout"
 
 PEER_CONFIG_CMD_FN="$(awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox")"
 [ -n "$PEER_CONFIG_CMD_FN" ] || _fail "cannot extract _cbox_wg_peer_config_cmd from cbox"
@@ -194,15 +199,16 @@ mkdir -p "$CFGHOME2"
   export PATH="$WGBINDIR:$PATH"
   _cbox_wg_ensure_keys
   _cbox_wg_peer_add laptop "$VALID_PUBKEY" "10.90.0.3/32"
-  export CBOX_WG_PUBLISH_ADDR=203.0.113.9 CBOX_WG_LISTEN_PORT=51820 CBOX_WG_KEEPALIVE=25
+  export CBOX_WG_PUBLISH_ADDR=203.0.113.9 CBOX_WG_LISTEN_PORT=51820 CBOX_WG_KEEPALIVE=25 CBOX_WG_ADDRESS=10.90.0.1/24
   _cbox_wg_peer_config_cmd laptop > "$TMPBASE/peerconfig.out" 2>&1
 )
 grep -q "PublicKey = $(cat "$CFGHOME2/.config/cbox/infra/wireguard/publickey")" "$TMPBASE/peerconfig.out" \
   || _fail "peer config live run: output does not carry this node's real public key"
-grep -q 'AllowedIPs = 10.90.0.3/32' "$TMPBASE/peerconfig.out" || _fail "peer config live run: missing the peer's allowed address"
+grep -q 'AllowedIPs = 10.90.0.1/32' "$TMPBASE/peerconfig.out" || _fail "peer config live run: AllowedIPs must be this node's own tunnel address as /32, not the peer's"
+! grep -q 'AllowedIPs = 10.90.0.3/32' "$TMPBASE/peerconfig.out" || _fail "peer config live run: the peer's own address must never appear as AllowedIPs (a peer does not accept packets sourced from itself)"
 grep -q 'Endpoint = 203.0.113.9:51820' "$TMPBASE/peerconfig.out" || _fail "peer config live run: missing this node's endpoint"
 ! grep -qi 'PrivateKey' "$TMPBASE/peerconfig.out" || _fail "peer config live run (no --generate-key): must never print a private key"
-_ok "peer config output (live run): contains the public key, endpoint, and peer allowed address; never a private key when --generate-key is not passed"
+_ok "peer config output (live run): contains the public key, endpoint, and this node's tunnel /32 as AllowedIPs; never a private key when --generate-key is not passed"
 
 for fn in _cbox_wg_status_cmd _cbox_wg_up_cmd _cbox_wg_down_cmd _cbox_wg_keygen_cmd _cbox_wg_peer_add_cmd _cbox_wg_peer_rm_cmd _cbox_wg_peer_list_cmd _cbox_wg_peer_config_cmd; do
   grep -q "^$fn() {" "$INSTALL_DIR/cbox" || _fail "expected implementation function $fn missing"

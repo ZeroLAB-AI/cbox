@@ -286,7 +286,7 @@ echo "$out" | grep -q 'existing-cid' || _fail "the refusal message must name wha
 _ok "adopt: name collision with a container cbox does not own is refused, naming what it found"
 
 grep -q 'ollama) shift; ollama_cmd "\$@";;' "$INSTALL_DIR/cbox" || _fail "ollama verb not wired into the dispatcher"
-grep -q 'ollama {status|up|down|pull <model>|reconcile|gpu-check}' "$INSTALL_DIR/cbox" || _fail "ollama missing from usage text"
+grep -q 'ollama {status|ps|up|down|pull <model>|reconcile|gpu-check}' "$INSTALL_DIR/cbox" || _fail "ollama missing from usage text"
 grep -q 'HUB_ROWS+=("ollama")' "$INSTALL_DIR/cbox" || _fail "ollama row missing from the hub"
 grep -q 'ollama) _hub_ollama_submenu' "$INSTALL_DIR/cbox" || _fail "ollama row not dispatched in the hub"
 _ok "wiring: dispatcher, usage, hub row and hub dispatch all present"
@@ -301,11 +301,56 @@ awk '/^ollama_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q '_cbox_config_in_
   || _fail "ollama_cmd does not refuse to run inside a container"
 _ok "guard: ollama is host-only, mirroring netaccess"
 
-for sub in status up down pull reconcile gpu-check; do
+for sub in status ps up down pull reconcile gpu-check; do
   awk '/^ollama_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q "$sub" \
     || _fail "ollama_cmd case statement missing '$sub'"
 done
-_ok "ollama_cmd recognizes status, up, down, pull, reconcile, and gpu-check"
+_ok "ollama_cmd recognizes status, ps, up, down, pull, reconcile, and gpu-check"
+
+OLLAMA_CMD_BODY="$(awk '/^ollama_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox")"
+echo "$OLLAMA_CMD_BODY" | grep -q '\[ "$sub" != ps \]' \
+  || _fail "ollama ps must be guard-exempt like status (read-only)"
+echo "$OLLAMA_CMD_BODY" | grep -A2 'ps)' | grep -q 'flock -s' \
+  || _fail "ollama ps must take the shared lock, not the exclusive one"
+echo "$OLLAMA_CMD_BODY" | grep -q '"$sub" = reconcile \] && _cbox_wg_active' \
+  || _fail "ollama reconcile must skip the ollama-off guard when wireguard is active (the pure-consumer machine applies its sidecar through this verb)"
+_ok "ollama_cmd: ps is read-only (guard-exempt, shared lock); reconcile passes the guard on a wg-active machine with ollama off"
+
+PS_CMD_FN="$(awk '/^_cbox_ollama_ps_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox")"
+[ -n "$PS_CMD_FN" ] || _fail "cannot extract _cbox_ollama_ps_cmd"
+run_ps_cmd() {
+  local mode="$1" compose_file="$2" cid="$3" state="$4"
+  bash -c '
+    set -u
+    '"$PS_CMD_FN"'
+    _cbox_ollama_owner_dir() { printf "%s" "'"$TMPBASE"'/psdir"; }
+    CBOX_OLLAMA_MODE="'"$mode"'"
+    mkdir -p "'"$TMPBASE"'/psdir"
+    rm -f "'"$TMPBASE"'/psdir/docker-compose.yml"
+    [ "'"$compose_file"'" = yes ] && touch "'"$TMPBASE"'/psdir/docker-compose.yml"
+    _cbox_ollama_owner_compose() { printf "%s\n" "'"$cid"'"; }
+    docker() {
+      case "$1" in
+        inspect) printf "'"$state"'" ;;
+        exec) echo "EXEC $*" ;;
+        stats) echo "STATS $*" ;;
+      esac
+    }
+    _cbox_ollama_ps_cmd
+  ' pscmdtest 2>&1
+  echo "RC=$?"
+}
+out="$(run_ps_cmd off no "" "")"
+echo "$out" | grep -q 'ollama: OFF' || _fail "ps with mode off must report OFF: $out"
+out="$(run_ps_cmd on no "" "")"
+echo "$out" | grep -q 'CONFIG-ONLY' || _fail "ps without a rendered owner must report CONFIG-ONLY: $out"
+out="$(run_ps_cmd on yes "" "")"
+echo "$out" | grep -q 'not running' || _fail "ps without a running container must say so: $out"
+out="$(run_ps_cmd on yes ollama-cid running)"
+echo "$out" | grep -q 'EXEC exec -- ollama-cid ollama ps' || _fail "ps must run 'ollama ps' inside the owner container: $out"
+echo "$out" | grep -q 'STATS' || _fail "ps must append the one-shot container stats line: $out"
+echo "$out" | grep -q 'RC=0' || _fail "a healthy ps must exit 0: $out"
+_ok "_cbox_ollama_ps_cmd: OFF/CONFIG-ONLY/not-running states short-circuit; a running owner gets 'ollama ps' + a stats line"
 
 awk '/^ollama_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -Eq 'flock -x( -w [0-9]+)? 6' \
   || _fail "ollama_cmd does not take an exclusive machine-level lock for state-changing verbs"

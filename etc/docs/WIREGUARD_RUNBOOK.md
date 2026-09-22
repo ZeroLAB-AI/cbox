@@ -347,11 +347,11 @@ Print the peers file: one line per peer, format `name|pubkey|allowed-address`.
 
 ### `cbox wg peer config <name> [--generate-key]`
 
-Print a ready-to-paste `[Peer]` block for the named peer containing this node's public key and endpoint.
+Print a ready-to-paste `[Peer]` block for the named peer containing this node's public key, endpoint, and this node's own tunnel address as the `AllowedIPs` `/32` (the block describes this node from the peer's side).
 
-Without `--generate-key`, no private key is included.
+Without `--generate-key`, no private key is involved.
 
-With `--generate-key`, generates the peer's own private key locally and includes it in the output. Use with caution: the peer's private key will be in the output. The preferred path is for the peer to generate their own key and send you only the public key.
+With `--generate-key`, generates the peer's own private key locally and writes it to a `0600` file (`peer-<name>.key` in the wireguard key directory) instead of printing it - stdout would land in session transcripts and shell history. Move that file to the peer's machine and delete it here. The preferred path remains: the peer generates its own key and sends you only the public key.
 
 ## Design constraints
 
@@ -359,7 +359,7 @@ The sidecar is built to forward exactly one TCP service (ollama) and never route
 
 - The startup script asserts `net.ipv4.ip_forward=0` before bringing the interface up.
 - The startup script asserts every `AllowedIPs` entry is a `/32` (single host).
-- The sidecar never joins any per-scope cbox network; only the ollama service does.
+- The sidecar joins a per-scope cbox network only under `CBOX_WG_CLIENT_ATTACH=on`, and then only as an aliased fixed-destination forwarder hub; it still routes nothing.
 - Two forwarders (server and client, depending on role) listen on fixed addresses and forward to fixed destinations.
 
 A misconfiguration cannot silently turn the sidecar into a router.

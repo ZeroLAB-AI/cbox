@@ -112,6 +112,17 @@ if len(sys.argv) >= 2 and sys.argv[1] == "-z":
         time.sleep(float(control.get("sleep_sec", 10)))
         sys.stdout.write("should not get here\\n")
         sys.exit(0)
+    if mode == "heartbeat":
+        beats = int(control.get("beats", 4))
+        gap = float(control.get("beat_gap_sec", 0.3))
+        beat_path = os.path.join(
+            os.environ.get("HERMES_HOME", ""), "state.db-wal")
+        for _i in range(beats):
+            time.sleep(gap)
+            with open(beat_path, "a") as fh:
+                fh.write("beat\\n")
+        sys.stdout.write("stub-heartbeat-answer\\n")
+        sys.exit(0)
     if mode == "ansi":
         sys.stdout.write("\\x1b[31mhello\\x1b[0m colored\\n")
         sys.exit(0)
@@ -184,6 +195,17 @@ def make_template_home(tmpdir, hardened=True):
     return home
 
 
+def _scandir_denying(blocked):
+    real = os.scandir
+
+    def fake(path):
+        if os.fspath(path) == blocked:
+            raise PermissionError(blocked)
+        return real(path)
+
+    return fake
+
+
 class HermesDelegateUnitTests(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -202,6 +224,7 @@ class HermesDelegateUnitTests(unittest.TestCase):
         os.environ.pop("CBOX_HERMES_MODEL_NAME", None)
         os.environ.pop("CBOX_OLLAMA_CONTEXT_LENGTH", None)
         os.environ.pop("CBOX_HERMES_DELEGATE_TIMEOUT_SEC", None)
+        os.environ.pop("CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC", None)
         os.environ.pop("CBOX_HERMES_DELEGATE_MAX_PROMPT_BYTES", None)
         os.environ.pop("CBOX_HERMES_DELEGATE_MAX_RESPONSE_BYTES", None)
         os.environ.pop(MOD.DEPTH_VAR, None)
@@ -312,6 +335,121 @@ class HermesDelegateUnitTests(unittest.TestCase):
         result = MOD.run_hermes_delegate({"prompt": "hi"})
         self.assertTrue(result["isError"])
         self.assertIn("timed out", result["content"][0]["text"])
+
+    def test_timeout_defaults_leave_room_for_long_local_work(self):
+        self.assertEqual(MOD.DEFAULT_TIMEOUT_SEC, 1800)
+        self.assertEqual(MOD.DEFAULT_IDLE_TIMEOUT_SEC, 900)
+
+    def test_hard_cap_error_names_the_var_and_the_running_generation(self):
+        write_control(self.control_file, mode="sleep", sleep_sec=10)
+        os.environ["CBOX_HERMES_DELEGATE_TIMEOUT_SEC"] = "1"
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        text = result["content"][0]["text"]
+        self.assertIn("wall-clock cap on the whole call", text)
+        self.assertIn("CBOX_HERMES_DELEGATE_TIMEOUT_SEC", text)
+        self.assertIn("still be finishing this generation", text)
+
+    def test_idle_timeout_kills_a_child_that_writes_nothing(self):
+        write_control(self.control_file, mode="sleep", sleep_sec=10)
+        os.environ["CBOX_HERMES_DELEGATE_TIMEOUT_SEC"] = "60"
+        os.environ["CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC"] = "1"
+        started = time.monotonic()
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertTrue(result["isError"])
+        text = result["content"][0]["text"]
+        self.assertIn("stalled", text)
+        self.assertIn("CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC", text)
+        self.assertLess(time.monotonic() - started, 30)
+
+    def test_writes_in_the_ephemeral_home_count_as_progress(self):
+        write_control(self.control_file, mode="heartbeat", beats=6,
+                      beat_gap_sec=0.3)
+        os.environ["CBOX_HERMES_DELEGATE_TIMEOUT_SEC"] = "60"
+        os.environ["CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC"] = "2"
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertFalse(result["isError"], result)
+        self.assertIn("stub-heartbeat-answer", result["content"][0]["text"])
+
+    def test_idle_timeout_zero_disables_the_stall_check(self):
+        write_control(self.control_file, mode="sleep", sleep_sec=10)
+        os.environ["CBOX_HERMES_DELEGATE_TIMEOUT_SEC"] = "1"
+        os.environ["CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC"] = "0"
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertTrue(result["isError"])
+        text = result["content"][0]["text"]
+        self.assertIn("timed out after 1s", text)
+        self.assertNotIn("stalled", text)
+
+    def test_idle_timeout_above_the_hard_cap_is_ignored(self):
+        write_control(self.control_file, mode="sleep", sleep_sec=10)
+        os.environ["CBOX_HERMES_DELEGATE_TIMEOUT_SEC"] = "1"
+        os.environ["CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC"] = "900"
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertTrue(result["isError"])
+        text = result["content"][0]["text"]
+        self.assertIn("timed out after 1s", text)
+        self.assertNotIn("stalled", text)
+        self.assertIn("no-progress check was off for this call", text)
+        self.assertIn("900", text)
+
+    def test_hard_cap_error_stays_quiet_when_the_idle_gate_was_active(self):
+        write_control(self.control_file, mode="sleep", sleep_sec=10)
+        os.environ["CBOX_HERMES_DELEGATE_TIMEOUT_SEC"] = "1"
+        os.environ["CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC"] = "0"
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertNotIn(
+            "no-progress check was off", result["content"][0]["text"])
+
+    def test_newest_mtime_clamps_a_future_timestamp(self):
+        root = os.path.join(self.tmpdir, "future")
+        os.makedirs(root)
+        stamped = os.path.join(root, "seeded")
+        with open(stamped, "w") as fh:
+            fh.write("x")
+        os.utime(stamped, (time.time() + 86400, time.time() + 86400))
+        self.assertLessEqual(MOD.newest_mtime(root), time.time() + 1)
+
+    def test_a_future_seeded_mtime_does_not_defeat_the_idle_gate(self):
+        write_control(self.control_file, mode="heartbeat", beats=6,
+                      beat_gap_sec=0.3)
+        os.environ["CBOX_HERMES_DELEGATE_TIMEOUT_SEC"] = "60"
+        os.environ["CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC"] = "2"
+        future = time.time() + 86400
+        seeded = os.path.join(self.template_home, "config.yaml")
+        os.chmod(self.template_home, 0o755)
+        os.chmod(seeded, 0o644)
+        os.utime(seeded, (future, future))
+        os.chmod(seeded, 0o444)
+        os.chmod(self.template_home, 0o555)
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertFalse(result["isError"], result)
+        self.assertIn("stub-heartbeat-answer", result["content"][0]["text"])
+
+    def test_newest_mtime_skips_a_directory_it_cannot_read(self):
+        root = os.path.join(self.tmpdir, "denied")
+        blocked = os.path.join(root, "blocked")
+        os.makedirs(blocked)
+        sibling = os.path.join(root, "sibling")
+        with open(sibling, "w") as fh:
+            fh.write("x")
+        os.utime(sibling, (1000, 1000))
+        with mock.patch("os.scandir", side_effect=_scandir_denying(blocked)):
+            self.assertEqual(int(MOD.newest_mtime(root)), 1000)
+
+    def test_newest_mtime_walks_subdirectories(self):
+        root = os.path.join(self.tmpdir, "walk")
+        os.makedirs(os.path.join(root, "a", "b"))
+        deep = os.path.join(root, "a", "b", "leaf")
+        with open(deep, "w") as fh:
+            fh.write("x")
+        os.utime(deep, (1000, 1000))
+        self.assertEqual(int(MOD.newest_mtime(root)), 1000)
+        os.utime(deep, (2000, 2000))
+        self.assertEqual(int(MOD.newest_mtime(root)), 2000)
+
+    def test_newest_mtime_survives_an_unreadable_tree(self):
+        self.assertEqual(
+            MOD.newest_mtime(os.path.join(self.tmpdir, "does-not-exist")), 0.0)
 
     def test_ansi_stripped_from_output(self):
         write_control(self.control_file, mode="ansi")

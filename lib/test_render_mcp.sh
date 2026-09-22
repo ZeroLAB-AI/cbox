@@ -10,6 +10,12 @@ _fail() {
   exit 1
 }
 
+while IFS='=' read -r _cbox_env_name _; do
+  case "$_cbox_env_name" in
+    CBOX_*|OLLAMA_*|HERMES_*) unset "$_cbox_env_name" ;;
+  esac
+done < <(env)
+
 _all_names() {
   python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
     "$INSTALL_DIR/etc/mcp/delegates.json" all \
@@ -255,6 +261,7 @@ test_codex_profile_toml_hermes_local_gated_on() {
     export HOME="/home/x"
     export CBOX_WORKSPACES="/zerolab/agent_ecosystem"
     export CBOX_CODEX_MCP=1
+    export CBOX_HERMES=on
     export CBOX_HERMES_DELEGATE=on
     source "$INSTALL_DIR/templates/generators.sh"
     gen_codex_profile_into "$outdir" global ""

@@ -29,6 +29,7 @@ CONSOLE_MODEL_VAR = "CBOX_HERMES_MODEL_NAME"
 MACHINE_BASE_URL_VAR = "CBOX_LOCAL_MODEL_URL"
 MACHINE_MODEL_VAR = "CBOX_LOCAL_MODEL_NAME"
 TIMEOUT_VAR = "CBOX_HERMES_DELEGATE_TIMEOUT_SEC"
+IDLE_TIMEOUT_VAR = "CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC"
 MAX_PROMPT_VAR = "CBOX_HERMES_DELEGATE_MAX_PROMPT_BYTES"
 MAX_RESPONSE_VAR = "CBOX_HERMES_DELEGATE_MAX_RESPONSE_BYTES"
 AUDIT_VAR = "CBOX_HERMES_DELEGATE_AUDIT"
@@ -41,7 +42,9 @@ DISABLED_TOOLSETS_VAR = "CBOX_HERMES_DELEGATE_DISABLED_TOOLSETS"
 
 DEFAULT_BIN = "/opt/hermes/bin/hermes"
 DEFAULT_TEMPLATE_HOME = "/opt/hermes/delegate-home"
-DEFAULT_TIMEOUT_SEC = 300
+DEFAULT_TIMEOUT_SEC = 1800
+DEFAULT_IDLE_TIMEOUT_SEC = 900
+HEARTBEAT_POLL_SEC = 5
 DEFAULT_MAX_PROMPT_BYTES = 32000
 DEFAULT_MAX_RESPONSE_BYTES = 1000000
 DEFAULT_QUEUE_WAIT_SEC = 1500
@@ -189,6 +192,49 @@ def int_env(name, default):
     except ValueError:
         return default
     return val if val > 0 else default
+
+
+def int_env_allow_zero(name, default):
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        val = int(raw)
+    except ValueError:
+        return default
+    return val if val >= 0 else default
+
+
+def newest_mtime(path, now=None):
+    ceiling = time.time() if now is None else now
+    newest = 0.0
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(entry.path)
+                    continue
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            stamp = min(st.st_mtime, ceiling)
+            if stamp > newest:
+                newest = stamp
+    return newest
+
+
+def _reap(proc):
+    _kill_group(proc)
+    try:
+        proc.wait(timeout=KILL_GRACE_SEC)
+    except Exception:
+        pass
 
 
 def hermes_bin():
@@ -576,11 +622,7 @@ def _run_short(argv, env, cwd, timeout_sec):
         while open_fds:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                _kill_group(proc)
-                try:
-                    proc.wait(timeout=KILL_GRACE_SEC)
-                except Exception:
-                    pass
+                _reap(proc)
                 return None, "timed out after %ds" % timeout_sec
             rlist, _, _ = select.select(
                 open_fds, [], [], min(remaining, 1.0))
@@ -621,11 +663,7 @@ def _run_short(argv, env, cwd, timeout_sec):
         return out, None
     finally:
         if proc is not None and proc.poll() is None:
-            _kill_group(proc)
-            try:
-                proc.wait(timeout=KILL_GRACE_SEC)
-            except Exception:
-                pass
+            _reap(proc)
         if proc is not None:
             for fh in (proc.stdout, proc.stderr):
                 try:
@@ -933,6 +971,12 @@ def spawn_hermes(prompt, system, effort=None):
         argv = [hermes_bin(), "-z", full_prompt, "--ignore-rules"]
 
         timeout = int_env(TIMEOUT_VAR, DEFAULT_TIMEOUT_SEC)
+        idle_timeout = int_env_allow_zero(
+            IDLE_TIMEOUT_VAR, DEFAULT_IDLE_TIMEOUT_SEC)
+        idle_dropped = 0
+        if idle_timeout > timeout:
+            idle_dropped = idle_timeout
+            idle_timeout = 0
         max_response = int_env(MAX_RESPONSE_VAR, DEFAULT_MAX_RESPONSE_BYTES)
 
         env = dict(env_base)
@@ -950,24 +994,59 @@ def spawn_hermes(prompt, system, effort=None):
         chunks = []
         total = 0
         truncated = False
-        deadline = time.monotonic() + timeout
+        started = time.monotonic()
+        deadline = started + timeout
+        last_progress = started
+        last_beat = newest_mtime(ephemeral_home) if idle_timeout else 0.0
+        beat_poll_gap = min(
+            HEARTBEAT_POLL_SEC, max(0.2, idle_timeout / 5.0)) if idle_timeout \
+            else 0.0
+        next_beat_poll = started + beat_poll_gap
         open_fds = [proc.stdout, proc.stderr]
         while open_fds:
-            remaining = deadline - time.monotonic()
+            now = time.monotonic()
+            remaining = deadline - now
             if remaining <= 0:
-                _kill_group(proc)
-                try:
-                    proc.wait(timeout=KILL_GRACE_SEC)
-                except Exception:
-                    pass
-                return None, "timed out after %ds" % timeout
-            rlist, _, _ = select.select(
-                open_fds, [], [], min(remaining, 1.0))
+                _reap(proc)
+                dropped = ""
+                if idle_dropped:
+                    dropped = (" The no-progress check was off for this call: "
+                               "%s is %ds, above the cap."
+                               % (IDLE_TIMEOUT_VAR, idle_dropped))
+                return None, (
+                    "timed out after %ds (wall-clock cap on the whole call, "
+                    "not an idle limit - raise %s if the task legitimately "
+                    "needs longer).%s The hermes process was killed here; the "
+                    "local model may still be finishing this generation on "
+                    "the GPU." % (timeout, TIMEOUT_VAR, dropped))
+            if idle_timeout:
+                if now >= next_beat_poll:
+                    next_beat_poll = now + beat_poll_gap
+                    beat = newest_mtime(ephemeral_home)
+                    if beat > last_beat:
+                        last_beat = beat
+                        last_progress = now
+                idle_for = now - last_progress
+                if idle_for >= idle_timeout:
+                    _reap(proc)
+                    return None, (
+                        "stalled: no progress for %ds (nothing written to the "
+                        "delegate's hermes home and no output, while the "
+                        "wall-clock cap of %ds had not yet been reached) - "
+                        "treating this as a hang, not a long task; raise %s "
+                        "or set it to 0 to disable this check. The local "
+                        "model may still be finishing this generation on the "
+                        "GPU." % (int(idle_for), timeout, IDLE_TIMEOUT_VAR))
+            wait = min(remaining, 1.0)
+            if idle_timeout:
+                wait = min(wait, beat_poll_gap)
+            rlist, _, _ = select.select(open_fds, [], [], wait)
             for fh in rlist:
                 chunk = os.read(fh.fileno(), 65536)
                 if not chunk:
                     open_fds.remove(fh)
                     continue
+                last_progress = time.monotonic()
                 if fh is proc.stdout and not truncated:
                     if total + len(chunk) > max_response:
                         chunk = chunk[:max(0, max_response - total)]
@@ -1001,11 +1080,7 @@ def spawn_hermes(prompt, system, effort=None):
     finally:
         release_slot(slot_fd)
         if proc is not None and proc.poll() is None:
-            _kill_group(proc)
-            try:
-                proc.wait(timeout=KILL_GRACE_SEC)
-            except Exception:
-                pass
+            _reap(proc)
         if proc is not None:
             for fh in (proc.stdout, proc.stderr):
                 try:

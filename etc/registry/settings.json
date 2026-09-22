@@ -1308,6 +1308,32 @@
       "validator": null
     },
     {
+      "key": "CBOX_HERMES_DELEGATE_TIMEOUT_SEC",
+      "section": "hermes-delegate",
+      "type": {
+        "kind": "uint-or-empty"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": null,
+      "help": "Wall-clock cap on a single hermes delegate call, in seconds (default 1800s). It governs the whole call, not idle time - a long task is killed at this point even while it is making progress.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC",
+      "section": "hermes-delegate",
+      "type": {
+        "kind": "uint-or-empty"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": null,
+      "help": "Seconds of no progress before a hermes delegate call is treated as hung (default 900s, 0 disables it). Progress means output or a write inside the call's ephemeral hermes home; it is dropped for the call when it exceeds the wall-clock cap. It is a heuristic: one genuinely slow step that writes nothing until it finishes is killed like a hang.",
+      "validator": null
+    },
+    {
       "key": "CBOX_HERMES_DELEGATE_LOCK_DIR",
       "section": "hermes-delegate",
       "type": {
@@ -1678,6 +1704,23 @@
       "export": true,
       "prompt": "setup: wireguard forward table (server role, space-separated listen_port:target_host:target_port entries; empty synthesises the ollama forward when ollama is on)",
       "help": "Server-role TCP forward table. Each entry is listen_port:target_host:target_port; target_host is a docker-service-name (max 63 chars), never a LAN IPv4 literal - this feature forwards to a named peer on the sidecar's own network, not an arbitrary LAN host. Empty means: synthesise the ollama forward alone when CBOX_OLLAMA_MODE=on.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_WG_CLIENT_ATTACH",
+      "section": "wireguard",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: attach cbox sessions to the wireguard client alias (off, on - global session joins the shared infra network, isolated projects each get a private hub-and-spoke network)",
+      "help": "Client-role consumer attach. When on (and CBOX_WG_MODE is client or both), cbox sessions can reach the remote ollama through the wg-remote-ollama alias: the global session container joins the shared infra default network directly, while each isolated project gets its own private scope network with the wireguard sidecar attached as the alias - isolated projects never share a network with each other or with the global session (hub-and-spoke). Applies on 'cbox ollama reconcile' and on every engine start; off detaches on the next reconcile.",
       "validator": null
     },
     {

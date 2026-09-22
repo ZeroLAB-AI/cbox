@@ -10,6 +10,12 @@ _fail() {
   exit 1
 }
 
+while IFS='=' read -r _cbox_env_name _; do
+  case "$_cbox_env_name" in
+    CBOX_*|OLLAMA_*|HERMES_*) unset "$_cbox_env_name" ;;
+  esac
+done < <(env)
+
 _ok() {
   echo "ok: $1"
 }
