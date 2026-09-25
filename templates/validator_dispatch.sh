@@ -65,6 +65,9 @@ _cbox_reg_validate_var_dispatch() {
     CBOX_EGRESS_APPLIED)
       _cbox_val_kind_enum "$val" '0' '1' || return 1
       ;;
+    CBOX_NETACCESS_HOST_ALIASES)
+      _cbox_val_named_host_alias_mode "$val" || return 1
+      ;;
     CBOX_NETACCESS_MODE)
       _cbox_val_kind_enum "$val" 'off' 'socks' || return 1
       ;;
@@ -264,7 +267,7 @@ _cbox_reg_validate_var_dispatch() {
       _cbox_val_named_wg_peer_address_cidr "$val" || return 1
       ;;
     CBOX_WG_KEEPALIVE)
-      _cbox_val_kind_uint "$val" || return 1
+      _cbox_val_kind_uint_range "$val" 0 65535 || return 1
       ;;
     CBOX_WG_FORWARDS)
       _cbox_val_kind_wg_forward_list "$val" || return 1

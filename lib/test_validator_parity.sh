@@ -578,6 +578,15 @@ _new_case CBOX_CODEX_SHIM_TURN_TIMEOUT_SEC 0 accept
 _new_case CBOX_CODEX_SHIM_TURN_TIMEOUT_SEC 3600 accept
 _new_case CBOX_CODEX_SHIM_TURN_TIMEOUT_SEC -5 reject
 
+_new_case CBOX_NETACCESS_HOST_ALIASES off accept
+_new_case CBOX_NETACCESS_HOST_ALIASES auto accept
+_new_case CBOX_NETACCESS_HOST_ALIASES devel.zerolab.sk accept
+_new_case CBOX_NETACCESS_HOST_ALIASES devel.zerolab.sk,api.zerolab.sk accept
+_new_case CBOX_NETACCESS_HOST_ALIASES "" reject
+_new_case CBOX_NETACCESS_HOST_ALIASES "bad name" reject
+_new_case CBOX_NETACCESS_HOST_ALIASES "evil\$(whoami)" reject
+_new_case CBOX_NETACCESS_HOST_ALIASES "devel.zerolab.sk," reject
+
 _new_case CBOX_HERMES_HOOKS off accept
 _new_case CBOX_HERMES_HOOKS on accept
 _new_case CBOX_HERMES_HOOKS bogus reject
@@ -653,7 +662,7 @@ while IFS=$'\t' read -r key val want; do
   fi
 done < "$NEW_CASES_FILE"
 exec 9<&-
-_ok "new-section validators (autoupdate/dns/clipboard/CBOX_NAME/CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_SAFEGUARD_AUTOCONFIRM/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING/CBOX_CODEX_HOOKS/CBOX_CODEX_MODEL/CBOX_CODEX_EFFORT/CBOX_HERMES_HOOKS/CBOX_OLLAMA_CONTEXT_LENGTH/CBOX_OLLAMA_FLASH_ATTENTION/CBOX_OLLAMA_KV_CACHE_TYPE/CBOX_OLLAMA_KEEP_ALIVE/CBOX_LOCAL_MODEL_TIMEOUT_SEC/CBOX_BINS_HEALTH_GATE/CBOX_HERMES_DELEGATE_TIMEOUT_SEC/CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC/CBOX_CODEX_SHIM_TURN_TIMEOUT_SEC): verdicts match intended semantics for $(wc -l < "$NEW_CASES_FILE" | tr -d ' ') cases"
+_ok "new-section validators (autoupdate/dns/clipboard/CBOX_NAME/CBOX_CONTAINER_EXEC_TOOL/CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG/CBOX_SESSION_MULTIPLEX/CBOX_SAFEGUARD_AUTOCONFIRM/CBOX_WG_FORWARDS/CBOX_SESSION_BROKER_MODE/CBOX_SSHD_LISTEN_ADDR/CBOX_SSHD_PORT/CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING/CBOX_CODEX_HOOKS/CBOX_CODEX_MODEL/CBOX_CODEX_EFFORT/CBOX_HERMES_HOOKS/CBOX_OLLAMA_CONTEXT_LENGTH/CBOX_OLLAMA_FLASH_ATTENTION/CBOX_OLLAMA_KV_CACHE_TYPE/CBOX_OLLAMA_KEEP_ALIVE/CBOX_LOCAL_MODEL_TIMEOUT_SEC/CBOX_BINS_HEALTH_GATE/CBOX_HERMES_DELEGATE_TIMEOUT_SEC/CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC/CBOX_CODEX_SHIM_TURN_TIMEOUT_SEC/CBOX_NETACCESS_HOST_ALIASES): verdicts match intended semantics for $(wc -l < "$NEW_CASES_FILE" | tr -d ' ') cases"
 
 PARITY_STREAM="$TMPBASE/parity_stream.nul"
 : > "$PARITY_STREAM"
@@ -703,6 +712,75 @@ if [ -n "$MISSING_COVERAGE" ]; then
 else
   _ok "every registry variable has at least one parity test case"
 fi
+
+GLOB_TESTDIR="$TMPBASE/glob-safety"
+mkdir -p "$GLOB_TESTDIR"
+: > "$GLOB_TESTDIR/example.com"
+GLOB_OUT="$(
+  cd "$GLOB_TESTDIR" && \
+  INSTALL_DIR="$INSTALL_DIR" bash -c '
+    source "$INSTALL_DIR/templates/validator_lib.sh"
+    _cbox_val_named_host_alias_mode "*"
+  '
+)"
+GLOB_RC=$?
+if [ "$GLOB_RC" -eq 0 ]; then
+  _fail "host-alias-mode validator glob-expanded '*' into a real filename instead of rejecting it literally: got '$GLOB_OUT'"
+else
+  _ok "host-alias-mode validator treats a bare glob character literally, does not expand against cwd files"
+fi
+
+PY_RESERVED_FILE="$TMPBASE/py_reserved.txt"
+python3 - "$INSTALL_DIR/lib/cbox_netaccess.py" > "$PY_RESERVED_FILE" << 'PYEOF'
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("cbox_netaccess", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+for name in sorted(mod.HOST_ALIAS_EXCLUDE_EXACT | mod.HOST_ALIAS_RESERVED_NAMES):
+    print(name)
+PYEOF
+
+SH_RESERVED_FILE="$TMPBASE/sh_reserved.txt"
+bash -c '
+  source "'"$INSTALL_DIR"'/templates/validator_lib.sh"
+  for n in $_CBOX_HOST_ALIAS_RESERVED_NAMES; do
+    printf "%s\n" "$n"
+  done
+' | sort > "$SH_RESERVED_FILE"
+sort -o "$PY_RESERVED_FILE" "$PY_RESERVED_FILE"
+
+if diff -u "$PY_RESERVED_FILE" "$SH_RESERVED_FILE" > "$TMPBASE/reserved.diff"; then
+  _ok "host-alias reserved name list: templates/validator_lib.sh mirrors lib/cbox_netaccess.py exactly ($(wc -l < "$PY_RESERVED_FILE" | tr -d ' ') names)"
+else
+  _fail "host-alias reserved name list diverged between validator_lib.sh and cbox_netaccess.py: $(cat "$TMPBASE/reserved.diff")"
+fi
+
+while IFS= read -r reserved_name; do
+  [ -n "$reserved_name" ] || continue
+  OUT="$(
+    INSTALL_DIR="$INSTALL_DIR" NAME="$reserved_name" bash -c '
+      source "$INSTALL_DIR/templates/validator_lib.sh"
+      _cbox_val_named_host_alias_mode "$NAME"
+    '
+  )"
+  RC=$?
+  if [ "$RC" -eq 0 ]; then
+    _fail "host-alias-mode validator accepted reserved name '$reserved_name' as a sole entry: $OUT"
+  fi
+  OUT2="$(
+    INSTALL_DIR="$INSTALL_DIR" NAME="$reserved_name" bash -c '
+      source "$INSTALL_DIR/templates/validator_lib.sh"
+      _cbox_val_named_host_alias_mode "devel.zerolab.sk,$NAME"
+    '
+  )"
+  RC2=$?
+  if [ "$RC2" -eq 0 ]; then
+    _fail "host-alias-mode validator accepted reserved name '$reserved_name' mixed into a longer list: $OUT2"
+  fi
+done < "$PY_RESERVED_FILE"
+_ok "host-alias-mode validator rejects every reserved name, alone and mixed into a longer list"
 
 if [ "$FAIL_COUNT" -eq 0 ]; then
   echo "PASS: all validator parity checks ($CASE_COUNT cases)"

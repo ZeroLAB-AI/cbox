@@ -954,12 +954,34 @@ _cbox_no_proxy_endpoint_unreachable() {
   return 1
 }
 
+_cbox_host_alias_names() {
+  _cbox_netaccess_active || return 0
+  local mode="${CBOX_NETACCESS_HOST_ALIASES:-off}"
+  [ "$mode" != off ] || return 0
+  python3 "$INSTALL_DIR/lib/cbox_netaccess.py" --print-host-alias-names --host-aliases "$mode" 2>/dev/null || true
+}
+
 _cbox_extra_hosts_into() {
+  local tmp="$1" names name wrote=0
+  if [ "${CBOX_HOST_GATEWAY_ALIAS:-off}" = on ] && [ "${CBOX_HOST_ROUTE_MODE:-off}" != off ]; then
+    printf '    extra_hosts:\n' >> "$tmp"
+    printf '      - "host.docker.internal:host-gateway"\n' >> "$tmp"
+    wrote=1
+  fi
+  names="$(_cbox_host_alias_names)"
+  [ -n "$names" ] || return 0
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    [ "$wrote" = 1 ] || { printf '    extra_hosts:\n' >> "$tmp"; wrote=1; }
+    printf '      - "%s:127.0.0.1"\n' "$name" >> "$tmp"
+  done <<< "$names"
+}
+
+_cbox_netaccess_sysctls_into() {
   local tmp="$1"
-  [ "${CBOX_HOST_GATEWAY_ALIAS:-off}" = on ] || return 0
-  [ "${CBOX_HOST_ROUTE_MODE:-off}" != off ] || return 0
-  printf '    extra_hosts:\n' >> "$tmp"
-  printf '      - "host.docker.internal:host-gateway"\n' >> "$tmp"
+  [ -n "$(_cbox_host_alias_names)" ] || return 0
+  printf '    sysctls:\n' >> "$tmp"
+  printf '      - net.ipv4.ip_unprivileged_port_start=0\n' >> "$tmp"
 }
 
 _cbox_proxy_main_networks_into() {
@@ -1113,6 +1135,7 @@ EOF
 EOF
   fi
   _cbox_extra_hosts_into "$tmp"
+  _cbox_netaccess_sysctls_into "$tmp"
   printf '    volumes:\n' >> "$tmp"
   local user_policies_upd="${CBOX_USER_DIR-$HOME/.config/cbox/user}"
   _cbox_clip_mounts_into "$tmp" "$name"
@@ -1256,6 +1279,7 @@ EOF
   if _cbox_netaccess_active; then
     mkdir -p "$INSTALL_DIR/generated/proxy/netmap"
     printf '      - %s/generated/proxy/netmap:/etc/cbox/net:ro\n' "$INSTALL_DIR" >> "$tmp"
+    printf '      - %s/etc/net/host_alias_forwarder.py:/opt/cbox/host_alias_forwarder.py:ro\n' "$INSTALL_DIR" >> "$tmp"
   fi
   if ! _cbox_proxy_active; then
     _cbox_dns_into "$tmp"
@@ -1500,6 +1524,7 @@ EOF
 EOF
   fi
   _cbox_extra_hosts_into "$tmp"
+  _cbox_netaccess_sysctls_into "$tmp"
   printf '    volumes:\n' >> "$tmp"
   local user_policies_upd="${CBOX_USER_DIR-$HOME/.config/cbox/user}"
   _cbox_clip_mounts_into "$tmp" "p$p_hash"
@@ -1670,6 +1695,7 @@ EOF
   if _cbox_netaccess_active; then
     mkdir -p "$eff/proxy/netmap"
     printf '      - %s/proxy/netmap:/etc/cbox/net:ro\n' "$eff" >> "$tmp"
+    printf '      - %s/etc/net/host_alias_forwarder.py:/opt/cbox/host_alias_forwarder.py:ro\n' "$INSTALL_DIR" >> "$tmp"
   fi
   if ! _cbox_proxy_active; then
     _cbox_dns_into "$tmp"
@@ -2031,6 +2057,7 @@ _cbox_is_ipv4_cidr() {
   _cbox_is_ipv4 "$ip" || return 1
   case "$prefix" in
     ""|*[!0-9]*) return 1 ;;
+    0?*) return 1 ;;
   esac
   [ "$prefix" -ge 0 ] && [ "$prefix" -le 32 ]
 }
@@ -2897,6 +2924,7 @@ gen_hooks_dir() {
   _cbox_write "$INSTALL_DIR/generated/hooks/limit_watchdog.py" < "$INSTALL_DIR/etc/hooks/limit_watchdog.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/session_pane_map.py" < "$INSTALL_DIR/etc/hooks/session_pane_map.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/usage_statusline.py" < "$INSTALL_DIR/etc/hooks/usage_statusline.py"
+  _cbox_write "$INSTALL_DIR/generated/hooks/codex_usage_refresh.py" < "$INSTALL_DIR/etc/hooks/codex_usage_refresh.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/cbox_budget.py" < "$INSTALL_DIR/etc/hooks/cbox_budget.py"
   gen_scope_json
 }
@@ -3836,6 +3864,40 @@ _cbox_wg_write_secret() {
   chmod 0600 "$target"
 }
 
+_cbox_wg_peer_keypair_ensure() {
+  local name="$1" allow_reuse="${2:-0}" key_file pub priv
+  key_file="$(_cbox_wg_peer_key_file "$name")"
+  if [ -e "$key_file" ]; then
+    if [ "$allow_reuse" != 1 ]; then
+      echo "cbox: refusing - a key file already exists at $key_file for peer '$name' - remove it yourself first if you really mean to replace it (this would invalidate whatever key was handed to '$name' before)" >&2
+      return 1
+    fi
+    pub="$(wg pubkey < "$key_file" 2>/dev/null)" || { echo "cbox: could not derive the public key from the existing $key_file" >&2; return 1; }
+    [ -n "$pub" ] || { echo "cbox: could not derive the public key from the existing $key_file" >&2; return 1; }
+    printf '%s\n' "$pub"
+    return 0
+  fi
+  _cbox_wg_tools_available || { echo "cbox: wireguard-tools ('wg') not found on this host - cannot generate a key" >&2; return 1; }
+  priv="$(wg genkey)" || { echo "cbox: 'wg genkey' failed - no key was generated or saved" >&2; return 1; }
+  if [ -z "$priv" ]; then
+    echo "cbox: 'wg genkey' produced no output - no key was generated or saved" >&2
+    return 1
+  fi
+  if ! pub="$(printf '%s' "$priv" | wg pubkey)" || [ -z "$pub" ]; then
+    priv=""
+    echo "cbox: 'wg pubkey' failed on the generated key - no key was saved" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$priv" | _cbox_wg_write_secret "$key_file"; then
+    priv=""
+    echo "cbox: failed to save the generated private key to $key_file - the key was NOT saved" >&2
+    return 1
+  fi
+  priv=""
+  printf '%s\n' "$pub"
+  return 0
+}
+
 _cbox_wg_keygen() {
   local dir priv pub
   dir="$(_cbox_wg_dir)"
@@ -3987,6 +4049,40 @@ _cbox_wg_peer_list() {
     fi
     printf '%s\n' "$line"
   done < "$file"
+}
+
+_cbox_wg_peer_collision_check() {
+  local name="$1" addr="$2" pubkey="${3:-}" file line pname paddr ppub
+  if [ -n "${CBOX_WG_PEER_ADDRESS:-}" ] && [ "$addr" = "$CBOX_WG_PEER_ADDRESS" ]; then
+    echo "cbox: refusing - peer allowed address '$addr' is already registered as the legacy CBOX_WG_PEER_ADDRESS remote - a duplicate /32 would let this peer hijack that traffic" >&2
+    return 1
+  fi
+  if [ -n "$pubkey" ] && [ -n "${CBOX_WG_PEER_PUBKEY:-}" ] && [ "$pubkey" = "$CBOX_WG_PEER_PUBKEY" ]; then
+    echo "cbox: refusing - this public key is already registered as the legacy CBOX_WG_PEER_PUBKEY remote" >&2
+    return 1
+  fi
+  file="$(_cbox_wg_peers_file)"
+  [ -f "$file" ] || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in \#*) continue ;; esac
+    pname="$(_cbox_wg_peer_field "$line" 0)"
+    ppub="$(_cbox_wg_peer_field "$line" 1)"
+    paddr="$(_cbox_wg_peer_field "$line" 2)"
+    if [ "$pname" = "$name" ]; then
+      echo "cbox: refusing - a peer named '$name' already exists" >&2
+      return 1
+    fi
+    if [ -n "$pubkey" ] && [ "$ppub" = "$pubkey" ]; then
+      echo "cbox: refusing - this public key is already registered under peer '$pname'" >&2
+      return 1
+    fi
+    if [ "$paddr" = "$addr" ]; then
+      echo "cbox: refusing - peer allowed address '$addr' is already registered under peer '$pname' - a duplicate /32 would let this peer hijack '$pname''s traffic" >&2
+      return 1
+    fi
+  done < "$file"
+  return 0
 }
 
 _cbox_wg_peer_add() {
@@ -4480,4 +4576,219 @@ gen_wireguard_conf_into() {
 
 gen_wireguard_conf() {
   gen_wireguard_conf_into "$(_cbox_wg_dir)"
+}
+
+_cbox_wg_pending_file() {
+  printf '%s/pending' "$(_cbox_wg_dir)"
+}
+
+_cbox_wg_pending_get() {
+  local name="$1" pfile pname paddr
+  pfile="$(_cbox_wg_pending_file)"
+  [ -f "$pfile" ] || return 1
+  while IFS='|' read -r pname paddr; do
+    [ -n "$pname" ] || continue
+    if [ "$pname" = "$name" ]; then
+      printf '%s' "$paddr"
+      return 0
+    fi
+  done < "$pfile"
+  return 1
+}
+
+_cbox_wg_pending_set() {
+  local name="$1" addr="$2" dir pfile tmp found=0 pname paddr
+  dir="$(_cbox_wg_dir)"
+  pfile="$(_cbox_wg_pending_file)"
+  mkdir -p -m 0700 "$dir"
+  tmp="$(mktemp "$dir/.cbox.XXXXXX")"
+  chmod 0600 "$tmp"
+  if [ -f "$pfile" ]; then
+    while IFS='|' read -r pname paddr; do
+      [ -n "$pname" ] || continue
+      if [ "$pname" = "$name" ]; then
+        found=1
+        printf '%s|%s\n' "$name" "$addr" >> "$tmp"
+      else
+        printf '%s|%s\n' "$pname" "$paddr" >> "$tmp"
+      fi
+    done < "$pfile"
+  fi
+  [ "$found" = 1 ] || printf '%s|%s\n' "$name" "$addr" >> "$tmp"
+  mv -f "$tmp" "$pfile"
+  chmod 0600 "$pfile"
+}
+
+_cbox_wg_pending_clear() {
+  local name="$1" dir pfile tmp pname paddr
+  pfile="$(_cbox_wg_pending_file)"
+  [ -f "$pfile" ] || return 0
+  dir="$(_cbox_wg_dir)"
+  tmp="$(mktemp "$dir/.cbox.XXXXXX")"
+  chmod 0600 "$tmp"
+  while IFS='|' read -r pname paddr; do
+    [ -n "$pname" ] || continue
+    [ "$pname" = "$name" ] && continue
+    printf '%s|%s\n' "$pname" "$paddr" >> "$tmp"
+  done < "$pfile"
+  mv -f "$tmp" "$pfile"
+  chmod 0600 "$pfile"
+}
+
+_cbox_wg_used_addrs() {
+  [ -n "${CBOX_WG_ADDRESS:-}" ] && printf '%s\n' "${CBOX_WG_ADDRESS%%/*}"
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    printf '%s\n' "$(_cbox_wg_peer_field "$line" 2)" | cut -d/ -f1
+  done < <(_cbox_wg_peer_list)
+  local pfile pname paddr
+  pfile="$(_cbox_wg_pending_file)"
+  if [ -f "$pfile" ]; then
+    while IFS='|' read -r pname paddr; do
+      [ -n "$paddr" ] || continue
+      printf '%s\n' "$paddr"
+    done < "$pfile"
+  fi
+  return 0
+}
+
+_cbox_ipv4_to_int() {
+  local ip="$1" a b c d
+  IFS=. read -r a b c d <<<"$ip"
+  printf '%s' "$(( (a * 16777216) + (b * 65536) + (c * 256) + d ))"
+}
+
+_cbox_int_to_ipv4() {
+  local n="$1"
+  printf '%s.%s.%s.%s' "$(( (n / 16777216) % 256 ))" "$(( (n / 65536) % 256 ))" "$(( (n / 256) % 256 ))" "$(( n % 256 ))"
+}
+
+_cbox_wg_next_free_addr() {
+  local base="${CBOX_WG_ADDRESS:-}" ip prefix
+  [ -n "$base" ] || { echo "cbox: refusing - CBOX_WG_ADDRESS is not set; cannot allocate a client address" >&2; return 1; }
+  ip="${base%%/*}"
+  prefix="${base#*/}"
+  case "$prefix" in
+    ''|*[!0-9]*) prefix=24 ;;
+  esac
+  if [ "$prefix" -eq 32 ]; then
+    echo "cbox: refusing - CBOX_WG_ADDRESS is a /32 ($base); auto-allocation needs a subnet, e.g. 10.90.0.1/24" >&2
+    return 1
+  fi
+  if [ "$prefix" -lt 16 ]; then
+    echo "cbox: refusing - CBOX_WG_ADDRESS prefix /$prefix is wider than /16; auto-allocation needs a narrower subnet - pass an explicit pubkey and address with 'wg peer add' instead" >&2
+    return 1
+  fi
+  local ip_int hostbits total net_int first last i cand used
+  ip_int="$(_cbox_ipv4_to_int "$ip")"
+  hostbits=$((32 - prefix))
+  total=$((1 << hostbits))
+  net_int=$(( (ip_int / total) * total ))
+  first=$((net_int + 1))
+  last=$((net_int + total - 2))
+  used=" $(_cbox_wg_used_addrs | tr '\n' ' ') "
+  for ((i = first; i <= last; i++)); do
+    cand="$(_cbox_int_to_ipv4 "$i")"
+    case "$used" in
+      *" $cand "*) continue ;;
+    esac
+    printf '%s' "$cand"
+    return 0
+  done
+  echo "cbox: refusing - no free address left in the tunnel subnet $base" >&2
+  return 1
+}
+
+_cbox_wg_detect_lan_ipv4() {
+  ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n1
+}
+
+_cbox_wg_resolve_endpoint() {
+  local explicit="$1" host
+  if [ -n "$explicit" ]; then
+    _cbox_wg_hostport_ok "$explicit" || { echo "cbox: refusing - --endpoint '$explicit' must be host:port" >&2; return 1; }
+    printf '%s' "$explicit"
+    return 0
+  fi
+  if [ -n "${CBOX_WG_PUBLISH_ADDR:-}" ] && [ "${CBOX_WG_PUBLISH_ADDR}" != "0.0.0.0" ]; then
+    printf '%s:%s' "$CBOX_WG_PUBLISH_ADDR" "${CBOX_WG_LISTEN_PORT:-51820}"
+    return 0
+  fi
+  host="$(_cbox_wg_detect_lan_ipv4)"
+  if [ -n "$host" ] && _cbox_is_ipv4 "$host"; then
+    printf '%s:%s' "$host" "${CBOX_WG_LISTEN_PORT:-51820}"
+    return 0
+  fi
+  echo "cbox: refusing - could not determine this node's reachable address (no CBOX_WG_PUBLISH_ADDR, no detected LAN IPv4) - pass --endpoint host:port" >&2
+  return 1
+}
+
+_cbox_wg_token_encode() {
+  local name="$1" pubkey="$2" endpoint="$3" server_addr="$4" client_addr="$5" keepalive="$6" payload
+  payload="$(printf 'name=%s\npubkey=%s\nendpoint=%s\nserver_addr=%s\nclient_addr=%s\nkeepalive=%s\n' \
+    "$name" "$pubkey" "$endpoint" "$server_addr" "$client_addr" "$keepalive")"
+  printf 'cbx1.%s' "$(printf '%s' "$payload" | base64 -w0 | tr '+/' '-_' | tr -d '=')"
+}
+
+_cbox_wg_token_decode() {
+  local token="$1" b64 std rem pad
+  case "$token" in
+    cbx1.*) b64="${token#cbx1.}" ;;
+    *) echo "cbox: refusing - not a cbox wireguard pairing token (expected a cbx1. token)" >&2; return 1 ;;
+  esac
+  case "$b64" in
+    ''|*[!A-Za-z0-9_-]*) echo "cbox: refusing - malformed pairing token" >&2; return 1 ;;
+  esac
+  std="$(printf '%s' "$b64" | tr '_-' '/+')"
+  rem=$(( ${#std} % 4 ))
+  case "$rem" in
+    0) pad="" ;;
+    2) pad="==" ;;
+    3) pad="=" ;;
+    *) echo "cbox: refusing - malformed pairing token (bad length)" >&2; return 1 ;;
+  esac
+  printf '%s%s' "$std" "$pad" | base64 -d 2>/dev/null || { echo "cbox: refusing - malformed pairing token (base64 decode failed)" >&2; return 1; }
+}
+
+_cbox_wg_token_parse() {
+  local payload="$1" line key val
+  local t_name="" t_pubkey="" t_endpoint="" t_server_addr="" t_client_addr="" t_keepalive="" seen=" "
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      *=*) ;;
+      *) echo "cbox: refusing - malformed pairing token line" >&2; return 1 ;;
+    esac
+    key="${line%%=*}"
+    val="${line#*=}"
+    local key_safe
+    key_safe="$(printf '%s' "$key" | tr -cd 'A-Za-z0-9_')"
+    case "$seen" in
+      *" $key "*) echo "cbox: refusing - duplicate key '$key_safe' in pairing token" >&2; return 1 ;;
+    esac
+    seen="$seen$key "
+    case "$key" in
+      name) t_name="$val" ;;
+      pubkey) t_pubkey="$val" ;;
+      endpoint) t_endpoint="$val" ;;
+      server_addr) t_server_addr="$val" ;;
+      client_addr) t_client_addr="$val" ;;
+      keepalive) t_keepalive="$val" ;;
+      *) echo "cbox: refusing - unknown key '$key_safe' in pairing token" >&2; return 1 ;;
+    esac
+  done <<<"$payload"
+  _cbox_wg_peer_name_ok "$t_name" || { echo "cbox: refusing - pairing token name is invalid" >&2; return 1; }
+  _cbox_wg_pubkey_ok "$t_pubkey" || { echo "cbox: refusing - pairing token public key is invalid" >&2; return 1; }
+  _cbox_wg_hostport_ok "$t_endpoint" || { echo "cbox: refusing - pairing token endpoint is invalid" >&2; return 1; }
+  _cbox_wg_peer_allowed_is_single_host "$t_server_addr" || { echo "cbox: refusing - pairing token server address must be a /32" >&2; return 1; }
+  _cbox_wg_peer_allowed_is_single_host "$t_client_addr" || { echo "cbox: refusing - pairing token client address must be a /32" >&2; return 1; }
+  case "$t_keepalive" in
+    ''|*[!0-9]*) echo "cbox: refusing - pairing token keepalive must be a non-negative integer" >&2; return 1 ;;
+  esac
+  if [ "${#t_keepalive}" -gt 5 ] || [ "$t_keepalive" -gt 65535 ]; then
+    echo "cbox: refusing - pairing token keepalive must be 0..65535" >&2
+    return 1
+  fi
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$t_name" "$t_pubkey" "$t_endpoint" "$t_server_addr" "$t_client_addr" "$t_keepalive"
 }

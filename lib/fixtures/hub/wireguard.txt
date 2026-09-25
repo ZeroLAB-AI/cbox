@@ -1,0 +1,10 @@
+cbox wireguard  /home/marek/zerolab/agent_ecosystem  global
+--------------------------------------------------------------------------------
+ s   status
+ u   up
+ d   down
+ a   add client
+ p   add client --plain
+ x   remove client
+ j   join (client)
+ b   back

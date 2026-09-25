@@ -33,6 +33,7 @@ class FakeDocker:
         self.other_containers = {}
         self.connected = []
         self.disconnected = []
+        self.running_ids = []
 
     def network(self, driver, subnet, kind=""):
         labels = {}
@@ -69,7 +70,25 @@ class FakeDocker:
             },
         }
 
+    def add_running_container(self, cid, name, networks, published=None):
+        ports = {}
+        for host_port, container_port, proto, host_ip in (published or []):
+            spec = "%d/%s" % (container_port, proto)
+            ports.setdefault(spec, []).append({"HostIp": host_ip, "HostPort": str(host_port)})
+        self.other_containers[cid] = {
+            "Id": cid,
+            "Config": {"ExposedPorts": {}},
+            "NetworkSettings": {
+                "Networks": {n: {} for n in networks},
+                "Ports": ports,
+            },
+        }
+        self.other_containers[cid]["Name"] = name
+        self.running_ids.append(cid)
+
     def __call__(self, docker_bin, args, timeout=15):
+        if args == ["ps", "-q"]:
+            return "\n".join(self.running_ids) + ("\n" if self.running_ids else "")
         if args[:1] == ["inspect"] and len(args) > 1 and args[1] != self.container_id:
             ids = args[1:]
             result = [self.other_containers[cid] for cid in ids if cid in self.other_containers]
@@ -109,7 +128,7 @@ class NetaccessTests(unittest.TestCase):
         MOD.run = self.original_run
         self.tmp.cleanup()
 
-    def args(self, networks, cidrs=None, scope="list"):
+    def args(self, networks, cidrs=None, scope="list", host_aliases="off", hosts_path=""):
         return argparse.Namespace(
             docker_bin="docker",
             container="a" * 64,
@@ -117,6 +136,8 @@ class NetaccessTests(unittest.TestCase):
             scope=scope,
             network=networks,
             cidr=cidrs or [],
+            host_aliases=host_aliases,
+            hosts_path=hosts_path or MOD.DEFAULT_HOSTS_PATH,
         )
 
     def test_apply_connects_selected_and_renders_routes(self):
@@ -236,7 +257,7 @@ class NetaccessTests(unittest.TestCase):
         MOD.apply(args)
         with open(netmap_out, encoding="ascii") as fh:
             netmap = json.load(fh)
-        self.assertEqual(netmap["version"], 1)
+        self.assertEqual(netmap["version"], 2)
         self.assertEqual(netmap["scope"], "list")
         self.assertEqual(netmap["proxy"], {
             "url": "socks5h://cbox-proxy-internal:1080",
@@ -427,6 +448,233 @@ class NetaccessTests(unittest.TestCase):
     def test_valid_port_spec_rejects_trailing_newline(self):
         self.assertFalse(MOD.valid_port_spec("80/tcp\n"))
         self.assertTrue(MOD.valid_port_spec("80/tcp"))
+
+    def test_parse_etc_hosts_selects_loopback_only_and_excludes_localhost_names(self):
+        hosts_path = os.path.join(self.tmp.name, "hosts")
+        with open(hosts_path, "w") as fh:
+            fh.write(
+                "127.0.0.1 localhost\n"
+                "127.0.0.1 devel.zerolab.sk api.zerolab.sk\n"
+                "::1 localhost ip6-localhost ip6-loopback\n"
+                "::1 other.zerolab.sk\n"
+                "192.168.1.5 lan-only.example.com\n"
+                "# comment 127.0.0.1 commented.example.com\n"
+            )
+        names = MOD.parse_etc_hosts(hosts_path)
+        self.assertEqual(names, ["devel.zerolab.sk", "api.zerolab.sk", "other.zerolab.sk"])
+
+    def test_select_host_alias_names_off_and_auto(self):
+        hosts_path = os.path.join(self.tmp.name, "hosts")
+        with open(hosts_path, "w") as fh:
+            fh.write("127.0.0.1 devel.zerolab.sk\n")
+        self.assertEqual(MOD.select_host_alias_names("off", hosts_path), [])
+        self.assertEqual(MOD.select_host_alias_names("auto", hosts_path), ["devel.zerolab.sk"])
+
+    def test_select_host_alias_names_explicit_list_validated(self):
+        names = MOD.select_host_alias_names("a.example.com,b.example.com")
+        self.assertEqual(names, ["a.example.com", "b.example.com"])
+        with self.assertRaises(ValueError):
+            MOD.select_host_alias_names("bad name")
+        with self.assertRaises(ValueError):
+            MOD.select_host_alias_names("a.example.com,,b.example.com")
+
+    def test_build_host_aliases_maps_published_port_on_granted_network(self):
+        self.fake.add_running_container(
+            "c" * 64, "revproxy", ["project_a"],
+            published=[(443, 443, "tcp", "127.0.0.1")],
+        )
+        result = MOD.build_host_aliases("docker", ["devel.zerolab.sk"], ["project_a"], self.fake.container_id)
+        self.assertEqual(result["names"], ["devel.zerolab.sk"])
+        self.assertEqual(result["ports"]["443"], {
+            "container": "revproxy",
+            "container_port": 443,
+            "network": "project_a",
+        })
+        self.assertEqual(result["skipped"], [])
+
+    def test_build_host_aliases_skips_port_not_on_granted_network(self):
+        self.fake.add_running_container(
+            "c" * 64, "revproxy", ["project_b"],
+            published=[(443, 443, "tcp", "0.0.0.0")],
+        )
+        result = MOD.build_host_aliases("docker", ["devel.zerolab.sk"], ["project_a"], self.fake.container_id)
+        self.assertEqual(result["ports"], {})
+        self.assertEqual(result["skipped"], [])
+        self.assertEqual(result["skipped_not_granted"], 1)
+
+    def test_build_host_aliases_not_granted_does_not_leak_container_identity(self):
+        self.fake.add_running_container(
+            "c" * 64, "secret-unrelated-service", ["project_b"],
+            published=[(9999, 9999, "tcp", "0.0.0.0")],
+        )
+        result = MOD.build_host_aliases("docker", ["devel.zerolab.sk"], ["project_a"], self.fake.container_id)
+        dumped = json.dumps(result)
+        self.assertNotIn("secret-unrelated-service", dumped)
+        self.assertNotIn("9999", dumped)
+        self.assertEqual(result["skipped_not_granted"], 1)
+
+    def test_build_host_aliases_caps_skipped_list(self):
+        for i in range(MOD.MAX_HOST_ALIAS_SKIPPED + 5):
+            self.fake.add_running_container(
+                "%064d" % i, "dns%d" % i, ["project_a"],
+                published=[(9000 + i, 53, "udp", "127.0.0.1")],
+            )
+        result = MOD.build_host_aliases("docker", ["devel.zerolab.sk"], ["project_a"], self.fake.container_id)
+        self.assertEqual(len(result["skipped"]), MOD.MAX_HOST_ALIAS_SKIPPED)
+        self.assertEqual(result["skipped_dropped"], 5)
+
+    def test_status_not_granted_detail_names_the_skipped_container(self):
+        self.fake.add_running_container(
+            "c" * 64, "secret-unrelated-service", ["project_b"],
+            published=[(9999, 9999, "tcp", "0.0.0.0")],
+        )
+        detail = MOD.status_not_granted_detail("docker", ["project_a"], self.fake.container_id)
+        self.assertEqual(len(detail), 1)
+        self.assertEqual(detail[0]["container"], "secret-unrelated-service")
+        self.assertEqual(detail[0]["host_port"], "9999")
+        self.assertEqual(detail[0]["container_port"], 9999)
+        self.assertEqual(detail[0]["networks"], ["project_b"])
+
+    def test_status_not_granted_detail_excludes_granted_containers(self):
+        self.fake.add_running_container(
+            "d" * 64, "granted-service", ["project_a"],
+            published=[(8080, 8080, "tcp", "0.0.0.0")],
+        )
+        detail = MOD.status_not_granted_detail("docker", ["project_a"], self.fake.container_id)
+        self.assertEqual(detail, [])
+
+    def test_status_not_granted_detail_excludes_the_proxy_container_itself(self):
+        self.fake.add_running_container(
+            self.fake.container_id, "cbox-proxy", ["project_b"],
+            published=[(1080, 1080, "tcp", "0.0.0.0")],
+        )
+        detail = MOD.status_not_granted_detail("docker", ["project_a"], self.fake.container_id)
+        self.assertEqual(detail, [])
+
+    def test_status_not_granted_detail_caps_at_64_with_more_marker(self):
+        n = MOD.MAX_NOT_GRANTED_DETAIL + 5
+        for i in range(n):
+            self.fake.add_running_container(
+                "%064d" % i, "svc%d" % i, ["project_b"],
+                published=[(9000 + i, 9000 + i, "tcp", "0.0.0.0")],
+            )
+        detail = MOD.status_not_granted_detail("docker", ["project_a"], self.fake.container_id)
+        self.assertEqual(len(detail), MOD.MAX_NOT_GRANTED_DETAIL + 1)
+        self.assertEqual(detail[-1]["reason"], "5 more")
+        self.assertEqual(detail[-1]["container"], "")
+
+    def test_status_not_granted_detail_sanitizes_container_and_network_names(self):
+        self.fake.add_running_container(
+            "c" * 64, "svc\x00\x07\x1bname\n", ["proj\x01ect_b"],
+            published=[(9999, 9999, "tcp", "0.0.0.0")],
+        )
+        detail = MOD.status_not_granted_detail("docker", ["project_a"], self.fake.container_id)
+        self.assertEqual(len(detail), 1)
+        self.assertEqual(detail[0]["container"], "svc name")
+        self.assertEqual(detail[0]["networks"], ["proj ect_b"])
+        for ch in "\x00\x07\x1b":
+            self.assertNotIn(ch, detail[0]["container"])
+            self.assertNotIn(ch, detail[0]["networks"][0])
+
+    def test_status_not_granted_detail_caps_networks_per_entry_at_16(self):
+        n = MOD.MAX_NETWORKS_PER_ENTRY + 3
+        networks = ["net%02d" % i for i in range(n)]
+        self.fake.add_running_container(
+            "c" * 64, "many-networks-service", networks,
+            published=[(9999, 9999, "tcp", "0.0.0.0")],
+        )
+        detail = MOD.status_not_granted_detail("docker", ["project_a"], self.fake.container_id)
+        self.assertEqual(len(detail), 1)
+        self.assertEqual(len(detail[0]["networks"]), MOD.MAX_NETWORKS_PER_ENTRY + 1)
+        self.assertEqual(detail[0]["networks"][-1], "+3")
+        self.assertEqual(detail[0]["networks"][:-1], sorted(networks)[:MOD.MAX_NETWORKS_PER_ENTRY])
+
+    def test_cap_network_list_no_marker_when_under_limit(self):
+        networks = ["b", "a", "c"]
+        self.assertEqual(MOD.cap_network_list(networks), ["a", "b", "c"])
+
+    def test_build_host_aliases_skips_non_loopback_publish(self):
+        self.fake.add_running_container(
+            "c" * 64, "revproxy", ["project_a"],
+            published=[(443, 443, "tcp", "203.0.113.5")],
+        )
+        result = MOD.build_host_aliases("docker", ["devel.zerolab.sk"], ["project_a"], self.fake.container_id)
+        self.assertEqual(result["ports"], {})
+        self.assertEqual(result["skipped"], [])
+
+    def test_build_host_aliases_skips_non_tcp_publish(self):
+        self.fake.add_running_container(
+            "c" * 64, "dns", ["project_a"],
+            published=[(53, 53, "udp", "127.0.0.1")],
+        )
+        result = MOD.build_host_aliases("docker", ["devel.zerolab.sk"], ["project_a"], self.fake.container_id)
+        self.assertEqual(result["ports"], {})
+        self.assertEqual(len(result["skipped"]), 1)
+        self.assertIn("non-tcp", result["skipped"][0]["reason"])
+
+    def test_build_host_aliases_excludes_proxy_container_itself(self):
+        self.fake.add_running_container(
+            self.fake.container_id, "cbox-proxy", ["project_a"],
+            published=[(443, 443, "tcp", "127.0.0.1")],
+        )
+        result = MOD.build_host_aliases("docker", ["devel.zerolab.sk"], ["project_a"], self.fake.container_id)
+        self.assertEqual(result["ports"], {})
+
+    def test_build_host_aliases_empty_names_skips_docker_entirely(self):
+        result = MOD.build_host_aliases("docker", [], ["project_a"], self.fake.container_id)
+        self.assertEqual(result, {"names": [], "ports": {}, "skipped": [], "skipped_not_granted": 0})
+        self.assertEqual(self.fake.running_ids, [])
+
+    def test_apply_embeds_host_aliases_in_netmap(self):
+        self.fake.add_running_container(
+            "c" * 64, "revproxy", ["project_a"],
+            published=[(443, 443, "tcp", "127.0.0.1")],
+        )
+        args = self.args(["project_a"], host_aliases="devel.zerolab.sk")
+        netmap_out = os.path.join(self.tmp.name, "netmap", "netmap.json")
+        args.netmap_out = netmap_out
+        args.proxy_url = "socks5h://cbox-proxy-internal:1080"
+        MOD.apply(args)
+        with open(netmap_out, encoding="ascii") as fh:
+            netmap = json.load(fh)
+        self.assertEqual(netmap["version"], 2)
+        self.assertEqual(netmap["host_aliases"]["names"], ["devel.zerolab.sk"])
+        self.assertEqual(netmap["host_aliases"]["ports"]["443"]["container"], "revproxy")
+
+    def test_apply_host_aliases_off_yields_empty_section(self):
+        args = self.args(["project_a"])
+        netmap_out = os.path.join(self.tmp.name, "netmap", "netmap.json")
+        args.netmap_out = netmap_out
+        args.proxy_url = "socks5h://cbox-proxy-internal:1080"
+        MOD.apply(args)
+        with open(netmap_out, encoding="ascii") as fh:
+            netmap = json.load(fh)
+        self.assertEqual(netmap["host_aliases"], {"names": [], "ports": {}, "skipped": [], "skipped_not_granted": 0})
+
+    def test_select_host_alias_names_rejects_reserved_names(self):
+        with self.assertRaises(ValueError):
+            MOD.select_host_alias_names("cbox-proxy-internal")
+        with self.assertRaises(ValueError):
+            MOD.select_host_alias_names("host.docker.internal")
+        with self.assertRaises(ValueError):
+            MOD.select_host_alias_names("proxy")
+        with self.assertRaises(ValueError):
+            MOD.select_host_alias_names("cbox")
+        with self.assertRaises(ValueError):
+            MOD.select_host_alias_names("a.example.com,proxy")
+
+    def test_parse_etc_hosts_excludes_reserved_names(self):
+        hosts_path = os.path.join(self.tmp.name, "hosts")
+        with open(hosts_path, "w") as fh:
+            fh.write(
+                "127.0.0.1 cbox-proxy-internal\n"
+                "127.0.0.1 host.docker.internal\n"
+                "127.0.0.1 proxy\n"
+                "127.0.0.1 cbox\n"
+                "127.0.0.1 devel.zerolab.sk\n"
+            )
+        names = MOD.parse_etc_hosts(hosts_path)
+        self.assertEqual(names, ["devel.zerolab.sk"])
 
     def test_netmap_dir_symlink_is_rejected(self):
         target = os.path.join(self.tmp.name, "netmap-target")

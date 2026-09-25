@@ -41,6 +41,7 @@ NAMED_VALIDATORS = {
     "ipv4-list",
     "kernel-lang",
     "codex-model-slug",
+    "host-alias-mode",
 }
 
 NAMED_RESOLVERS = {

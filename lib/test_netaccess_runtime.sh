@@ -299,6 +299,9 @@ printf '%s\n' "$PROXY_BLOCK2B" | grep -qF 'restart: "no"' \
 if grep -qF '/etc/cbox/net' "$YML2B"; then
   fail "netmap mount must not appear when netaccess is off (egress-only)"
 fi
+if grep -qF 'host_alias_forwarder.py' "$YML2B"; then
+  fail "host_alias_forwarder.py mount must not appear when netaccess is off (egress-only)"
+fi
 _ok_render "egress-only compose: proxy restart policy unaffected, no netmap mount without netaccess"
 
 ISOD3="$TMPBASE/isolated-render-netaccess"
@@ -341,6 +344,8 @@ printf '%s\n' "$PROXY_BLOCK3" | grep -qF 'cbox.kind: proxy' \
 grep -qF "$ISOD3/eff/proxy/netmap:/etc/cbox/net:ro" "$YML" \
   || fail "netaccess active must mount <eff>/proxy/netmap read-only at /etc/cbox/net on the main service"
 [ -d "$ISOD3/eff/proxy/netmap" ] || fail "the netmap host directory must be created before compose up, not left to docker to auto-vivify"
+grep -qF "$INSTALL_DIR/etc/net/host_alias_forwarder.py:/opt/cbox/host_alias_forwarder.py:ro" "$YML" \
+  || fail "netaccess active (isolated) must also mount host_alias_forwarder.py, same gate as the netmap mount"
 grep -qF 'if [ -f /run/cbox/internal-ip ]; then ip=$$(cat /run/cbox/internal-ip); elif [ -f /etc/cbox-generated/internal-ip ]; then ip=$$(cat /etc/cbox-generated/internal-ip); fi' "$YML" \
   || fail "healthcheck must prefer /run/cbox/internal-ip, fall back to /etc/cbox-generated/internal-ip"
 _ok_render "netaccess-only compose: internal-scoped proxy alias, alias-based endpoint, no ALL_PROXY, healthcheck probes only the SOCKS port"
@@ -640,7 +645,42 @@ grep -qF -- "-f $gen_dir_empty/sockd.conf" "$FAKE_SOCKD_LOG" || fail "empty targ
 [ "$(cat "$run_dir7/internal-ip" 2>/dev/null)" = "172.20.0.2" ] || fail "fast path with empty targets_spec and a live egress address must still write run_dir/internal-ip"
 echo "ok: sockd-start.sh with empty targets_spec ignores a live egress address that no raw CIDR target needs"
 
+CBOX_NETACCESS_MODE=socks
+CBOX_NETACCESS_APPLIED=1
+CBOX_NETACCESS_SCOPE=list
+CBOX_NETACCESS_NETWORKS="project_a"
+CBOX_NETACCESS_HOST_ALIASES="devel.zerolab.sk,api.zerolab.sk"
+CBOX_HOST_GATEWAY_ALIAS=off
+CBOX_HOST_ROUTE_MODE=off
+
+host_alias_frag="$TMPBASE/host-alias-fragment"
+: > "$host_alias_frag"
+_cbox_extra_hosts_into "$host_alias_frag"
+grep -qF '    extra_hosts:' "$host_alias_frag" || fail "host-alias extra_hosts block header missing"
+grep -qF '      - "devel.zerolab.sk:127.0.0.1"' "$host_alias_frag" || fail "host-alias extra_hosts entry missing for devel.zerolab.sk"
+grep -qF '      - "api.zerolab.sk:127.0.0.1"' "$host_alias_frag" || fail "host-alias extra_hosts entry missing for api.zerolab.sk"
+echo "ok: _cbox_extra_hosts_into renders one extra_hosts entry per selected host-alias name, mapped to 127.0.0.1"
+
+sysctl_frag="$TMPBASE/host-alias-sysctls"
+: > "$sysctl_frag"
+_cbox_netaccess_sysctls_into "$sysctl_frag"
+grep -qF '    sysctls:' "$sysctl_frag" || fail "host-alias sysctls block header missing"
+grep -qF '      - net.ipv4.ip_unprivileged_port_start=0' "$sysctl_frag" || fail "host-alias sysctls entry missing"
+echo "ok: _cbox_netaccess_sysctls_into renders the unprivileged-port sysctl when host aliases are active"
+
+CBOX_NETACCESS_HOST_ALIASES=off
+host_alias_off_frag="$TMPBASE/host-alias-off-fragment"
+: > "$host_alias_off_frag"
+_cbox_extra_hosts_into "$host_alias_off_frag"
+[ -s "$host_alias_off_frag" ] && fail "extra_hosts must render nothing when host aliases and host-gateway alias are both off" || true
+sysctl_off_frag="$TMPBASE/host-alias-off-sysctls"
+: > "$sysctl_off_frag"
+_cbox_netaccess_sysctls_into "$sysctl_off_frag"
+[ -s "$sysctl_off_frag" ] && fail "sysctls must render nothing when host aliases are off" || true
+echo "ok: _cbox_extra_hosts_into and _cbox_netaccess_sysctls_into render nothing when host aliases are off"
+
 CBOX_NETACCESS_MODE=off
 CBOX_NETACCESS_APPLIED=0
+CBOX_NETACCESS_HOST_ALIASES=off
 
 echo "PASS: netaccess runtime rendering"

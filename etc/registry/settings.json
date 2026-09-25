@@ -67,6 +67,18 @@
       "doctor_rows": null
     },
     {
+      "id": "host-aliases",
+      "title": "Host-alias proxy",
+      "description": "Redirect selected host /etc/hosts names (mapped to 127.0.0.1/::1) through the netaccess SOCKS proxy to a docker container publishing a matching host port, so curl https://name works natively inside cbox with no proxy flags. Off by default; requires netaccess to be on to actually forward anything.",
+      "apply_class": "recreate",
+      "profile": "skip",
+      "scope": "project",
+      "dependencies": [],
+      "doctor_rows": [
+        "host-aliases"
+      ]
+    },
+    {
       "id": "netaccess",
       "title": "Container network access",
       "description": "Reach Docker networks through Dante SOCKS; optional host-side exec bridge runs tests only in containers on explicit scope=list networks and never mounts docker.sock into cbox.",
@@ -695,6 +707,20 @@
       "export": false,
       "prompt": null,
       "help": "Internal marker: whether the egress topology has been applied.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_NETACCESS_HOST_ALIASES",
+      "section": "host-aliases",
+      "type": {
+        "kind": "string",
+        "escape_hatch": "host-alias-mode"
+      },
+      "default": "off",
+      "role": "setting",
+      "export": false,
+      "prompt": "setup: host alias names to redirect through the proxy",
+      "help": "off - no host-alias redirection. auto - every name in the host's /etc/hosts mapped to 127.0.0.1 or ::1 (excluding localhost/ip6-* style names). Or a comma-separated explicit list of hostnames. Each selected name resolves to 127.0.0.1 inside the container; an in-container forwarder relays the connection through the netaccess SOCKS proxy to whichever docker container publishes that host port on a network the proxy is granted.",
       "validator": null
     },
     {
@@ -1718,7 +1744,9 @@
       "key": "CBOX_WG_KEEPALIVE",
       "section": "wireguard",
       "type": {
-        "kind": "uint"
+        "kind": "uint-range",
+        "min": 0,
+        "max": 65535
       },
       "default": 25,
       "role": "setting",

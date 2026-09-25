@@ -10,6 +10,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
@@ -47,6 +48,8 @@ DEFAULT_INTERRUPT_GRACE_SEC = 15
 INTERRUPT_GRACE_ENV_VAR = "CBOX_CODEX_SHIM_INTERRUPT_GRACE_SEC"
 
 CODEX_HOME_ENV_VAR = "CODEX_HOME"
+USAGE_DIR_ENV_VAR = "CBOX_USAGE_DIR"
+RATE_LIMIT_READ_TIMEOUT_SEC = 5
 THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 ROLLOUT_SCAN_FILE_LIMIT = 4000
 ROLLOUT_META_READ_CAP = 65536
@@ -95,6 +98,109 @@ def interrupt_grace_sec():
 
 def codex_home():
     return os.environ.get(CODEX_HOME_ENV_VAR) or os.path.expanduser("~/.codex")
+
+
+def usage_dir():
+    d = os.environ.get(USAGE_DIR_ENV_VAR)
+    if d:
+        return os.path.expanduser(d)
+    return os.path.expanduser("~/.claude/cbox-usage")
+
+
+def _usage_safe_chmod_dir(d, mode):
+    try:
+        st = os.lstat(d)
+    except OSError:
+        return
+    if stat.S_ISLNK(st.st_mode):
+        return
+    if st.st_uid != os.geteuid():
+        return
+    try:
+        os.chmod(d, mode)
+    except OSError:
+        pass
+
+
+def _usage_atomic_write(path, payload):
+    d = os.path.dirname(path)
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    _usage_safe_chmod_dir(d, 0o700)
+    fd = None
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".usage.tmp.", dir=d)
+        os.chmod(tmp, 0o600)
+        with os.fdopen(fd, "w") as f:
+            fd = None
+            f.write(json.dumps(payload))
+        os.replace(tmp, path)
+        tmp = None
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _rate_limit_window(entry):
+    if not isinstance(entry, dict):
+        return None
+    used = entry.get("usedPercent")
+    if isinstance(used, bool) or not isinstance(used, (int, float)):
+        used = None
+    resets = entry.get("resetsAt")
+    if isinstance(resets, bool) or not isinstance(resets, (int, float)):
+        resets = None
+    window_minutes = entry.get("windowDurationMins")
+    if isinstance(window_minutes, bool) or not isinstance(window_minutes, (int, float)):
+        window_minutes = None
+    return {
+        "used_percentage": used,
+        "resets_at": resets,
+        "window_minutes": window_minutes,
+    }
+
+
+def codex_usage_snapshot_from_rate_limits(rate_limits, ordinary_usage_allowed=None):
+    if not isinstance(rate_limits, dict):
+        return None
+    five = _rate_limit_window(rate_limits.get("primary"))
+    seven = _rate_limit_window(rate_limits.get("secondary"))
+    if five is None and seven is None:
+        return None
+    snapshot = {
+        "source": "codex",
+        "captured_at": time.time(),
+        "five_hour": five,
+        "seven_day": seven,
+    }
+    plan_type = rate_limits.get("planType")
+    if isinstance(plan_type, str) and plan_type:
+        snapshot["plan_type"] = plan_type
+    reached_type = rate_limits.get("rateLimitReachedType")
+    if isinstance(reached_type, str) and reached_type:
+        snapshot["rate_limit_reached_type"] = reached_type[:128]
+    if isinstance(ordinary_usage_allowed, bool):
+        snapshot["ordinary_usage_allowed"] = ordinary_usage_allowed
+    return snapshot
+
+
+def write_codex_usage_snapshot(rate_limits, ordinary_usage_allowed=None):
+    snapshot = codex_usage_snapshot_from_rate_limits(rate_limits, ordinary_usage_allowed)
+    if snapshot is None:
+        return False
+    try:
+        _usage_atomic_write(os.path.join(usage_dir(), "codex.json"), snapshot)
+    except Exception:
+        return False
+    return True
 
 
 def _rollout_field_from_result(result):
@@ -676,6 +782,7 @@ class CodexBackend:
         self.thread_rollout = {}
         self.thread_incarnation = {}
         self.incarnation = 0
+        self.rate_limit_refresh_lock = threading.Lock()
         self.reader_thread = None
         self._spawn_cv = threading.Condition()
         self._spawn_request = None
@@ -1017,6 +1124,38 @@ class CodexBackend:
             return "no_confirmation"
         return "confirmed"
 
+    def capture_rate_limits(self, rate_limits, ordinary_usage_allowed=None):
+        try:
+            ok = write_codex_usage_snapshot(rate_limits, ordinary_usage_allowed)
+        except Exception:
+            ok = False
+        self.journal("rate_limits_captured" if ok else "rate_limits_capture_skipped")
+
+    def refresh_rate_limits_once(self):
+        if not self.rate_limit_refresh_lock.acquire(blocking=False):
+            return
+        try:
+            try:
+                result = self.request(
+                    "account/rateLimits/read", None,
+                    timeout=RATE_LIMIT_READ_TIMEOUT_SEC,
+                )
+            except (BackendRpcError, BackendTimeout) as exc:
+                self.journal("rate_limits_read_failed", error=str(exc))
+                return
+            except Exception as exc:
+                self.journal("rate_limits_read_failed", error=str(exc))
+                return
+            rate_limits = result.get("rateLimits") if isinstance(result, dict) else None
+            ordinary_usage_allowed = (
+                result.get("ordinaryUsageAllowed") if isinstance(result, dict) else None
+            )
+            if not isinstance(ordinary_usage_allowed, bool):
+                ordinary_usage_allowed = None
+            self.capture_rate_limits(rate_limits, ordinary_usage_allowed)
+        finally:
+            self.rate_limit_refresh_lock.release()
+
     def _handle_server_request(self, msg):
         method = msg.get("method")
         rid = msg.get("id")
@@ -1044,6 +1183,15 @@ class CodexBackend:
         })
 
     def _handle_notification(self, method, params):
+        if method == "account/rateLimits/updated":
+            rate_limits = params.get("rateLimits") if isinstance(params, dict) else None
+            ordinary_usage_allowed = (
+                params.get("ordinaryUsageAllowed") if isinstance(params, dict) else None
+            )
+            if not isinstance(ordinary_usage_allowed, bool):
+                ordinary_usage_allowed = None
+            self.capture_rate_limits(rate_limits, ordinary_usage_allowed)
+            return
         if method == "turn/completed":
             tid = params.get("threadId")
             turn = params.get("turn")
@@ -1484,6 +1632,7 @@ class Relay:
                 "thread/start", thread_params, timeout=THREAD_START_TIMEOUT_SEC,
             )
         except (BackendRpcError, BackendTimeout) as exc:
+            self._schedule_rate_limit_refresh()
             if rid is not None:
                 self.reply_error(rid, -32000, "codex_mcp_shim: %s" % exc)
             return
@@ -1600,11 +1749,19 @@ class Relay:
                     return
                 self.backend.mark_thread_live(tid, cwd, resume_rollout_hint)
         except (BackendRpcError, BackendTimeout) as exc:
+            self._schedule_rate_limit_refresh()
             if rid is not None:
                 self.reply_error(rid, -32000, "codex_mcp_shim: %s" % exc)
             return
 
         self._finish_turn(rid, tid, prompt, token)
+
+    def _schedule_rate_limit_refresh(self):
+        if self.backend.rate_limit_refresh_lock.acquire(blocking=False):
+            self.backend.rate_limit_refresh_lock.release()
+            threading.Thread(
+                target=self.backend.refresh_rate_limits_once, daemon=True,
+            ).start()
 
     def _finish_turn(self, rid, thread_id, prompt, token):
         if rid is not None and self.was_cancelled(rid):
@@ -1620,6 +1777,7 @@ class Relay:
                 cancelled_check=self.was_cancelled,
             )
             duration = time.time() - started
+            self._schedule_rate_limit_refresh()
             cancelled_after = rid is not None and self.was_cancelled(rid)
             outcome = "cancelled" if cancelled_after else _classify_call_outcome(err)
             shim_audit(

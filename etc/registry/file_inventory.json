@@ -92,6 +92,10 @@
       "layer": "template-generating-container-content",
       "purpose": "copied into generated/hooks, staged into container claude hooks; reads ~/.claude/cbox-usage/{claude,codex}.json and reports per-window usage metrics (used_percentage, resets_at, elapsed_fraction, pace, age, stale) via `metrics` CLI subcommand"
     },
+    "etc/hooks/codex_usage_refresh.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "one-shot background refresher spawned by usage_statusline.py when ~/.claude/cbox-usage/codex.json is missing or older than 60 minutes; skips silently when codex is not installed or has no auth.json, single-flights via a lock file (codex_refresh.lock, stale after 30s), spawns `codex app-server` under a ~20s wall-clock cap, does the initialize/account/rateLimits/read handshake, and writes codex.json through codex_mcp_shim.py's write_codex_usage_snapshot; NOT YET WIRED into generators.sh's _cbox_write list (needs a line alongside usage_statusline.py/cbox_budget.py to ship into generated/hooks)"
+    },
     "etc/hooks/commit_guard.py": {
       "layer": "template-generating-container-content",
       "purpose": "copied into generated/hooks, staged into container claude hooks"
@@ -146,7 +150,7 @@
     },
     "etc/hooks/usage_statusline.py": {
       "layer": "template-generating-container-content",
-      "purpose": "copied into generated/hooks, staged into container claude hooks; wired as statusLine command, reads CC's rate_limits stdin JSON, atomically writes ~/.claude/cbox-usage/claude.json, prints the short usage line"
+      "purpose": "copied into generated/hooks, staged into container claude hooks; wired as statusLine command, renders `[profile] claude: r5h%/r7d% | codex: r5h%/r7d% | hermes: state | pace: b` (all remaining-quota percentages, each segment omitted when its data is missing, narrow terminals drop pace then hermes then the 7d numbers using a columns/terminal_width stdin field or $COLUMNS); reads CC's rate_limits stdin JSON and atomically writes ~/.claude/cbox-usage/claude.json; codex segment reads ~/.claude/cbox-usage/codex.json (stale marker past 60min) and fire-and-forget spawns codex_usage_refresh.py (single-flight, cooldown via codex_refresh_attempt.json, opt-out CBOX_CODEX_USAGE_REFRESH=off) when that snapshot is missing or stale; hermes segment is a non-blocking flock probe of CBOX_HERMES_DELEGATE_LOCK_DIR slot files plus a bounded tail scan of CBOX_HERMES_DELEGATE_RUNS_DIR run records (start time from the run id's own timestamp prefix, duration from summary.json started/ended) for a median-based ~Nmin estimate, independent of the hermes.json reachability cache cbox_budget.hermes_state()/agent_label_guard.py consume; pace segment is cbox_budget.budget_for_family(\"claude\")'s b value, rendering only, math untouched"
     },
     "etc/host/90-cbox-net-refresh": {
       "layer": "host",
@@ -158,7 +162,7 @@
     },
     "etc/mcp/codex_mcp_shim.py": {
       "layer": "template-generating-container-content",
-      "purpose": "_cbox_write copies verbatim into generated/hooks/codex_mcp_shim.py, an in-container MCP relay"
+      "purpose": "_cbox_write copies verbatim into generated/hooks/codex_mcp_shim.py, an in-container MCP relay; also captures the codex backend's account/rateLimits/updated notifications and issues one account/rateLimits/read after each completed turn (single-flight, 5s timeout, failures journalled and swallowed), atomically writing ~/.claude/cbox-usage/codex.json (0700 dir/0600 file) for cbox_budget.py and usage_statusline.py to read"
     },
     "etc/mcp/container_exec_mcp.py": {
       "layer": "template-generating-container-content",
@@ -214,7 +218,7 @@
     },
     "lib/cbox_hub.py": {
       "layer": "host",
-      "purpose": "the H1 python hub core (docs/MULTIPLATFORM_DESIGN.md track H); invoked host-side by cbox's bare-invocation dispatch arm when python3 is present and the file py_compiles, reads scope context from 'cbox __hub_context' and renders/dispatches the interactive crossroads; falls back to the existing bash hub() otherwise"
+      "purpose": "the hub core (docs/SETUP_HUB_DESIGN.md section 3, increment 1); invoked host-side by cbox bare-invocation dispatch when python3 is present and the file py_compiles, reads scope context from cbox __hub_context, orchestrates cbox_hub_ui (RawKeys/LineKeys input) and cbox_hub_screens (main + submenu renderers) and dispatches every action as an existing CLI verb subprocess; falls back to the bash hub() otherwise"
     },
     "lib/cbox_settings.py": {
       "layer": "host",
@@ -227,6 +231,10 @@
     "lib/cbox_session_bridge.py": {
       "layer": "container",
       "purpose": "mounted into the container at /opt/cbox/cbox_session_bridge.py:ro (generators.sh:987,1340), executed inside the container by entrypoint.sh"
+    },
+    "etc/net/host_alias_forwarder.py": {
+      "layer": "container",
+      "purpose": "mounted into the container at /opt/cbox/host_alias_forwarder.py:ro when netaccess is active (generators.sh), started by entrypoint.sh's _host_alias_forwarder_start and executed inside the container: listens on 127.0.0.1 per host-alias port from netmap.json's host_aliases.ports and relays each connection through the netaccess SOCKS proxy via a domain-name CONNECT"
     },
     "lib/cbox_session_nofollow.py": {
       "layer": "host",
@@ -271,6 +279,18 @@
     "lib/test_apply_change_lifecycle.sh": {
       "layer": "test",
       "purpose": "setup apply_change lifecycle: for every apply action (recreate, restart, topology, rebuild) asserts setup never runs docker compose up/build and never builds or starts a container - it only offers to stop an already-running container (cbox down --force) for the global or, in isolated mode, the current project scope, and otherwise notes that the change applies on the next cbox run"
+    },
+    "lib/test_default_preset_mode.sh": {
+      "layer": "test",
+      "purpose": "asserts default_preset_set's CBOX_MODE matches the registry default (global) - isolated mode is opt-in per project setup, never the machine-wide default"
+    },
+    "lib/test_gen_hooks_dir_deploy.sh": {
+      "layer": "test",
+      "purpose": "asserts gen_hooks_dir deploys etc/hooks/codex_usage_refresh.py (and keeps deploying usage_statusline.py) into generated/hooks"
+    },
+    "lib/test_run_egress_lockdown_gate.sh": {
+      "layer": "test",
+      "purpose": "asserts cbox run applies a configured egress/netaccess lockdown exactly once, only after login credentials exist for the engine being run (mount and volume mode, global and isolated scope), and never re-applies once marked applied"
     },
     "lib/test_ask_claude_fallback.py": {
       "layer": "test",
@@ -317,6 +337,10 @@
       "purpose": "host-side test harness under the lib/test_* suite"
     },
     "lib/test_cbox_net_mcp.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_host_alias_forwarder.py": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
@@ -382,7 +406,11 @@
     },
     "lib/test_codex_mcp_shim.py": {
       "layer": "test",
-      "purpose": "host-side test harness under the lib/test_* suite"
+      "purpose": "host-side test harness under the lib/test_* suite; also covers codex.json rate-limit capture: snapshot shape vs cbox_budget's schema, atomic write, symlink-safe replace, post-call single-flight read, account/rateLimits/updated notification capture, capture failures never breaking the delegate call"
+    },
+    "lib/test_codex_usage_refresh.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite; codex_usage_refresh.py auth/install gating, successful/failed/exception-raising probe capture via codex_mcp_shim.py's writer, single-flight lock file acquire/release/contention"
     },
     "lib/test_conf_manifest.sh": {
       "layer": "test",
@@ -482,7 +510,7 @@
     },
     "lib/test_usage_statusline.py": {
       "layer": "test",
-      "purpose": "host-side test harness under the lib/test_* suite; usage_statusline.py stdin handling, atomic claude.json write and permissions, printed line, ISO/epoch resets_at"
+      "purpose": "host-side test harness under the lib/test_* suite; usage_statusline.py stdin handling, atomic claude.json write and permissions, ISO/epoch resets_at, the claude/codex/hermes/pace/profile segment renderer (fresh, stale, partial, missing), narrow-width drop order (pace, then hermes, then 7d), hermes idle/estimate/no-history/overdue via lock-file and run-record fixtures, and the codex_usage_refresh.py spawn trigger (disabled, no-binary, fresh-skip, cooldown)"
     },
     "lib/test_cbox_budget.py": {
       "layer": "test",
@@ -664,6 +692,10 @@
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
+    "lib/test_wireguard_pairing.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
     "lib/test_wireguard_render.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
@@ -695,6 +727,14 @@
     "templates/validator_lib.sh": {
       "layer": "host",
       "purpose": "sourced by cbox/setup.sh on the host"
+    },
+    "lib/cbox_hub_ui.py": {
+      "layer": "host",
+      "purpose": "input framework for the python hub (docs/SETUP_HUB_DESIGN.md section 3): Action record, RawKeys (termios single-key, used only on a real TTY with TERM!=dumb, working termios, and CBOX_HUB_PLAIN unset) and LineKeys (numbered/typed line fallback, forced when CBOX_HUB_PLAIN=1 or raw mode is unavailable), selection and confirm() helpers; imported only by lib/cbox_hub.py and lib/cbox_hub_screens.py"
+    },
+    "lib/cbox_hub_screens.py": {
+      "layer": "host",
+      "purpose": "pure render(snapshot) -> (text, actions) screen builders for the python hub (docs/SETUP_HUB_DESIGN.md section 3): main screen plus sessions/network/ollama/wireguard/maintenance submenus, each Action carrying the exact CLI argv it runs (or an argv_builder for typed input) and its confirmation requirement; imported only by lib/cbox_hub.py"
     }
   },
   "generated_by": "step 0 of the multiplatform migration (docs/MULTIPLATFORM_DESIGN.md section 4)",

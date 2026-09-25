@@ -29,7 +29,39 @@ Both machines need:
 
 None of this has been executed live from the build environment, so a live test of end-to-end model inference over the tunnel is not confirmed.
 
-## Machine A setup (server role - sharing this machine's ollama)
+## Quick start
+
+Pair a cbox client: three pastes total, keys never handled by hand, and no private key is ever printed.
+
+1. On the server (Machine A):
+
+   ```bash
+   cbox wg server add-client pc2
+   ```
+
+   This turns on the server role if needed (default tunnel address `10.90.0.1/24`), runs the up path, reserves the next free tunnel address for `pc2`, and prints one line: `cbox wg client join <token>`. The token holds only public data (server public key, endpoint, both tunnel addresses). The endpoint is the detected LAN IPv4 of A unless `--endpoint HOST:PORT` is given.
+
+2. On the client (Machine B): paste that line. It configures the client role, generates B's own key, runs the up path, and prints one line: `cbox wg server add-client pc2 <pubkey>`. It then waits up to 180 s for the handshake and tests the remote ollama.
+
+3. Back on the server: paste that line. B is accepted, and B's waiting check then reports OK. cbox sessions on B reach A's ollama at `http://wg-remote-ollama:11434` (a project needs `CBOX_WG_CLIENT_ATTACH=on`).
+
+### Client without cbox (e.g., Windows WireGuard app)
+
+On A run `cbox wg server add-client pcb --plain`. It prints a ready WireGuard config whose `PrivateKey` line points to a key file saved on A (that key is never printed). Move that file's content to the client, import the config, then test:
+
+```bash
+curl http://10.90.0.1:11434/api/tags
+```
+
+### Internet access
+
+The router must forward UDP 51820 to A, and the `add-client` call should use `--endpoint HOST:PORT` with a public IP or DDNS name instead of the LAN address.
+
+## Manual setup (advanced)
+
+The quick start above covers the common case; the step-by-step sections below are for manual control over each piece.
+
+### Machine A setup (server role - sharing this machine's ollama)
 
 ### Step 1: Enable cbox-managed ollama on Machine A
 
@@ -118,7 +150,7 @@ cbox wg status
 
 Should now show the peer registered.
 
-## Machine B setup (client role - consuming Machine A's ollama)
+### Machine B setup (client role - consuming Machine A's ollama)
 
 ### Step 1: Generate the WireGuard keypair on Machine B
 
@@ -207,6 +239,33 @@ You should see the list of models available on Machine A's ollama. If the endpoi
 - Machine B's `cbox wg status` - is the sidecar ACTIVE and is the peer connection timestamp recent?
 - Network connectivity: can you ping the tunnel IP from Machine A to B and vice versa? (Packet loss is OK; WireGuard handles it.)
 - Firewall rules: does the UDP listen port on Machine A allow inbound traffic from Machine B?
+
+### Plain WireGuard client on Machine B (no cbox)
+
+Machine B does not need cbox to consume A's ollama; any WireGuard client works.
+
+1. On Machine B, generate a keypair in the WireGuard app or on the command line:
+
+   ```bash
+   wg genkey | tee privatekey | wg pubkey
+   ```
+
+2. Send the public key to Machine A (out-of-band).
+
+3. On Machine A, register the peer and generate its config:
+
+   ```bash
+   cbox wg peer add pcb <pubkey> 10.90.0.2/32
+   cbox wg peer config pcb
+   ```
+
+4. Paste the output into the client on Machine B and put the private key on the `PrivateKey` line.
+
+5. Once connected, test from Machine B - the server forwarder listens on A's tunnel address, port 11434:
+
+   ```bash
+   curl http://10.90.0.1:11434/api/tags
+   ```
 
 ## Switching roles or disabling
 
@@ -328,6 +387,23 @@ When ACTIVE:
 
 Generate or confirm the keypair at `~/.config/cbox/infra/wireguard/{privatekey,publickey}`.
 
+### `cbox wg up`
+
+Turn WireGuard on for any role (server, client, both). It checks prerequisites first: installs wireguard-tools via the detected package manager with sudo, loads the `tun` module with `sudo modprobe tun`, and for the server role offers to open the UDP port in ufw or firewalld. Every sudo action asks y/N first; `--yes` skips the question; without a terminal and without `--yes` it prints the exact command to run instead. A declined firewall rule is only a warning. Then keys and the sidecar start as before. `cbox wg down` stops it.
+
+### `cbox wg server add-client <name> [<pubkey>] [--endpoint HOST:PORT] [--plain] [--yes]`
+
+Pair a client with three pastes total, no keys handled by hand, and no private key ever printed.
+
+- Without `<pubkey>`: turns on the server role if needed (default tunnel address `10.90.0.1/24`), runs the up path, reserves the next free tunnel address for `<name>`, and prints one line `cbox wg client join <token>`. The token holds only public data (server public key, endpoint, both tunnel addresses). The endpoint is the detected LAN IPv4 of this host unless `--endpoint HOST:PORT` is given; for internet access use a public IP or DDNS name there (and the router must forward the UDP port to this host).
+- With `<pubkey>`: accepts the client's public key under `<name>` (the line a client prints after `cbox wg client join <token>`). The client's waiting check (up to 180 s) then reports OK. cbox sessions on the client reach this host's ollama at `http://wg-remote-ollama:11434` (a project on the client needs `CBOX_WG_CLIENT_ATTACH=on`).
+- `--plain`: instead of a join line, prints a ready WireGuard config for a client without cbox (for example the Windows WireGuard app) whose `PrivateKey` line points to a key file saved on this host (that key is never printed); move the file's content to the client, import the config, then test `curl http://10.90.0.1:11434/api/tags`.
+- `--yes`: skips the y/N question on every sudo action in the up path.
+
+### `cbox wg client join <token> [--yes]`
+
+Run on the client machine: paste the line a server printed from `cbox wg server add-client <name>`. It configures the client role, generates the client's own key, runs the up path, and prints one line `cbox wg server add-client <name> <pubkey>` to paste back on the server. It then waits up to 180 s for the handshake and tests the remote ollama. `--yes` skips the y/N question on every sudo action in the up path; it also skips the pairing token confirmation prompt itself and, without asking, replaces an already-configured `CBOX_WG_PEER_PUBKEY` with the token's public key - only pass it once you trust the token's source.
+
 ### `cbox wg peer add <name> <pubkey> <address/32>`
 
 Register a peer. Validates:
@@ -347,7 +423,7 @@ Print the peers file: one line per peer, format `name|pubkey|allowed-address`.
 
 ### `cbox wg peer config <name> [--generate-key]`
 
-Print a ready-to-paste config for the named peer: `[Interface] Address = <the peer's own tunnel address>`, then `[Peer]` with this node's public key, this node's own tunnel address as the `AllowedIPs` `/32` (the block describes this node from the peer's side), and an `Endpoint` line only when the peer is server-role (it dials this node) - a client-role peer (added with its own `--endpoint`) gets no `Endpoint` line, since this node dials it instead. If `CBOX_WG_PUBLISH_ADDR` is empty or `0.0.0.0`, `Endpoint` is a placeholder rather than an address nobody can reach.
+Print a ready-to-paste config for the named peer: `[Interface] Address = <the peer's own tunnel address>`, then `[Peer]` with this node's public key, this node's own tunnel address as the `AllowedIPs` `/32` (the block describes this node from the peer's side), and an `Endpoint` line only when the peer is server-role (it dials this node) - a client-role peer (added with its own `--endpoint`) gets no `Endpoint` line, since this node dials it instead. If `CBOX_WG_PUBLISH_ADDR` is empty or `0.0.0.0`, plain `peer config` keeps a placeholder Endpoint (`<this node's reachable address>:<port>`) rather than guessing; a peer over the internet must use this host's public IP or DDNS name instead. LAN-IPv4 auto-detection with a fallback to that placeholder only happens on the `add-client`/`--plain` pairing path, not on plain `peer config`.
 
 Without `--generate-key`, no private key is involved; `[Interface]` notes that the peer uses its own privately generated key.
 

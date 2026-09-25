@@ -8,7 +8,7 @@ trap 'rm -rf "$TMPBASE"' EXIT
 unset CBOX_CLAUDE_TARGET CBOX_CODEX_VERSION CBOX_CODEX_TARGET CBOX_HERMES CBOX_HERMES_VERSION \
   CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME CBOX_BINS_SCOPE \
   CBOX_BINS_HEALTH_GATE CBOX_AUTOUPDATE CBOX_AUTOUPDATE_TTL_HOURS CBOX_EGRESS_MODE \
-  CBOX_LIMIT_AUTORESUME CBOX_SESSION_MULTIPLEX CBOX_SAFEGUARD_AUTOCONFIRM
+  CBOX_LIMIT_AUTORESUME CBOX_SESSION_MULTIPLEX CBOX_SAFEGUARD_AUTOCONFIRM CBOX_HUB_PLAIN
 
 _fail() {
   echo "FAIL: $1" >&2
@@ -73,38 +73,41 @@ run_pty() {
       script -qec "$(printf '%q' "$INSTALL_DIR/cbox")" /dev/null ) < "$input" > "$logfile" 2>&1
 }
 
-IN_Q="$TMPBASE/in_q"
-printf 'q\n' > "$IN_Q"
-LOG_Q="$TMPBASE/log_q"
-rc=0
-run_pty "$IN_Q" "$LOG_Q" || rc=$?
-[ "$rc" = 0 ] || _fail "PTY hub with immediate 'q' exited $rc, expected 0 ($(cat "$LOG_Q"))"
-grep -q "cbox - $PROJ" "$LOG_Q" || _fail "PTY hub header line missing ($(cat "$LOG_Q"))"
-grep -Eq 'container: +(unknown|down)' "$LOG_Q" || _fail "PTY hub did not render container state as unknown-or-down ($(cat "$LOG_Q"))"
-grep -q 'mode: isolated' "$LOG_Q" || _fail "PTY hub did not report isolated mode"
-grep -q '  1) claude' "$LOG_Q" || _fail "PTY hub did not render the claude engine row"
-grep -q '  2) codex' "$LOG_Q" || _fail "PTY hub did not render the codex engine row"
-_ok "PTY hub: renders header (container state unknown-or-down), quits cleanly on 'q', exit 0"
-
-IN_ZZ="$TMPBASE/in_zz"
-printf 'zz\nq\n' > "$IN_ZZ"
-LOG_ZZ="$TMPBASE/log_zz"
-rc=0
-run_pty "$IN_ZZ" "$LOG_ZZ" || rc=$?
-[ "$rc" = 0 ] || _fail "PTY hub with invalid-then-q exited $rc, expected 0 ($(cat "$LOG_ZZ"))"
-grep -q "unrecognized selection 'zz'" "$LOG_ZZ" || _fail "PTY hub did not report the invalid selection ($(cat "$LOG_ZZ"))"
-header_count="$(grep -c "cbox - $PROJ" "$LOG_ZZ" || true)"
-[ "$header_count" -ge 2 ] || _fail "PTY hub did not re-render the header after an invalid selection (saw $header_count)"
-_ok "PTY hub: invalid selection ('zz') re-prompts (header re-rendered), then 'q' exits 0"
+run_pty_plain() {
+  local input="$1" logfile="$2"
+  ( cd "$PROJ" && HOME="$PTYHOME" PATH="$STUBBIN:$PATH" CBOX_HUB_PLAIN=1 \
+      script -qec "$(printf '%q' "$INSTALL_DIR/cbox")" /dev/null ) < "$input" > "$logfile" 2>&1
+}
 
 [ -f "$INSTALL_DIR/lib/cbox_hub.py" ] || _fail "lib/cbox_hub.py not found - the python hub core is a required H1 deliverable"
 python3 -c "import py_compile; py_compile.compile('$INSTALL_DIR/lib/cbox_hub.py', doraise=True)" \
   || _fail "lib/cbox_hub.py does not py_compile"
 _ok "lib/cbox_hub.py exists and py_compiles cleanly"
 
-grep -Eq '  [0-9]+\) settings' "$LOG_Q" || _fail "PTY hub did not render the settings row label"
-grep -q '^egress: ' "$LOG_Q" || _fail "PTY hub did not render the python-hub-specific standalone egress line - the dispatch may not be routing to lib/cbox_hub.py"
-_ok "PTY hub with python3 present is routed through lib/cbox_hub.py (standalone 'egress: ' line confirms the python implementation, not the bash fallback)"
+IN_Q="$TMPBASE/in_q"
+printf 'q\n' > "$IN_Q"
+LOG_Q="$TMPBASE/log_q"
+rc=0
+run_pty "$IN_Q" "$LOG_Q" || rc=$?
+[ "$rc" = 0 ] || _fail "PTY hub (raw single-key mode) with immediate 'q' exited $rc, expected 0 ($(cat "$LOG_Q"))"
+grep -qF "cbox  $PROJ  isolated" "$LOG_Q" || _fail "PTY hub header line missing ($(cat "$LOG_Q"))"
+grep -Eq '^container +(unknown|down)' "$LOG_Q" || _fail "PTY hub did not render container state as unknown-or-down ($(cat "$LOG_Q"))"
+grep -q ' 1 claude ' "$LOG_Q" || _fail "PTY hub did not render the claude engine row"
+grep -q ' 2 codex ' "$LOG_Q" || _fail "PTY hub did not render the codex engine row"
+grep -q ' s settings' "$LOG_Q" || _fail "PTY hub did not render the settings row"
+grep -q 'cmd: ' "$LOG_Q" || _fail "PTY hub footer did not render the python-hub-specific 'cmd: ' command hint - the dispatch may not be routing to lib/cbox_hub.py"
+_ok "PTY hub (raw single-key mode, no CBOX_HUB_PLAIN): renders header/rows/footer, quits cleanly on a bare 'q' keypress, exit 0"
+
+IN_ZZ="$TMPBASE/in_zz"
+printf 'zz\nq\n' > "$IN_ZZ"
+LOG_ZZ="$TMPBASE/log_zz"
+rc=0
+run_pty_plain "$IN_ZZ" "$LOG_ZZ" || rc=$?
+[ "$rc" = 0 ] || _fail "PTY hub (line mode) with invalid-then-q exited $rc, expected 0 ($(cat "$LOG_ZZ"))"
+grep -q "unrecognized selection 'zz'" "$LOG_ZZ" || _fail "PTY hub did not report the invalid selection ($(cat "$LOG_ZZ"))"
+header_count="$(grep -cF "cbox  $PROJ  isolated" "$LOG_ZZ" || true)"
+[ "$header_count" -ge 2 ] || _fail "PTY hub did not re-render the header after an invalid selection (saw $header_count)"
+_ok "PTY hub (line mode, CBOX_HUB_PLAIN=1): invalid selection ('zz') re-prompts (header re-rendered), then 'q' exits 0"
 
 DOCKERSPY_LOG="$TMPBASE/docker_spy.log"
 DOCKERSPYBIN="$TMPBASE/dockerspybin"
@@ -119,12 +122,12 @@ IN_NAV="$TMPBASE/in_nav"
 printf '1\nq\n' > "$IN_NAV"
 LOG_NAV="$TMPBASE/log_nav"
 rc=0
-( cd "$PROJ" && HOME="$PTYHOME" PATH="$DOCKERSPYBIN:$PATH" \
+( cd "$PROJ" && HOME="$PTYHOME" PATH="$DOCKERSPYBIN:$PATH" CBOX_HUB_PLAIN=1 \
     script -qec "$(printf '%q' "$INSTALL_DIR/cbox")" /dev/null ) < "$IN_NAV" > "$LOG_NAV" 2>&1 || rc=$?
 [ "$rc" = 0 ] || _fail "PTY hub selecting the claude engine row exited $rc, expected 0 ($(cat "$LOG_NAV"))"
 [ -s "$DOCKERSPY_LOG" ] || _fail "selecting row 1 (claude) never reached the docker CLI at all - navigation dispatch did not run 'cbox run claude'"
 grep -q "compose" "$DOCKERSPY_LOG" || _fail "docker was invoked but not with a compose subcommand: $(cat "$DOCKERSPY_LOG")"
-_ok "PTY hub: selecting row 1 (claude) reaches the exact 'cbox run claude' path (docker compose invoked, verified via a spy binary), then 'q' exits 0 with no crash despite no real daemon"
+_ok "PTY hub (line mode): selecting row 1 (claude) reaches the exact 'cbox run claude' path (docker compose invoked, verified via a spy binary), then 'q' exits 0 with no crash despite no real daemon"
 
 PYHOME="$TMPBASE/home-nopy-check"
 mkdir -p "$PYHOME"
@@ -150,7 +153,7 @@ rc=0
     script -qec "$(printf '%q' "$INSTALLCOPY/cbox")" /dev/null ) < "$IN_NOPY" > "$LOG_NOPY" 2>&1 || rc=$?
 [ "$rc" = 0 ] || _fail "PTY hub with python3 absent (global mode) exited $rc, expected 0 ($(cat "$LOG_NOPY"))"
 grep -q "cbox - $TMPBASE" "$LOG_NOPY" || _fail "python3-missing fallback did not open the bash hub ($(cat "$LOG_NOPY"))"
-grep -q '^egress: ' "$LOG_NOPY" && _fail "python3-missing fallback rendered the python hub's standalone egress line - the fallback guard did not engage"
+grep -q 'cmd: ' "$LOG_NOPY" && _fail "python3-missing fallback rendered the python hub's 'cmd: ' footer - the fallback guard did not engage"
 _ok "python3-missing: bare cbox in global mode falls back to the bash hub (no cbox_hub.py marker present), not a crash"
 
 BROKENHOME="$TMPBASE/home-broken"
@@ -170,7 +173,7 @@ rc=0
     script -qec "$(printf '%q' "$INSTALLBROKEN/cbox")" /dev/null ) < "$IN_BROKEN" > "$LOG_BROKEN" 2>&1 || rc=$?
 [ "$rc" = 0 ] || _fail "PTY hub with a broken cbox_hub.py exited $rc, expected 0 ($(cat "$LOG_BROKEN"))"
 grep -q "cbox - $TMPBASE" "$LOG_BROKEN" || _fail "broken cbox_hub.py did not fall back to the bash hub ($(cat "$LOG_BROKEN"))"
-grep -q '^egress: ' "$LOG_BROKEN" && _fail "broken cbox_hub.py somehow rendered the python hub's standalone egress line"
+grep -q 'cmd: ' "$LOG_BROKEN" && _fail "broken cbox_hub.py somehow rendered the python hub's 'cmd: ' footer"
 _ok "a syntactically broken lib/cbox_hub.py degrades to the bash hub instead of crashing bare cbox"
 
 INSTALLCRASH="$TMPBASE/cbox-install-crash"
@@ -200,7 +203,7 @@ rc=0
 [ "$rc" = 0 ] || _fail "PTY hub with a runtime-crashing cbox_hub.py exited $rc, expected 0 via bash-hub fallback ($(cat "$LOG_CRASH"))"
 grep -q "falling back to the bash hub" "$LOG_CRASH" || _fail "runtime-crash fallback note missing from stderr ($(cat "$LOG_CRASH"))"
 grep -q "cbox - $TMPBASE" "$LOG_CRASH" || _fail "runtime-crashing cbox_hub.py (py_compile passes, main raises) did not fall back to the bash hub ($(cat "$LOG_CRASH"))"
-grep -q '^egress: ' "$LOG_CRASH" && _fail "runtime-crashing cbox_hub.py somehow rendered the python hub's standalone egress line"
+grep -q 'cmd: ' "$LOG_CRASH" && _fail "runtime-crashing cbox_hub.py somehow rendered the python hub's 'cmd: ' footer"
 _ok "a syntactically valid but runtime-crashing lib/cbox_hub.py (py_compile blind spot) also degrades to the bash hub via the reserved failure exit code"
 
 RUNGUARD_HOME="$TMPBASE/home-runguard"

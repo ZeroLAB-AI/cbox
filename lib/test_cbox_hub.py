@@ -4,13 +4,23 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PATH = os.path.join(ROOT, "lib", "cbox_hub.py")
+LIB = os.path.join(ROOT, "lib")
+
+import sys
+sys.path.insert(0, LIB)
+
+PATH = os.path.join(LIB, "cbox_hub.py")
 SPEC = importlib.util.spec_from_file_location("cbox_hub", PATH)
 MOD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MOD)
+
+import cbox_hub_screens as screens
+import cbox_hub_ui as ui
 
 
 ISOLATED_CTX = {
@@ -25,6 +35,8 @@ ISOLATED_CTX = {
 
 GLOBAL_CTX = dict(ISOLATED_CTX)
 GLOBAL_CTX.update({"mode": "global", "root": "/tmp/proj"})
+
+CBOX_PATH = "/x/cbox"
 
 
 class StubProbeUnknown(object):
@@ -60,157 +72,556 @@ class StubProbeUp(object):
         return dict((n, "running") for n in names)
 
 
-class BuildStatusRowsTests(unittest.TestCase):
-    def test_probe_error_degrades_to_unknown_never_raises(self):
-        rows = MOD.build_status_rows(ISOLATED_CTX, StubProbeUnknown(), ["claude", "codex"])
-        by_label = dict(rows)
-        self.assertEqual(by_label["container"], "unknown")
-        self.assertEqual(by_label["engines"], "claude codex")
-
-    def test_down_state_rendered(self):
-        rows = MOD.build_status_rows(ISOLATED_CTX, StubProbeDown(), ["claude", "codex"])
-        by_label = dict(rows)
-        self.assertEqual(by_label["container"], "down")
-
-    def test_up_state_and_running_engines_rendered(self):
-        rows = MOD.build_status_rows(ISOLATED_CTX, StubProbeUp(), ["claude", "codex"])
-        by_label = dict(rows)
-        self.assertIn("up", by_label["container"])
-        self.assertIn("claude(running)", by_label["engines"])
-        self.assertIn("codex(running)", by_label["engines"])
-
-    def test_empty_engine_list_renders_placeholder(self):
-        rows = MOD.build_status_rows(ISOLATED_CTX, StubProbeDown(), [])
-        by_label = dict(rows)
-        self.assertEqual(by_label["engines"], "<none>")
-
-    def test_egress_missing_key_degrades_to_unknown(self):
-        ctx = dict(ISOLATED_CTX)
-        del ctx["egress"]
-        rows = MOD.build_status_rows(ctx, StubProbeDown(), [])
-        by_label = dict(rows)
-        self.assertEqual(by_label["egress"], "unknown")
+def load_fixture(name):
+    path = os.path.join(LIB, "fixtures", "hub", name + ".json")
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
 
 
-class BuildScreenTests(unittest.TestCase):
-    def test_full_engine_list_isolated_rows(self):
-        status_rows = MOD.build_status_rows(ISOLATED_CTX, StubProbeDown(), ["claude", "codex"])
-        screen, rows = MOD.build_screen(ISOLATED_CTX, ["claude", "codex"], status_rows)
-        self.assertIn("cbox - /tmp/proj   mode: isolated", screen)
-        self.assertIn("1) claude", screen)
-        self.assertIn("2) codex", screen)
-        self.assertNotIn("(ends hub)", screen)
-        self.assertEqual(rows, ["engine:claude", "engine:codex", "shell", "logs", "doctor", "settings", "down"])
-
-    def test_empty_engine_list_isolated_rows(self):
-        status_rows = MOD.build_status_rows(ISOLATED_CTX, StubProbeDown(), [])
-        screen, rows = MOD.build_screen(ISOLATED_CTX, [], status_rows)
-        self.assertEqual(rows, ["shell", "logs", "doctor", "settings", "down"])
-        self.assertIn("1) shell", screen)
-
-    def test_global_mode_marks_ends_hub(self):
-        status_rows = MOD.build_status_rows(GLOBAL_CTX, StubProbeDown(), ["claude"])
-        screen, rows = MOD.build_screen(GLOBAL_CTX, ["claude"], status_rows)
-        self.assertIn("(ends hub)", screen)
-        self.assertIn("shell (ends hub)", screen)
-
-    def test_quit_row_always_present(self):
-        status_rows = MOD.build_status_rows(ISOLATED_CTX, StubProbeDown(), [])
-        screen, _rows = MOD.build_screen(ISOLATED_CTX, [], status_rows)
-        self.assertIn("q) quit", screen)
+def load_golden(name):
+    path = os.path.join(LIB, "fixtures", "hub", name + ".txt")
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
 
 
-class ActionArgvTests(unittest.TestCase):
-    def test_engine_row_maps_to_run(self):
-        self.assertEqual(MOD.action_argv("/x", "/x/cbox", "engine:claude", ISOLATED_CTX), ["/x/cbox", "run", "claude"])
+class GoldenScreenTests(unittest.TestCase):
+    def _assert_cols_and_ascii(self, text):
+        self._assert_display_cols(text)
+        for line in text.splitlines():
+            line.encode("ascii")
 
-    def test_shell_row_maps_to_shell(self):
-        self.assertEqual(MOD.action_argv("/x", "/x/cbox", "shell", ISOLATED_CTX), ["/x/cbox", "shell"])
+    def _assert_display_cols(self, text):
+        for line in text.splitlines():
+            self.assertLessEqual(screens.display_width(line), 80, line)
 
-    def test_logs_row_maps_to_logs(self):
-        self.assertEqual(MOD.action_argv("/x", "/x/cbox", "logs", ISOLATED_CTX), ["/x/cbox", "logs"])
+    def test_main_isolated_matches_golden(self):
+        snap = load_fixture("main_isolated")
+        text, actions = screens.render_main(snap)
+        self.assertEqual(text, load_golden("main_isolated"))
+        self._assert_cols_and_ascii(text)
 
-    def test_doctor_row_maps_to_doctor(self):
-        self.assertEqual(MOD.action_argv("/x", "/x/cbox", "doctor", ISOLATED_CTX), ["/x/cbox", "doctor"])
+    def test_main_global_matches_golden(self):
+        snap = load_fixture("main_global")
+        text, actions = screens.render_main(snap)
+        self.assertEqual(text, load_golden("main_global"))
+        self._assert_cols_and_ascii(text)
 
-    def test_down_row_maps_to_down(self):
-        self.assertEqual(MOD.action_argv("/x", "/x/cbox", "down", ISOLATED_CTX), ["/x/cbox", "down"])
+    def test_wireguard_matches_golden(self):
+        snap = load_fixture("wireguard")
+        text, actions = screens.render_wireguard(snap)
+        self.assertEqual(text, load_golden("wireguard"))
+        self._assert_cols_and_ascii(text)
 
-    def test_settings_row_isolated_adds_local_root(self):
-        argv = MOD.action_argv("/x", "/x/cbox", "settings", ISOLATED_CTX)
-        self.assertEqual(argv[:2], [MOD.sys.executable, "/x/lib/cbox_settings.py"])
-        self.assertEqual(argv[2:], ["/x", "/x/cbox", "--local", "/tmp/proj"])
+    def test_all_submenus_stay_in_budget(self):
+        snap = {"ctx": GLOBAL_CTX, "cbox_path": CBOX_PATH}
+        for name, fn in screens.RENDERERS.items():
+            text, _actions = fn(snap)
+            self._assert_cols_and_ascii(text)
 
-    def test_settings_row_global_has_no_local_flag(self):
-        argv = MOD.action_argv("/x", "/x/cbox", "settings", GLOBAL_CTX)
-        self.assertEqual(argv, [MOD.sys.executable, "/x/lib/cbox_settings.py", "/x", "/x/cbox"])
-
-    def test_unknown_row_returns_none(self):
-        self.assertIsNone(MOD.action_argv("/x", "/x/cbox", "bogus", ISOLATED_CTX))
-
-    def test_settings_row_isolated_without_root_returns_none(self):
-        ctx = dict(ISOLATED_CTX)
-        ctx["root"] = ""
-        self.assertIsNone(MOD.action_argv("/x", "/x/cbox", "settings", ctx))
-        ctx2 = dict(ISOLATED_CTX)
-        del ctx2["root"]
-        self.assertIsNone(MOD.action_argv("/x", "/x/cbox", "settings", ctx2))
+    def test_hints_screen_stays_in_budget(self):
+        snap = load_fixture("main_isolated")
+        _text, actions = screens.render_main(snap)
+        hints = screens.render_hints(actions)
+        self._assert_cols_and_ascii(hints)
 
 
-class RunActionDispatchTests(unittest.TestCase):
-    def test_engine_action_invokes_subprocess_call_with_exact_argv_no_docker(self):
+class RunningEngineLabelTests(unittest.TestCase):
+    def test_running_engine_shows_attach_not_start(self):
+        snap = {
+            "ctx": ISOLATED_CTX,
+            "engine_names": ["claude", "codex"],
+            "engine_state": {"claude": "running", "codex": "down"},
+            "container_state": "up (since x)",
+            "cbox_path": CBOX_PATH,
+            "doctor_warnings": None,
+        }
+        text, _actions = screens.render_main(snap)
+        self.assertIn("claude", text)
+        claude_line = [l for l in text.splitlines() if "claude" in l][0]
+        codex_line = [l for l in text.splitlines() if "codex" in l][0]
+        self.assertIn("attach", claude_line)
+        self.assertNotIn("start", claude_line)
+        self.assertIn("start", codex_line)
+        self.assertNotIn("attach", codex_line)
+
+    def test_unknown_engine_state_shows_start(self):
+        snap = {
+            "ctx": ISOLATED_CTX,
+            "engine_names": ["claude"],
+            "engine_state": {"claude": "unknown"},
+            "container_state": "unknown",
+            "cbox_path": CBOX_PATH,
+            "doctor_warnings": None,
+        }
+        text, _actions = screens.render_main(snap)
+        self.assertIn("start", text)
+        self.assertNotIn("attach", text)
+
+
+ARGV_TABLE = {
+    "main": {
+        "1": ["run", ["run", "claude"]],
+        "2": ["run", ["run", "codex"]],
+        "t": ["run", ["shell"]],
+    },
+    "sessions": {
+        "l": ["run", ["session", "list"]],
+        "n": ["run", ["session", "new"]],
+        "s": ["builder", ["session", "show", "SID"]],
+        "c": ["builder", ["session", "close", "SID"]],
+    },
+    "network": {
+        "s": ["run", ["netaccess", "status"]],
+        "a": ["builder", ["netaccess", "allow", "TARGET"]],
+        "x": ["builder", ["netaccess", "deny", "TARGET"]],
+    },
+    "ollama": {
+        "s": ["run", ["ollama", "status"]],
+        "p": ["run", ["ollama", "ps"]],
+        "u": ["run", ["ollama", "up"]],
+        "d": ["run", ["ollama", "down"]],
+        "l": ["builder", ["ollama", "pull", "MODEL"]],
+        "r": ["run", ["ollama", "reconcile"]],
+        "g": ["run", ["ollama", "gpu-check"]],
+    },
+    "wireguard": {
+        "s": ["run", ["wg", "status"]],
+        "u": ["run", ["wg", "up"]],
+        "d": ["run", ["wg", "down"]],
+        "a": ["builder", ["wg", "server", "add-client", "NAME"]],
+        "p": ["builder", ["wg", "server", "add-client", "NAME", "--plain"]],
+        "x": ["builder", ["wg", "peer", "rm", "NAME"]],
+        "j": ["builder", ["wg", "client", "join", "TOKEN"]],
+    },
+    "maintenance": {
+        "d": ["run", ["down"]],
+        "r": ["run", ["restart"]],
+        "o": ["run", ["doctor"]],
+        "l": ["run", ["logs"]],
+        "u": ["run", ["reinstall-bins", "--if-stale"]],
+        "y": ["run", ["bins", "status"]],
+        "z": ["run", ["bins", "rollback"]],
+        "g": ["run", ["images", "list"]],
+        "x": ["builder", ["images", "rm", "HASH"]],
+        "c": ["run", ["gc"]],
+        "k": ["run", ["backup"]],
+        "f": ["run", ["net-refresh"]],
+        "p": ["run", ["ls"]],
+        "t": ["run", ["session-broker", "status"]],
+        "h": ["run", ["install-hooks"]],
+    },
+}
+
+SAMPLE_TEXT_BY_ACTION = {
+    ("sessions", "s"): "SID",
+    ("sessions", "c"): "SID",
+    ("network", "a"): "TARGET",
+    ("network", "x"): "TARGET",
+    ("ollama", "l"): "MODEL",
+    ("wireguard", "a"): "NAME",
+    ("wireguard", "p"): "NAME",
+    ("wireguard", "x"): "NAME",
+    ("wireguard", "j"): "TOKEN",
+    ("maintenance", "x"): "HASH",
+}
+
+CONFIRM_KEYS = {
+    ("wireguard", "u"),
+    ("wireguard", "p"),
+    ("wireguard", "x"),
+    ("maintenance", "z"),
+    ("maintenance", "x"),
+    ("maintenance", "c"),
+    ("sessions", "c"),
+}
+
+
+def _actions_for(screen_name, engine_state=None):
+    if screen_name == "main":
+        snap = {
+            "ctx": ISOLATED_CTX,
+            "engine_names": ["claude", "codex"],
+            "engine_state": {"claude": "down", "codex": "down"},
+            "container_state": "down",
+            "cbox_path": CBOX_PATH,
+            "doctor_warnings": None,
+        }
+        _text, actions = screens.render_main(snap)
+    else:
+        snap = {
+            "ctx": ISOLATED_CTX,
+            "cbox_path": CBOX_PATH,
+            "engine_state": engine_state or {},
+        }
+        _text, actions = screens.RENDERERS[screen_name](snap)
+    return actions
+
+
+class ArgvTableTests(unittest.TestCase):
+    def test_every_action_matches_the_expected_argv(self):
+        for screen_name, table in ARGV_TABLE.items():
+            actions = _actions_for(screen_name)
+            by_key = dict((a.key, a) for a in actions)
+            for key, (kind, expected_tail) in table.items():
+                self.assertIn(key, by_key, "%s missing key %s" % (screen_name, key))
+                action = by_key[key]
+                expected_argv = [CBOX_PATH] + expected_tail
+                if kind == "run":
+                    self.assertEqual(action.argv, expected_argv,
+                                      "%s/%s argv mismatch" % (screen_name, key))
+                else:
+                    sample = SAMPLE_TEXT_BY_ACTION[(screen_name, key)]
+                    got = action.argv_builder(sample)
+                    self.assertEqual(got, expected_argv,
+                                      "%s/%s built argv mismatch" % (screen_name, key))
+
+    def test_every_screen_has_a_back_action_except_main(self):
+        for name in screens.RENDERERS:
+            actions = _actions_for(name)
+            keys = [a.key for a in actions]
+            self.assertIn("b", keys, "%s has no back action" % name)
+            back = [a for a in actions if a.key == "b"][0]
+            self.assertEqual(back.kind, "back")
+
+
+class ConfirmationGatingTests(unittest.TestCase):
+    def test_only_the_listed_actions_ask_for_confirmation(self):
+        for screen_name in list(ARGV_TABLE.keys()) + ["main"]:
+            actions = _actions_for(screen_name)
+            for a in actions:
+                expect_confirm = (screen_name, a.key) in CONFIRM_KEYS
+                self.assertEqual(a.confirm, expect_confirm,
+                                  "%s/%s confirm=%s expected %s" %
+                                  (screen_name, a.key, a.confirm, expect_confirm))
+
+    def test_down_never_confirms_when_no_engine_is_running(self):
+        actions = _actions_for("maintenance", engine_state={"claude": "down"})
+        down = [a for a in actions if a.key == "d"][0]
+        self.assertFalse(down.confirm)
+        self.assertIsNone(down.force_token)
+
+    def test_down_requires_force_token_when_an_engine_is_running(self):
+        actions = _actions_for("maintenance", engine_state={"claude": "running"})
+        down = [a for a in actions if a.key == "d"][0]
+        self.assertTrue(down.confirm)
+        self.assertEqual(down.force_token, "FORCE")
+
+    def test_confirm_declines_on_no_and_does_not_run(self):
+        calls = []
+        actions = _actions_for("maintenance")
+        rollback = [a for a in actions if a.key == "z"][0]
+        keys = ui.LineKeys(io.StringIO("n\n"), io.StringIO())
+        stdout = io.StringIO()
+        outcome, rc = MOD.run_action(rollback, keys, stdout, ROOT, CBOX_PATH,
+                                      ISOLATED_CTX, lambda argv: calls.append(argv) or 0)
+        self.assertEqual(outcome, "noop")
+        self.assertEqual(calls, [])
+
+    def test_confirm_runs_on_yes(self):
+        calls = []
+        actions = _actions_for("maintenance")
+        rollback = [a for a in actions if a.key == "z"][0]
+        keys = ui.LineKeys(io.StringIO("y\n"), io.StringIO())
+        stdout = io.StringIO()
+        outcome, rc = MOD.run_action(rollback, keys, stdout, ROOT, CBOX_PATH,
+                                      ISOLATED_CTX, lambda argv: calls.append(argv) or 0)
+        self.assertEqual(outcome, "ran")
+        self.assertEqual(calls, [[CBOX_PATH, "bins", "rollback"]])
+
+    def test_force_token_wrong_text_cancels(self):
+        calls = []
+        actions = _actions_for("maintenance", engine_state={"claude": "running"})
+        down = [a for a in actions if a.key == "d"][0]
+        keys = ui.LineKeys(io.StringIO("nah\n"), io.StringIO())
+        stdout = io.StringIO()
+        outcome, rc = MOD.run_action(down, keys, stdout, ROOT, CBOX_PATH,
+                                      ISOLATED_CTX, lambda argv: calls.append(argv) or 0)
+        self.assertEqual(outcome, "noop")
+        self.assertEqual(calls, [])
+
+    def test_force_token_exact_match_runs_with_force_flag(self):
+        calls = []
+        actions = _actions_for("maintenance", engine_state={"claude": "running"})
+        down = [a for a in actions if a.key == "d"][0]
+        keys = ui.LineKeys(io.StringIO("FORCE\n"), io.StringIO())
+        stdout = io.StringIO()
+        outcome, rc = MOD.run_action(down, keys, stdout, ROOT, CBOX_PATH,
+                                      ISOLATED_CTX, lambda argv: calls.append(argv) or 0)
+        self.assertEqual(outcome, "ran")
+        self.assertEqual(calls, [[CBOX_PATH, "down", "--force"]])
+
+    def test_force_token_eof_returns_eof_outcome(self):
+        calls = []
+        actions = _actions_for("maintenance", engine_state={"claude": "running"})
+        down = [a for a in actions if a.key == "d"][0]
+        keys = ui.LineKeys(io.StringIO(""), io.StringIO())
+        stdout = io.StringIO()
+        outcome, rc = MOD.run_action(down, keys, stdout, ROOT, CBOX_PATH,
+                                      ISOLATED_CTX, lambda argv: calls.append(argv) or 0)
+        self.assertEqual(outcome, "eof")
+        self.assertEqual(calls, [])
+
+
+class RawLineModeSelectionTests(unittest.TestCase):
+    def test_plain_forced_env_selects_line_mode(self):
+        old = os.environ.get("CBOX_HUB_PLAIN")
+        os.environ["CBOX_HUB_PLAIN"] = "1"
+        try:
+            self.assertFalse(ui.raw_keys_available(io.StringIO(), io.StringIO()))
+        finally:
+            if old is None:
+                os.environ.pop("CBOX_HUB_PLAIN", None)
+            else:
+                os.environ["CBOX_HUB_PLAIN"] = old
+
+    def test_non_tty_stringio_selects_line_mode(self):
+        keys = ui.make_keys(io.StringIO("q\n"), io.StringIO())
+        self.assertIsInstance(keys, ui.LineKeys)
+
+    def test_raw_mode_failure_falls_back_to_line_mode(self):
+        class FakeTTYNoFileno(object):
+            def isatty(self):
+                return True
+
+            def fileno(self):
+                raise OSError("no real fd in this environment")
+
+        self.assertFalse(ui.raw_keys_available(FakeTTYNoFileno(), FakeTTYNoFileno()))
+        keys = ui.make_keys(FakeTTYNoFileno(), FakeTTYNoFileno())
+        self.assertIsInstance(keys, ui.LineKeys)
+
+    def test_dumb_term_forces_line_mode(self):
+        class FakeTTY(object):
+            def isatty(self):
+                return True
+
+            def fileno(self):
+                return 0
+
+        old = os.environ.get("TERM")
+        os.environ["TERM"] = "dumb"
+        try:
+            self.assertFalse(ui.raw_keys_available(FakeTTY(), FakeTTY()))
+        finally:
+            if old is None:
+                os.environ.pop("TERM", None)
+            else:
+                os.environ["TERM"] = old
+
+
+class LineKeysHubLoopTests(unittest.TestCase):
+    def test_navigate_into_sessions_list_then_back_then_quit(self):
         calls = []
 
-        def fake_call(argv):
+        def runner(argv):
             calls.append(argv)
             return 0
 
-        old = MOD.subprocess.call
-        MOD.subprocess.call = fake_call
-        try:
-            rc = MOD.run_action("/x", "/x/cbox", "engine:claude", ISOLATED_CTX)
-        finally:
-            MOD.subprocess.call = old
+        out = io.StringIO()
+        stdin = io.StringIO("e\nl\nb\nq\n")
+        rc = MOD.hub_loop(ROOT, CBOX_PATH, ISOLATED_CTX, StubProbeDown(), stdin,
+                           out.write, runner=runner)
         self.assertEqual(rc, 0)
-        self.assertEqual(calls, [["/x/cbox", "run", "claude"]])
+        self.assertEqual(calls, [[CBOX_PATH, "session", "list"]])
+        self.assertIn("cbox  /tmp/proj  isolated", out.getvalue())
 
-    def test_settings_action_invokes_subprocess_with_settings_script(self):
+    def test_text_input_action_builds_argv_from_typed_line(self):
         calls = []
 
-        def fake_call(argv):
+        def runner(argv):
             calls.append(argv)
             return 0
 
-        old = MOD.subprocess.call
-        MOD.subprocess.call = fake_call
-        try:
-            rc = MOD.run_action("/x", "/x/cbox", "settings", ISOLATED_CTX)
-        finally:
-            MOD.subprocess.call = old
+        out = io.StringIO()
+        stdin = io.StringIO("n\na\nshop_db\nb\nq\n")
+        rc = MOD.hub_loop(ROOT, CBOX_PATH, ISOLATED_CTX, StubProbeDown(), stdin,
+                           out.write, runner=runner)
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [[CBOX_PATH, "netaccess", "allow", "shop_db"]])
+
+    def test_quit_selection_returns_immediately(self):
+        calls = []
+        out = io.StringIO()
+        rc = MOD.hub_loop(ROOT, CBOX_PATH, ISOLATED_CTX, StubProbeDown(),
+                           io.StringIO("q\n"), out.write,
+                           runner=lambda argv: calls.append(argv) or 0)
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [])
+
+    def test_eof_quits_cleanly(self):
+        out = io.StringIO()
+        rc = MOD.hub_loop(ROOT, CBOX_PATH, ISOLATED_CTX, StubProbeDown(),
+                           io.StringIO(""), out.write, runner=lambda argv: 0)
+        self.assertEqual(rc, 0)
+        self.assertIn("EOF", out.getvalue())
+
+    def test_invalid_selection_reprompts_without_exec(self):
+        out = io.StringIO()
+        rc = MOD.hub_loop(ROOT, CBOX_PATH, ISOLATED_CTX, StubProbeDown(),
+                           io.StringIO("zz\nq\n"), out.write,
+                           runner=lambda argv: (_ for _ in ()).throw(
+                               AssertionError("must not exec on invalid selection")))
+        self.assertEqual(rc, 0)
+        self.assertIn("unrecognized selection 'zz'", out.getvalue())
+
+    def test_engine_selection_produces_exact_argv(self):
+        calls = []
+        out = io.StringIO()
+        rc = MOD.hub_loop(ROOT, CBOX_PATH, ISOLATED_CTX, StubProbeDown(),
+                           io.StringIO("1\nq\n"), out.write,
+                           runner=lambda argv: calls.append(argv) or 0)
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [[CBOX_PATH, "run", "claude"]])
+
+    def test_global_mode_engine_selection_ends_hub_loop(self):
+        rc = MOD.hub_loop(ROOT, CBOX_PATH, GLOBAL_CTX, StubProbeDown(),
+                           io.StringIO("1\n"), io.StringIO().write,
+                           runner=lambda argv: 0)
+        self.assertEqual(rc, 0)
+
+    def test_global_mode_submenu_action_does_not_end_hub_loop(self):
+        calls = []
+        out = io.StringIO()
+        rc = MOD.hub_loop(ROOT, CBOX_PATH, GLOBAL_CTX, StubProbeDown(),
+                           io.StringIO("m\nr\nb\nq\n"), out.write,
+                           runner=lambda argv: calls.append(argv) or 0)
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [[CBOX_PATH, "restart"]])
+
+    def test_out_of_range_selection_reprompts(self):
+        out = io.StringIO()
+        rc = MOD.hub_loop(ROOT, CBOX_PATH, ISOLATED_CTX, StubProbeDown(),
+                           io.StringIO("999\nq\n"), out.write, runner=lambda argv: 0)
+        self.assertEqual(rc, 0)
+        self.assertIn("unrecognized selection '999'", out.getvalue())
+
+    def test_confirm_no_skips_destructive_action(self):
+        calls = []
+        out = io.StringIO()
+        stdin = io.StringIO("m\nz\nn\nb\nq\n")
+        rc = MOD.hub_loop(ROOT, CBOX_PATH, ISOLATED_CTX, StubProbeDown(), stdin,
+                           out.write, runner=lambda argv: calls.append(argv) or 0)
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [])
+
+    def test_confirm_yes_runs_destructive_action(self):
+        calls = []
+        out = io.StringIO()
+        stdin = io.StringIO("m\nz\ny\nb\nq\n")
+        rc = MOD.hub_loop(ROOT, CBOX_PATH, ISOLATED_CTX, StubProbeDown(), stdin,
+                           out.write, runner=lambda argv: calls.append(argv) or 0)
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [[CBOX_PATH, "bins", "rollback"]])
+
+    def test_down_runs_without_prompt_when_no_engine_running(self):
+        calls = []
+        out = io.StringIO()
+        stdin = io.StringIO("m\nd\nb\nq\n")
+        rc = MOD.hub_loop(ROOT, CBOX_PATH, ISOLATED_CTX, StubProbeDown(), stdin,
+                           out.write, runner=lambda argv: calls.append(argv) or 0)
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [[CBOX_PATH, "down"]])
+
+    def test_down_requires_typed_force_when_engine_running(self):
+        calls = []
+        out = io.StringIO()
+        stdin = io.StringIO("m\nd\nFORCE\nb\nq\n")
+        rc = MOD.hub_loop(ROOT, CBOX_PATH, ISOLATED_CTX, StubProbeUp(), stdin,
+                           out.write, runner=lambda argv: calls.append(argv) or 0)
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [[CBOX_PATH, "down", "--force"]])
+
+    def test_down_cancels_on_wrong_typed_text_when_engine_running(self):
+        calls = []
+        out = io.StringIO()
+        stdin = io.StringIO("m\nd\nno\nb\nq\n")
+        rc = MOD.hub_loop(ROOT, CBOX_PATH, ISOLATED_CTX, StubProbeUp(), stdin,
+                           out.write, runner=lambda argv: calls.append(argv) or 0)
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [])
+
+    def test_settings_row_invokes_cbox_settings_script(self):
+        calls = []
+        out = io.StringIO()
+        rc = MOD.hub_loop(ROOT, CBOX_PATH, ISOLATED_CTX, StubProbeDown(),
+                           io.StringIO("s\nq\n"), out.write,
+                           runner=lambda argv: calls.append(argv) or 0)
         self.assertEqual(rc, 0)
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][1], "/x/lib/cbox_settings.py")
+        self.assertEqual(calls[0][:2], [MOD.sys.executable,
+                                         os.path.join(ROOT, "lib", "cbox_settings.py")])
+        self.assertIn("--local", calls[0])
+        self.assertIn("/tmp/proj", calls[0])
 
-    def test_unknown_row_returns_nonzero_without_exec(self):
-        old = MOD.subprocess.call
-        MOD.subprocess.call = lambda argv: (_ for _ in ()).throw(AssertionError("must not exec for unknown row"))
-        try:
-            rc = MOD.run_action("/x", "/x/cbox", "bogus", ISOLATED_CTX)
-        finally:
-            MOD.subprocess.call = old
-        self.assertNotEqual(rc, 0)
+    def test_settings_row_global_has_no_local_flag(self):
+        calls = []
+        out = io.StringIO()
+        rc = MOD.hub_loop(ROOT, CBOX_PATH, GLOBAL_CTX, StubProbeDown(),
+                           io.StringIO("s\n"), out.write,
+                           runner=lambda argv: calls.append(argv) or 0)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("--local", calls[0])
 
-    def test_oserror_on_exec_degrades_to_nonzero_not_crash(self):
-        def raising_call(argv):
-            raise OSError("no such file")
+    def test_hints_row_renders_then_returns_to_main(self):
+        out = io.StringIO()
+        rc = MOD.hub_loop(ROOT, CBOX_PATH, ISOLATED_CTX, StubProbeDown(),
+                           io.StringIO("?\n\nq\n"), out.write, runner=lambda argv: 0)
+        self.assertEqual(rc, 0)
+        self.assertIn("command hints", out.getvalue())
 
-        old = MOD.subprocess.call
-        MOD.subprocess.call = raising_call
-        try:
-            rc = MOD.run_action("/x", "/x/cbox", "shell", ISOLATED_CTX)
-        finally:
-            MOD.subprocess.call = old
-        self.assertEqual(rc, 1)
+    def test_refresh_row_reruns_probe_without_exec(self):
+        out = io.StringIO()
+        rc = MOD.hub_loop(ROOT, CBOX_PATH, ISOLATED_CTX, StubProbeDown(),
+                           io.StringIO("r\nq\n"), out.write,
+                           runner=lambda argv: (_ for _ in ()).throw(
+                               AssertionError("refresh must not exec anything")))
+        self.assertEqual(rc, 0)
+
+    def test_cancelled_text_input_does_not_run(self):
+        calls = []
+        out = io.StringIO()
+        stdin = io.StringIO("n\na\n\nb\nq\n")
+        rc = MOD.hub_loop(ROOT, CBOX_PATH, ISOLATED_CTX, StubProbeDown(), stdin,
+                           out.write, runner=lambda argv: calls.append(argv) or 0)
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [])
+
+
+class BuildStatusTests(unittest.TestCase):
+    def test_probe_error_degrades_to_unknown_never_raises(self):
+        status = MOD.gather_status(StubProbeUnknown(), ["claude", "codex"], budget=1.0)
+        self.assertEqual(status["container_state"], "unknown")
+        self.assertEqual(status["engine_state"], {"claude": "unknown", "codex": "unknown"})
+
+    def test_down_state_rendered(self):
+        status = MOD.gather_status(StubProbeDown(), ["claude"], budget=1.0)
+        self.assertEqual(status["container_state"], "down")
+
+    def test_up_state_and_running_engines_rendered(self):
+        status = MOD.gather_status(StubProbeUp(), ["claude", "codex"], budget=1.0)
+        self.assertIn("up", status["container_state"])
+        self.assertEqual(status["engine_state"]["claude"], "running")
+        self.assertEqual(status["engine_state"]["codex"], "running")
+
+    def test_slow_probe_yields_ellipsis_within_budget(self):
+        class SlowProbe(object):
+            def container_id(self):
+                import time
+                time.sleep(2.0)
+                return None
+
+            def container_state(self, cid):
+                return "down"
+
+            def running_engines(self, cid, names):
+                return dict((n, "unknown") for n in names)
+
+        import time
+        started = time.time()
+        status = MOD.gather_status(SlowProbe(), ["claude"], budget=0.2)
+        elapsed = time.time() - started
+        self.assertLess(elapsed, 1.0)
+        self.assertEqual(status["container_state"], "...")
 
 
 class EnginesFromRegistryTests(unittest.TestCase):
@@ -288,69 +699,53 @@ class ContextFromCboxTests(unittest.TestCase):
             self.assertEqual(ctx["mode"], "isolated")
 
 
-class HubLoopNavigationTests(unittest.TestCase):
-    def test_quit_selection_returns_immediately(self):
-        calls = []
-        old = MOD.subprocess.call
-        MOD.subprocess.call = lambda argv: calls.append(argv) or 0
-        try:
-            out = io.StringIO()
-            rc = MOD.hub_loop(ROOT, "/x/cbox", ISOLATED_CTX, StubProbeDown(), io.StringIO("q\n"), out.write)
-        finally:
-            MOD.subprocess.call = old
-        self.assertEqual(rc, 0)
-        self.assertEqual(calls, [])
+class CliUsageTests(unittest.TestCase):
+    def test_missing_binary_falls_back_to_static_usage(self):
+        text = MOD.cli_usage("/does/not/exist/cbox")
+        self.assertIn("usage:", text)
 
-    def test_eof_quits_cleanly(self):
-        out = io.StringIO()
-        rc = MOD.hub_loop(ROOT, "/x/cbox", ISOLATED_CTX, StubProbeDown(), io.StringIO(""), out.write)
-        self.assertEqual(rc, 0)
-        self.assertIn("EOF", out.getvalue())
-
-    def test_invalid_selection_reprompts_without_exec(self):
-        old = MOD.subprocess.call
-        MOD.subprocess.call = lambda argv: (_ for _ in ()).throw(AssertionError("must not exec on invalid selection"))
-        try:
-            out = io.StringIO()
-            rc = MOD.hub_loop(ROOT, "/x/cbox", ISOLATED_CTX, StubProbeDown(), io.StringIO("zz\nq\n"), out.write)
-        finally:
-            MOD.subprocess.call = old
-        self.assertEqual(rc, 0)
-        self.assertIn("unrecognized selection 'zz'", out.getvalue())
-
-    def test_engine_selection_produces_exact_argv_without_docker(self):
-        calls = []
-        old = MOD.subprocess.call
-        MOD.subprocess.call = lambda argv: calls.append(argv) or 0
-        try:
-            out = io.StringIO()
-            rc = MOD.hub_loop(ROOT, "/x/cbox", ISOLATED_CTX, StubProbeDown(), io.StringIO("1\nq\n"), out.write)
-        finally:
-            MOD.subprocess.call = old
-        self.assertEqual(rc, 0)
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][:2], ["/x/cbox", "run"])
-
-    def test_global_mode_engine_selection_ends_hub_loop(self):
-        old = MOD.subprocess.call
-        MOD.subprocess.call = lambda argv: 0
-        try:
-            out = io.StringIO()
-            rc = MOD.hub_loop(ROOT, "/x/cbox", GLOBAL_CTX, StubProbeDown(), io.StringIO("1\n"), out.write)
-        finally:
-            MOD.subprocess.call = old
-        self.assertEqual(rc, 0)
-
-    def test_out_of_range_selection_reprompts(self):
-        out = io.StringIO()
-        rc = MOD.hub_loop(ROOT, "/x/cbox", ISOLATED_CTX, StubProbeDown(), io.StringIO("999\nq\n"), out.write)
-        self.assertEqual(rc, 0)
-        self.assertIn("unrecognized selection '999'", out.getvalue())
+    def test_real_dispatcher_usage_is_relayed_verbatim(self):
+        fake = None
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = os.path.join(tmp, "fake_cbox")
+            with open(fake, "w", encoding="ascii") as fh:
+                fh.write("#!/bin/sh\necho 'usage: fake {run|shell}'\nexit 1\n")
+            os.chmod(fake, 0o755)
+            text = MOD.cli_usage(fake)
+            self.assertIn("usage: fake {run|shell}", text)
 
 
 class MainNonTtyTests(unittest.TestCase):
     def test_main_argument_shortage_returns_1(self):
         self.assertEqual(MOD.main(["cbox_hub.py"]), 1)
+
+    def test_non_tty_stdin_prints_usage_and_returns_1(self):
+        class NonTTY(object):
+            def isatty(self):
+                return False
+
+            def write(self, text):
+                pass
+
+        out = NonTTY()
+        rc = MOD.main(["cbox_hub.py", ROOT, "/does/not/exist/cbox"], stdin=NonTTY(), stdout=out)
+        self.assertEqual(rc, 1)
+
+    def test_non_tty_stdout_prints_usage_and_returns_1(self):
+        class TTYStdin(object):
+            def isatty(self):
+                return True
+
+        class NonTTYStdout(object):
+            def isatty(self):
+                return False
+
+            def write(self, text):
+                pass
+
+        rc = MOD.main(["cbox_hub.py", ROOT, "/does/not/exist/cbox"],
+                       stdin=TTYStdin(), stdout=NonTTYStdout())
+        self.assertEqual(rc, 1)
 
 
 class NullProbeTests(unittest.TestCase):
@@ -359,6 +754,329 @@ class NullProbeTests(unittest.TestCase):
         self.assertIsNone(probe.container_id())
         self.assertEqual(probe.container_state(None), "unknown")
         self.assertEqual(probe.running_engines(None, ["claude"]), {"claude": "unknown"})
+
+
+class SingleInFlightProbeTests(unittest.TestCase):
+    def test_refresh_during_slow_probe_starts_only_one_probe_thread(self):
+        class BlockingProbe(object):
+            def __init__(self):
+                self.release = threading.Event()
+                self.lock = threading.Lock()
+                self.container_id_calls = 0
+
+            def _bump(self):
+                with self.lock:
+                    self.container_id_calls += 1
+
+            def container_id(self):
+                self._bump()
+                if not self.release.wait(6):
+                    raise RuntimeError("probe timed out in test")
+                return None
+
+            def container_state(self, cid):
+                return "down"
+
+            def running_engines(self, cid, names):
+                return dict((n, "down") for n in names)
+
+        probe = BlockingProbe()
+        s1 = MOD.gather_status(probe, ["claude", "codex"], budget=0.2)
+        first_thread = probe._hub_probe_state["thread"]
+        self.assertEqual(s1["container_state"], "...")
+        self.assertEqual(s1["engine_state"], {"claude": "...", "codex": "..."})
+        self.assertTrue(first_thread.is_alive())
+        s2 = MOD.gather_status(probe, ["claude", "codex"], budget=0.2)
+        s3 = MOD.gather_status(probe, ["claude", "codex"], budget=0.2)
+        self.assertIs(probe._hub_probe_state["thread"], first_thread)
+        with probe.lock:
+            self.assertEqual(probe.container_id_calls, 1)
+        self.assertEqual(s2["container_state"], "...")
+        self.assertEqual(s2["engine_state"], {"claude": "...", "codex": "..."})
+        self.assertEqual(s3["container_state"], "...")
+        probe.release.set()
+        first_thread.join(5)
+        self.assertFalse(first_thread.is_alive())
+        self.assertEqual(probe._hub_probe_state["last"]["container_state"], "down")
+        with probe.lock:
+            self.assertEqual(probe.container_id_calls, 1)
+
+    def test_refresh_after_probe_finished_starts_a_fresh_probe(self):
+        class FastProbe(object):
+            def __init__(self):
+                self.lock = threading.Lock()
+                self.calls = 0
+
+            def container_id(self):
+                with self.lock:
+                    self.calls += 1
+                return None
+
+            def container_state(self, cid):
+                return "down"
+
+            def running_engines(self, cid, names):
+                return dict((n, "down") for n in names)
+
+        probe = FastProbe()
+        s1 = MOD.gather_status(probe, ["claude"], budget=1.0)
+        s1_thread = probe._hub_probe_state["thread"]
+        self.assertEqual(s1["container_state"], "down")
+        s1_thread.join(5)
+        self.assertFalse(s1_thread.is_alive())
+        s2 = MOD.gather_status(probe, ["claude"], budget=1.0)
+        s2_thread = probe._hub_probe_state["thread"]
+        self.assertIsNot(s2_thread, s1_thread)
+        s2_thread.join(5)
+        self.assertFalse(s2_thread.is_alive())
+        with probe.lock:
+            self.assertEqual(probe.calls, 2)
+        self.assertEqual(s2["container_state"], "down")
+
+    def test_repeated_slow_refresh_without_prior_snapshot_shows_ellipsis(self):
+        class OneShotSlowProbe(object):
+            def __init__(self):
+                self.release = threading.Event()
+                self.counter = 0
+                self.lock = threading.Lock()
+
+            def container_id(self):
+                with self.lock:
+                    self.counter += 1
+                    n = self.counter
+                if n == 1:
+                    if not self.release.wait(6):
+                        raise RuntimeError("probe timed out in test")
+                    return None
+                raise AssertionError("a second probe thread must not start while the first is alive")
+
+            def container_state(self, cid):
+                return "up (since 2026-09-25T00:00:00)"
+
+            def running_engines(self, cid, names):
+                return dict((n, "running") for n in names)
+
+        probe = OneShotSlowProbe()
+        s1 = MOD.gather_status(probe, ["claude"], budget=0.2)
+        t1 = probe._hub_probe_state["thread"]
+        self.assertEqual(s1["container_state"], "...")
+        self.assertEqual(s1["engine_state"], {"claude": "..."})
+        s2 = MOD.gather_status(probe, ["claude"], budget=0.2)
+        self.assertIs(probe._hub_probe_state["thread"], t1)
+        self.assertEqual(s2["container_state"], "...")
+        self.assertEqual(s2["engine_state"], {"claude": "..."})
+        probe.release.set()
+        t1.join(5)
+        self.assertFalse(t1.is_alive())
+        time_start = time.time()
+        s3 = MOD.gather_status(probe, ["claude"], budget=1.0)
+        t2 = probe._hub_probe_state["thread"]
+        self.assertIsNot(t2, t1)
+        t2.join(5)
+        self.assertFalse(t2.is_alive())
+        self.assertFalse(time.time() - time_start > 1.0)
+        self.assertIn("up", s3["container_state"])
+        self.assertEqual(s3["engine_state"]["claude"], "running")
+
+    def test_slow_probe_with_prior_snapshot_reuses_last_snapshot(self):
+        class WarmProbe(object):
+            def __init__(self):
+                self.release = threading.Event()
+                self.lock = threading.Lock()
+
+            def container_id(self):
+                if self.release.is_set():
+                    raise AssertionError("warm snapshot should be served without a new probe")
+                if not self.release.wait(6):
+                    raise RuntimeError("probe timed out in test")
+                return None
+
+            def container_state(self, cid):
+                return "up (since 2026-09-25T00:00:00)"
+
+            def running_engines(self, cid, names):
+                return dict((n, "running") for n in names)
+
+        probe = WarmProbe()
+        s1 = MOD.gather_status(probe, ["claude"], budget=1.0)
+        self.assertIn("up", s1["container_state"])
+        t1 = probe._hub_probe_state["thread"]
+        t1.join(5)
+        self.assertFalse(t1.is_alive())
+        s2 = MOD.gather_status(probe, ["claude"], budget=0.2)
+        self.assertEqual(s2["container_state"], s1["container_state"])
+        with probe.lock:
+            pass
+        self.assertFalse(probe.release.is_set())
+
+
+class RawConfirmDrainTests(unittest.TestCase):
+    class FakeRawInput(object):
+        def __init__(self, pending=b""):
+            self.pending = pending
+            self.reads = []
+
+        def isatty(self):
+            return True
+
+        def fileno(self):
+            raise OSError("no real fd in this test")
+
+        def readline(self):
+            data = self.pending
+            self.pending = b""
+            self.reads.append(data)
+            if data == b"":
+                return ""
+            return data.decode("utf-8", "replace")
+
+    class _DrainContext(object):
+        def __init__(self, fd, pending):
+            import select as _select_module
+            self.select_module = _select_module
+            self.fd = fd
+            self.pending = pending
+            self.reads = []
+            self._select = None
+            self._read = None
+
+        def __enter__(self):
+            self._select = self.select_module.select
+            self._read = ui.os.read
+            self.select_module.select = self._fake_select
+            ui.os.read = self._fake_read
+            return self
+
+        def __exit__(self, *exc):
+            self.select_module.select = self._select
+            ui.os.read = self._read
+            return False
+
+        def _fake_select(self, rlist, _wlist, _xlist, _timeout):
+            if self.fd not in rlist or not self.pending:
+                return ([], [], [])
+            return ([self.fd], [], [])
+
+        def _fake_read(self, fd, size):
+            self.reads.append((fd, size))
+            if fd != self.fd or not self.pending:
+                return b""
+            one = self.pending[:1]
+            self.pending = self.pending[1:]
+            return one
+
+    def _confirm_and_next_key(self, pending):
+        fake = self.FakeRawInput(pending)
+        keys = ui.RawKeys(fake, io.StringIO())
+        out = io.StringIO()
+        saved_read_key = ui.RawKeys.read_key
+        def read_key_via_line(self_):
+            line = self_.readline()
+            if line == "":
+                return None
+            return line
+        ui.RawKeys.read_key = read_key_via_line
+        try:
+            ctx = self._DrainContext(0, pending)
+            ctx.__enter__()
+            try:
+                answer = ui.confirm(keys, out, "do it")
+                next_key = ui.read_selection(keys, out, "default")
+            finally:
+                ctx.__exit__(None, None, None)
+        finally:
+            ui.RawKeys.read_key = saved_read_key
+        return answer, next_key, fake, out
+
+    def test_pending_cr_after_y_is_drained_and_not_consumed_as_default(self):
+        answer, next_key, fake, _out = self._confirm_and_next_key(b"y\r")
+        self.assertIs(answer, True)
+        self.assertEqual(next_key, None)
+        self.assertEqual(fake.pending, b"")
+        self.assertEqual([len(r) for r in fake.reads], [1, 0])
+
+    def test_pending_lf_after_y_is_drained_and_not_consumed_as_default(self):
+        answer, next_key, fake, _out = self._confirm_and_next_key(b"y\n")
+        self.assertIs(answer, True)
+        self.assertEqual(next_key, None)
+        self.assertEqual(fake.pending, b"")
+        self.assertEqual([len(r) for r in fake.reads], [1, 0])
+
+    def test_drain_preserves_a_pending_non_newline_key(self):
+        _answer, _next_key, fake, _out = self._confirm_and_next_key(b"yx")
+        self.assertEqual(fake.pending, b"x")
+
+    def test_pending_cr_after_n_is_drained_too(self):
+        answer, next_key, fake, _out = self._confirm_and_next_key(b"n\r")
+        self.assertIs(answer, False)
+        self.assertEqual(next_key, None)
+        self.assertEqual(fake.pending, b"")
+
+
+class DisplayWidthRowTests(unittest.TestCase):
+    WIDE = "\u4e2d"
+
+    def test_cjk_char_counts_as_two_columns(self):
+        self.assertEqual(screens.display_width(self.WIDE + "a"), 3)
+
+    def test_row_truncates_by_display_width(self):
+        out = screens._row(self.WIDE * 40)
+        self.assertTrue(out.endswith("..."))
+        self.assertEqual(screens.display_width(out), 80)
+        self.assertEqual(screens.display_width(out[:-3]), 77)
+        mixed = screens._row("a" * 79 + self.WIDE)
+        self.assertEqual(screens.display_width(mixed), 80)
+
+    def test_row_keeps_short_width_fit_text_unchanged(self):
+        text = self.WIDE * 25 + "a"
+        self.assertEqual(screens.display_width(text), 51)
+        self.assertEqual(screens._row(text), text)
+
+    def test_row_boundary_cjk_not_split(self):
+        out = screens._row(self.WIDE * 39)
+        self.assertTrue(out.endswith("..."))
+        self.assertEqual(screens.display_width(out), 80)
+        fit = self.WIDE * 40
+        self.assertEqual(screens.display_width(fit), 80)
+        self.assertEqual(screens._row(fit), fit)
+
+    def test_row_truncated_ascii_matches_legacy_behaviour(self):
+        out = screens._row("x" * 100)
+        self.assertEqual(out, "x" * 77 + "...")
+
+
+class CJKRootRenderTests(unittest.TestCase):
+    def assert_in_cols(self, text):
+        for line in text.splitlines():
+            self.assertLessEqual(screens.display_width(line), 80, line)
+
+    def test_cjk_root_of_50_chars_renders_every_line_within_80_columns(self):
+        ctx = dict(ISOLATED_CTX)
+        cjk_root = "\u6d4b" * 50
+        ctx["root"] = cjk_root
+        snap = {
+            "ctx": ctx,
+            "engine_names": ["claude", "codex"],
+            "engine_state": {"claude": "running", "codex": "down"},
+            "container_state": "up (since 2026-09-25T00:00:00)",
+            "cbox_path": CBOX_PATH,
+            "doctor_warnings": 2,
+        }
+        text, _actions = screens.render_main(snap)
+        self.assert_in_cols(text)
+        first_line = text.splitlines()[0]
+        self.assertTrue(first_line.endswith("..."))
+        self.assertLessEqual(screens.display_width(first_line), 80)
+
+    def test_cjk_root_in_submenu_header_within_80_columns(self):
+        ctx = dict(GLOBAL_CTX)
+        cjk_root = "\u4e91" * 40
+        ctx["root"] = cjk_root
+        snap = {"ctx": ctx, "cbox_path": CBOX_PATH, "engine_state": {}}
+        for name, fn in screens.RENDERERS.items():
+            text, _actions = fn(snap)
+            self.assert_in_cols(text)
+            self.assert_in_cols(screens.render_hints(_actions))
 
 
 if __name__ == "__main__":

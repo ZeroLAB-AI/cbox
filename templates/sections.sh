@@ -1,4 +1,4 @@
-SECTIONS=(mode mounts workspaces python gpu egress netaccess hostroute ssh bashrc mcp-servers codex-progress local-model hermes hermes-delegate ollama wireguard autoresume agents codex-mcp continuity claude-md settings hooks git-identity apt-extra binaries restart-policy autoupdate dns clipboard kernel-lang user-layer)
+SECTIONS=(mode mounts workspaces python gpu egress host-aliases netaccess hostroute ssh bashrc mcp-servers codex-progress local-model hermes hermes-delegate ollama wireguard autoresume agents codex-mcp continuity claude-md settings hooks git-identity apt-extra binaries restart-policy autoupdate dns clipboard kernel-lang user-layer)
 
 sec_get() {
   case "$1" in
@@ -21,6 +21,9 @@ sec_get() {
           ;;
         egress)
           printf '%s\n' 'Egress'
+          ;;
+        host-aliases)
+          printf '%s\n' 'Host-alias proxy'
           ;;
         netaccess)
           printf '%s\n' 'Container network access'
@@ -128,6 +131,9 @@ sec_get() {
         egress)
           printf '%s\n' 'Network egress policy: off, allowlist, or blocklist of domains; applied after login.'
           ;;
+        host-aliases)
+          printf '%s\n' 'Redirect selected host /etc/hosts names (mapped to 127.0.0.1/::1) through the netaccess SOCKS proxy to a docker container publishing a matching host port, so curl https://name works natively inside cbox with no proxy flags. Off by default; requires netaccess to be on to actually forward anything.'
+          ;;
         netaccess)
           printf '%s\n' 'Reach Docker networks through Dante SOCKS; optional host-side exec bridge runs tests only in containers on explicit scope=list networks and never mounts docker.sock into cbox.'
           ;;
@@ -233,6 +239,9 @@ sec_get() {
           ;;
         egress)
           printf '%s\n' 'CBOX_EGRESS_MODE CBOX_EGRESS_APPLIED'
+          ;;
+        host-aliases)
+          printf '%s\n' 'CBOX_NETACCESS_HOST_ALIASES'
           ;;
         netaccess)
           printf '%s\n' 'CBOX_NETACCESS_MODE CBOX_NETACCESS_APPLIED CBOX_NETACCESS_SCOPE CBOX_NETACCESS_NETWORKS CBOX_NETACCESS_CIDRS CBOX_NETACCESS_SOCKS_PORT CBOX_NETACCESS_EXEC_MODE CBOX_NETACCESS_EXEC_WORKSPACE_GUARD CBOX_NETACCESS_EXEC_TIMEOUT CBOX_NETACCESS_EXEC_MAX_BYTES CBOX_CONTAINER_EXEC_TOOL'
@@ -340,6 +349,9 @@ sec_get() {
         egress)
           printf '%s\n' 'topology'
           ;;
+        host-aliases)
+          printf '%s\n' 'recreate'
+          ;;
         netaccess)
           printf '%s\n' 'topology'
           ;;
@@ -446,6 +458,9 @@ sec_get() {
         egress)
           printf '%s\n' 'skip'
           ;;
+        host-aliases)
+          printf '%s\n' 'skip'
+          ;;
         netaccess)
           printf '%s\n' 'skip'
           ;;
@@ -550,6 +565,9 @@ sec_get() {
           printf '%s\n' 'project'
           ;;
         egress)
+          printf '%s\n' 'project'
+          ;;
+        host-aliases)
           printf '%s\n' 'project'
           ;;
         netaccess)
@@ -693,6 +711,9 @@ sec_get() {
         python)
           printf '%s\n' ''
           ;;
+        host-aliases)
+          printf '%s\n' 'host-aliases'
+          ;;
         netaccess)
           printf '%s\n' 'netaccess container-exec container-exec-tool cbox-net'
           ;;
@@ -765,7 +786,7 @@ sec_has() {
   case "$1" in
     SEC_TITLE)
       case "$2" in
-        mode|mounts|workspaces|python|gpu|egress|netaccess|hostroute|ssh|bashrc|mcp-servers|codex-progress|local-model|hermes|hermes-delegate|ollama|wireguard|autoresume|agents|codex-mcp|continuity|claude-md|settings|hooks|git-identity|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang|user-layer)
+        mode|mounts|workspaces|python|gpu|egress|host-aliases|netaccess|hostroute|ssh|bashrc|mcp-servers|codex-progress|local-model|hermes|hermes-delegate|ollama|wireguard|autoresume|agents|codex-mcp|continuity|claude-md|settings|hooks|git-identity|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang|user-layer)
           return 0
           ;;
         *)
@@ -775,7 +796,7 @@ sec_has() {
       ;;
     SEC_DESC)
       case "$2" in
-        mode|mounts|workspaces|python|gpu|egress|netaccess|hostroute|ssh|bashrc|mcp-servers|codex-progress|local-model|hermes|hermes-delegate|ollama|wireguard|autoresume|agents|codex-mcp|continuity|claude-md|settings|hooks|git-identity|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang|user-layer)
+        mode|mounts|workspaces|python|gpu|egress|host-aliases|netaccess|hostroute|ssh|bashrc|mcp-servers|codex-progress|local-model|hermes|hermes-delegate|ollama|wireguard|autoresume|agents|codex-mcp|continuity|claude-md|settings|hooks|git-identity|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang|user-layer)
           return 0
           ;;
         *)
@@ -785,7 +806,7 @@ sec_has() {
       ;;
     SEC_VARS)
       case "$2" in
-        mode|mounts|workspaces|python|gpu|egress|netaccess|hostroute|ssh|bashrc|mcp-servers|codex-progress|local-model|hermes|hermes-delegate|ollama|wireguard|autoresume|agents|codex-mcp|continuity|claude-md|settings|hooks|git-identity|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang|user-layer)
+        mode|mounts|workspaces|python|gpu|egress|host-aliases|netaccess|hostroute|ssh|bashrc|mcp-servers|codex-progress|local-model|hermes|hermes-delegate|ollama|wireguard|autoresume|agents|codex-mcp|continuity|claude-md|settings|hooks|git-identity|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang|user-layer)
           return 0
           ;;
         *)
@@ -795,7 +816,7 @@ sec_has() {
       ;;
     SEC_APPLY)
       case "$2" in
-        mode|mounts|workspaces|python|gpu|egress|netaccess|hostroute|ssh|bashrc|mcp-servers|codex-progress|local-model|hermes|hermes-delegate|ollama|wireguard|autoresume|agents|codex-mcp|continuity|claude-md|settings|hooks|git-identity|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang|user-layer)
+        mode|mounts|workspaces|python|gpu|egress|host-aliases|netaccess|hostroute|ssh|bashrc|mcp-servers|codex-progress|local-model|hermes|hermes-delegate|ollama|wireguard|autoresume|agents|codex-mcp|continuity|claude-md|settings|hooks|git-identity|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang|user-layer)
           return 0
           ;;
         *)
@@ -805,7 +826,7 @@ sec_has() {
       ;;
     SEC_PROFILE)
       case "$2" in
-        mode|mounts|workspaces|python|gpu|egress|netaccess|hostroute|ssh|bashrc|mcp-servers|codex-progress|local-model|hermes|hermes-delegate|ollama|wireguard|autoresume|agents|codex-mcp|continuity|claude-md|settings|hooks|git-identity|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang|user-layer)
+        mode|mounts|workspaces|python|gpu|egress|host-aliases|netaccess|hostroute|ssh|bashrc|mcp-servers|codex-progress|local-model|hermes|hermes-delegate|ollama|wireguard|autoresume|agents|codex-mcp|continuity|claude-md|settings|hooks|git-identity|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang|user-layer)
           return 0
           ;;
         *)
@@ -815,7 +836,7 @@ sec_has() {
       ;;
     SEC_SCOPE)
       case "$2" in
-        mode|mounts|workspaces|python|gpu|egress|netaccess|hostroute|ssh|bashrc|mcp-servers|codex-progress|local-model|hermes|hermes-delegate|ollama|wireguard|autoresume|agents|codex-mcp|continuity|claude-md|settings|hooks|git-identity|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang|user-layer)
+        mode|mounts|workspaces|python|gpu|egress|host-aliases|netaccess|hostroute|ssh|bashrc|mcp-servers|codex-progress|local-model|hermes|hermes-delegate|ollama|wireguard|autoresume|agents|codex-mcp|continuity|claude-md|settings|hooks|git-identity|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang|user-layer)
           return 0
           ;;
         *)
@@ -845,7 +866,7 @@ sec_has() {
       ;;
     SEC_DOCTOR_ROWS)
       case "$2" in
-        mounts|workspaces|python|netaccess|bashrc|mcp-servers|hermes-delegate|ollama|wireguard|autoresume|agents|continuity|claude-md|hooks|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang|user-layer)
+        mounts|workspaces|python|host-aliases|netaccess|bashrc|mcp-servers|hermes-delegate|ollama|wireguard|autoresume|agents|continuity|claude-md|hooks|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang|user-layer)
           return 0
           ;;
         *)
@@ -862,22 +883,22 @@ sec_has() {
 sec_keys() {
   case "$1" in
     SEC_TITLE)
-      printf '%s\n' 'mode' 'mounts' 'workspaces' 'python' 'gpu' 'egress' 'netaccess' 'hostroute' 'ssh' 'bashrc' 'mcp-servers' 'codex-progress' 'local-model' 'hermes' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'codex-mcp' 'continuity' 'claude-md' 'settings' 'hooks' 'git-identity' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang' 'user-layer'
+      printf '%s\n' 'mode' 'mounts' 'workspaces' 'python' 'gpu' 'egress' 'host-aliases' 'netaccess' 'hostroute' 'ssh' 'bashrc' 'mcp-servers' 'codex-progress' 'local-model' 'hermes' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'codex-mcp' 'continuity' 'claude-md' 'settings' 'hooks' 'git-identity' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang' 'user-layer'
       ;;
     SEC_DESC)
-      printf '%s\n' 'mode' 'mounts' 'workspaces' 'python' 'gpu' 'egress' 'netaccess' 'hostroute' 'ssh' 'bashrc' 'mcp-servers' 'codex-progress' 'local-model' 'hermes' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'codex-mcp' 'continuity' 'claude-md' 'settings' 'hooks' 'git-identity' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang' 'user-layer'
+      printf '%s\n' 'mode' 'mounts' 'workspaces' 'python' 'gpu' 'egress' 'host-aliases' 'netaccess' 'hostroute' 'ssh' 'bashrc' 'mcp-servers' 'codex-progress' 'local-model' 'hermes' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'codex-mcp' 'continuity' 'claude-md' 'settings' 'hooks' 'git-identity' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang' 'user-layer'
       ;;
     SEC_VARS)
-      printf '%s\n' 'mode' 'mounts' 'workspaces' 'python' 'gpu' 'egress' 'netaccess' 'hostroute' 'ssh' 'bashrc' 'mcp-servers' 'codex-progress' 'local-model' 'hermes' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'codex-mcp' 'continuity' 'claude-md' 'settings' 'hooks' 'git-identity' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang' 'user-layer'
+      printf '%s\n' 'mode' 'mounts' 'workspaces' 'python' 'gpu' 'egress' 'host-aliases' 'netaccess' 'hostroute' 'ssh' 'bashrc' 'mcp-servers' 'codex-progress' 'local-model' 'hermes' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'codex-mcp' 'continuity' 'claude-md' 'settings' 'hooks' 'git-identity' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang' 'user-layer'
       ;;
     SEC_APPLY)
-      printf '%s\n' 'mode' 'mounts' 'workspaces' 'python' 'gpu' 'egress' 'netaccess' 'hostroute' 'ssh' 'bashrc' 'mcp-servers' 'codex-progress' 'local-model' 'hermes' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'codex-mcp' 'continuity' 'claude-md' 'settings' 'hooks' 'git-identity' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang' 'user-layer'
+      printf '%s\n' 'mode' 'mounts' 'workspaces' 'python' 'gpu' 'egress' 'host-aliases' 'netaccess' 'hostroute' 'ssh' 'bashrc' 'mcp-servers' 'codex-progress' 'local-model' 'hermes' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'codex-mcp' 'continuity' 'claude-md' 'settings' 'hooks' 'git-identity' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang' 'user-layer'
       ;;
     SEC_PROFILE)
-      printf '%s\n' 'mode' 'mounts' 'workspaces' 'python' 'gpu' 'egress' 'netaccess' 'hostroute' 'ssh' 'bashrc' 'mcp-servers' 'codex-progress' 'local-model' 'hermes' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'codex-mcp' 'continuity' 'claude-md' 'settings' 'hooks' 'git-identity' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang' 'user-layer'
+      printf '%s\n' 'mode' 'mounts' 'workspaces' 'python' 'gpu' 'egress' 'host-aliases' 'netaccess' 'hostroute' 'ssh' 'bashrc' 'mcp-servers' 'codex-progress' 'local-model' 'hermes' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'codex-mcp' 'continuity' 'claude-md' 'settings' 'hooks' 'git-identity' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang' 'user-layer'
       ;;
     SEC_SCOPE)
-      printf '%s\n' 'mode' 'mounts' 'workspaces' 'python' 'gpu' 'egress' 'netaccess' 'hostroute' 'ssh' 'bashrc' 'mcp-servers' 'codex-progress' 'local-model' 'hermes' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'codex-mcp' 'continuity' 'claude-md' 'settings' 'hooks' 'git-identity' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang' 'user-layer'
+      printf '%s\n' 'mode' 'mounts' 'workspaces' 'python' 'gpu' 'egress' 'host-aliases' 'netaccess' 'hostroute' 'ssh' 'bashrc' 'mcp-servers' 'codex-progress' 'local-model' 'hermes' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'codex-mcp' 'continuity' 'claude-md' 'settings' 'hooks' 'git-identity' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang' 'user-layer'
       ;;
     SEC_DEPS)
       printf '%s\n' 'gpu' 'codex-progress' 'codex-mcp' 'continuity' 'restart-policy'
@@ -886,7 +907,7 @@ sec_keys() {
       printf '%s\n' 'disable:no-cdi' 'dictate:shim-hook' 'dictate:hooks' 'dictate:continuity-hooks' 'disable:isolated-mode'
       ;;
     SEC_DOCTOR_ROWS)
-      printf '%s\n' 'mounts' 'workspaces' 'python' 'netaccess' 'bashrc' 'mcp-servers' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'continuity' 'claude-md' 'hooks' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang' 'user-layer'
+      printf '%s\n' 'mounts' 'workspaces' 'python' 'host-aliases' 'netaccess' 'bashrc' 'mcp-servers' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'continuity' 'claude-md' 'hooks' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang' 'user-layer'
       ;;
     *)
       return 0

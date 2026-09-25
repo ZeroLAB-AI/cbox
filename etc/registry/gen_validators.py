@@ -21,6 +21,7 @@ NAMED_DISPATCH = {
     "ipv4-list": "_cbox_val_named_ipv4_list \"$val\"",
     "kernel-lang": "_cbox_val_named_kernel_lang \"$val\"",
     "codex-model-slug": "_cbox_val_named_codex_model_slug \"$val\"",
+    "host-alias-mode": "_cbox_val_named_host_alias_mode \"$val\"",
 }
 
 

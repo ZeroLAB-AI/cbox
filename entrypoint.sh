@@ -805,7 +805,16 @@ _hermes_netaccess_line() {
   printf '%s' "Docker networks here are reachable only through the cbox SOCKS gateway: call cbox-net net_map first, then net_probe; target containers by name over socks5h; never guess IPs or set ALL_PROXY; a down gateway is a host-side fix."
 }
 
+_host_alias_forwarder_start() {
+  local script=/opt/cbox/host_alias_forwarder.py
+  [ -f "$script" ] || return 0
+  [ ! -L "$script" ] || return 0
+  _as_user setsid /usr/bin/python3 "$script" < /dev/null > /dev/null &
+  disown "$!" 2>/dev/null || true
+}
+
 _guard_socks_proxy
+_host_alias_forwarder_start
 
 case "${1:-}" in
   claude|codex)

@@ -23,10 +23,15 @@ OTHER_PUBKEY="cRcYqQIm9uH5B9V0IEQKddz3nO2FnHOEcYcQ0YQnMBs="
 THIRD_PUBKEY="dRcYqQIm9uH5B9V0IEQKddz3nO2FnHOEcYcQ0YQnMBs="
 
 grep -q 'wg) shift; wg_cmd "\$@";;' "$INSTALL_DIR/cbox" || _fail "wg verb not wired into the dispatcher"
-grep -q 'wg {status|up|down|keygen|peer {add|rm|list|config}}' "$INSTALL_DIR/cbox" || _fail "wg missing from usage text"
+grep -q 'wg {status|up \[--yes\]|down|keygen|peer {add|rm|list|config}|server add-client' "$INSTALL_DIR/cbox" || _fail "wg missing from usage text"
 grep -q 'HUB_ROWS+=("wg")' "$INSTALL_DIR/cbox" || _fail "wg row missing from the hub"
 grep -q 'wg) _hub_wg_submenu' "$INSTALL_DIR/cbox" || _fail "wg row not dispatched in the hub"
 _ok "wiring: dispatcher, usage, hub row and hub dispatch all present"
+
+grep -q '_CBOX_WG_USAGE=' "$INSTALL_DIR/cbox" || _fail "wg_cmd has no shared usage string constant"
+grep -q 'wg server add-client <name>' "$INSTALL_DIR/cbox" || _fail "wg_cmd usage text missing 'server add-client'"
+grep -q 'wg client join <token>' "$INSTALL_DIR/cbox" || _fail "wg_cmd usage text missing 'client join'"
+_ok "wg_cmd usage text documents the pairing verbs (server add-client, client join)"
 
 awk '/^wg_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q '_cbox_wg_guard' \
   || _fail "wg_cmd does not call the off-guard for state-changing subcommands"
@@ -38,7 +43,7 @@ awk '/^wg_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q '_cbox_config_in_cont
   || _fail "wg_cmd does not refuse to run inside a container"
 _ok "guard: wg is host-only, mirroring ollama and netaccess"
 
-for sub in status up down keygen peer; do
+for sub in status up down keygen peer server client; do
   awk '/^wg_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q "$sub" \
     || _fail "wg_cmd case statement missing '$sub'"
 done
@@ -46,7 +51,15 @@ for psub in add rm list config; do
   awk '/^wg_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q "$psub" \
     || _fail "wg_cmd peer case statement missing '$psub'"
 done
-_ok "wg_cmd recognizes status, up, down, keygen, and peer {add|rm|list|config}"
+awk '/^wg_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q 'add-client' \
+  || _fail "wg_cmd server case statement missing 'add-client'"
+awk '/^wg_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q 'join' \
+  || _fail "wg_cmd client case statement missing 'join'"
+_ok "wg_cmd recognizes status, up, down, keygen, peer {add|rm|list|config}, server add-client, and client join"
+
+awk '/^wg_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q '\[ "\$sub" != status \] && \[ "\$sub" != server \] && \[ "\$sub" != client \]' \
+  || _fail "wg_cmd must bypass _cbox_wg_guard for 'server' and 'client' - those verbs are the ones that turn wireguard on"
+_ok "guard bypass: 'wg server ...' and 'wg client ...' skip the off-guard so they can turn the feature on"
 
 awk '/^wg_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -Eq 'flock -x( -w [0-9]+)? 6' \
   || _fail "wg_cmd does not take an exclusive machine-level lock for state-changing verbs"
@@ -137,6 +150,31 @@ out="$(peer_env "$PEERHOME" _cbox_wg_peer_remove ghost 2>&1 || true)"
 echo "$out" | grep -qi 'no peer named' || _fail "peer rm: unknown-name rejection must name the peer: $out"
 _ok "peer rm: refuses an unknown peer name"
 
+PEER_ADD_CMD_FN="$(awk '/^_cbox_wg_peer_add_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox")"
+[ -n "$PEER_ADD_CMD_FN" ] || _fail "could not extract _cbox_wg_peer_add_cmd from cbox"
+
+RC_TRAILING_ENDPOINT=0
+PEER_ADD_CMD_FN="$PEER_ADD_CMD_FN" timeout 5 bash -c '
+  set -e
+  source "'"$INSTALL_DIR"'/templates/generators.sh"
+  eval "$PEER_ADD_CMD_FN"
+  _cbox_wg_peer_add_cmd myname mypubkey 10.0.0.1/32 --endpoint
+' > "$TMPBASE/trailing_endpoint.out" 2>&1 || RC_TRAILING_ENDPOINT=$?
+[ "$RC_TRAILING_ENDPOINT" != 124 ] || _fail "peer add: --endpoint as the trailing argument must not hang (timed out): $(cat "$TMPBASE/trailing_endpoint.out")"
+[ "$RC_TRAILING_ENDPOINT" = 1 ] || _fail "peer add: --endpoint as the trailing argument must exit 1 with a usage error (got rc=$RC_TRAILING_ENDPOINT): $(cat "$TMPBASE/trailing_endpoint.out")"
+grep -qi 'usage' "$TMPBASE/trailing_endpoint.out" || _fail "peer add: trailing --endpoint must print a usage message: $(cat "$TMPBASE/trailing_endpoint.out")"
+
+RC_TRAILING_CAP=0
+PEER_ADD_CMD_FN="$PEER_ADD_CMD_FN" timeout 5 bash -c '
+  set -e
+  source "'"$INSTALL_DIR"'/templates/generators.sh"
+  eval "$PEER_ADD_CMD_FN"
+  _cbox_wg_peer_add_cmd myname mypubkey 10.0.0.1/32 --capability
+' > "$TMPBASE/trailing_capability.out" 2>&1 || RC_TRAILING_CAP=$?
+[ "$RC_TRAILING_CAP" != 124 ] || _fail "peer add: --capability as the trailing argument must not hang (timed out): $(cat "$TMPBASE/trailing_capability.out")"
+[ "$RC_TRAILING_CAP" = 1 ] || _fail "peer add: --capability as the trailing argument must exit 1 with a usage error (got rc=$RC_TRAILING_CAP): $(cat "$TMPBASE/trailing_capability.out")"
+_ok "peer add: a trailing --endpoint or --capability with no value is a usage error, not an infinite loop"
+
 awk '/^_cbox_wg_peer_add_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q '_cbox_wg_reload_or_restart' \
   || _fail "peer add verb does not reload/restart the sidecar after writing the peer"
 awk '/^_cbox_wg_peer_rm_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q '_cbox_wg_reload_or_restart' \
@@ -162,32 +200,35 @@ esac
 WGEOF
 chmod +x "$WGBINDIR/wg"
 
-awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q '_cbox_wg_pubkey' \
+PEER_CONFIG_CMD_FN="$(
+  awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox"
+  awk '/^_cbox_wg_peer_config_impl\(\) \{/,/^}$/' "$INSTALL_DIR/cbox"
+)"
+[ -n "$PEER_CONFIG_CMD_FN" ] || _fail "cannot extract _cbox_wg_peer_config_cmd/_cbox_wg_peer_config_impl from cbox"
+
+printf '%s\n' "$PEER_CONFIG_CMD_FN" | grep -q '_cbox_wg_pubkey' \
   || _fail "peer config verb does not read this node's own public key"
-awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q 'PublicKey = \$my_pub' \
+printf '%s\n' "$PEER_CONFIG_CMD_FN" | grep -q 'PublicKey = \$my_pub' \
   || _fail "peer config output does not include this node's public key"
-awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q 'Endpoint = ' \
+printf '%s\n' "$PEER_CONFIG_CMD_FN" | grep -q 'Endpoint = ' \
   || _fail "peer config output does not include this node's endpoint"
-awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q 'AllowedIPs = ${CBOX_WG_ADDRESS%%/\*}/32' \
+printf '%s\n' "$PEER_CONFIG_CMD_FN" | grep -q 'AllowedIPs = ${CBOX_WG_ADDRESS%%/\*}/32' \
   || _fail "peer config AllowedIPs must carry THIS node's tunnel address as a /32 - the [Peer] block describes this node from the peer's side; emitting the peer's own address produced a config that never routed tunnel traffic"
-awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -Eiq 'privatekey|PrivateKey' \
+printf '%s\n' "$PEER_CONFIG_CMD_FN" | grep -Eiq 'privatekey|PrivateKey' \
   || _fail "peer config generate-key path (optional) must exist to test the never-by-default private key path"
 _ok "peer config: prints this node's public key, endpoint, and this node's tunnel address as AllowedIPs"
 
-awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" \
+printf '%s\n' "$PEER_CONFIG_CMD_FN" \
   | awk '/generate-key/,0' | grep -q 'PrivateKey' \
   || _fail "peer config only ever emits PrivateKey inside the --generate-key branch"
-awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -Eiq 'preferred|preference' \
+printf '%s\n' "$PEER_CONFIG_CMD_FN" | grep -Eiq 'preferred|preference' \
   || _fail "peer config does not document that the peer generating its own key is preferred"
 _ok "peer config: generating the peer's private key locally is optional (--generate-key) and the docs/output state the peer-generates-its-own-key preference"
-awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q '_cbox_wg_write_secret' \
-  || _fail "peer config --generate-key must write the generated private key to a 0600 file via _cbox_wg_write_secret"
-! awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox" | grep -q 'PrivateKey = \$tmp_priv' \
+printf '%s\n' "$PEER_CONFIG_CMD_FN" | grep -q '_cbox_wg_peer_keypair_ensure' \
+  || _fail "peer config --generate-key must write the generated private key to a 0600 file via the shared _cbox_wg_peer_keypair_ensure helper (which uses _cbox_wg_write_secret)"
+! printf '%s\n' "$PEER_CONFIG_CMD_FN" | grep -q 'PrivateKey = \$tmp_priv' \
   || _fail "peer config --generate-key must never print the raw private key to stdout (it lands in session transcripts and shell history)"
 _ok "peer config --generate-key: the key goes to a 0600 file, never to stdout"
-
-PEER_CONFIG_CMD_FN="$(awk '/^_cbox_wg_peer_config_cmd\(\) \{/,/^}$/' "$INSTALL_DIR/cbox")"
-[ -n "$PEER_CONFIG_CMD_FN" ] || _fail "cannot extract _cbox_wg_peer_config_cmd from cbox"
 
 CFGHOME2="$TMPBASE/config-out2"
 mkdir -p "$CFGHOME2"

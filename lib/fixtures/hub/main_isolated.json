@@ -1,0 +1,8 @@
+{
+  "ctx": {"mode": "isolated", "root": "/home/marek/work/shop"},
+  "engine_names": ["claude", "codex", "hermes"],
+  "engine_state": {"claude": "running", "codex": "down", "hermes": "unknown"},
+  "container_state": "up (since 2026-09-25T10:00:00)",
+  "cbox_path": "/home/marek/.local/bin/cbox",
+  "doctor_warnings": null
+}

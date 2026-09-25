@@ -21,6 +21,19 @@ MAX_ALIASES_PER_CONTAINER = 16
 MAX_PORTS_PER_CONTAINER = 32
 MAX_CONTAINERS_PER_NETWORK = 512
 
+DEFAULT_HOSTS_PATH = "/etc/hosts"
+HOST_ALIAS_LOOPBACK_IPS = {"127.0.0.1", "::1"}
+HOST_ALIAS_EXCLUDE_EXACT = {"localhost", "localhost.localdomain", "broadcasthost"}
+HOST_ALIAS_RESERVED_NAMES = {
+    "cbox-proxy-internal", "host.docker.internal", "proxy", "cbox",
+    "ollama", "wg-remote-ollama",
+}
+MAX_HOST_ALIAS_NAMES = 64
+MAX_HOST_ALIAS_PORTS = 64
+MAX_HOST_ALIAS_SKIPPED = 64
+MAX_NOT_GRANTED_DETAIL = 64
+MAX_NETWORKS_PER_ENTRY = 16
+
 
 def valid_hostname(name):
     if not isinstance(name, str) or not name or len(name) > 253:
@@ -113,6 +126,15 @@ def cbox_infra_network(doc):
     return labels.get("cbox.kind") == "infra"
 
 
+def cap_network_list(networks, limit=MAX_NETWORKS_PER_ENTRY):
+    names = sorted(networks)
+    if len(names) <= limit:
+        return names
+    capped = names[:limit]
+    capped.append("+%d" % (len(names) - limit))
+    return capped
+
+
 def sanitize_reason(text, limit=120):
     value = "".join(ch if ch.isprintable() and ord(ch) < 127 else " " for ch in str(text))
     value = " ".join(value.split())
@@ -158,6 +180,201 @@ def select_networks(docker_bin, scope, requested, project):
         selected.append(name)
         docs[name] = doc
     return list(dict.fromkeys(selected)), docs, skipped
+
+
+def parse_etc_hosts(path):
+    names = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return names
+    for line in lines:
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        ip = parts[0]
+        if ip not in HOST_ALIAS_LOOPBACK_IPS:
+            continue
+        for name in parts[1:]:
+            name_lower = name.lower()
+            if name_lower in HOST_ALIAS_EXCLUDE_EXACT:
+                continue
+            if name_lower in HOST_ALIAS_RESERVED_NAMES:
+                continue
+            if name_lower.startswith("ip6-"):
+                continue
+            if not valid_hostname(name):
+                continue
+            names.append(name)
+    return list(dict.fromkeys(names))
+
+
+def select_host_alias_names(spec, hosts_path=DEFAULT_HOSTS_PATH):
+    spec = (spec or "off").strip()
+    if spec == "off" or spec == "":
+        return []
+    if spec == "auto":
+        names = parse_etc_hosts(hosts_path)
+    else:
+        names = []
+        for raw in spec.split(","):
+            if not raw:
+                raise ValueError("empty entry in host alias list")
+            if not valid_hostname(raw):
+                raise ValueError("invalid host alias name: %s" % raw)
+            if raw.lower() in HOST_ALIAS_EXCLUDE_EXACT or raw.lower() in HOST_ALIAS_RESERVED_NAMES:
+                raise ValueError("reserved host alias name: %s" % raw)
+            names.append(raw)
+        names = list(dict.fromkeys(names))
+    if len(names) > MAX_HOST_ALIAS_NAMES:
+        names = names[:MAX_HOST_ALIAS_NAMES]
+    return names
+
+
+def container_published_tcp_ports(container_entry):
+    if not isinstance(container_entry, dict):
+        return {}
+    settings = container_entry.get("NetworkSettings") if isinstance(container_entry.get("NetworkSettings"), dict) else {}
+    ports = settings.get("Ports") if isinstance(settings.get("Ports"), dict) else {}
+    result = {}
+    for spec, bindings in ports.items():
+        if not isinstance(bindings, list):
+            continue
+        if not valid_port_spec(str(spec)):
+            continue
+        proto = str(spec).rsplit("/", 1)[1]
+        container_port = int(str(spec).split("/", 1)[0])
+        for binding in bindings:
+            if not isinstance(binding, dict):
+                continue
+            host_ip = str(binding.get("HostIp") or "")
+            host_port_raw = str(binding.get("HostPort") or "")
+            if host_ip not in ("", "0.0.0.0", "127.0.0.1", "::", "::1"):
+                continue
+            if not host_port_raw.isdigit():
+                continue
+            host_port = int(host_port_raw)
+            if not (1 <= host_port <= 65535):
+                continue
+            result.setdefault(host_port, []).append((proto, container_port))
+    return result
+
+
+def list_running_container_ids(docker_bin):
+    result = []
+    for cid in run(docker_bin, ["ps", "-q"]).splitlines():
+        cid = cid.strip()
+        if cid:
+            result.append(cid)
+    return result
+
+
+def build_host_aliases(docker_bin, names, selected, proxy_container_id):
+    result = {"names": list(names), "ports": {}, "skipped": [], "skipped_not_granted": 0}
+    if not names:
+        return result
+    try:
+        ids = [cid for cid in list_running_container_ids(docker_bin) if cid != proxy_container_id]
+    except Exception as exc:
+        result["skipped"].append({"host_port": "", "container": "", "reason": sanitize_reason("docker ps failed: %s" % exc)})
+        return result
+    infos = batched_container_info(docker_bin, ids)
+    granted = set(selected)
+    dropped = 0
+    skipped_dropped = 0
+    not_granted = 0
+    entries = []
+    for cid, info in infos.items():
+        cname = str(info.get("Name") or "").lstrip("/")
+        settings = info.get("NetworkSettings") if isinstance(info.get("NetworkSettings"), dict) else {}
+        networks = settings.get("Networks") if isinstance(settings.get("Networks"), dict) else {}
+        container_networks = set(networks.keys())
+        shared = sorted(container_networks & granted)
+        published = container_published_tcp_ports(info)
+        if not shared:
+            for host_port, bindings in published.items():
+                not_granted += len(bindings)
+            continue
+        for host_port, bindings in published.items():
+            for proto, container_port in bindings:
+                if proto != "tcp":
+                    if len(result["skipped"]) >= MAX_HOST_ALIAS_SKIPPED:
+                        skipped_dropped += 1
+                        continue
+                    result["skipped"].append({
+                        "host_port": str(host_port),
+                        "container": cname,
+                        "reason": "non-tcp port publish (%s)" % proto,
+                    })
+                    continue
+                entries.append((host_port, {
+                    "container": cname,
+                    "container_port": container_port,
+                    "network": shared[0],
+                }))
+    entries.sort(key=lambda item: item[0])
+    seen_ports = set()
+    for host_port, entry in entries:
+        if host_port in seen_ports:
+            continue
+        seen_ports.add(host_port)
+        if len(result["ports"]) >= MAX_HOST_ALIAS_PORTS:
+            dropped += 1
+            continue
+        result["ports"][str(host_port)] = entry
+    if dropped:
+        result["dropped"] = dropped
+    if skipped_dropped:
+        result["skipped_dropped"] = skipped_dropped
+    result["skipped_not_granted"] = not_granted
+    return result
+
+
+def status_not_granted_detail(docker_bin, selected, proxy_container_id):
+    detail = []
+    try:
+        ids = [cid for cid in list_running_container_ids(docker_bin) if cid != proxy_container_id]
+    except Exception as exc:
+        return [{"host_port": "", "container": "", "container_port": "", "networks": [],
+                  "reason": sanitize_reason("docker ps failed: %s" % exc)}]
+    infos = batched_container_info(docker_bin, ids)
+    granted = set(selected)
+    overflow = 0
+    for _cid, info in infos.items():
+        cname = sanitize_reason(str(info.get("Name") or "").lstrip("/"), 80)
+        settings = info.get("NetworkSettings") if isinstance(info.get("NetworkSettings"), dict) else {}
+        networks = settings.get("Networks") if isinstance(settings.get("Networks"), dict) else {}
+        container_networks = set(networks.keys())
+        if container_networks & granted:
+            continue
+        published = container_published_tcp_ports(info)
+        if not published:
+            continue
+        sanitized_networks = cap_network_list(sanitize_reason(n, 60) for n in container_networks)
+        for host_port, bindings in sorted(published.items(), key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0):
+            for proto, container_port in bindings:
+                if proto != "tcp":
+                    continue
+                if len(detail) >= MAX_NOT_GRANTED_DETAIL:
+                    overflow += 1
+                    continue
+                detail.append({
+                    "host_port": sanitize_reason(str(host_port), 12),
+                    "container": cname,
+                    "container_port": container_port,
+                    "networks": sanitized_networks,
+                    "reason": sanitize_reason("not on a granted network"),
+                })
+    if overflow:
+        detail.append({
+            "host_port": "", "container": "", "container_port": "", "networks": [],
+            "reason": sanitize_reason("%d more" % overflow),
+        })
+    return detail
 
 
 def safe_state_dir(path):
@@ -296,7 +513,7 @@ def exposed_ports(container_entry):
     return valid, dropped
 
 
-def build_netmap(docker_bin, scope, selected, skipped, docs, proxy_container_id, proxy_url, raw_cidrs):
+def build_netmap(docker_bin, scope, selected, skipped, docs, proxy_container_id, proxy_url, raw_cidrs, host_aliases=None):
     networks = []
     all_ids = []
     seen_ids = set()
@@ -349,14 +566,17 @@ def build_netmap(docker_bin, scope, selected, skipped, docs, proxy_container_id,
         networks.append({"name": net["name"], "subnet": net["subnet"], "containers": containers, "dropped": dropped_total})
     proxy_host, proxy_port = proxy_url_parts(proxy_url)
     generated_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if not isinstance(host_aliases, dict):
+        host_aliases = {"names": [], "ports": {}, "skipped": []}
     return {
-        "version": 1,
+        "version": 2,
         "generated_at": generated_at,
         "proxy": {"url": proxy_url, "host": proxy_host, "port": proxy_port},
         "scope": scope,
         "networks": networks,
         "cidrs": list(raw_cidrs),
         "skipped": [{"network": item.get("network", ""), "reason": item.get("reason", "")} for item in skipped],
+        "host_aliases": host_aliases,
     }
 
 
@@ -380,7 +600,9 @@ def netmap_only(args):
                 "requested": True,
             })
     raw_cidrs = validate_cidrs(args.cidr)
-    netmap = build_netmap(args.docker_bin, args.scope, still_selected, skipped, docs, args.container, args.proxy_url, raw_cidrs)
+    host_alias_names = select_host_alias_names(getattr(args, "host_aliases", "") or "off", getattr(args, "hosts_path", DEFAULT_HOSTS_PATH))
+    host_aliases = build_host_aliases(args.docker_bin, host_alias_names, still_selected, args.container)
+    netmap = build_netmap(args.docker_bin, args.scope, still_selected, skipped, docs, args.container, args.proxy_url, raw_cidrs, host_aliases)
     write_netmap(args.netmap_out, netmap)
     return netmap
 
@@ -519,7 +741,9 @@ def apply(args):
     netmap_out = getattr(args, "netmap_out", None)
     if netmap_out:
         proxy_url = getattr(args, "proxy_url", "") or ""
-        netmap = build_netmap(args.docker_bin, args.scope, selected, skipped, docs, args.container, proxy_url, raw_cidrs)
+        host_alias_names = select_host_alias_names(getattr(args, "host_aliases", "") or "off", getattr(args, "hosts_path", DEFAULT_HOSTS_PATH))
+        host_aliases = build_host_aliases(args.docker_bin, host_alias_names, selected, args.container)
+        netmap = build_netmap(args.docker_bin, args.scope, selected, skipped, docs, args.container, proxy_url, raw_cidrs, host_aliases)
         write_netmap(netmap_out, netmap)
     return {
         "internalIp": internal_ip,
@@ -530,20 +754,48 @@ def apply(args):
     }
 
 
+def print_host_alias_names(args):
+    names = select_host_alias_names(args.host_aliases or "off", args.hosts_path)
+    for name in names:
+        print(name)
+    return 0
+
+
+def print_status_not_granted(args):
+    proxy_id = args.container or ""
+    if proxy_id and not NAME_RE.fullmatch(proxy_id):
+        raise ValueError("invalid proxy container ID")
+    detail = status_not_granted_detail(args.docker_bin, args.network, proxy_id)
+    print(json.dumps(detail, ensure_ascii=True, separators=(",", ":")))
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--docker-bin", default="docker")
-    parser.add_argument("--container", required=True)
-    parser.add_argument("--state-dir", required=True)
-    parser.add_argument("--scope", choices=("all", "list"), required=True)
+    parser.add_argument("--container")
+    parser.add_argument("--state-dir")
+    parser.add_argument("--scope", choices=("all", "list"))
     parser.add_argument("--network", action="append", default=[])
     parser.add_argument("--cidr", action="append", default=[])
     parser.add_argument("--netmap-out", default="")
     parser.add_argument("--proxy-url", default="")
     parser.add_argument("--netmap-only", action="store_true")
+    parser.add_argument("--host-aliases", default="off")
+    parser.add_argument("--hosts-path", default=DEFAULT_HOSTS_PATH)
+    parser.add_argument("--print-host-alias-names", action="store_true")
+    parser.add_argument("--status-not-granted", action="store_true")
     args = parser.parse_args(argv)
-    if not NAME_RE.fullmatch(args.container):
+    if args.print_host_alias_names:
+        return print_host_alias_names(args)
+    if args.status_not_granted:
+        return print_status_not_granted(args)
+    if not args.container or not NAME_RE.fullmatch(args.container):
         raise ValueError("invalid proxy container ID")
+    if not args.state_dir:
+        raise ValueError("--state-dir is required")
+    if not args.scope:
+        raise ValueError("--scope is required")
     if args.netmap_only:
         if not args.netmap_out:
             raise ValueError("--netmap-only requires --netmap-out")

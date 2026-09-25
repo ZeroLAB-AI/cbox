@@ -370,13 +370,130 @@ class NetMapTests(EnvIsolatedTestCase):
         self.assertIn("not valid JSON", payload["reason"])
 
     def test_wrong_version(self):
-        write_netmap(self.map_path(), "127.0.0.1", 1080, version=2)
+        write_netmap(self.map_path(), "127.0.0.1", 1080, version=3)
         self.set_map_path()
         result = MOD.run_net_map({})
         self.assertTrue(result["isError"])
         payload = json.loads(result["content"][0]["text"])
         self.assertEqual(payload["status"], "invalid")
         self.assertIn("unsupported netmap version", payload["reason"])
+
+    def test_version_2_with_host_aliases_accepted(self):
+        listener = PlainListener()
+        try:
+            write_netmap(self.map_path(), "127.0.0.1", listener.port, version=2)
+            self.set_map_path()
+            result = MOD.run_net_map({})
+            self.assertFalse(result["isError"])
+            payload = json.loads(result["content"][0]["text"])
+            self.assertEqual(payload["status"], "ok")
+        finally:
+            listener.stop()
+
+    def test_host_aliases_sanitized_and_passed_through(self):
+        raw = {
+            "version": 2,
+            "generated_at": "2026-09-25T00:00:00Z",
+            "proxy": {"url": "socks5h://127.0.0.1:1080", "host": "127.0.0.1", "port": 1080},
+            "scope": "list",
+            "networks": [],
+            "cidrs": [],
+            "skipped": [],
+            "host_aliases": {
+                "names": ["devel.zerolab.sk", "evil$(whoami)"],
+                "ports": {
+                    "443": {"container": "revproxy", "container_port": 443, "network": "project_a"},
+                    "not-a-port": {"container": "x", "container_port": 80, "network": "project_a"},
+                    "70000": {"container": "x", "container_port": 80, "network": "project_a"},
+                },
+                "skipped": [{"host_port": "80", "container": "x", "reason": "not on a granted network"}],
+            },
+        }
+        with open(self.map_path(), "w", encoding="ascii") as fh:
+            fh.write(json.dumps(raw))
+        self.set_map_path()
+        result = MOD.run_net_map({})
+        payload = json.loads(result["content"][0]["text"])
+        host_aliases = payload["map"]["host_aliases"]
+        self.assertEqual(host_aliases["names"], ["devel.zerolab.sk"])
+        self.assertEqual(list(host_aliases["ports"].keys()), ["443"])
+        self.assertEqual(host_aliases["skipped"][0]["host_port"], "80")
+
+    def test_host_aliases_ports_container_validated_and_counters_sanitized(self):
+        raw = {
+            "version": 2,
+            "generated_at": "2026-09-25T00:00:00Z",
+            "proxy": {"url": "socks5h://127.0.0.1:1080", "host": "127.0.0.1", "port": 1080},
+            "scope": "list",
+            "networks": [],
+            "cidrs": [],
+            "skipped": [],
+            "host_aliases": {
+                "names": [],
+                "ports": {
+                    "443": {"container": "revproxy", "container_port": 443, "network": "project_a"},
+                    "444": {"container": "bad name!", "container_port": 444, "network": "project_a"},
+                },
+                "skipped": [],
+                "skipped_not_granted": "not-an-int",
+                "dropped": 5,
+                "some_unknown_key": "should not survive",
+            },
+        }
+        with open(self.map_path(), "w", encoding="ascii") as fh:
+            fh.write(json.dumps(raw))
+        self.set_map_path()
+        result = MOD.run_net_map({})
+        payload = json.loads(result["content"][0]["text"])
+        host_aliases = payload["map"]["host_aliases"]
+        self.assertEqual(list(host_aliases["ports"].keys()), ["443"])
+        self.assertEqual(host_aliases["skipped_not_granted"], 0)
+        self.assertEqual(host_aliases["dropped"], 5)
+        self.assertNotIn("some_unknown_key", host_aliases)
+
+    def test_host_aliases_skipped_entries_validated_and_capped(self):
+        long_reason = "x" * 500
+        skipped = [
+            {"host_port": "80", "container": "x", "reason": "ok"},
+            {"host_port": "not-a-port", "container": "x", "reason": "ok"},
+            {"host_port": "70000", "container": "x", "reason": "ok"},
+            {"host_port": "80", "container": "bad name!", "reason": "ok"},
+            {"host_port": "80", "container": "x", "reason": long_reason},
+            {"host_port": "", "container": "", "reason": "docker ps failed"},
+        ]
+        skipped += [
+            {"host_port": str(9000 + i), "container": "x", "reason": "ok"}
+            for i in range(70)
+        ]
+        raw = {
+            "version": 2,
+            "generated_at": "2026-09-25T00:00:00Z",
+            "proxy": {"url": "socks5h://127.0.0.1:1080", "host": "127.0.0.1", "port": 1080},
+            "scope": "list",
+            "networks": [],
+            "cidrs": [],
+            "skipped": [],
+            "host_aliases": {
+                "names": [],
+                "ports": {},
+                "skipped": skipped,
+            },
+        }
+        with open(self.map_path(), "w", encoding="ascii") as fh:
+            fh.write(json.dumps(raw))
+        self.set_map_path()
+        result = MOD.run_net_map({})
+        payload = json.loads(result["content"][0]["text"])
+        clean_skipped = payload["map"]["host_aliases"]["skipped"]
+        self.assertLessEqual(len(clean_skipped), MOD.MAX_HOST_ALIAS_SKIPPED)
+        self.assertEqual(clean_skipped[0], {"host_port": "80", "container": "x", "reason": "ok"})
+        self.assertEqual(clean_skipped[1]["host_port"], "")
+        self.assertEqual(clean_skipped[2]["host_port"], "")
+        self.assertEqual(clean_skipped[3]["container"], "")
+        self.assertEqual(len(clean_skipped[4]["reason"]), MOD.MAX_HOST_ALIAS_SKIPPED_REASON_LEN)
+        self.assertEqual(clean_skipped[5]["host_port"], "")
+        self.assertEqual(clean_skipped[5]["container"], "")
+        self.assertEqual(clean_skipped[5]["reason"], "docker ps failed")
 
     def test_symlinked_map_refused(self):
         real_path = os.path.join(self.tmpdir, "real-netmap.json")

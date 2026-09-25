@@ -1,0 +1,8 @@
+{
+  "ctx": {"mode": "global", "root": "/home/marek/zerolab/agent_ecosystem"},
+  "engine_names": ["claude", "codex"],
+  "engine_state": {"claude": "down", "codex": "down"},
+  "container_state": "down",
+  "cbox_path": "/home/marek/.local/bin/cbox",
+  "doctor_warnings": 2
+}

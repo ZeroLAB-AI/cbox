@@ -351,3 +351,35 @@ _cbox_val_named_codex_model_slug() {
   esac
   printf '%s' "$val" | grep -Eq '^[A-Za-z0-9._-]+$' || { printf 'expected a model slug matching [A-Za-z0-9._-]+'; return 1; }
 }
+
+_CBOX_HOST_ALIAS_RESERVED_NAMES="localhost localhost.localdomain broadcasthost cbox-proxy-internal host.docker.internal proxy cbox ollama wg-remote-ollama"
+
+_cbox_val_named_host_alias_mode() {
+  local val="$1" n
+  case "$val" in
+    off|auto) return 0 ;;
+    '') printf 'expected off, auto, or a comma-separated hostname list'; return 1 ;;
+  esac
+  case "$val" in
+    ,*|*,|*,,*) printf 'empty entry in host alias list'; return 1 ;;
+  esac
+  local parts n_lower reserved
+  IFS=, read -ra parts <<< "$val"
+  for n in "${parts[@]}"; do
+    if [ -z "$n" ]; then
+      printf 'empty entry in host alias list'; return 1
+    fi
+    case "$n" in
+      *[!A-Za-z0-9.-]*) printf 'invalid host alias name: %s' "$n"; return 1 ;;
+    esac
+    case "$n" in
+      .*|*.|-*|*-|*..*) printf 'invalid host alias name: %s' "$n"; return 1 ;;
+    esac
+    [ "${#n}" -le 253 ] || { printf 'host alias name too long (max 253): %s' "$n"; return 1; }
+    n_lower="$(printf '%s' "$n" | tr '[:upper:]' '[:lower:]')"
+    for reserved in $_CBOX_HOST_ALIAS_RESERVED_NAMES; do
+      [ "$n_lower" = "$reserved" ] && { printf 'reserved host alias name: %s' "$n"; return 1; }
+    done
+  done
+  return 0
+}

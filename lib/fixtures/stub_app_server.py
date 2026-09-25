@@ -89,6 +89,9 @@ def handle_initialize(msg):
 def handle_thread_start(msg):
     rid = msg.get("id")
     params = msg.get("params") or {}
+    if MODE == "thread_start_fail":
+        reply_error(rid, -32000, "usageLimitExceeded: rate limit reached")
+        return
     thread_counter[0] += 1
     thread_id = "thread-%d" % thread_counter[0]
     requested_model = params.get("model")
@@ -111,6 +114,9 @@ def handle_thread_resume(msg):
     rid = msg.get("id")
     params = msg.get("params") or {}
     tid = params.get("threadId")
+    if MODE == "resume_fail":
+        reply_error(rid, -32000, "rate_limit_reached: try again later")
+        return
     state = load_state()
     rec = threads.get(tid) or state.get(tid)
     if rec is None:
@@ -218,6 +224,8 @@ def handle_turn_start(msg):
                  "items": [{"type": "agentMessage", "id": "am1", "text": text,
                             "phase": "final_answer"}]},
     })
+    if MODE == "rate_limits_notify":
+        notify("account/rateLimits/updated", {"rateLimits": default_rate_limits()})
 
 
 pending_approvals = {}
@@ -241,6 +249,36 @@ def handle_turn_interrupt(msg):
         "threadId": thread_id,
         "turn": {"id": turn_id, "status": "interrupted", "items": []},
     })
+
+
+def default_rate_limits():
+    return {
+        "limitId": "codex",
+        "primary": {"usedPercent": 38, "resetsAt": 1790340325, "windowDurationMins": 300},
+        "secondary": {"usedPercent": 12, "resetsAt": 1790842078, "windowDurationMins": 10080},
+        "planType": "plus",
+    }
+
+
+def reached_rate_limits():
+    return {
+        "limitId": "codex",
+        "primary": {"usedPercent": 100, "resetsAt": 1790340325, "windowDurationMins": 300},
+        "secondary": {"usedPercent": 44, "resetsAt": 1790842078, "windowDurationMins": 10080},
+        "planType": "plus",
+        "rateLimitReachedType": "rate_limit_reached",
+    }
+
+
+def handle_rate_limits_read(msg):
+    rid = msg.get("id")
+    if MODE == "rate_limits_fail":
+        reply_error(rid, -32000, "stub induced rate limit read failure")
+        return
+    if MODE in ("rate_limits_reached", "thread_start_fail", "resume_fail"):
+        reply(rid, {"rateLimits": reached_rate_limits(), "ordinaryUsageAllowed": False})
+        return
+    reply(rid, {"rateLimits": default_rate_limits()})
 
 
 def handle_approval_response(msg):
@@ -295,6 +333,8 @@ def main():
             handle_turn_start(msg)
         elif method == "turn/interrupt":
             handle_turn_interrupt(msg)
+        elif method == "account/rateLimits/read":
+            handle_rate_limits_read(msg)
         elif msg.get("id") is not None:
             reply_error(msg.get("id"), -32600, "unknown method: %s" % method)
     return 0

@@ -3,6 +3,12 @@ import json
 import os
 import subprocess
 import sys
+import threading
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import cbox_hub_screens as screens
+import cbox_hub_ui as ui
 
 
 def context_from_cbox(install_dir, cbox_path):
@@ -164,127 +170,247 @@ class NullProbe(object):
         return dict((n, "unknown") for n in names)
 
 
-def build_status_rows(ctx, probe, engine_names):
-    rows = []
+STATUS_BUDGET_SECONDS = 1.5
+
+
+def _fallback_snapshot(engine_names):
+    return {
+        "container_state": "...",
+        "engine_state": dict((n, "...") for n in engine_names),
+    }
+
+
+def _probe_state(probe):
+    state = getattr(probe, "_hub_probe_state", None)
+    if state is None:
+        state = {"thread": None, "last": None}
+        try:
+            probe._hub_probe_state = state
+        except (AttributeError, TypeError):
+            state = {"thread": None, "last": None}
+    return state
+
+
+def gather_status(probe, engine_names, budget=STATUS_BUDGET_SECONDS):
+    state = _probe_state(probe)
+    thread = state["thread"]
+    if thread is not None and thread.is_alive():
+        if state["last"] is not None:
+            return dict(state["last"])
+        return _fallback_snapshot(engine_names)
+    workbox = {"snap": {"container_state": None, "engine_state": None}}
+
+    def run_probe():
+        try:
+            cid = probe.container_id()
+        except Exception:
+            cid = None
+        try:
+            workbox["snap"]["container_state"] = probe.container_state(cid)
+        except Exception:
+            workbox["snap"]["container_state"] = "unknown"
+        try:
+            workbox["snap"]["engine_state"] = probe.running_engines(cid, engine_names)
+        except Exception:
+            workbox["snap"]["engine_state"] = dict((n, "unknown") for n in engine_names)
+
+    t = threading.Thread(target=run_probe)
+    t.daemon = True
+    t.start()
+    state["thread"] = t
+    t.join(budget)
+    snap = workbox["snap"]
+    if snap["container_state"] is not None and snap["engine_state"] is not None:
+        state["last"] = {
+            "container_state": snap["container_state"],
+            "engine_state": snap["engine_state"],
+        }
+        return dict(state["last"])
+    if state["last"] is not None:
+        return dict(state["last"])
+    return _fallback_snapshot(engine_names)
+
+
+def cli_usage(cbox_path):
     try:
-        cid = probe.container_id()
-    except Exception:
-        cid = None
+        out = subprocess.run(
+            [cbox_path, "__cbox_hub_usage_probe__"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+        text = out.stdout.decode("utf-8", "replace")
+        if text:
+            return text
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "usage: %s <verb> [args]\n" % cbox_path
+
+
+def settings_argv(install_dir, cbox_path, ctx):
+    script = os.path.join(install_dir, "lib", "cbox_settings.py")
+    argv = [sys.executable, script, install_dir, cbox_path]
+    if ctx.get("mode") == "isolated":
+        root = ctx.get("root")
+        if not root:
+            return None
+        argv += ["--local", root]
+    return argv
+
+
+def run_action(action, keys, stdout, install_dir, cbox_path, ctx, runner):
+    if action.kind == "quit":
+        return "quit", 0
+    if action.kind == "back":
+        return "back", 0
+    if action.kind == "refresh":
+        return "refresh", 0
+    if action.kind == "hints":
+        return "hints", 0
+    if action.kind == "submenu":
+        return "submenu", action.submenu
+
+    argv = action.argv
+    if action.kind == "settings":
+        argv = settings_argv(install_dir, cbox_path, ctx)
+        if argv is None:
+            stdout.write("cbox: cannot open settings - no project root resolved\n")
+            return "noop", 1
+
+    if action.argv_builder is not None:
+        text = ui.read_text(keys, stdout, action.prompt or "value: ")
+        if text is None:
+            return "eof", 1
+        if not text:
+            stdout.write("cancelled\n")
+            return "noop", 1
+        argv = action.argv_builder(text)
+        if argv is None:
+            stdout.write("cancelled (bad input)\n")
+            return "noop", 1
+
+    if action.confirm:
+        if action.force_token:
+            text = ui.read_text(keys, stdout, "%s: " % action.confirm_prompt)
+            if text is None:
+                return "eof", 1
+            if text != action.force_token:
+                stdout.write("cancelled\n")
+                return "noop", 1
+            argv = argv + ["--force"]
+        else:
+            answer = ui.confirm(keys, stdout, action.confirm_prompt)
+            if answer is None:
+                return "eof", 1
+            if not answer:
+                return "noop", 1
+
     try:
-        state = probe.container_state(cid)
-    except Exception:
-        state = "unknown"
-    rows.append(("container", state))
-    rows.append(("egress", ctx.get("egress", "unknown") or "unknown"))
-    try:
-        marks = probe.running_engines(cid, engine_names)
-    except Exception:
-        marks = dict((n, "unknown") for n in engine_names)
-    engines_line = " ".join(
-        "%s(%s)" % (n, marks.get(n, "unknown")) if marks.get(n) == "running" else n
-        for n in engine_names
-    )
-    rows.append(("engines", engines_line or "<none>"))
-    return rows
-
-
-def build_screen(ctx, engine_names, status_rows):
-    mode = ctx.get("mode", "none")
-    root = ctx.get("root", os.getcwd())
-    end_note = " (ends hub)" if mode == "global" else ""
-
-    lines = []
-    lines.append("cbox - %s   mode: %s" % (root, mode))
-    for label, value in status_rows:
-        lines.append("%s: %s" % (label, value))
-    lines.append("")
-
-    rows = []
-    numbered = []
-    i = 1
-    for name in engine_names:
-        numbered.append((str(i), "engine:%s" % name, "%-10s [start%s]" % (name, end_note)))
-        i += 1
-    numbered.append((str(i), "shell", "shell%s" % (" (ends hub)" if mode == "global" else "")))
-    i += 1
-    numbered.append((str(i), "logs", "logs"))
-    i += 1
-    numbered.append((str(i), "doctor", "doctor"))
-    i += 1
-    numbered.append((str(i), "settings", "settings"))
-    i += 1
-    numbered.append((str(i), "down", "down"))
-    i += 1
-
-    for num, action, label in numbered:
-        lines.append("  %s) %s" % (num, label))
-        rows.append(action)
-    lines.append("  q) quit")
-    return "\n".join(lines) + "\n", rows
-
-
-def action_argv(install_dir, cbox_path, row, ctx):
-    if row.startswith("engine:"):
-        return [cbox_path, "run", row[len("engine:"):]]
-    if row == "shell":
-        return [cbox_path, "shell"]
-    if row == "logs":
-        return [cbox_path, "logs"]
-    if row == "doctor":
-        return [cbox_path, "doctor"]
-    if row == "down":
-        return [cbox_path, "down"]
-    if row == "settings":
-        script = os.path.join(install_dir, "lib", "cbox_settings.py")
-        argv = [sys.executable, script, install_dir, cbox_path]
-        if ctx.get("mode") == "isolated":
-            root = ctx.get("root")
-            if not root:
-                return None
-            argv += ["--local", root]
-        return argv
-    return None
-
-
-def run_action(install_dir, cbox_path, row, ctx):
-    argv = action_argv(install_dir, cbox_path, row, ctx)
-    if argv is None:
-        sys.stderr.write("cbox: internal error - unknown row '%s'\n" % row)
-        return 1
-    try:
-        return subprocess.call(argv)
+        rc = runner(argv)
     except OSError as exc:
-        sys.stderr.write("cbox: failed to run %s: %s\n" % (" ".join(argv), exc))
-        return 1
+        stdout.write("cbox: failed to run %s: %s\n" % (" ".join(argv), exc))
+        return "ran", 1
+    if rc != 0:
+        stdout.write("cbox: action exited non-zero (%d)\n" % rc)
+    return "ran", rc
 
 
-def hub_loop(install_dir, cbox_path, ctx, probe, stdin_stream, stdout_write):
+EOF_MESSAGE = "\ncbox: EOF - quitting\n"
+
+
+def hub_loop(install_dir, cbox_path, ctx, probe, stdin_stream, stdout_write, runner=None):
+    if runner is None:
+        runner = subprocess.call
+    stdout = _StdoutWriter(stdout_write)
+    keys = ui.make_keys(stdin_stream, stdout)
     engine_names = engines_from_registry(install_dir)
+    status = gather_status(probe, engine_names)
+    screen_name = "main"
+
     while True:
-        status_rows = build_status_rows(ctx, probe, engine_names)
-        screen, rows = build_screen(ctx, engine_names, status_rows)
-        stdout_write(screen)
-        stdout_write("> ")
-        line = stdin_stream.readline()
-        if line == "":
-            stdout_write("\ncbox: EOF - quitting\n")
+        if screen_name == "main":
+            snapshot = {
+                "ctx": ctx,
+                "engine_names": engine_names,
+                "engine_state": status["engine_state"],
+                "container_state": status["container_state"],
+                "cbox_path": cbox_path,
+                "doctor_warnings": None,
+            }
+            text, actions = screens.render_main(snapshot)
+        else:
+            renderer = screens.RENDERERS[screen_name]
+            snapshot = {
+                "ctx": ctx,
+                "cbox_path": cbox_path,
+                "engine_names": engine_names,
+                "engine_state": status["engine_state"],
+            }
+            text, actions = renderer(snapshot)
+
+        stdout.write(text)
+        default_key = actions[0].key if actions else None
+        sel = ui.read_selection(keys, stdout, default_key)
+        if sel is None:
+            stdout.write(EOF_MESSAGE)
             return 0
-        ans = line.strip()
-        if ans in ("q", "Q"):
+        action = ui.find_action(actions, sel)
+        if action is None:
+            stdout.write("cbox: unrecognized selection '%s'\n" % sel)
+            continue
+
+        if action.kind == "hints":
+            stdout.write(screens.render_hints(actions))
+            if keys.read_key() is None:
+                stdout.write(EOF_MESSAGE)
+                return 0
+            continue
+        if action.kind == "refresh":
+            status = gather_status(probe, engine_names)
+            continue
+        if action.kind == "submenu":
+            screen_name = action.submenu
+            continue
+        if action.kind == "back":
+            screen_name = "main"
+            continue
+        if action.kind == "quit":
             return 0
-        if not ans.isdigit():
-            stdout_write("cbox: unrecognized selection '%s'\n" % ans)
-            continue
-        idx = int(ans)
-        if idx < 1 or idx > len(rows):
-            stdout_write("cbox: unrecognized selection '%s'\n" % ans)
-            continue
-        row = rows[idx - 1]
-        rc = run_action(install_dir, cbox_path, row, ctx)
-        if rc != 0:
-            stdout_write("cbox: action exited non-zero (%d)\n" % rc)
-        if ctx.get("mode") == "global" and (row == "shell" or row.startswith("engine:")):
-            return rc
+
+        outcome, rc = run_action(action, keys, stdout, install_dir, cbox_path, ctx, runner)
+        if outcome == "eof":
+            stdout.write(EOF_MESSAGE)
+            return 0
+        if outcome == "ran":
+            if ctx.get("mode") == "global" and screen_name == "main" and \
+                    action.key.isdigit():
+                return rc
+            if ctx.get("mode") == "global" and screen_name == "main" and \
+                    action.key == "t":
+                return rc
+
+
+class _StdoutWriter(object):
+    def __init__(self, write_fn):
+        self._write = write_fn
+        self._tty_source = getattr(write_fn, "__self__", None)
+
+    def write(self, text):
+        self._write(text)
+        return len(text)
+
+    def isatty(self):
+        if self._tty_source is None:
+            return False
+        try:
+            return self._tty_source.isatty()
+        except Exception:
+            return False
+
+    def fileno(self):
+        if self._tty_source is None:
+            raise OSError("no underlying stream for isatty/fileno")
+        return self._tty_source.fileno()
 
 
 def stderr_write(text):
@@ -292,44 +418,30 @@ def stderr_write(text):
     sys.stderr.flush()
 
 
-def usage_text(cbox_path):
-    return (
-        "usage: %s {run [--session <id>] <bin> [args]|session {list|new|close <id>|show <id>}|"
-        "ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] "
-        "[--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force]|restart [--gpu]|shell|"
-        "logs [args]|update|reinstall-bins [--fresh|--if-stale]|install-hooks|continuity migrate|"
-        "verify [--gpu|--isolated]|doctor|config {get|set|pending}|netaccess {status|allow|deny}|"
-        "ollama {status|up|down|pull <model>|reconcile}|"
-        "wg {status|up|down|keygen|peer {add|rm|list|config}}|"
-        "session-broker {status|access {disabled|viewer|full-attach}|window {off|<minutes>}|"
-        "key {add <pubkey-file> [comment]|rm <fingerprint>|fingerprints}}|"
-        "backup|login [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}\n"
-    ) % cbox_path
+def main(argv, stdin=None, stdout=None):
+    stdin = sys.stdin if stdin is None else stdin
+    stdout = sys.stdout if stdout is None else stdout
 
-
-def main(argv):
     if len(argv) < 3:
         sys.stderr.write("cbox_hub: usage: cbox_hub.py <install_dir> <cbox_path>\n")
         return 1
     install_dir = argv[1]
     cbox_path = argv[2]
 
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
-        sys.stdout.write(usage_text(cbox_path))
-        sys.stdout.write("cbox: 'cbox ls' lists RUNNING isolated projects only, not every configured project\n")
+    if not (stdin.isatty() and stdout.isatty()):
+        stdout.write(cli_usage(cbox_path))
         return 1
 
     ctx = context_from_cbox(install_dir, cbox_path)
     if ctx is None:
-        sys.stdout.write(usage_text(cbox_path))
-        sys.stdout.write("cbox: 'cbox ls' lists RUNNING isolated projects only, not every configured project\n")
+        stdout.write(cli_usage(cbox_path))
         return 1
     if ctx.get("mode") not in ("global", "isolated"):
         return HUB_NO_CONFIG_EXIT
 
     probe = Probe(ctx, install_dir)
     try:
-        return hub_loop(install_dir, cbox_path, ctx, probe, sys.stdin, stderr_write)
+        return hub_loop(install_dir, cbox_path, ctx, probe, stdin, stdout.write)
     except KeyboardInterrupt:
         stderr_write("\ncbox: interrupted - quitting\n")
         return 130

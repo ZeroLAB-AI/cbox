@@ -229,6 +229,7 @@ _cbox_netaccess_render() {
       *) { [ "${#netmap_port}" -le 5 ] && [ "$netmap_port" -ge 1 ] && [ "$netmap_port" -le 65535 ]; } || netmap_port=1080 ;;
     esac
     args+=(--netmap-out "$state_dir/netmap/netmap.json" --proxy-url "socks5h://$(_cbox_proxy_internal_alias):$netmap_port")
+    args+=(--host-aliases "${CBOX_NETACCESS_HOST_ALIASES:-off}")
   else
     scope=list
   fi
@@ -411,6 +412,68 @@ _netaccess_print_status() {
     echo "applied:   $(cat "$state_dir/applied-networks.json")"
   else
     echo "applied:   <no state yet>"
+  fi
+  echo "host-aliases: ${CBOX_NETACCESS_HOST_ALIASES:-off}"
+  if [ "${CBOX_NETACCESS_HOST_ALIASES:-off}" != off ]; then
+    local ha_map="$state_dir/netmap/netmap.json"
+    if [ -f "$ha_map" ]; then
+      python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="ascii"))
+except Exception:
+    sys.exit(0)
+ha = d.get("host_aliases") if isinstance(d.get("host_aliases"), dict) else {}
+names = ha.get("names") if isinstance(ha.get("names"), list) else []
+ports = ha.get("ports") if isinstance(ha.get("ports"), dict) else {}
+skipped = ha.get("skipped") if isinstance(ha.get("skipped"), list) else []
+print("  names:   %s" % (" ".join(names) if names else "<none>"))
+for hp, entry in sorted(ports.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0):
+    if not isinstance(entry, dict):
+        continue
+    print("  127.0.0.1:%s -> %s:%s (network %s)" % (hp, entry.get("container", ""), entry.get("container_port", ""), entry.get("network", "")))
+for item in skipped:
+    if not isinstance(item, dict):
+        continue
+    print("  ! skipped host port %s (%s): %s" % (item.get("host_port", ""), item.get("container", ""), item.get("reason", "")))
+' "$ha_map" 2>/dev/null
+    else
+      echo "  <no live netmap yet - apply netaccess first>"
+    fi
+    echo "  note: a name added to /etc/hosts or the explicit list after the container started needs cbox down && cbox run"
+    if [ -n "$proxy_id" ]; then
+      local -a granted_nets=()
+      if [ -f "$state_dir/applied-networks.json" ]; then
+        while IFS= read -r _net; do
+          [ -n "$_net" ] && granted_nets+=(--network "$_net")
+        done < <(python3 -c '
+import json, sys
+try:
+    for n in json.load(open(sys.argv[1], encoding="ascii")):
+        print(n)
+except Exception:
+    pass
+' "$state_dir/applied-networks.json" 2>/dev/null)
+      fi
+      local not_granted=""
+      not_granted="$(python3 "$INSTALL_DIR/lib/cbox_netaccess.py" --status-not-granted --docker-bin docker --container "$proxy_id" "${granted_nets[@]}" 2>/dev/null)" || not_granted=""
+      if [ -n "$not_granted" ] && [ "$not_granted" != "[]" ]; then
+        echo "  not-granted containers (recomputed host-side, not stored in the netmap):"
+        python3 -c '
+import json, sys
+try:
+    items = json.loads(sys.argv[1])
+except Exception:
+    items = []
+for item in items:
+    if not isinstance(item, dict):
+        continue
+    print("    ! host port %s -> %s:%s (container on %s): %s" % (
+        item.get("host_port", ""), item.get("container", ""), item.get("container_port", ""),
+        ",".join(item.get("networks", []) or []), item.get("reason", "")))
+' "$not_granted" 2>/dev/null
+      fi
+    fi
   fi
   echo
   echo "note: a pass rule covers the target network's WHOLE subnet on all TCP ports - allowing"
@@ -897,8 +960,8 @@ _cbox_ollama_reconcile_cmd() {
       _cbox_ollama_reconcile_networks_impl >/dev/null 2>&1 || true
       _cbox_ollama_owner_compose down >/dev/null 2>&1 || true
     fi
-    gen_ollama_owner_compose_into "$dir"
-    gen_wireguard_conf
+    gen_ollama_owner_compose_into "$dir" || return 1
+    gen_wireguard_conf || echo "cbox: warning - could not re-render the wireguard conf template during teardown" >&2
     rm -f "$dir/ownership.manifest"
     _cbox_ollama_heal_recreate_clear
     _cbox_ollama_gc_scope_networks_impl
@@ -917,8 +980,8 @@ _cbox_ollama_reconcile_cmd() {
     fi
     [ -e /dev/net/tun ] || echo "cbox: warning - /dev/net/tun not present on this host; the wireguard sidecar will fail to start until it is available (kernel module 'tun' or equivalent)" >&2
   fi
-  gen_ollama_owner_compose_into "$dir"
-  gen_wireguard_conf
+  gen_ollama_owner_compose_into "$dir" || return 1
+  gen_wireguard_conf || return 1
   _cbox_ollama_manifest_write "$dir"
   _cbox_ollama_owner_up || { echo "cbox: ollama reconcile: owner project $(_cbox_ollama_owner_name) rendered at $dir but its containers failed to start - see the error above" >&2; return 1; }
   _cbox_ollama_reconcile_networks_impl || echo "cbox: ollama reconcile: owner project is up but per-scope network reconciliation reported an error - run 'cbox ollama reconcile' again" >&2
@@ -1559,14 +1622,167 @@ _cbox_wg_status_cmd() {
   return 0
 }
 
-_cbox_wg_up_cmd() {
-  local dir
-  dir="$(_cbox_ollama_owner_dir)"
-  _cbox_wg_ensure_keys || return 1
-  if _cbox_wg_server_role; then
-    command -v wg >/dev/null 2>&1 || { echo "cbox: refusing - CBOX_WG_MODE=${CBOX_WG_MODE} but wireguard-tools ('wg') is not installed on this host" >&2; return 1; }
+_cbox_wg_tun_present() {
+  [ -e /dev/net/tun ]
+}
+
+_cbox_wg_pkg_manager() {
+  if command -v apt-get >/dev/null 2>&1; then printf 'apt-get'
+  elif command -v dnf >/dev/null 2>&1; then printf 'dnf'
+  elif command -v pacman >/dev/null 2>&1; then printf 'pacman'
+  elif command -v zypper >/dev/null 2>&1; then printf 'zypper'
   fi
-  [ -e /dev/net/tun ] || echo "cbox: warning - /dev/net/tun not present on this host; the wireguard sidecar needs it (kernel module 'tun' or equivalent) and will fail to start without it" >&2
+}
+
+_cbox_wg_install_display() {
+  case "$1" in
+    apt-get) printf 'sudo apt-get install -y wireguard-tools' ;;
+    dnf) printf 'sudo dnf install -y wireguard-tools' ;;
+    pacman) printf 'sudo pacman -S --noconfirm wireguard-tools' ;;
+    zypper) printf 'sudo zypper install -y wireguard-tools' ;;
+  esac
+}
+
+_cbox_wg_install_run() {
+  case "$1" in
+    apt-get) sudo apt-get install -y wireguard-tools ;;
+    dnf) sudo dnf install -y wireguard-tools ;;
+    pacman) sudo pacman -S --noconfirm wireguard-tools ;;
+    zypper) sudo zypper install -y wireguard-tools ;;
+  esac
+}
+
+_cbox_wg_firewalld_open_port() {
+  sudo firewall-cmd --add-port="${1}/udp" && sudo firewall-cmd --permanent --add-port="${1}/udp"
+}
+
+_cbox_wg_ufw_allow_port() {
+  local port="$1"
+  if [ -n "${CBOX_WG_PUBLISH_ADDR:-}" ] && [ "${CBOX_WG_PUBLISH_ADDR}" != "0.0.0.0" ] && _cbox_is_ipv4 "${CBOX_WG_PUBLISH_ADDR}"; then
+    sudo ufw allow in to "${CBOX_WG_PUBLISH_ADDR}" port "$port" proto udp comment cbox-wg
+  else
+    sudo ufw allow "${port}/udp" comment cbox-wg
+  fi
+}
+
+_cbox_wg_ufw_allow_display() {
+  local port="$1"
+  if [ -n "${CBOX_WG_PUBLISH_ADDR:-}" ] && [ "${CBOX_WG_PUBLISH_ADDR}" != "0.0.0.0" ] && _cbox_is_ipv4 "${CBOX_WG_PUBLISH_ADDR}"; then
+    printf 'sudo ufw allow in to %s port %s proto udp comment cbox-wg' "${CBOX_WG_PUBLISH_ADDR}" "$port"
+  else
+    printf 'sudo ufw allow %s/udp comment cbox-wg' "$port"
+  fi
+}
+
+_cbox_wg_offer_sudo() {
+  local desc="$1" display_cmd="$2" yes="$3" fatal="$4"
+  shift 4
+  if [ "$yes" = 1 ]; then
+    echo "cbox: $desc: $display_cmd" >&2
+    "$@" && return 0
+    echo "cbox: command failed: $display_cmd" >&2
+    return 1
+  fi
+  if [ -t 0 ] && [ -t 1 ]; then
+    printf 'cbox: %s\n  %s\nrun now? [y/N] ' "$desc" "$display_cmd" >&2
+    local ans
+    IFS= read -r ans || ans=""
+    case "$ans" in
+      y|Y)
+        "$@" && return 0
+        echo "cbox: command failed: $display_cmd" >&2
+        return 1
+        ;;
+    esac
+    if [ "$fatal" = 1 ]; then
+      echo "cbox: skipped - run yourself: $display_cmd" >&2
+      return 1
+    fi
+    echo "cbox: warning - skipped: $display_cmd" >&2
+    return 0
+  fi
+  if [ "$fatal" = 1 ]; then
+    echo "cbox: $desc - no TTY to ask (use --yes to run it automatically); run: $display_cmd" >&2
+    return 1
+  fi
+  echo "cbox: warning - $desc - run: $display_cmd" >&2
+  return 0
+}
+
+_cbox_wg_ensure_wg_tools() {
+  local yes="$1" mgr display
+  command -v wg >/dev/null 2>&1 && return 0
+  mgr="$(_cbox_wg_pkg_manager)"
+  if [ -z "$mgr" ]; then
+    echo "cbox: refusing - wireguard-tools ('wg') is not installed and no supported package manager (apt-get, dnf, pacman, zypper) was found on this host - install wireguard-tools yourself, then re-run 'cbox wg up'" >&2
+    return 1
+  fi
+  display="$(_cbox_wg_install_display "$mgr")"
+  _cbox_wg_offer_sudo "wireguard-tools ('wg') is not installed on this host" "$display" "$yes" 1 _cbox_wg_install_run "$mgr" || return 1
+  command -v wg >/dev/null 2>&1 || { echo "cbox: refusing - wireguard-tools was installed but 'wg' is still not on PATH" >&2; return 1; }
+  return 0
+}
+
+_cbox_wg_ensure_tun() {
+  local yes="$1"
+  _cbox_wg_tun_present && return 0
+  _cbox_wg_offer_sudo "/dev/net/tun is missing on this host - the wireguard sidecar needs the 'tun' kernel module" "sudo modprobe tun" "$yes" 1 sudo modprobe tun || return 1
+  _cbox_wg_tun_present || { echo "cbox: refusing - /dev/net/tun is still missing after 'modprobe tun'" >&2; return 1; }
+  return 0
+}
+
+_cbox_wg_firewall_active() {
+  case "$1" in
+    ufw)
+      systemctl is-active --quiet ufw 2>/dev/null && return 0
+      [ -f /etc/ufw/ufw.conf ] && grep -q '^ENABLED=yes' /etc/ufw/ufw.conf 2>/dev/null
+      ;;
+    firewalld)
+      systemctl is-active --quiet firewalld 2>/dev/null
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+_cbox_wg_ensure_firewall_port() {
+  local yes="$1" port="${CBOX_WG_LISTEN_PORT:-51820}"
+  case "$port" in
+    ''|*[!0-9]*) echo "cbox: warning - CBOX_WG_LISTEN_PORT '$port' is not a valid port; skipping the firewall offer" >&2; return 0 ;;
+  esac
+  if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+    echo "cbox: warning - CBOX_WG_LISTEN_PORT '$port' is out of range; skipping the firewall offer" >&2
+    return 0
+  fi
+  if _cbox_wg_firewall_active ufw; then
+    _cbox_wg_offer_sudo "ufw is active and may block the wireguard UDP port $port" "$(_cbox_wg_ufw_allow_display "$port")" "$yes" 0 _cbox_wg_ufw_allow_port "$port"
+  fi
+  if _cbox_wg_firewall_active firewalld; then
+    _cbox_wg_offer_sudo "firewalld is active and may block the wireguard UDP port $port" "sudo firewall-cmd --add-port=${port}/udp && sudo firewall-cmd --permanent --add-port=${port}/udp" "$yes" 0 _cbox_wg_firewalld_open_port "$port"
+  fi
+  return 0
+}
+
+_cbox_wg_ensure_prereqs() {
+  local yes="$1"
+  _cbox_wg_ensure_wg_tools "$yes" || return 1
+  _cbox_wg_ensure_tun "$yes" || return 1
+  if _cbox_wg_server_role; then
+    _cbox_wg_ensure_firewall_port "$yes"
+  fi
+  return 0
+}
+
+_cbox_wg_up_cmd() {
+  local dir yes=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      --yes) yes=1 ;;
+      *) echo "cbox: usage: $0 wg up [--yes]" >&2; return 1 ;;
+    esac
+  done
+  dir="$(_cbox_ollama_owner_dir)"
+  _cbox_wg_ensure_prereqs "$yes" || return 1
+  _cbox_wg_ensure_keys || return 1
   _cbox_ollama_reconcile_cmd
 }
 
@@ -1589,7 +1805,7 @@ _cbox_wg_keygen_cmd() {
 _cbox_wg_reload_or_restart() {
   local dir cid iface
   dir="$(_cbox_ollama_owner_dir)"
-  gen_wireguard_conf
+  gen_wireguard_conf || { echo "cbox: could not re-render the wireguard conf template - peer changes were saved but not applied; re-run this command" >&2; return 1; }
   [ -f "$dir/docker-compose.yml" ] || return 0
   cid="$(_cbox_wg_owner_container_id)" || cid=""
   [ -n "$cid" ] || return 0
@@ -1614,11 +1830,19 @@ _cbox_wg_peer_add_cmd() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --endpoint)
-        endpoint="${2:-}"
+        if [ "$#" -lt 2 ]; then
+          echo "cbox: usage: $0 wg peer add <name> <pubkey> <tunnel-host-address/32> [--endpoint host:port] [--capability none|ollama|session|ollama,session]" >&2
+          return 1
+        fi
+        endpoint="$2"
         shift 2
         ;;
       --capability)
-        capability="${2:-}"
+        if [ "$#" -lt 2 ]; then
+          echo "cbox: usage: $0 wg peer add <name> <pubkey> <tunnel-host-address/32> [--endpoint host:port] [--capability none|ollama|session|ollama,session]" >&2
+          return 1
+        fi
+        capability="$2"
         shift 2
         ;;
       *)
@@ -1674,6 +1898,15 @@ _cbox_wg_peer_list_cmd() {
 
 _cbox_wg_peer_config_cmd() {
   local name="$1" genkey="${2:-}"
+  if [ -n "${3:-}" ]; then
+    echo "cbox: usage: $0 wg peer config <name> [--generate-key]" >&2
+    return 1
+  fi
+  _cbox_wg_peer_config_impl "$name" "$genkey" ""
+}
+
+_cbox_wg_peer_config_impl() {
+  local name="$1" genkey="${2:-}" reuse="${3:-}"
   if [ -z "$name" ]; then
     echo "cbox: usage: $0 wg peer config <name> [--generate-key]" >&2
     return 1
@@ -1704,27 +1937,9 @@ _cbox_wg_peer_config_cmd() {
     echo "cbox: --generate-key requested - generating a private key for peer '$name' on THIS machine (not the documented preference; the peer generating its own key is preferred)" >&2
     _cbox_wg_tools_available || { echo "cbox: wireguard-tools ('wg') not found on this host - cannot generate a key" >&2; return 1; }
     key_file="$(_cbox_wg_peer_key_file "$name")"
-    if [ -e "$key_file" ]; then
-      echo "cbox: refusing - a key file already exists at $key_file for peer '$name' - remove it yourself first if you really mean to replace it (this would invalidate whatever key was handed to '$name' before)" >&2
-      return 1
-    fi
-    local tmp_priv tmp_pub
-    tmp_priv="$(wg genkey)" || { echo "cbox: 'wg genkey' failed - no key was generated or saved" >&2; return 1; }
-    if [ -z "$tmp_priv" ]; then
-      echo "cbox: 'wg genkey' produced no output - no key was generated or saved" >&2
-      return 1
-    fi
-    if ! tmp_pub="$(printf '%s' "$tmp_priv" | wg pubkey)" || [ -z "$tmp_pub" ]; then
-      tmp_priv=""
-      echo "cbox: 'wg pubkey' failed on the generated key - no key was saved" >&2
-      return 1
-    fi
-    if ! printf '%s\n' "$tmp_priv" | _cbox_wg_write_secret "$key_file"; then
-      tmp_priv=""
-      echo "cbox: failed to save the generated private key to $key_file - the key was NOT saved" >&2
-      return 1
-    fi
-    tmp_priv=""
+    local tmp_pub reuse_flag=0
+    [ "$reuse" = "--reuse-existing" ] && reuse_flag=1
+    tmp_pub="$(_cbox_wg_peer_keypair_ensure "$name" "$reuse_flag")" || return 1
     echo "# generated private key for '$name' saved to $key_file (0700 dir, 0600 file, outside the wireguard sidecar mount, never printed) -"
     echo "# move that file to the peer's machine and delete it from here, then put its contents on the PrivateKey line below"
     echo "# this node's [Peer] entry to use $name's newly generated public key: $tmp_pub"
@@ -1755,9 +1970,324 @@ _cbox_wg_peer_config_cmd() {
   else
     echo "AllowedIPs = <this node's tunnel address>/32"
   fi
-  [ "${CBOX_WG_KEEPALIVE:-25}" -gt 0 ] 2>/dev/null && echo "PersistentKeepalive = ${CBOX_WG_KEEPALIVE}"
+  [ "${CBOX_WG_KEEPALIVE:-25}" -gt 0 ] 2>/dev/null && echo "PersistentKeepalive = ${CBOX_WG_KEEPALIVE:-25}"
   return 0
 }
+
+_cbox_wg_reload_global_conf() {
+  [ -f "$CONF" ] || return 0
+  source "$CONF"
+  _cbox_reg_export_vars
+}
+
+_cbox_wg_server_add_client_cmd() {
+  local name="" pubkey="" endpoint="" plain=0 yes=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --endpoint)
+        if [ "$#" -lt 2 ]; then
+          echo "cbox: usage: $0 wg server add-client <name> [<pubkey>] [--endpoint host:port] [--plain] [--yes]" >&2
+          return 1
+        fi
+        endpoint="$2"
+        shift 2
+        ;;
+      --plain) plain=1; shift ;;
+      --yes) yes=1; shift ;;
+      --*)
+        echo "cbox: usage: $0 wg server add-client <name> [<pubkey>] [--endpoint host:port] [--plain] [--yes]" >&2
+        return 1
+        ;;
+      *)
+        if [ -z "$name" ]; then
+          name="$1"
+        elif [ -z "$pubkey" ]; then
+          pubkey="$1"
+        else
+          echo "cbox: usage: $0 wg server add-client <name> [<pubkey>] [--endpoint host:port] [--plain] [--yes]" >&2
+          return 1
+        fi
+        shift
+        ;;
+    esac
+  done
+  if [ -z "$name" ]; then
+    echo "cbox: usage: $0 wg server add-client <name> [<pubkey>] [--endpoint host:port] [--plain] [--yes]" >&2
+    return 1
+  fi
+  _cbox_wg_peer_name_ok "$name" || { echo "cbox: refusing - client name '$name' must match [A-Za-z0-9_-]+" >&2; return 1; }
+  if [ -n "$pubkey" ] && [ "$plain" = 1 ]; then
+    echo "cbox: refusing - --plain generates a key on this host; do not also pass a pubkey" >&2
+    return 1
+  fi
+  if [ -n "$pubkey" ]; then
+    _cbox_wg_pubkey_ok "$pubkey" || { echo "cbox: refusing - '$pubkey' is not a valid WireGuard public key" >&2; return 1; }
+  fi
+  if [ -n "$endpoint" ]; then
+    _cbox_wg_hostport_ok "$endpoint" || { echo "cbox: refusing - --endpoint '$endpoint' must be host:port" >&2; return 1; }
+  fi
+
+  local addr="" addr_defaulted=0
+  if [ -n "$pubkey" ] || [ "$plain" = 1 ]; then
+    if [ -z "${CBOX_WG_ADDRESS:-}" ]; then
+      addr_defaulted=1
+      CBOX_WG_ADDRESS=10.90.0.1/24
+    fi
+    addr="$(_cbox_wg_pending_get "$name")" || addr=""
+    [ -n "$addr" ] || addr="$(_cbox_wg_next_free_addr)" || return 1
+    if [ -n "$pubkey" ]; then
+      _cbox_wg_peer_collision_check "$name" "${addr}/32" "$pubkey" || return 1
+    else
+      _cbox_wg_peer_collision_check "$name" "${addr}/32" || return 1
+    fi
+  fi
+
+  local new_mode="${CBOX_WG_MODE:-off}"
+  case "${CBOX_WG_MODE:-off}" in
+    off|"") new_mode=server ;;
+    client) new_mode=both ;;
+    server|both) new_mode="${CBOX_WG_MODE}" ;;
+  esac
+  local -a set_pairs=() report_pairs=()
+  if [ "$new_mode" != "${CBOX_WG_MODE:-off}" ]; then
+    set_pairs+=("CBOX_WG_MODE=$new_mode")
+    report_pairs+=("CBOX_WG_MODE: ${CBOX_WG_MODE:-off} -> $new_mode")
+  fi
+  if [ "$addr_defaulted" = 1 ] || [ -z "${CBOX_WG_ADDRESS:-}" ]; then
+    CBOX_WG_ADDRESS="${CBOX_WG_ADDRESS:-10.90.0.1/24}"
+    set_pairs+=("CBOX_WG_ADDRESS=${CBOX_WG_ADDRESS}")
+    report_pairs+=("CBOX_WG_ADDRESS: (empty) -> ${CBOX_WG_ADDRESS}")
+  fi
+  if [ "${#set_pairs[@]}" -gt 0 ]; then
+    _cbox_config_set "${set_pairs[@]}" || return 1
+    local line
+    for line in "${report_pairs[@]}"; do
+      echo "cbox: $line"
+    done
+    _cbox_wg_reload_global_conf
+  fi
+
+  local -a up_args=()
+  [ "$yes" = 1 ] && up_args+=(--yes)
+  _cbox_wg_up_cmd "${up_args[@]}" || return 1
+
+  if [ -n "$pubkey" ]; then
+    _cbox_wg_peer_add "$name" "$pubkey" "${addr}/32" "" "" || return 1
+    _cbox_wg_pending_clear "$name"
+    _cbox_wg_reload_or_restart
+    echo "cbox: client '$name' accepted at ${addr}/32"
+    return 0
+  fi
+
+  if [ "$plain" = 1 ]; then
+    local resolved_ep resolved_host resolved_port key_file plain_pub key_existed=0
+    resolved_ep="$(_cbox_wg_resolve_endpoint "$endpoint")" || return 1
+    resolved_host="${resolved_ep%:*}"
+    resolved_port="${resolved_ep##*:}"
+    key_file="$(_cbox_wg_peer_key_file "$name")"
+    [ -e "$key_file" ] && key_existed=1
+    plain_pub="$(_cbox_wg_peer_keypair_ensure "$name" 1)" || return 1
+    if ! _cbox_wg_peer_add "$name" "$plain_pub" "${addr}/32" "" ""; then
+      [ "$key_existed" = 1 ] || rm -f "$key_file"
+      return 1
+    fi
+    _cbox_wg_pending_clear "$name"
+    _cbox_wg_reload_or_restart
+    CBOX_WG_PUBLISH_ADDR="$resolved_host" CBOX_WG_LISTEN_PORT="$resolved_port" _cbox_wg_peer_config_impl "$name" --generate-key --reuse-existing
+    return 0
+  fi
+
+  addr="$(_cbox_wg_pending_get "$name")" || addr=""
+  if [ -z "$addr" ]; then
+    addr="$(_cbox_wg_next_free_addr)" || return 1
+    _cbox_wg_pending_set "$name" "$addr"
+  fi
+  local resolved_ep server_pub server_addr keepalive token
+  resolved_ep="$(_cbox_wg_resolve_endpoint "$endpoint")" || return 1
+  server_pub="$(_cbox_wg_pubkey)" || { echo "cbox: this node has no wireguard public key yet - run 'cbox wg keygen' first" >&2; return 1; }
+  server_addr="${CBOX_WG_ADDRESS%%/*}/32"
+  keepalive="${CBOX_WG_KEEPALIVE:-25}"
+  token="$(_cbox_wg_token_encode "$name" "$server_pub" "$resolved_ep" "$server_addr" "${addr}/32" "$keepalive")"
+  echo "cbox: $0 wg client join $token"
+  return 0
+}
+
+_cbox_wg_wait_and_probe() {
+  local cid iface start now elapsed hs_out hs_time probe_out
+  cid="$(_cbox_wg_owner_container_id)" || cid=""
+  if [ -z "$cid" ]; then
+    echo "cbox: wireguard sidecar is not running yet - check with: $0 wg status" >&2
+    return 0
+  fi
+  iface="$(_cbox_wg_iface)"
+  echo "cbox: waiting up to 180s for a handshake with the server..."
+  start="$(date +%s)"
+  while :; do
+    hs_out="$(docker exec "$cid" wg show "$iface" latest-handshakes 2>/dev/null)" || hs_out=""
+    hs_time="$(printf '%s\n' "$hs_out" | awk -v k="${CBOX_WG_PEER_PUBKEY:-}" '$1==k{print $2}')"
+    if [ -n "$hs_time" ] && [ "$hs_time" != "0" ]; then
+      echo "cbox: handshake established"
+      break
+    fi
+    now="$(date +%s)"
+    elapsed=$((now - start))
+    if [ "$elapsed" -ge 180 ]; then
+      echo "cbox: no handshake within 180s - check status with: $0 wg status" >&2
+      return 0
+    fi
+    sleep 3
+  done
+  if probe_out="$(docker exec "$cid" wget -q -O- --timeout=5 "http://${CBOX_WG_PEER_ADDRESS%%/*}:$(_cbox_wg_client_forward_port)/api/tags" 2>/dev/null)" && [ -n "$probe_out" ]; then
+    echo "cbox: OK - remote ollama reachable through the tunnel"
+  else
+    echo "cbox: handshake OK but the remote ollama probe did not respond - it may not be running yet (check with: $0 wg status)"
+  fi
+  echo "cbox: cbox sessions reach it at http://wg-remote-ollama:11434 - enable it per project with: $0 config set CBOX_WG_CLIENT_ATTACH=on, then point hermes/local-model at http://wg-remote-ollama:11434"
+  return 0
+}
+
+_cbox_wg_client_join_cmd() {
+  local token="" yes=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      --yes) yes=1 ;;
+      --*)
+        echo "cbox: usage: $0 wg client join <token> [--yes]" >&2
+        return 1
+        ;;
+      *)
+        if [ -z "$token" ]; then
+          token="$arg"
+        else
+          echo "cbox: usage: $0 wg client join <token> [--yes]" >&2
+          return 1
+        fi
+        ;;
+    esac
+  done
+  [ -n "$token" ] || { echo "cbox: usage: $0 wg client join <token> [--yes]" >&2; return 1; }
+
+  local payload parsed
+  payload="$(_cbox_wg_token_decode "$token")" || return 1
+  parsed="$(_cbox_wg_token_parse "$payload")" || return 1
+  local t_name t_pubkey t_endpoint t_server_addr t_client_addr t_keepalive
+  { IFS= read -r t_name
+    IFS= read -r t_pubkey
+    IFS= read -r t_endpoint
+    IFS= read -r t_server_addr
+    IFS= read -r t_client_addr
+    IFS= read -r t_keepalive
+  } <<<"$parsed"
+
+  if [ "$t_server_addr" = "$t_client_addr" ]; then
+    echo "cbox: refusing - pairing token server address and client address are identical - malformed or tampered token" >&2
+    return 1
+  fi
+  local self_addr_host t_client_host same_host_addr=0
+  self_addr_host="${CBOX_WG_ADDRESS:-}"
+  self_addr_host="${self_addr_host%%/*}"
+  t_client_host="${t_client_addr%%/*}"
+  if [ -n "$self_addr_host" ] && [ "$self_addr_host" = "$t_client_host" ]; then
+    same_host_addr=1
+  fi
+  if _cbox_wg_server_role && [ -n "${CBOX_WG_ADDRESS:-}" ] && [ "$same_host_addr" != 1 ]; then
+    echo "cbox: refusing - this node already has a server role at CBOX_WG_ADDRESS=${CBOX_WG_ADDRESS}; this pairing token's client address differs and applying it would overwrite this node's own tunnel address - review the token, or run this on a different node" >&2
+    return 1
+  fi
+  local self_pub
+  self_pub="$(_cbox_wg_pubkey)" 2>/dev/null || self_pub=""
+  if [ -n "$self_pub" ] && [ "$t_pubkey" = "$self_pub" ]; then
+    echo "cbox: refusing - pairing token public key equals this node's own wireguard public key" >&2
+    return 1
+  fi
+  if [ -n "${CBOX_WG_ADDRESS:-}" ] && [ "$t_server_addr" = "${CBOX_WG_ADDRESS}" ]; then
+    echo "cbox: refusing - pairing token address collides with this node's own tunnel address (CBOX_WG_ADDRESS)" >&2
+    return 1
+  fi
+  local _wg_pline _wg_ppub _wg_paddr
+  while IFS= read -r _wg_pline; do
+    [ -n "$_wg_pline" ] || continue
+    _wg_ppub="$(_cbox_wg_peer_field "$_wg_pline" 1)"
+    _wg_paddr="$(_cbox_wg_peer_field "$_wg_pline" 2)"
+    if [ "$_wg_ppub" = "$t_pubkey" ] || [ "$_wg_paddr" = "$t_server_addr" ] || [ "$_wg_paddr" = "$t_client_addr" ]; then
+      echo "cbox: refusing - pairing token collides with an existing peer entry - review 'cbox wg peer list' before continuing" >&2
+      return 1
+    fi
+  done < <(_cbox_wg_peer_list)
+
+  if [ -n "${CBOX_WG_PEER_PUBKEY:-}" ] && [ "${CBOX_WG_PEER_PUBKEY}" != "$t_pubkey" ] && [ "$yes" != 1 ]; then
+    echo "cbox: refusing - this node already has a different peer public key configured (CBOX_WG_PEER_PUBKEY) - re-run with --yes to replace it with this token's key" >&2
+    return 1
+  fi
+  if [ "$yes" != 1 ] && [ -t 0 ] && [ -t 1 ]; then
+    printf 'cbox: pairing token from '\''%s'\'' - server public key: %s\ncbox: server endpoint: %s\napply this token? [y/N] ' "$t_name" "$t_pubkey" "$t_endpoint" >&2
+    local join_ans
+    IFS= read -r join_ans || join_ans=""
+    case "$join_ans" in
+      y|Y) ;;
+      *) echo "cbox: aborted - no changes made" >&2; return 1 ;;
+    esac
+  fi
+
+  local new_mode="${CBOX_WG_MODE:-off}"
+  case "${CBOX_WG_MODE:-off}" in
+    off|"") new_mode=client ;;
+    server) new_mode=both ;;
+    client|both) new_mode="${CBOX_WG_MODE}" ;;
+  esac
+  local -a set_pairs=() report_pairs=()
+  if [ "$new_mode" != "${CBOX_WG_MODE:-off}" ]; then
+    set_pairs+=("CBOX_WG_MODE=$new_mode")
+    report_pairs+=("CBOX_WG_MODE: ${CBOX_WG_MODE:-off} -> $new_mode")
+  fi
+  if [ "${CBOX_WG_ADDRESS:-}" != "$t_client_addr" ]; then
+    set_pairs+=("CBOX_WG_ADDRESS=$t_client_addr")
+    report_pairs+=("CBOX_WG_ADDRESS: ${CBOX_WG_ADDRESS:-(empty)} -> $t_client_addr")
+  fi
+  if [ "${CBOX_WG_PEER_ENDPOINT:-}" != "$t_endpoint" ]; then
+    set_pairs+=("CBOX_WG_PEER_ENDPOINT=$t_endpoint")
+    report_pairs+=("CBOX_WG_PEER_ENDPOINT: ${CBOX_WG_PEER_ENDPOINT:-(empty)} -> $t_endpoint")
+  fi
+  if [ "${CBOX_WG_PEER_PUBKEY:-}" != "$t_pubkey" ]; then
+    set_pairs+=("CBOX_WG_PEER_PUBKEY=$t_pubkey")
+    report_pairs+=("CBOX_WG_PEER_PUBKEY: ${CBOX_WG_PEER_PUBKEY:-(empty)} -> $t_pubkey")
+  fi
+  if [ "${CBOX_WG_PEER_ADDRESS:-}" != "$t_server_addr" ]; then
+    set_pairs+=("CBOX_WG_PEER_ADDRESS=$t_server_addr")
+    report_pairs+=("CBOX_WG_PEER_ADDRESS: ${CBOX_WG_PEER_ADDRESS:-(empty)} -> $t_server_addr")
+  fi
+  if [ "${CBOX_WG_KEEPALIVE:-25}" != "$t_keepalive" ]; then
+    set_pairs+=("CBOX_WG_KEEPALIVE=$t_keepalive")
+    report_pairs+=("CBOX_WG_KEEPALIVE: ${CBOX_WG_KEEPALIVE:-25} -> $t_keepalive")
+  fi
+
+  if [ "${#set_pairs[@]}" -gt 0 ]; then
+    _cbox_config_set "${set_pairs[@]}" || return 1
+    local line
+    for line in "${report_pairs[@]}"; do
+      echo "cbox: $line"
+    done
+    _cbox_wg_reload_global_conf
+  fi
+
+  local -a up_args=()
+  [ "$yes" = 1 ] && up_args+=(--yes)
+  _cbox_wg_up_cmd "${up_args[@]}" || return 1
+
+  local own_pub
+  own_pub="$(_cbox_wg_pubkey)" || { echo "cbox: this node has no wireguard public key yet" >&2; return 1; }
+  echo "cbox: $0 wg server add-client $t_name $own_pub"
+
+  if [ -t 0 ] && [ -t 1 ]; then
+    exec 6>&-
+    _cbox_wg_wait_and_probe
+  else
+    echo "cbox: no TTY - check status with: $0 wg status"
+  fi
+  return 0
+}
+
+_CBOX_WG_USAGE="cbox: usage: $0 wg {status|up [--yes]|down|keygen|peer {add|rm|list|config}|server add-client <name> [<pubkey>] [--endpoint host:port] [--plain] [--yes]|client join <token> [--yes]}"
 
 wg_cmd() {
   local sub="${1:-}" sub2="${2:-}"
@@ -1772,8 +2302,26 @@ wg_cmd() {
           ;;
       esac
       ;;
+    server)
+      case "$sub2" in
+        add-client) ;;
+        *)
+          echo "cbox: usage: $0 wg server add-client <name> [<pubkey>] [--endpoint host:port] [--plain] [--yes]" >&2
+          return 1
+          ;;
+      esac
+      ;;
+    client)
+      case "$sub2" in
+        join) ;;
+        *)
+          echo "cbox: usage: $0 wg client join <token> [--yes]" >&2
+          return 1
+          ;;
+      esac
+      ;;
     *)
-      echo "cbox: usage: $0 wg {status|up|down|keygen|peer {add|rm|list|config}}" >&2
+      echo "$_CBOX_WG_USAGE" >&2
       return 1
       ;;
   esac
@@ -1784,7 +2332,7 @@ wg_cmd() {
   fi
   [ -f "$INSTALL_DIR/templates/sections.sh" ] || die "$INSTALL_DIR/templates/sections.sh missing"
   . "$INSTALL_DIR/templates/sections.sh"
-  if [ "$sub" != status ]; then
+  if [ "$sub" != status ] && [ "$sub" != server ] && [ "$sub" != client ]; then
     _cbox_wg_guard || return 1
   fi
   mkdir -p "$HOME/.config/cbox/infra"
@@ -1798,7 +2346,7 @@ wg_cmd() {
       ;;
     up)
       _cbox_flock -x -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
-      _cbox_wg_up_cmd || rc=$?
+      _cbox_wg_up_cmd "$@" || rc=$?
       ;;
     down)
       _cbox_flock -x -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
@@ -1826,6 +2374,24 @@ wg_cmd() {
         config)
           _cbox_flock -x -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
           _cbox_wg_peer_config_cmd "$@" || rc=$?
+          ;;
+      esac
+      ;;
+    server)
+      shift
+      case "$sub2" in
+        add-client)
+          _cbox_flock -x -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+          _cbox_wg_server_add_client_cmd "$@" || rc=$?
+          ;;
+      esac
+      ;;
+    client)
+      shift
+      case "$sub2" in
+        join)
+          _cbox_flock -x -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+          _cbox_wg_client_join_cmd "$@" || rc=$?
           ;;
       esac
       ;;
@@ -2047,6 +2613,195 @@ session_broker_cmd() {
   esac
 }
 
+_cbox_engine_creds_file() {
+  case "$1" in
+    claude) printf '%s' '.credentials.json' ;;
+    codex) printf '%s' 'auth.json' ;;
+    *) return 1 ;;
+  esac
+}
+
+_cbox_lockdown_vol_name() {
+  local scope="$1" hash="$2" bin="$3"
+  if [ "$scope" = global ]; then
+    printf '%s-%s' "${CBOX_NAME:-cbox}" "$bin"
+  else
+    printf 'cbox-p%s-%s' "$hash" "$bin"
+  fi
+}
+
+_cbox_lockdown_eff_dir() {
+  local scope="$1" hash="$2"
+  if [ "$scope" = global ]; then
+    printf '%s' "$INSTALL_DIR"
+  else
+    printf '%s/.config/cbox/projects/%s' "$HOME" "$hash"
+  fi
+}
+
+_cbox_lockdown_probe_image_tag() {
+  local eff="$1" hash
+  [ -n "$eff" ] && [ -f "$eff/image.inputs" ] || return 1
+  hash="$(_cbox_image_hash "$eff")" || return 1
+  [ -n "$hash" ] || return 1
+  _cbox_image_tag "$hash"
+}
+
+_cbox_volume_file_present() {
+  local vol="$1" file="$2" img_tag="$3"
+  [ -n "$img_tag" ] || return 1
+  docker volume inspect "$vol" >/dev/null 2>&1 || return 1
+  docker image inspect "$img_tag" >/dev/null 2>&1 || return 1
+  docker run --rm --network none --pull never --entrypoint test \
+    -v "${vol}:/cbox-lockdown-check:ro" "$img_tag" -s "/cbox-lockdown-check/$file" >/dev/null 2>&1
+}
+
+_cbox_engine_api_key_present() {
+  local bin="$1" engine_mode="$2" engine_path="$3"
+  case "$bin" in
+    claude)
+      [ -n "${ANTHROPIC_API_KEY:-}" ] && return 0
+      if [ "$engine_mode" != volume ] && [ -s "$engine_path/settings.json" ]; then
+        python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(1)
+val = data.get("apiKeyHelper") if isinstance(data, dict) else None
+sys.exit(0 if isinstance(val, str) and val.strip() else 1)
+' "$engine_path/settings.json" 2>/dev/null && return 0
+      fi
+      return 1
+      ;;
+    codex)
+      [ -n "${OPENAI_API_KEY:-}" ] && return 0
+      return 1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+_cbox_run_login_guidance() {
+  local bin="$1" mode="$2"
+  [ "$mode" = volume ] || return 0
+  echo "cbox: login required inside the container (credentials live in a volume):" >&2
+  echo "  ./cbox shell" >&2
+  case "$bin" in
+    claude)
+      echo "    claude" >&2
+      echo "      complete the OAuth flow in your host browser" >&2
+      ;;
+    codex)
+      echo "    codex login --device-auth" >&2
+      ;;
+  esac
+}
+
+_cbox_run_lockdown_snapshot() {
+  local conf="$1"
+  ( eval "$(cat "$conf" 2>/dev/null)" >/dev/null 2>&1
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "${CBOX_EGRESS_MODE:-off}" "${CBOX_EGRESS_APPLIED:-0}" \
+      "${CBOX_NETACCESS_MODE:-off}" "${CBOX_NETACCESS_APPLIED:-0}" \
+      "${CBOX_CLAUDE_MODE:-mount}" "${CBOX_CLAUDE_PATH:-$HOME/.claude}" \
+      "${CBOX_CODEX_MODE:-mount}" "${CBOX_CODEX_PATH:-$HOME/.codex}"
+  )
+}
+
+_cbox_engine_ready() {
+  local bin="$1" scope="$2" hash="$3" engine_mode="$4" engine_path="$5"
+  local file ready=1
+  if file="$(_cbox_engine_creds_file "$bin" 2>/dev/null)"; then
+    if [ "$engine_mode" = volume ]; then
+      local eff img_tag
+      eff="$(_cbox_lockdown_eff_dir "$scope" "$hash")"
+      img_tag="$(_cbox_lockdown_probe_image_tag "$eff" 2>/dev/null)" || img_tag=""
+      _cbox_volume_file_present "$(_cbox_lockdown_vol_name "$scope" "$hash" "$bin")" "$file" "$img_tag" || ready=0
+    else
+      [ -s "$engine_path/$file" ] || ready=0
+    fi
+  else
+    ready=0
+  fi
+  if [ "$ready" != 1 ]; then
+    _cbox_engine_api_key_present "$bin" "$engine_mode" "$engine_path" && ready=1
+  fi
+  [ "$ready" = 1 ]
+}
+
+_cbox_scope_creds_ready() {
+  local scope="$1" hash="$2" claude_mode="$3" claude_path="$4" codex_mode="$5" codex_path="$6"
+  _cbox_engine_ready claude "$scope" "$hash" "$claude_mode" "$claude_path" && return 0
+  _cbox_engine_ready codex "$scope" "$hash" "$codex_mode" "$codex_path" && return 0
+  return 1
+}
+
+_cbox_run_egress_lockdown_gate() {
+  local bin="$1" scope="$2" conf="${3:-}" hash="${4:-}"
+  local egress_mode egress_applied netaccess_mode netaccess_applied claude_mode claude_path codex_mode codex_path
+  if [ "$scope" = global ]; then
+    egress_mode="${CBOX_EGRESS_MODE:-off}"
+    egress_applied="${CBOX_EGRESS_APPLIED:-0}"
+    netaccess_mode="${CBOX_NETACCESS_MODE:-off}"
+    netaccess_applied="${CBOX_NETACCESS_APPLIED:-0}"
+    claude_mode="${CBOX_CLAUDE_MODE:-mount}"
+    claude_path="${CBOX_CLAUDE_PATH:-$HOME/.claude}"
+    codex_mode="${CBOX_CODEX_MODE:-mount}"
+    codex_path="${CBOX_CODEX_PATH:-$HOME/.codex}"
+  else
+    [ -n "$conf" ] && [ -f "$conf" ] || return 0
+    local snap
+    snap="$(_cbox_run_lockdown_snapshot "$conf")" || return 0
+    IFS="$(printf '\t')" read -r egress_mode egress_applied netaccess_mode netaccess_applied \
+      claude_mode claude_path codex_mode codex_path <<< "$snap"
+  fi
+  { [ "$egress_mode" != off ] && [ "$egress_applied" != 1 ]; } \
+    || { [ "$netaccess_mode" != off ] && [ "$netaccess_applied" != 1 ]; } \
+    || return 0
+
+  local ready=1
+  _cbox_scope_creds_ready "$scope" "$hash" "$claude_mode" "$claude_path" "$codex_mode" "$codex_path" || ready=0
+
+  if [ "$ready" != 1 ]; then
+    echo "cbox: network lockdown (egress=$egress_mode, netaccess=$netaccess_mode) is configured; it applies once you have logged in to $bin" >&2
+    case "$bin" in
+      claude) _cbox_run_login_guidance "$bin" "$claude_mode" ;;
+      codex) _cbox_run_login_guidance "$bin" "$codex_mode" ;;
+    esac
+    local -a override_pairs=()
+    [ "$egress_mode" != off ] && [ "$egress_applied" != 1 ] && override_pairs+=("CBOX_EGRESS_APPLIED=1")
+    [ "$netaccess_mode" != off ] && [ "$netaccess_applied" != 1 ] && override_pairs+=("CBOX_NETACCESS_APPLIED=1")
+    if [ "${#override_pairs[@]}" -gt 0 ]; then
+      echo "cbox: already authenticated a way cbox cannot see (for example an API key)? override once verified: $0 config set ${override_pairs[*]}" >&2
+    fi
+    return 0
+  fi
+
+  local -a pairs=()
+  [ "$egress_mode" != off ] && [ "$egress_applied" != 1 ] && pairs+=("CBOX_EGRESS_APPLIED=1")
+  [ "$netaccess_mode" != off ] && [ "$netaccess_applied" != 1 ] && pairs+=("CBOX_NETACCESS_APPLIED=1")
+  if [ "${#pairs[@]}" -gt 0 ]; then
+    local set_ok=1
+    if [ "$scope" = global ]; then
+      _cbox_config_set_force_global "${pairs[@]}" >/dev/null || set_ok=0
+    else
+      _cbox_config_set "${pairs[@]}" >/dev/null || set_ok=0
+    fi
+    if [ "$set_ok" != 1 ]; then
+      echo "cbox: could not record the network lockdown as applied - aborting 'cbox run $bin' (refusing to start open while config says applied); re-run to retry" >&2
+      return 1
+    fi
+    if [ "$scope" = global ]; then
+      local pair
+      for pair in "${pairs[@]}"; do
+        printf -v "${pair%%=*}" '%s' "${pair#*=}"
+      done
+    fi
+  fi
+}
+
 _run_global() {
   local bin="$1"; shift
   local workspaces=() w root inscope=0
@@ -2078,6 +2833,7 @@ _run_global() {
       return 1
     fi
   fi
+  _cbox_run_egress_lockdown_gate "$bin" global || return 1
   check_tpl_sha
   _cbox_global_prepare_locked
   _cbox_compose_refresh_gpu
@@ -3955,6 +4711,7 @@ _run_isolated() {
   fi
   _cbox_manifest_verify_conf_interactive "$eff" "$root"
   _cbox_global_drift_check_interactive "$eff" "$root"
+  _cbox_run_egress_lockdown_gate "$bin" isolated "$eff/cbox.conf" "$P" || return 1
   (
     set -e
     unset CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL CBOX_CODEX_TARGET
@@ -4092,6 +4849,12 @@ shell_isolated() {
     return 1
   }
   _cbox_ollama_owner_heal || true
+  _cbox_run_egress_lockdown_gate claude isolated "$eff/cbox.conf" "$(basename "$eff")" || {
+    _container_exec_bridge_stop
+    _clip_bridge_stop
+    exec 8>&-
+    return 1
+  }
   _cbox_compose_up "$eff/.compose.up.stamp" docker compose --project-directory "$eff" -f "$eff/docker-compose.yml" || {
     _container_exec_bridge_stop
     _clip_bridge_stop
@@ -4356,6 +5119,7 @@ up() {
   if [ "${1:-}" = "--gpu" ]; then gpu=1; fi
   check_tpl_sha
   source "$INSTALL_DIR/templates/generators.sh"
+  _cbox_run_egress_lockdown_gate claude global || return 1
   _cbox_global_prepare_locked
   _cbox_compose_refresh_gpu
   if [ "$gpu" = 1 ] && [ "${CBOX_GPU:-0}" != "1" ]; then
@@ -5061,7 +5825,7 @@ case "$("$p" --version 2>&1)" in *"$v"*) exit 0;; *) exit 1;; esac
 
   if [ "${CBOX_EGRESS_MODE:-off}" != off ] && [ "${CBOX_EGRESS_APPLIED:-0}" != 1 ]; then
     v_t "egress topology"
-    v_skip "configured but not applied - run cbox setup update egress"
+    v_skip "configured but not applied - cbox run <engine> applies it once you have logged in"
   elif [ "${CBOX_EGRESS_MODE:-off}" != off ]; then
     v_t "egress proxy allows api.anthropic.com"
     if "${X[@]}" curl -s -o /dev/null --connect-timeout 10 -x http://proxy:8888 https://api.anthropic.com >/dev/null 2>&1; then
@@ -6099,6 +6863,23 @@ doctor() {
     else
       _cbox_doctor_row "cbox-net" OFF "netaccess is off - the cbox-net MCP tool is not rendered"
     fi
+    if [ "${CBOX_NETACCESS_HOST_ALIASES:-off}" = off ]; then
+      _cbox_doctor_row "host-aliases" OFF "CBOX_NETACCESS_HOST_ALIASES=off"
+    elif ! _cbox_netaccess_active; then
+      _cbox_doctor_row "host-aliases" CONFIG-ONLY "CBOX_NETACCESS_HOST_ALIASES=${CBOX_NETACCESS_HOST_ALIASES} but netaccess is off - host aliases forward nothing until netaccess is on"
+    else
+      local ha_names ha_count ha_flat
+      ha_names="$(_cbox_host_alias_names 2>/dev/null)" || ha_names=""
+      if [ -n "$ha_names" ]; then
+        ha_count="$(printf '%s\n' "$ha_names" | grep -c .)" || ha_count=0
+        ha_flat="$(printf '%s' "$ha_names" | tr '\n' ' ')"
+        ha_flat="${ha_flat% }"
+      else
+        ha_count=0
+        ha_flat="<none>"
+      fi
+      _cbox_doctor_row "host-aliases" CONFIG-ONLY "CBOX_NETACCESS_HOST_ALIASES=${CBOX_NETACCESS_HOST_ALIASES}, $ha_count name(s) resolved now: $ha_flat - a name added after the container started needs cbox down && cbox run (or cbox setup update host-aliases) to take effect"
+    fi
     local hostroute_detail_suffix=""
     if [ "${CBOX_HOST_GATEWAY_ALIAS:-off}" = on ] && _cbox_is_rootless_docker; then
       hostroute_detail_suffix="$hostroute_detail_suffix; warning: rootless docker maps host.docker.internal to the rootlesskit bridge, not the real host (disable-host-loopback blocks it, moby #47684) - bind the host model server to a non-loopback host address (for example the host WireGuard interface IP) and point the URL there directly"
@@ -6814,6 +7595,32 @@ _cbox_config_set() {
   esac
 }
 
+_cbox_config_set_force_global() {
+  if _cbox_config_in_container; then
+    echo "cbox: config set is host-only - run it from a host shell, not inside the container (get is still allowed)" >&2
+    return 1
+  fi
+  [ "$#" -ge 1 ] || { echo "cbox: usage: $0 config set KEY=VALUE [KEY=VALUE...]" >&2; return 1; }
+
+  CBOX_CONFIG_MACHINE_ROUTED=0
+
+  _cbox_config_load_sections
+  _cbox_config_load_conf_lib
+  _cbox_config_parse_pairs "$@" || return 1
+
+  local i key val errmsg
+  for i in "${!CBOX_CONFIG_KEYS[@]}"; do
+    key="${CBOX_CONFIG_KEYS[$i]}"
+    val="${CBOX_CONFIG_VALS[$i]}"
+    if ! errmsg="$(_cbox_config_validate_var "$key" "$val")"; then
+      echo "cbox: invalid value for $key: '$val' - ${errmsg:-rejected}" >&2
+      return 1
+    fi
+  done
+
+  _cbox_config_set_global
+}
+
 _cbox_config_apply_staged_vars() {
   local i
   for i in "${!CBOX_CONFIG_KEYS[@]}"; do
@@ -6878,8 +7685,9 @@ _cbox_config_set_isolated() {
 
   mkdir -p "$eff"
   local lockfile="$eff/.regen.lock"
-  exec 6> "$lockfile"
-  _cbox_flock -x 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+  local cfg_lock_fd
+  exec {cfg_lock_fd}> "$lockfile"
+  _cbox_flock -x "$cfg_lock_fd" || { echo "cbox: cannot lock $lockfile" >&2; exec {cfg_lock_fd}>&-; return 1; }
 
   local backup_conf backup_gen backup_override rc=0 had_override=0
   backup_conf="$(mktemp)"
@@ -6945,7 +7753,7 @@ _cbox_config_set_isolated() {
     fi
     rm -f "$backup_conf" "$backup_override"
     rm -rf "$backup_gen"
-    exec 6>&-
+    exec {cfg_lock_fd}>&-
     echo "cbox: config set failed - previous configuration and generated artifacts restored" >&2
     return 1
   fi
@@ -6966,7 +7774,7 @@ _cbox_config_set_isolated() {
     _cbox_config_print_report "${touched_arr[@]}"
   fi
 
-  exec 6>&-
+  exec {cfg_lock_fd}>&-
   return 0
 }
 
@@ -6974,8 +7782,9 @@ _cbox_config_set_global() {
   require_global_conf
   local conf="$INSTALL_DIR/cbox.conf"
   local lockfile="$INSTALL_DIR/.regen.lock"
-  exec 6> "$lockfile"
-  _cbox_flock -x 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+  local cfg_lock_fd
+  exec {cfg_lock_fd}> "$lockfile"
+  _cbox_flock -x "$cfg_lock_fd" || { echo "cbox: cannot lock $lockfile" >&2; exec {cfg_lock_fd}>&-; return 1; }
 
   local loaded_sha cur_sha
   loaded_sha="$(_cbox_sha256 "$conf")"
@@ -7016,7 +7825,7 @@ _cbox_config_set_global() {
 
   if [ "$rc" -ne 0 ]; then
     cp "$backup" "$conf"
-    exec 6>&-
+    exec {cfg_lock_fd}>&-
     echo "cbox: config set failed - previous global cbox.conf restored (kept at $backup)" >&2
     return 1
   fi
@@ -7036,7 +7845,7 @@ _cbox_config_set_global() {
   fi
 
   echo "cbox: previous global cbox.conf kept at $backup"
-  exec 6>&-
+  exec {cfg_lock_fd}>&-
   return 0
 }
 
@@ -7601,9 +8410,11 @@ _hub_wg_submenu() {
     echo "  6) peer rm" >&2
     echo "  7) peer list" >&2
     echo "  8) peer config" >&2
+    echo "  9) server add-client" >&2
+    echo "  10) client join" >&2
     echo "  b) back" >&2
     printf '> ' >&2
-    local ans name pubkey addr genkey
+    local ans name pubkey addr genkey endpoint token
     IFS= read -r ans || return 0
     case "$ans" in
       1) wg_cmd status 2>&1 | cat 1>&2 || true ;;
@@ -7639,6 +8450,32 @@ _hub_wg_submenu() {
           y|Y) wg_cmd peer config "$name" --generate-key 2>&1 | cat 1>&2 || true ;;
           *) wg_cmd peer config "$name" 2>&1 | cat 1>&2 || true ;;
         esac
+        ;;
+      9)
+        printf 'client name: ' >&2
+        IFS= read -r name || continue
+        [ -n "$name" ] || continue
+        printf 'client public key (leave empty to get a pairing token to hand the client instead): ' >&2
+        IFS= read -r pubkey || pubkey=""
+        printf 'endpoint override host:port (leave empty to auto-detect): ' >&2
+        IFS= read -r endpoint || endpoint=""
+        if [ -n "$pubkey" ]; then
+          if [ -n "$endpoint" ]; then
+            wg_cmd server add-client "$name" "$pubkey" --endpoint "$endpoint" 2>&1 | cat 1>&2 || true
+          else
+            wg_cmd server add-client "$name" "$pubkey" 2>&1 | cat 1>&2 || true
+          fi
+        elif [ -n "$endpoint" ]; then
+          wg_cmd server add-client "$name" --endpoint "$endpoint" 2>&1 | cat 1>&2 || true
+        else
+          wg_cmd server add-client "$name" 2>&1 | cat 1>&2 || true
+        fi
+        ;;
+      10)
+        printf 'pairing token (cbx1....): ' >&2
+        IFS= read -r token || continue
+        [ -n "$token" ] || continue
+        wg_cmd client join "$token" 2>&1 | cat 1>&2 || true
         ;;
       b|B) return 0 ;;
       *) echo "cbox: unrecognized choice '$ans'" >&2 ;;
@@ -7988,7 +8825,7 @@ print(json.dumps({
 }
 
 usage() {
-  echo "usage: $0 {run [--session <id>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force]|restart [--gpu]|shell|logs [args]|update|reinstall-bins [--fresh|--force|--if-stale]|bins {status|history [tool]|rollback [tool]}|install-hooks|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|unset|diff|pending}|netaccess {status|allow|deny}|ollama {status|ps|up|down|pull <model>|reconcile|gpu-check}|wg {status|up|down|keygen|peer {add|rm|list|config}}|session-broker {status|access {disabled|viewer|full-attach}|window {off|<minutes>}|key {add <pubkey-file> [comment]|rm <fingerprint>|fingerprints}}|backup|login [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}"
+  echo "usage: $0 {run [--session <id>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force]|restart [--gpu]|shell|logs [args]|update|reinstall-bins [--fresh|--force|--if-stale]|bins {status|history [tool]|rollback [tool]}|install-hooks|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|unset|diff|pending}|netaccess {status|allow|deny}|ollama {status|ps|up|down|pull <model>|reconcile|gpu-check}|wg {status|up [--yes]|down|keygen|peer {add|rm|list|config}|server add-client <name> [<pubkey>] [--endpoint host:port] [--plain] [--yes]|client join <token> [--yes]}|session-broker {status|access {disabled|viewer|full-attach}|window {off|<minutes>}|key {add <pubkey-file> [comment]|rm <fingerprint>|fingerprints}}|backup|login [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}"
   echo "cbox: with zero arguments and a TTY on stdin+stdout, bare '$0' opens the interactive hub instead of this usage text"
   echo "cbox: 'cbox ls' lists RUNNING isolated projects only, not every configured project"
   exit 1

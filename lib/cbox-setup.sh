@@ -1372,6 +1372,48 @@ step_egress() {
   note "login-first: the wizard applies the egress lockdown only after the login step"
 }
 
+step_host_aliases() {
+  echo "== section: host-aliases =="
+  note "proxy: off by default. Redirects selected host /etc/hosts names through the netaccess SOCKS proxy to a docker container publishing a matching host port on 127.0.0.1/0.0.0.0/:: - curl https://name works natively inside cbox, no proxy flags. Requires netaccess (next section) to be on to actually forward anything."
+  local prev="$CBOX_NETACCESS_HOST_ALIASES" mode current="" list=""
+  case "$prev" in
+    off|auto) mode="$prev" ;;
+    *) mode=explicit; current="$prev" ;;
+  esac
+  ask_choice "setup: host alias mode" "$mode" off auto explicit
+  case "$ASK_VALUE" in
+    off) CBOX_NETACCESS_HOST_ALIASES=off ;;
+    auto) CBOX_NETACCESS_HOST_ALIASES=auto ;;
+    explicit)
+      [ -z "$current" ] || note "current explicit list: $current"
+      note "add hostnames one per line (each resolves to 127.0.0.1 inside the container); empty line finishes"
+      while :; do
+        ask "setup: host alias name: " ""
+        [ -n "$ASK_VALUE" ] || break
+        case "$ASK_VALUE" in
+          .*|*.|-*|*-|*..*) echo "setup: invalid host alias name: $ASK_VALUE"; continue ;;
+        esac
+        case "$ASK_VALUE" in
+          *[!A-Za-z0-9.-]*) echo "setup: invalid host alias name: $ASK_VALUE"; continue ;;
+        esac
+        case ",$list," in
+          *",$ASK_VALUE,"*) note "already listed: $ASK_VALUE" ;;
+          *) list="${list:+$list,}$ASK_VALUE"; note "added $ASK_VALUE" ;;
+        esac
+      done
+      if [ -z "$list" ]; then
+        warn "no names entered; keeping host aliases off"
+        CBOX_NETACCESS_HOST_ALIASES=off
+      else
+        CBOX_NETACCESS_HOST_ALIASES="$list"
+      fi
+      ;;
+  esac
+  if [ "$CBOX_NETACCESS_HOST_ALIASES" != off ] && [ "$CBOX_NETACCESS_MODE" = off ]; then
+    note "netaccess is currently off - host aliases will not forward anything until the next section turns netaccess on"
+  fi
+}
+
 step_netaccess() {
   echo "== section: netaccess =="
   local prev_mode="$CBOX_NETACCESS_MODE"
@@ -2011,35 +2053,25 @@ step_wireguard() {
         if [ -z "$CBOX_WG_PUBLISH_ADDR" ]; then
           warn "no publish address set - the sidecar will refuse to render until you name one; this feature never picks every interface for you"
         fi
-        note "peers are managed separately (one host address, a /32, per peer) - see 'cbox wireguard peer add'"
         ask "setup: wireguard forward table (space-separated listen_port:target_host:target_port; empty synthesises the ollama forward alone when ollama is on)" "$CBOX_WG_FORWARDS"
         if [ -n "$ASK_VALUE" ] && ! _cbox_wg_forwards_list_ok "$ASK_VALUE"; then
           warn "invalid forward table (want listen_port:target_host:target_port entries, unique listen ports, target_host an IPv4 literal or docker-service-name); keeping $CBOX_WG_FORWARDS"
         else
           CBOX_WG_FORWARDS="$ASK_VALUE"
         fi
+        note "add a client with a one-time invite token: 'cbox wg server add-client <name>' prints the token to paste on that machine (raw keys/peers: 'cbox wg peer add' or 'cbox config set', advanced)"
+        ask "setup: name for a new client to add after setup finishes (empty = skip; this is a reminder only, nothing runs now)" ""
+        if [ -n "$ASK_VALUE" ]; then
+          note "after setup finishes: cbox wg server add-client $ASK_VALUE"
+        else
+          note "add a client later: cbox wg server add-client <name>"
+        fi
         ;;
     esac
     case "$CBOX_WG_MODE" in
       client|both)
-        ask "setup: remote peer endpoint (host:port)" "$CBOX_WG_PEER_ENDPOINT"
-        if [ -n "$ASK_VALUE" ] && ! _cbox_wg_hostport_ok "$ASK_VALUE"; then
-          warn "expected host:port; keeping $CBOX_WG_PEER_ENDPOINT"
-        else
-          CBOX_WG_PEER_ENDPOINT="$ASK_VALUE"
-        fi
-        ask "setup: remote peer public key" "$CBOX_WG_PEER_PUBKEY"
-        if [ -n "$ASK_VALUE" ] && ! _cbox_wg_pubkey_ok "$ASK_VALUE"; then
-          warn "expected a 44-character base64 WireGuard public key; keeping $CBOX_WG_PEER_PUBKEY"
-        else
-          CBOX_WG_PEER_PUBKEY="$ASK_VALUE"
-        fi
-        ask "setup: remote peer's own tunnel address in CIDR form (e.g. 10.90.0.1/32)" "$CBOX_WG_PEER_ADDRESS"
-        if [ -n "$ASK_VALUE" ] && ! _cbox_is_ipv4_cidr "$ASK_VALUE"; then
-          warn "expected an IPv4 address with a prefix length; keeping $CBOX_WG_PEER_ADDRESS"
-        else
-          CBOX_WG_PEER_ADDRESS="$ASK_VALUE"
-        fi
+        note "join an existing network with the one-time invite token printed by 'cbox wg server add-client <name>' on the server"
+        note "join after setup finishes: cbox wg client join <token>"
         note "client mode dials out only - no inbound port; a forwarder inside the infra network exposes the remote ollama under a stable internal alias, so cbox containers use a plain http URL with no NET_ADMIN and no route awareness"
         ask_choice "setup: attach cbox sessions to the wg-remote-ollama alias (global session joins the shared infra network; each isolated project gets a private hub-and-spoke network - projects never see each other)" "$CBOX_WG_CLIENT_ATTACH" off on
         CBOX_WG_CLIENT_ATTACH="$ASK_VALUE"
@@ -2053,6 +2085,7 @@ step_wireguard() {
     if [ ! -e /dev/net/tun ]; then
       warn "/dev/net/tun not present on this host - the sidecar cannot start until it exists (a host prerequisite, not a cbox default)"
     fi
+    note "bring the tunnel up after setup finishes: cbox wg up"
   fi
   if [ "$CBOX_WG_MODE" = "$prev_mode" ] && [ "$CBOX_WG_IMPL" = "$prev_impl" ] \
       && [ "$CBOX_WG_ADDRESS" = "$prev_address" ] && [ "$CBOX_WG_LISTEN_PORT" = "$prev_listen_port" ] \
@@ -2879,7 +2912,7 @@ step_hooks() {
   fi
   gen_hooks_dir
   if [ "$CBOX_CLAUDE_MODE" = mount ]; then
-    staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py rm_glob_guard.py net_proxy_guard.py rm_permission_gate.py spawn_gate.py codex_guard_bridge.py hermes_guard_bridge.py orchestrator-global.txt conduct-kernel.txt session-core.txt codex_scope.container.json ask_claude_mcp.py ask_claude_fallback_models.json codex_notify.py codex_bump_probe.sh codex_mcp_shim.py hermes_delegate_mcp.py local_model_mcp.py container_exec_mcp.py cbox_net_mcp.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py continuity_session_start.py session_scope_farm.py limit_watchdog.py session_pane_map.py usage_statusline.py cbox_budget.py || true
+    staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py rm_glob_guard.py net_proxy_guard.py rm_permission_gate.py spawn_gate.py codex_guard_bridge.py hermes_guard_bridge.py orchestrator-global.txt conduct-kernel.txt session-core.txt codex_scope.container.json ask_claude_mcp.py ask_claude_fallback_models.json codex_notify.py codex_bump_probe.sh codex_mcp_shim.py hermes_delegate_mcp.py local_model_mcp.py container_exec_mcp.py cbox_net_mcp.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py continuity_session_start.py session_scope_farm.py limit_watchdog.py session_pane_map.py usage_statusline.py codex_usage_refresh.py cbox_budget.py || true
   else
     note "volume mode: hooks are served read-only from $GEN_DIR/hooks (synced)"
   fi
@@ -3324,24 +3357,6 @@ run_backups() {
   backup_one_dir "$CBOX_CODEX_MODE" "$CBOX_CODEX_PATH" "$CBOX_CODEX_BACKUP"
 }
 
-smoke_test() {
-  note "smoke test: claude and codex inside the container (binaries are installed host-side into shared volumes before this point; first boot no longer downloads)"
-  docker compose -f "$COMPOSE_FILE" exec -T "$SERVICE" /entrypoint.sh claude --version
-  docker compose -f "$COMPOSE_FILE" exec -T "$SERVICE" /entrypoint.sh codex --version
-}
-
-login_guidance() {
-  if [ "$CBOX_CLAUDE_MODE" != volume ] && [ "$CBOX_CODEX_MODE" != volume ]; then
-    return 0
-  fi
-  note "login required inside the container (credentials live in volumes):"
-  echo "  ./cbox shell"
-  echo "    claude"
-  echo "      complete the OAuth flow in your host browser"
-  echo "    codex login --device-auth"
-  read -r -p "setup: press Enter once both logins are done "
-}
-
 ssh_mixed_sync() {
   [ "$CBOX_SSH_MODE" = mixed ] || return 0
   [ -f "$GEN_DIR/ssh/config" ] || return 0
@@ -3357,18 +3372,7 @@ egress_lockdown() {
   if [ "$CBOX_EGRESS_MODE" = off ] && [ "$CBOX_NETACCESS_MODE" = off ]; then
     return 0
   fi
-  if [ "$CBOX_EGRESS_MODE" != off ]; then
-    CBOX_EGRESS_APPLIED=1
-  fi
-  if [ "$CBOX_NETACCESS_MODE" != off ]; then
-    CBOX_NETACCESS_APPLIED=1
-  fi
-  conf_save
-  regen_all
-  docker compose -f "$COMPOSE_FILE" down --remove-orphans
-  docker compose -f "$COMPOSE_FILE" build
-  CBOX_NO_EXEC=1 "$INSTALL_DIR/cbox" up
-  note "network policy applied (egress=$CBOX_EGRESS_MODE, netaccess=$CBOX_NETACCESS_MODE)"
+  note "network policy configured (egress=$CBOX_EGRESS_MODE, netaccess=$CBOX_NETACCESS_MODE); setup never builds or starts a container - 'cbox run <engine>' applies it once you have logged in"
 }
 
 print_backup_cmds() {
@@ -3402,10 +3406,10 @@ print_host_sequence() {
     echo "    codex login --device-auth"
   fi
   if [ "$CBOX_EGRESS_MODE" != off ] && [ "$CBOX_EGRESS_APPLIED" = 0 ]; then
-    echo "  cbox setup update egress"
+    echo "  # egress lockdown is configured - 'cbox run <engine>' applies it once you have logged in"
   fi
   if [ "$CBOX_NETACCESS_MODE" != off ] && [ "$CBOX_NETACCESS_APPLIED" = 0 ]; then
-    echo "  cbox setup update netaccess"
+    echo "  # netaccess lockdown is configured - 'cbox run <engine>' applies it once you have logged in"
   fi
   if [ "$CBOX_CODEX_MCP" = 1 ] && [ "$CBOX_CODEX_MODE" = volume ]; then
     echo "  cbox setup update codex-mcp"
@@ -3489,7 +3493,7 @@ apply_change() {
 isolated_next_steps() {
   local root="$1"
   note "isolated mode: cbox run derives one container per project from the workspace root (git toplevel or cwd)"
-  note "the image builds automatically on the first cbox run (reused when inputs are unchanged)"
+  note "next: cbox run <engine> builds the image and applies this configuration (asks for login where needed, reused when inputs are unchanged)"
   if [ -n "$root" ]; then
     note "run from $root: cbox run codex"
   else
@@ -3499,37 +3503,23 @@ isolated_next_steps() {
 
 run_phase_isolated() {
   local root=""
-  note "isolated mode: the image is built and shared bins install on the first cbox run; no global container is created here"
-  if ! { [ -t 0 ] && [ -t 1 ]; }; then
-    isolated_next_steps ""
-    return 0
-  fi
+  note "isolated mode: setup never builds or starts a container - the first cbox run in each project does"
   if ! root="$(_cbox_workspace_root 2>/dev/null)"; then
-    warn "$PWD is not a usable project root (home, /, or a mount root); no per-project container is started"
+    warn "$PWD is not a usable project root (home, /, or a mount root)"
     isolated_next_steps ""
     return 0
   fi
   if reserved_path_conflict "$root" >/dev/null 2>&1; then
     warn "$root looks like the cbox tool directory or a reserved path, not a project to sandbox"
     reserved_path_conflict "$root" | sed 's/^setup: /  /'
-    note "cd into an actual project directory and run: cbox run codex"
     isolated_next_steps ""
     return 0
-  fi
-  note "no per-project container exists yet for this project"
-  if ask_yn "setup: start this project's container now for $root (cbox run codex)? [y/N]" n; then
-    note "starting cbox run codex for $root"
-    exec "$INSTALL_DIR/cbox" run codex
   fi
   isolated_next_steps "$root"
   return 0
 }
 
 run_phase() {
-  CBOX_EGRESS_APPLIED=0
-  if [ "${CBOX_MODE:-global}" = isolated ] && [ "$CBOX_NETACCESS_MODE" != off ]; then
-    CBOX_NETACCESS_APPLIED=1
-  fi
   user_dir_precreate_host
   conf_save
   regen_all
@@ -3539,27 +3529,18 @@ run_phase() {
     print_host_sequence
     return 0
   fi
-  docker compose -f "$COMPOSE_FILE" build
-  run_backups
   if [ "${CBOX_MODE:-global}" = isolated ]; then
     run_phase_isolated
     return 0
   fi
-  if [ ! -f /.dockerenv ] && have_docker; then
-    "$INSTALL_DIR/cbox" reinstall-bins --if-stale
-  fi
-  CBOX_NO_EXEC=1 "$INSTALL_DIR/cbox" up
-  smoke_test
   ssh_mixed_sync
   if [ "$CBOX_CODEX_MCP" = 1 ] && [ "$CBOX_CODEX_MODE" = volume ] && [ ! -f /.dockerenv ]; then
     codex_mcp_apply
   fi
-  login_guidance
-  egress_lockdown
   if [ "$CBOX_GPU" = 1 ]; then
     note "gpu is runtime opt-in: ./cbox up --gpu"
   fi
-  "$INSTALL_DIR/cbox" verify
+  note "next: cbox run <engine> builds the image and applies this configuration (asks for login where needed)"
 }
 
 default_preset_set() {
@@ -3590,7 +3571,7 @@ default_preset_set() {
   CBOX_CODEX_TARGET=""
   CBOX_BINS_SCOPE=global
   CBOX_RESTART_POLICY=no
-  CBOX_MODE=isolated
+  CBOX_MODE=global
   CBOX_HISTORY=1
   CBOX_GIT=1
   CBOX_DIARY=1
@@ -3796,6 +3777,9 @@ run_classic() {
         :
         ;;
     esac
+    if [ "$s" = mounts ]; then
+      run_backups
+    fi
   done
   _classic_features_select
   default_preset_summary
@@ -3848,6 +3832,9 @@ run_walk() {
     fn="step_${WIZ_SECTIONS[i]//-/_}"
     header "$(section_title "${WIZ_SECTIONS[i]}")" "$((i+1))" "${#WIZ_SECTIONS[@]}"
     "$fn"
+    if [ "${WIZ_SECTIONS[i]}" = mounts ]; then
+      run_backups
+    fi
     nav_prompt
     case "$NAV" in
       next)
@@ -3995,27 +3982,20 @@ run_config() {
     print_host_sequence
     return 0
   fi
-  docker compose -f "$COMPOSE_FILE" build
   if [ "${CBOX_MODE:-global}" = isolated ]; then
-    note "isolated mode: the image is built and shared bins install on the first cbox run; no global container is created here"
     isolated_next_steps ""
     return 0
   fi
-  if [ ! -f /.dockerenv ] && have_docker; then
-    "$INSTALL_DIR/cbox" reinstall-bins --if-stale
-  fi
-  CBOX_NO_EXEC=1 "$INSTALL_DIR/cbox" up
-  smoke_test
   ssh_mixed_sync
   if [ "$CBOX_CODEX_MCP" = 1 ] && [ "$CBOX_CODEX_MODE" = volume ] && [ ! -f /.dockerenv ]; then
     codex_mcp_apply
   elif [ "$CBOX_CODEX_MCP" = 1 ]; then
     note "codex-mcp is enabled but config writes are skipped in --config mode; apply with cbox setup update codex-mcp"
   fi
-  "$INSTALL_DIR/cbox" verify
   if [ "$CBOX_EGRESS_MODE" != off ] && [ "$CBOX_EGRESS_APPLIED" = 0 ]; then
-    note "egress mode '$CBOX_EGRESS_MODE' is configured but not applied yet; run cbox setup update egress"
+    note "egress mode '$CBOX_EGRESS_MODE' is configured; 'cbox run <engine>' applies it once you have logged in"
   fi
+  note "next: cbox run <engine> builds the image and applies this configuration (asks for login where needed)"
 }
 
 _uninstall_rc_block() {
@@ -4139,6 +4119,7 @@ run_local_wizard_subset() {
   step_python
   step_gpu
   step_egress
+  step_host_aliases
   step_netaccess
   step_hostroute
   step_ssh

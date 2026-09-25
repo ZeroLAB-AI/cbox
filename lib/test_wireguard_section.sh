@@ -273,6 +273,71 @@ case "$step_wireguard_body" in
 esac
 _ok "off-default: step_wireguard's follow-up prompts are gated behind CBOX_WG_MODE != off"
 
+case "$step_wireguard_body" in
+  *'cbox wireguard peer add'*)
+    _fail "wiring: step_wireguard still names the dead verb 'cbox wireguard peer add'"
+    ;;
+esac
+_ok "wiring: step_wireguard no longer names the dead 'cbox wireguard peer add' verb"
+
+case "$step_wireguard_body" in
+  *'ask "setup: remote peer endpoint'*|*'ask "setup: remote peer public key'*|*"ask \"setup: remote peer's own tunnel address"*)
+    _fail "wiring: step_wireguard still prompts raw PEER_ENDPOINT/PEER_PUBKEY/PEER_ADDRESS directly"
+    ;;
+esac
+_ok "wiring: step_wireguard no longer prompts raw PEER_ENDPOINT/PEER_PUBKEY/PEER_ADDRESS - those stay reachable via cbox config set / advanced"
+
+case "$step_wireguard_body" in
+  *'cbox wg server add-client'*) ;;
+  *) _fail "wiring: step_wireguard should offer/print 'cbox wg server add-client <name>' for the server role" ;;
+esac
+_ok "wiring: step_wireguard guides the server role through 'cbox wg server add-client <name>'"
+
+case "$step_wireguard_body" in
+  *'cbox wg client join'*) ;;
+  *) _fail "wiring: step_wireguard should offer/print 'cbox wg client join <token>' for the client role" ;;
+esac
+_ok "wiring: step_wireguard guides the client role through 'cbox wg client join <token>' (paste the token)"
+
+case "$step_wireguard_body" in
+  *'paste the pairing token'*)
+    _fail "LOW-2: step_wireguard must not ask for the pairing token"
+    ;;
+esac
+case "$step_wireguard_body" in
+  *'client join $ASK_VALUE'*)
+    _fail "LOW-2: step_wireguard must not echo a pasted pairing token back out"
+    ;;
+esac
+_ok "LOW-2: step_wireguard never asks for or echoes the wireguard pairing token - only prints the literal 'cbox wg client join <token>' reminder"
+
+case "$step_wireguard_body" in
+  *'cbox wg up'*) ;;
+  *) _fail "wiring: step_wireguard should end with 'cbox wg up' as the on-switch" ;;
+esac
+_ok "wiring: step_wireguard always ends with 'cbox wg up' as the on-switch"
+
+case "$step_wireguard_body" in
+  *'"$INSTALL_DIR/cbox"'*)
+    _fail "setup never starts containers: step_wireguard must not run 'cbox wg ...' as a subprocess - it only prints the follow-up command"
+    ;;
+esac
+_ok "setup never starts containers: step_wireguard runs no subprocess (no '\$INSTALL_DIR/cbox' invocation anywhere in the function)"
+
+case "$step_wireguard_body" in
+  *'conf_load'*)
+    _fail "setup never starts containers: step_wireguard must not call conf_load (that would discard unsaved wizard answers and resync from stale disk state)"
+    ;;
+esac
+_ok "setup never starts containers: step_wireguard never calls conf_load"
+
+case "$step_wireguard_body" in
+  *'ask_yn "setup: run '*)
+    _fail "setup never starts containers: step_wireguard must not ask to run a wg/ollama command now - only record answers and print the follow-up command"
+    ;;
+esac
+_ok "setup never starts containers: step_wireguard never offers to run a command immediately"
+
 _load_doc_coverage_block() {
   awk '
     /^v_t\(\) \{/ { infunc=1 }

@@ -1,0 +1,15 @@
+cbox  /home/marek/zerolab/agent_ecosystem  global
+--------------------------------------------------------------------------------
+container  down
+doctor: 2 warnings
+
+ 1 claude    start             e sessions
+ 2 codex     start             n network
+                               o ollama
+                               w wireguard
+                               s settings
+                               m maintenance
+                               t shell
+                               q quit
+
+Enter=1   ?=commands                 cmd: /home/marek/.local/bin/cbox run claude

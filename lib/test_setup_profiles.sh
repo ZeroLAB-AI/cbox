@@ -263,4 +263,33 @@ OUT_UNCHANGED="$(_run_unchanged_checkbox_probe)"
 [ "$(_field "$OUT_UNCHANGED" CBOX_LOCAL_MODEL)" = off ] || _fail "unchanged checkbox: CBOX_LOCAL_MODEL should stay off"
 _ok "_classic_features_select: leaving the checkbox unchanged does not re-derive an already-on feature's custom values"
 
+RUN_WALK="$(_extract_fn "$SETUP_SH" run_walk)"
+[ -n "$RUN_WALK" ] || _fail "cannot extract run_walk from lib/cbox-setup.sh"
+
+printf '%s\n' "$RUN_CLASSIC" | grep -q 'run_backups' \
+  || _fail "data safety: run_classic no longer calls run_backups - mount-mode host writes (mcp-servers, agents, settings, hooks) would happen with no backup"
+printf '%s\n' "$RUN_WALK" | grep -q 'run_backups' \
+  || _fail "data safety: run_walk no longer calls run_backups - mount-mode host writes (mcp-servers, agents, settings, hooks) would happen with no backup"
+_ok "data safety: run_classic and run_walk both still call run_backups"
+
+CLASSIC_MOUNTS_PAT='"$s" = mounts'
+classic_mounts_pos="${RUN_CLASSIC%%$CLASSIC_MOUNTS_PAT*}"
+classic_backup_pos="${RUN_CLASSIC%%run_backups*}"
+classic_loop_end_pos="${RUN_CLASSIC%%_classic_features_select*}"
+[ "${#classic_backup_pos}" -gt "${#classic_mounts_pos}" ] \
+  || _fail "data safety: run_classic's run_backups call must come after the mounts-section guard, not before it"
+[ "${#classic_backup_pos}" -lt "${#classic_loop_end_pos}" ] \
+  || _fail "data safety: run_classic's run_backups call must sit inside the SECTIONS loop (before _classic_features_select), right after mounts - not after the loop, once later auto sections already wrote"
+_ok "data safety: run_classic backs up ~/.claude / ~/.codex right after the mounts section, before mcp-servers/agents/settings/hooks can write to them"
+
+WALK_MOUNTS_PAT='= mounts'
+walk_mounts_pos="${RUN_WALK%%$WALK_MOUNTS_PAT*}"
+walk_backup_pos="${RUN_WALK%%run_backups*}"
+walk_phase_pos="${RUN_WALK%%run_phase*}"
+[ "${#walk_backup_pos}" -gt "${#walk_mounts_pos}" ] \
+  || _fail "data safety: run_walk's run_backups call must come after the mounts-section guard, not before it"
+[ "${#walk_backup_pos}" -lt "${#walk_phase_pos}" ] \
+  || _fail "data safety: run_walk's run_backups call must sit inside the section loop (before run_phase), right after mounts - not after the loop, once later auto sections already wrote"
+_ok "data safety: run_walk backs up ~/.claude / ~/.codex right after the mounts section, before mcp-servers/agents/settings/hooks can write to them"
+
 _ok "all setup profile checks passed"

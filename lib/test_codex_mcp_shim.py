@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import shutil
+import stat
 import sys
 import tempfile
 import threading
@@ -1599,6 +1600,402 @@ class ProgressTokenBoundsTests(IntegrationHarness):
         resp = self.wait_for_reply(1, timeout=10)
         self.assertIsNotNone(resp)
         self.assertNotIn("tok-drop", relay.progress_seq)
+
+
+class RateLimitSnapshotShapeTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.saved_usage_dir = os.environ.pop("CBOX_USAGE_DIR", None)
+        os.environ["CBOX_USAGE_DIR"] = self._tmp.name
+
+    def tearDown(self):
+        os.environ.pop("CBOX_USAGE_DIR", None)
+        if self.saved_usage_dir is not None:
+            os.environ["CBOX_USAGE_DIR"] = self.saved_usage_dir
+        self._tmp.cleanup()
+
+    def _codex_json(self):
+        with open(os.path.join(self._tmp.name, "codex.json"), "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_snapshot_shape_matches_cbox_budget_schema(self):
+        rl = {
+            "primary": {"usedPercent": 38, "resetsAt": 1790340325, "windowDurationMins": 300},
+            "secondary": {"usedPercent": 12, "resetsAt": 1790842078, "windowDurationMins": 10080},
+            "planType": "plus",
+        }
+        snap = SHIM.codex_usage_snapshot_from_rate_limits(rl)
+        self.assertEqual(snap["source"], "codex")
+        self.assertEqual(snap["five_hour"]["used_percentage"], 38)
+        self.assertEqual(snap["five_hour"]["resets_at"], 1790340325)
+        self.assertEqual(snap["seven_day"]["used_percentage"], 12)
+        self.assertEqual(snap["seven_day"]["resets_at"], 1790842078)
+        self.assertEqual(snap["plan_type"], "plus")
+
+    def test_snapshot_captures_reached_type_and_ordinary_usage_allowed(self):
+        rl = {
+            "primary": {"usedPercent": 100, "resetsAt": 1790340325, "windowDurationMins": 300},
+            "secondary": {"usedPercent": 44, "resetsAt": 1790842078, "windowDurationMins": 10080},
+            "planType": "plus",
+            "rateLimitReachedType": "rate_limit_reached",
+        }
+        snap = SHIM.codex_usage_snapshot_from_rate_limits(rl, ordinary_usage_allowed=False)
+        self.assertEqual(snap["rate_limit_reached_type"], "rate_limit_reached")
+        self.assertEqual(snap["ordinary_usage_allowed"], False)
+
+    def test_snapshot_omits_reached_fields_when_absent(self):
+        rl = {"primary": {"usedPercent": 5, "resetsAt": 100}}
+        snap = SHIM.codex_usage_snapshot_from_rate_limits(rl)
+        self.assertNotIn("rate_limit_reached_type", snap)
+        self.assertNotIn("ordinary_usage_allowed", snap)
+
+    def test_snapshot_ignores_non_bool_ordinary_usage_allowed(self):
+        rl = {"primary": {"usedPercent": 5, "resetsAt": 100}}
+        snap = SHIM.codex_usage_snapshot_from_rate_limits(rl, ordinary_usage_allowed="nope")
+        self.assertNotIn("ordinary_usage_allowed", snap)
+
+    def test_malformed_window_entries_tolerated(self):
+        self.assertIsNone(SHIM._rate_limit_window("not-a-dict"))
+        self.assertIsNone(SHIM._rate_limit_window(None))
+        w = SHIM._rate_limit_window({"usedPercent": True, "resetsAt": "bad"})
+        self.assertIsNone(w["used_percentage"])
+        self.assertIsNone(w["resets_at"])
+
+    def test_no_windows_returns_none(self):
+        self.assertIsNone(SHIM.codex_usage_snapshot_from_rate_limits({"foo": "bar"}))
+        self.assertIsNone(SHIM.codex_usage_snapshot_from_rate_limits("not-a-dict"))
+        self.assertIsNone(SHIM.codex_usage_snapshot_from_rate_limits(None))
+
+    def test_write_returns_false_and_skips_file_when_no_usable_windows(self):
+        self.assertFalse(SHIM.write_codex_usage_snapshot({"foo": "bar"}))
+        self.assertFalse(os.path.exists(os.path.join(self._tmp.name, "codex.json")))
+
+    def test_write_creates_atomic_0600_file_in_0700_dir(self):
+        ok = SHIM.write_codex_usage_snapshot({
+            "primary": {"usedPercent": 5, "resetsAt": 100},
+        })
+        self.assertTrue(ok)
+        path = os.path.join(self._tmp.name, "codex.json")
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        self.assertEqual(mode, 0o600)
+        dmode = stat.S_IMODE(os.stat(self._tmp.name).st_mode)
+        self.assertEqual(dmode, 0o700)
+        data = self._codex_json()
+        self.assertEqual(data["source"], "codex")
+        self.assertIn("captured_at", data)
+
+    def test_write_replaces_a_preexisting_symlink_without_following_it(self):
+        outside_dir = tempfile.TemporaryDirectory()
+        try:
+            outside = os.path.join(outside_dir.name, "outside_target.json")
+            with open(outside, "w", encoding="utf-8") as f:
+                f.write("SHOULD_NOT_BE_WRITTEN")
+            path = os.path.join(self._tmp.name, "codex.json")
+            os.makedirs(self._tmp.name, exist_ok=True)
+            os.symlink(outside, path)
+            ok = SHIM.write_codex_usage_snapshot({"primary": {"usedPercent": 1, "resetsAt": 1}})
+            self.assertTrue(ok)
+            self.assertFalse(os.path.islink(path))
+            with open(outside, encoding="utf-8") as f:
+                self.assertEqual(f.read(), "SHOULD_NOT_BE_WRITTEN")
+        finally:
+            outside_dir.cleanup()
+
+    def test_cbox_budget_reads_the_written_snapshot(self):
+        SHIM.write_codex_usage_snapshot({
+            "primary": {"usedPercent": 38, "resetsAt": time.time() + 3600,
+                        "windowDurationMins": 300},
+            "secondary": {"usedPercent": 12, "resetsAt": time.time() + 86400,
+                          "windowDurationMins": 10080},
+        })
+        spec = importlib.util.spec_from_file_location(
+            "cbox_budget_for_shim_test", ROOT / "etc" / "hooks" / "cbox_budget.py",
+        )
+        budget_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(budget_mod)
+        m = budget_mod.source_metrics("codex")
+        self.assertIsNotNone(m)
+        self.assertEqual(m["five_hour"]["used_percentage"], 38.0)
+        self.assertEqual(m["seven_day"]["used_percentage"], 12.0)
+
+
+class RateLimitSingleFlightTests(unittest.TestCase):
+    def test_only_one_inflight_read_runs_at_a_time(self):
+        backend = SHIM.CodexBackend.__new__(SHIM.CodexBackend)
+        backend.rate_limit_refresh_lock = threading.Lock()
+        backend.journal = lambda *a, **k: None
+        calls = []
+        gate = threading.Event()
+
+        def slow_request(method, params, timeout=60):
+            calls.append(method)
+            gate.wait(2)
+            return {"rateLimits": {"primary": {"usedPercent": 1}}}
+
+        backend.request = slow_request
+        backend.capture_rate_limits = lambda rl, ordinary_usage_allowed=None: None
+        t1 = threading.Thread(target=backend.refresh_rate_limits_once)
+        t1.start()
+        try:
+            deadline = time.monotonic() + 2
+            while not calls and time.monotonic() < deadline:
+                time.sleep(0.01)
+            backend.refresh_rate_limits_once()
+            self.assertEqual(calls, ["account/rateLimits/read"])
+        finally:
+            gate.set()
+            t1.join(timeout=3)
+
+    def test_read_failure_is_swallowed_and_journalled(self):
+        backend = SHIM.CodexBackend.__new__(SHIM.CodexBackend)
+        backend.rate_limit_refresh_lock = threading.Lock()
+        events = []
+        backend.journal = lambda event, **fields: events.append(event)
+
+        def failing_request(method, params, timeout=60):
+            raise SHIM.BackendTimeout("boom")
+
+        backend.request = failing_request
+        backend.refresh_rate_limits_once()
+        self.assertIn("rate_limits_read_failed", events)
+        self.assertTrue(backend.rate_limit_refresh_lock.acquire(blocking=False))
+        backend.rate_limit_refresh_lock.release()
+
+
+class FinishTurnRefreshSpawnTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.saved_usage_dir = os.environ.pop("CBOX_USAGE_DIR", None)
+        self.saved_audit = os.environ.pop("CODEX_SHIM_GUARD_AUDIT", None)
+        os.environ["CBOX_USAGE_DIR"] = self._tmp.name
+        os.environ["CODEX_SHIM_GUARD_AUDIT"] = os.path.join(
+            self._tmp.name, "audit.jsonl")
+        self.saved_digest = SHIM.GUARD._audit_digest
+        SHIM.GUARD._audit_digest = lambda cwd: "0" * 16
+
+    def tearDown(self):
+        SHIM.GUARD._audit_digest = self.saved_digest
+        os.environ.pop("CBOX_USAGE_DIR", None)
+        if self.saved_usage_dir is not None:
+            os.environ["CBOX_USAGE_DIR"] = self.saved_usage_dir
+        os.environ.pop("CODEX_SHIM_GUARD_AUDIT", None)
+        if self.saved_audit is not None:
+            os.environ["CODEX_SHIM_GUARD_AUDIT"] = self.saved_audit
+        self._tmp.cleanup()
+
+    def _relay(self):
+        relay = SHIM.Relay.__new__(SHIM.Relay)
+        relay.tier = "test"
+        relay.progress_lock = threading.Lock()
+        relay.call_lock = threading.Lock()
+        relay.call_threads = {}
+        relay.backend = SHIM.CodexBackend.__new__(SHIM.CodexBackend)
+        relay.backend.state_lock = threading.Lock()
+        relay.backend.thread_cwd = {}
+        relay.backend.cached_cwd = lambda tid: None
+        relay.backend.rate_limit_refresh_lock = threading.Lock()
+        relay.backend.run_turn = lambda *a, **k: ("ok-text", None)
+        relay.backend.request = lambda *a, **k: {
+            "rateLimits": {"primary": {"usedPercent": 1}}}
+        relay.backend.capture_rate_limits = lambda rl, ordinary_usage_allowed=None: None
+        relay.backend.journal = lambda *a, **k: None
+        relay.was_cancelled = lambda rid: False
+        relay._append_pointer = lambda text, tid, hint=None: text
+        relay.reply = lambda rid, result: None
+        self.audit_calls = []
+        relay.shim_audit = lambda *a, **k: self.audit_calls.append((a, k))
+        return relay
+
+    def test_single_refresh_thread_spawned_when_idle(self):
+        relay = self._relay()
+        spawned = []
+        constructor_calls = []
+
+        class RecordingThread(threading.Thread):
+            def __init__(self, *args, **kwargs):
+                constructor_calls.append(kwargs)
+                super().__init__(*args, **kwargs)
+
+            def start(self):
+                spawned.append(self)
+                super().start()
+
+        with mock.patch.object(SHIM.threading, "Thread", RecordingThread):
+            relay._finish_turn(1, "tid-1", "prompt", None)
+        self.assertEqual(len(spawned), 1)
+        self.assertEqual(len(constructor_calls), 1)
+        self.assertEqual(
+            getattr(constructor_calls[0].get("target"), "__name__", None),
+            "refresh_rate_limits_once",
+        )
+        self.assertTrue(constructor_calls[0].get("daemon"))
+        spawned[0].join(timeout=2)
+        self.assertFalse(spawned[0].is_alive())
+        self.assertTrue(
+            relay.backend.rate_limit_refresh_lock.acquire(blocking=False),
+            "refresh thread must have released the in-flight lock on exit",
+        )
+        relay.backend.rate_limit_refresh_lock.release()
+
+    def test_no_second_thread_while_refresh_in_flight(self):
+        relay = self._relay()
+        relay.backend.rate_limit_refresh_lock.acquire()
+        try:
+            spawned = []
+
+            class RecordingThread(threading.Thread):
+                def start(self):
+                    spawned.append(self)
+                    return super().start()
+
+            with mock.patch.object(SHIM.threading, "Thread", RecordingThread):
+                relay._finish_turn(1, "tid-1", "prompt", None)
+        finally:
+            relay.backend.rate_limit_refresh_lock.release()
+        self.assertEqual(spawned, [])
+
+
+class RateLimitLiveCaptureTests(RelayHarness):
+    def setUp(self):
+        super().setUp()
+        self._usage_tmp = tempfile.TemporaryDirectory()
+        self.saved_usage_dir = os.environ.pop("CBOX_USAGE_DIR", None)
+        os.environ["CBOX_USAGE_DIR"] = self._usage_tmp.name
+
+    def tearDown(self):
+        os.environ.pop("CBOX_USAGE_DIR", None)
+        if self.saved_usage_dir is not None:
+            os.environ["CBOX_USAGE_DIR"] = self.saved_usage_dir
+        self._usage_tmp.cleanup()
+        super().tearDown()
+
+    def _codex_json_path(self):
+        return os.path.join(self._usage_tmp.name, "codex.json")
+
+    def _wait_for_codex_json(self, timeout=5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if os.path.exists(self._codex_json_path()):
+                with open(self._codex_json_path(), "r", encoding="utf-8") as f:
+                    return json.load(f)
+            time.sleep(0.05)
+        return None
+
+    def test_post_call_read_writes_codex_json(self):
+        os.environ["STUB_APP_SERVER_MODE"] = "happy"
+        relay = self.make_relay(child_argv=stub_child())
+        relay._call_codex(1, {"cwd": self.good_cwd, "prompt": "hi"}, None)
+        self.assertIsNotNone(self.wait_for_reply(1))
+        data = self._wait_for_codex_json()
+        self.assertIsNotNone(data)
+        self.assertEqual(data["source"], "codex")
+        self.assertEqual(data["five_hour"]["used_percentage"], 38)
+        self.assertEqual(data["seven_day"]["used_percentage"], 12)
+        self.assertEqual(data["plan_type"], "plus")
+
+    def test_notification_capture_writes_codex_json(self):
+        os.environ["STUB_APP_SERVER_MODE"] = "rate_limits_notify"
+        relay = self.make_relay(child_argv=stub_child())
+        relay._call_codex(1, {"cwd": self.good_cwd, "prompt": "hi"}, None)
+        self.assertIsNotNone(self.wait_for_reply(1))
+        data = self._wait_for_codex_json()
+        self.assertIsNotNone(data)
+        self.assertEqual(data["source"], "codex")
+
+    def test_rate_limit_read_failure_never_breaks_the_call(self):
+        os.environ["STUB_APP_SERVER_MODE"] = "rate_limits_fail"
+        relay = self.make_relay(child_argv=stub_child())
+        relay._call_codex(1, {"cwd": self.good_cwd, "prompt": "hi"}, None)
+        resp = self.wait_for_reply(1)
+        self.assertIsNotNone(resp)
+        self.assertNotIn("error", resp)
+        time.sleep(0.3)
+        self.assertFalse(os.path.exists(self._codex_json_path()))
+
+    def test_reached_fields_captured_when_present(self):
+        os.environ["STUB_APP_SERVER_MODE"] = "rate_limits_reached"
+        relay = self.make_relay(child_argv=stub_child())
+        relay._call_codex(1, {"cwd": self.good_cwd, "prompt": "hi"}, None)
+        self.assertIsNotNone(self.wait_for_reply(1))
+        data = self._wait_for_codex_json()
+        self.assertIsNotNone(data)
+        self.assertEqual(data["rate_limit_reached_type"], "rate_limit_reached")
+        self.assertEqual(data["ordinary_usage_allowed"], False)
+        self.assertEqual(data["five_hour"]["used_percentage"], 100)
+        self.assertEqual(data["seven_day"]["used_percentage"], 44)
+
+
+class RefreshScheduledOnFailurePathTests(IntegrationHarness):
+    def setUp(self):
+        super().setUp()
+        self._usage_tmp = tempfile.TemporaryDirectory()
+        self.saved_usage_dir = os.environ.pop("CBOX_USAGE_DIR", None)
+        os.environ["CBOX_USAGE_DIR"] = self._usage_tmp.name
+
+    def tearDown(self):
+        os.environ.pop("CBOX_USAGE_DIR", None)
+        if self.saved_usage_dir is not None:
+            os.environ["CBOX_USAGE_DIR"] = self.saved_usage_dir
+        self._usage_tmp.cleanup()
+        super().tearDown()
+
+    def _codex_json_path(self):
+        return os.path.join(self._usage_tmp.name, "codex.json")
+
+    def _wait_for_codex_json(self, timeout=5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if os.path.exists(self._codex_json_path()):
+                with open(self._codex_json_path(), "r", encoding="utf-8") as f:
+                    return json.load(f)
+            time.sleep(0.05)
+        return None
+
+    def test_thread_start_failure_still_refreshes_codex_json(self):
+        os.environ["STUB_APP_SERVER_MODE"] = "thread_start_fail"
+        relay = self.make_relay(child_argv=stub_child())
+        resp = self.start_and_wait(
+            relay, "codex", {"cwd": self.good_cwd, "prompt": "hi"}, 1,
+        )
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp["error"]["code"], -32000)
+        data = self._wait_for_codex_json()
+        self.assertIsNotNone(
+            data, "no background refresh happened after a thread/start failure",
+        )
+        self.assertEqual(data["source"], "codex")
+        self.assertEqual(data["ordinary_usage_allowed"], False)
+
+    def test_thread_resume_failure_still_refreshes_codex_json(self):
+        with tempfile.TemporaryDirectory() as td:
+            os.environ["STUB_APP_SERVER_STATE_FILE"] = os.path.join(td, "state.json")
+            os.environ["STUB_APP_SERVER_MODE"] = "happy"
+            relay = self.make_relay(child_argv=stub_child())
+            resp = self.start_and_wait(
+                relay, "codex", {"cwd": self.good_cwd, "prompt": "hi"}, 1,
+            )
+            self.assertIsNotNone(resp)
+            self.assertNotIn("error", resp)
+            thread_id = resp["result"]["structuredContent"]["threadId"]
+
+            old_proc = relay.backend.proc
+            old_proc.kill()
+            old_proc.wait(timeout=5)
+            old_proc.stdin.close()
+            old_proc.stdout.close()
+
+            os.environ["STUB_APP_SERVER_MODE"] = "resume_fail"
+            resp2 = self.start_and_wait(
+                relay, "codex-reply", {"threadId": thread_id, "prompt": "again"}, 2,
+                timeout=15,
+            )
+            self.assertIsNotNone(resp2)
+            self.assertEqual(resp2["error"]["code"], -32000)
+            data = self._wait_for_codex_json()
+            self.assertIsNotNone(
+                data, "no background refresh happened after a thread/resume failure",
+            )
+            self.assertEqual(data["source"], "codex")
 
 
 if __name__ == "__main__":

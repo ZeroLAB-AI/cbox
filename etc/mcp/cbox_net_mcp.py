@@ -96,7 +96,103 @@ def valid_port_spec(spec):
     return 1 <= int(match.group(1)) <= 65535
 
 
+NETWORK_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+CONTAINER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+HOST_ALIASES_COUNTER_KEYS = ("dropped", "skipped_not_granted", "skipped_dropped")
+MAX_HOST_ALIAS_SKIPPED = 64
+MAX_HOST_ALIAS_SKIPPED_REASON_LEN = 200
+
+
+def sanitize_skipped_host_port(value):
+    if not isinstance(value, str) or value == "":
+        return ""
+    if not value.isdigit():
+        return ""
+    if not (1 <= int(value) <= 65535):
+        return ""
+    return value
+
+
+def sanitize_skipped_container(value):
+    if not isinstance(value, str) or value == "":
+        return ""
+    if not CONTAINER_NAME_RE.fullmatch(value):
+        return ""
+    return value
+
+
+def sanitize_skipped_reason(value):
+    if not isinstance(value, str):
+        return ""
+    return value[:MAX_HOST_ALIAS_SKIPPED_REASON_LEN]
+
+
+def safe_counter(value):
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return 0
+
+
+def sanitize_host_aliases(obj):
+    host_aliases = obj.get("host_aliases")
+    if not isinstance(host_aliases, dict):
+        return
+    clean = {}
+    names = host_aliases.get("names")
+    clean_names = []
+    if isinstance(names, list):
+        for name in names:
+            if isinstance(name, str) and classify_host(name) == "hostname":
+                clean_names.append(name)
+    clean["names"] = clean_names
+    ports = host_aliases.get("ports")
+    clean_ports = {}
+    if isinstance(ports, dict):
+        for host_port, entry in ports.items():
+            if not isinstance(host_port, str) or not host_port.isdigit():
+                continue
+            if not (1 <= int(host_port) <= 65535):
+                continue
+            if not isinstance(entry, dict):
+                continue
+            container = entry.get("container")
+            container_port = entry.get("container_port")
+            network = entry.get("network")
+            if not isinstance(container, str) or not CONTAINER_NAME_RE.fullmatch(container):
+                continue
+            if not isinstance(container_port, int) or isinstance(container_port, bool) \
+                    or not (1 <= container_port <= 65535):
+                continue
+            if not isinstance(network, str) or not NETWORK_NAME_RE.fullmatch(network):
+                continue
+            clean_ports[host_port] = {
+                "container": container,
+                "container_port": container_port,
+                "network": network,
+            }
+    clean["ports"] = clean_ports
+    skipped = host_aliases.get("skipped")
+    clean_skipped = []
+    if isinstance(skipped, list):
+        for item in skipped:
+            if len(clean_skipped) >= MAX_HOST_ALIAS_SKIPPED:
+                break
+            if not isinstance(item, dict):
+                continue
+            clean_skipped.append({
+                "host_port": sanitize_skipped_host_port(item.get("host_port")),
+                "container": sanitize_skipped_container(item.get("container")),
+                "reason": sanitize_skipped_reason(item.get("reason")),
+            })
+    clean["skipped"] = clean_skipped
+    for key in HOST_ALIASES_COUNTER_KEYS:
+        if key in host_aliases:
+            clean[key] = safe_counter(host_aliases.get(key))
+    obj["host_aliases"] = clean
+
+
 def sanitize_netmap(obj):
+    sanitize_host_aliases(obj)
     networks = obj.get("networks")
     if not isinstance(networks, list):
         return obj
@@ -171,7 +267,7 @@ def load_netmap(path):
 def validate_netmap(obj):
     if not isinstance(obj, dict):
         return False, "netmap root is not a JSON object"
-    if obj.get("version") != 1:
+    if obj.get("version") not in (1, 2):
         return False, "unsupported netmap version: %r" % (obj.get("version"),)
     proxy = obj.get("proxy")
     if not isinstance(proxy, dict):

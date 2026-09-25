@@ -1128,4 +1128,38 @@ mkdir -p "$GETSTABLE_CLEAN"
 mv "$GETSTABLE_EFF" "$GETSTABLE_CLEAN/eff"
 rm -rf "$GETSTABLE_CLEAN"
 
+echo "--- config_set must not clobber a caller's own lock fd (fd-collision regression) ---"
+_cbox_workspace_root() { printf '%s' "$ROOT"; }
+_cbox_path_hash() { printf 'fdlockhash'; }
+FDLOCKEFF="$HOME/.config/cbox/projects/fdlockhash"
+_setup_fixture_eff "$FDLOCKEFF" "$ROOT"
+_gen_effective() { :; }
+FDLOCKFILE="$TMPBASE/fdlock-caller.lock"
+: > "$FDLOCKFILE"
+(
+  cd "$ROOT"
+  HOME="$TMPBASE/home"
+  export HOME
+  exec 6> "$FDLOCKFILE"
+  _cbox_flock -x 6 || exit 90
+  CBOX_CONFIG_KEYS=(CBOX_CODEX_MCP)
+  CBOX_CONFIG_VALS=(1)
+  _cbox_config_set_isolated >/dev/null 2>"$TMPBASE/fdlock.stderr" || exit 91
+  exec 7> "$FDLOCKFILE"
+  if _cbox_flock -n -x 7; then
+    echo "lock was NOT held after config_set - the caller's fd 6 was clobbered" >&2
+    exit 92
+  fi
+  exit 0
+)
+FDLOCK_RC=$?
+case "$FDLOCK_RC" in
+  90) _fail "fd-collision regression: test setup could not acquire the caller's own lock fd" ;;
+  91) _fail "fd-collision regression: real _cbox_config_set_isolated failed: $(cat "$TMPBASE/fdlock.stderr" 2>/dev/null)" ;;
+  92) _fail "fd-collision regression: _cbox_config_set_isolated released the caller's held lock fd 6 (a second fd opened on the same lockfile could flock -n it, meaning the lock is gone)" ;;
+  0) ;;
+  *) _fail "fd-collision regression: unexpected exit code $FDLOCK_RC" ;;
+esac
+_ok "fd-collision regression: real _cbox_config_set_isolated does not release a caller's held lock fd 6 (flock -n from a second fd on the same lockfile still fails)"
+
 echo "PASS: all cbox config tests"

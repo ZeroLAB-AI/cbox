@@ -1,0 +1,14 @@
+cbox  /home/marek/work/shop  isolated
+--------------------------------------------------------------------------------
+container  up (since 2026-09-25T10:00:00)
+
+ 1 claude    attach            e sessions
+ 2 codex     start             n network
+ 3 hermes    start             o ollama
+                               w wireguard
+                               s settings
+                               m maintenance
+                               t shell
+                               q quit
+
+Enter=1   ?=commands                 cmd: /home/marek/.local/bin/cbox run claude
