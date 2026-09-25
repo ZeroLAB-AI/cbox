@@ -147,7 +147,7 @@ sec_get() {
           printf '%s\n' 'Wrap codex-* MCP servers in a shim that translates codex events into MCP progress notifications - codex output shows live in the Claude UI.'
           ;;
         local-model)
-          printf '%s\n' 'Off by default. A text-only MCP delegate (local-qwen) backed by a local OpenAI-compatible endpoint such as ollama - see etc/docs/LOCAL_MODEL_RUNBOOK.md. Machine-scoped: the endpoint is a fact about this host, not about a project, so it is configured once and every project on the machine reads the same value.'
+          printf '%s\n' 'Off by default. A text-only MCP delegate (local-qwen) backed by a local OpenAI-compatible endpoint such as ollama - see docs/LOCAL_MODEL_RUNBOOK.md. Machine-scoped: the endpoint is a fact about this host, not about a project, so it is configured once and every project on the machine reads the same value.'
           ;;
         hermes)
           printf '%s\n' 'Off by default; third console engine (NousResearch Hermes Agent) installed at runtime into the shared bins volume; local OpenAI-compatible endpoint by default.'
@@ -250,7 +250,7 @@ sec_get() {
           printf '%s\n' 'CBOX_MCP_SERVERS'
           ;;
         codex-progress)
-          printf '%s\n' 'CBOX_CODEX_PROGRESS_MODE'
+          printf '%s\n' 'CBOX_CODEX_PROGRESS_MODE CBOX_CODEX_SHIM_TURN_TIMEOUT_SEC'
           ;;
         local-model)
           printf '%s\n' 'CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME CBOX_LOCAL_MODEL_TIMEOUT_SEC'
@@ -694,13 +694,16 @@ sec_get() {
           printf '%s\n' ''
           ;;
         netaccess)
-          printf '%s\n' 'netaccess container-exec container-exec-tool'
+          printf '%s\n' 'netaccess container-exec container-exec-tool cbox-net'
           ;;
         bashrc)
           printf '%s\n' ''
           ;;
         mcp-servers)
           printf '%s\n' ''
+          ;;
+        hermes-delegate)
+          printf '%s\n' 'hermes-delegate hermes-agent'
           ;;
         ollama)
           printf '%s\n' 'ollama'
@@ -842,7 +845,7 @@ sec_has() {
       ;;
     SEC_DOCTOR_ROWS)
       case "$2" in
-        mounts|workspaces|python|netaccess|bashrc|mcp-servers|ollama|wireguard|autoresume|agents|continuity|claude-md|hooks|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang|user-layer)
+        mounts|workspaces|python|netaccess|bashrc|mcp-servers|hermes-delegate|ollama|wireguard|autoresume|agents|continuity|claude-md|hooks|apt-extra|binaries|restart-policy|autoupdate|dns|clipboard|kernel-lang|user-layer)
           return 0
           ;;
         *)
@@ -883,7 +886,7 @@ sec_keys() {
       printf '%s\n' 'disable:no-cdi' 'dictate:shim-hook' 'dictate:hooks' 'dictate:continuity-hooks' 'disable:isolated-mode'
       ;;
     SEC_DOCTOR_ROWS)
-      printf '%s\n' 'mounts' 'workspaces' 'python' 'netaccess' 'bashrc' 'mcp-servers' 'ollama' 'wireguard' 'autoresume' 'agents' 'continuity' 'claude-md' 'hooks' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang' 'user-layer'
+      printf '%s\n' 'mounts' 'workspaces' 'python' 'netaccess' 'bashrc' 'mcp-servers' 'hermes-delegate' 'ollama' 'wireguard' 'autoresume' 'agents' 'continuity' 'claude-md' 'hooks' 'apt-extra' 'binaries' 'restart-policy' 'autoupdate' 'dns' 'clipboard' 'kernel-lang' 'user-layer'
       ;;
     *)
       return 0

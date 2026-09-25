@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import re
+import select
 import selectors
 import shutil
 import signal
@@ -390,6 +391,22 @@ def write_response(conn, value):
     conn.sendall((json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
 
 
+class ClientGone(Exception):
+    pass
+
+
+def client_present(conn):
+    try:
+        poller = select.poll()
+        poller.register(conn.fileno(), select.POLLIN | select.POLLHUP | select.POLLERR | select.POLLNVAL)
+        flags = 0
+        for _key, flag in poller.poll(0):
+            flags |= flag
+        return not (flags & (select.POLLHUP | select.POLLERR | select.POLLNVAL))
+    except (OSError, ValueError):
+        return False
+
+
 def _darwin_parent_start(parent_pid):
     try:
         out = subprocess.check_output(
@@ -427,6 +444,13 @@ def _darwin_peer_uid(conn):
     return cr_uid
 
 
+def _audit_client_gone(handler):
+    try:
+        audit(handler.audit_path, {"op": "client-gone"})
+    except Exception:
+        pass
+
+
 def serve(sock_dir, parent_pid, parent_start, handler):
     sock_dir = safe_runtime_dir(sock_dir)
     path = os.path.join(sock_dir, "bridge.sock")
@@ -456,11 +480,25 @@ def serve(sock_dir, parent_pid, parent_start, handler):
                         _, peer_uid, _ = struct.unpack("3i", peer)
                         if peer_uid != os.getuid():
                             raise PermissionError("peer uid mismatch")
-                    write_response(conn, handler.handle(read_request(conn)))
+                    request = read_request(conn)
+                    if not client_present(conn):
+                        _audit_client_gone(handler)
+                        continue
+                    response = handler.handle(request)
+                    try:
+                        write_response(conn, response)
+                    except OSError:
+                        _audit_client_gone(handler)
                 except PermissionError as exc:
-                    write_response(conn, {"ok": False, "error": safe_text(str(exc)), "kind": "denied"})
+                    try:
+                        write_response(conn, {"ok": False, "error": safe_text(str(exc)), "kind": "denied"})
+                    except OSError:
+                        _audit_client_gone(handler)
                 except Exception as exc:
-                    write_response(conn, {"ok": False, "error": safe_text(str(exc)), "kind": "invalid"})
+                    try:
+                        write_response(conn, {"ok": False, "error": safe_text(str(exc)), "kind": "invalid"})
+                    except OSError:
+                        _audit_client_gone(handler)
     finally:
         server.close()
         try:

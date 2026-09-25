@@ -2,7 +2,10 @@
 import importlib.util
 import json
 import os
+import socket
 import tempfile
+import threading
+import time
 import unittest
 
 
@@ -146,6 +149,246 @@ class DockerExecBridgeTests(unittest.TestCase):
             os.symlink(target, link)
             with self.assertRaises(OSError):
                 MOD.audit(link, {"op": "test"})
+
+
+    def test_client_present_detects_a_closed_peer(self):
+        a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            self.assertTrue(MOD.client_present(a))
+            b.close()
+            time.sleep(0.05)
+            self.assertFalse(MOD.client_present(a))
+        finally:
+            a.close()
+
+    def _start_bridge(self, tmp, handler, patches):
+        originals = {}
+        for name, value in patches.items():
+            originals[name] = getattr(MOD, name)
+            setattr(MOD, name, value)
+        stop = {"value": False}
+        originals.setdefault("parent_alive", MOD.parent_alive)
+        MOD.parent_alive = lambda pid, start: not stop["value"]
+        thread = threading.Thread(target=MOD.serve, args=(tmp, os.getpid(), "1", handler), daemon=True)
+        thread.start()
+        sock_path = os.path.join(tmp, "bridge.sock")
+        deadline = time.monotonic() + 5
+        while not os.path.lexists(sock_path) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(os.path.lexists(sock_path))
+        return originals, thread, stop, sock_path
+
+    def _stop_bridge(self, originals, thread, stop):
+        stop["value"] = True
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+        for name, value in originals.items():
+            setattr(MOD, name, value)
+
+    def _request(self, sock_path, payload, expect_response=True):
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.connect(sock_path)
+        try:
+            client.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+            if not expect_response:
+                return None
+            client.settimeout(5)
+            data = b""
+            while not data.endswith(b"\n"):
+                chunk = client.recv(65536)
+                if not chunk:
+                    self.fail("bridge stopped serving before answering")
+                data += chunk
+            return json.loads(data.decode("utf-8"))
+        finally:
+            client.close()
+
+    def test_bridge_keeps_serving_after_a_client_disconnects_before_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scope_tmp = os.path.join(tmp, "scope")
+            os.makedirs(scope_tmp)
+            audit_path = os.path.join(tmp, "audit.jsonl")
+            handler = MOD.Handler("docker", ["project_a"], [scope_tmp], 30, 4096, audit_path)
+            sock_dir = os.path.join(tmp, "run")
+            os.makedirs(sock_dir)
+            original_write = MOD.write_response
+            first = {"flag": False}
+
+            def failing_write(conn, value):
+                if not first["flag"]:
+                    first["flag"] = True
+                    raise BrokenPipeError("client went away")
+                return original_write(conn, value)
+
+            patches = {
+                "scoped_containers": lambda docker_bin, networks, roots: {
+                    "abc": {"id": "abc", "name": "test", "blockedReason": None}
+                },
+                "client_present": lambda conn: True,
+                "write_response": failing_write,
+            }
+            originals, thread, stop, sock_path = self._start_bridge(sock_dir, handler, patches)
+            try:
+                client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                client.connect(sock_path)
+                client.sendall((json.dumps({"op": "list"}) + "\n").encode("utf-8"))
+                client.close()
+                payload = self._request(sock_path, {"op": "list"})
+                self.assertTrue(first["flag"])
+                self.assertTrue(payload["ok"])
+                with open(audit_path, encoding="ascii") as handle:
+                    records = [json.loads(line) for line in handle if line.strip()]
+                self.assertTrue(any(r.get("op") == "client-gone" for r in records))
+            finally:
+                self._stop_bridge(originals, thread, stop)
+
+    def test_bridge_skips_execution_when_client_is_gone_before_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scope_tmp = os.path.join(tmp, "scope")
+            os.makedirs(scope_tmp)
+            audit_path = os.path.join(tmp, "audit.jsonl")
+            handler = MOD.Handler("docker", ["project_a"], [scope_tmp], 30, 4096, audit_path)
+            sock_dir = os.path.join(tmp, "run")
+            os.makedirs(sock_dir)
+
+            def forbidden(*args, **kwargs):
+                self.fail("run_exec ran although the client was gone before start")
+
+            patches = {
+                "scoped_containers": lambda docker_bin, networks, roots: {
+                    "abc": {"id": "abc", "name": "test", "blockedReason": None}
+                },
+                "client_present": lambda conn: False,
+                "run_exec": forbidden,
+            }
+            originals, thread, stop, sock_path = self._start_bridge(sock_dir, handler, patches)
+            try:
+                client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                client.connect(sock_path)
+                client.sendall((json.dumps({"op": "exec", "container": "abc", "argv": ["true"]}) + "\n").encode("utf-8"))
+                client.close()
+                deadline = time.monotonic() + 5
+                records = []
+                while time.monotonic() < deadline:
+                    if os.path.exists(audit_path):
+                        with open(audit_path, encoding="ascii") as handle:
+                            records = [json.loads(line) for line in handle if line.strip()]
+                    if any(r.get("op") == "client-gone" for r in records):
+                        break
+                    time.sleep(0.01)
+                self.assertTrue(any(r.get("op") == "client-gone" for r in records))
+                self.assertFalse(any(r.get("op") == "exec" for r in records))
+            finally:
+                self._stop_bridge(originals, thread, stop)
+
+    def test_bridge_serves_half_closed_client_that_waits_for_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scope_tmp = os.path.join(tmp, "scope")
+            os.makedirs(scope_tmp)
+            audit_path = os.path.join(tmp, "audit.jsonl")
+            handler = MOD.Handler("docker", ["project_a"], [scope_tmp], 30, 4096, audit_path)
+            sock_dir = os.path.join(tmp, "run")
+            os.makedirs(sock_dir)
+            executed = {"value": False}
+
+            def execute(docker_bin, container_id, argv, cwd, timeout, max_bytes):
+                executed["value"] = True
+                return {"ok": True, "rc": 0, "stdout": "ok\n", "stderr": "", "timedOut": False, "truncated": False}
+
+            patches = {
+                "scoped_containers": lambda docker_bin, networks, roots: {
+                    "abc": {"id": "abc", "name": "test", "blockedReason": None}
+                },
+                "run_exec": execute,
+            }
+            originals, thread, stop, sock_path = self._start_bridge(sock_dir, handler, patches)
+            try:
+                client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                client.connect(sock_path)
+                client.sendall((json.dumps({"op": "exec", "container": "abc", "argv": ["true"]}) + "\n").encode("utf-8"))
+                client.shutdown(socket.SHUT_WR)
+                client.settimeout(5)
+                data = b""
+                while not data.endswith(b"\n"):
+                    chunk = client.recv(65536)
+                    if not chunk:
+                        self.fail("bridge did not answer a half-closed client")
+                    data += chunk
+                client.close()
+                payload = json.loads(data.decode("utf-8"))
+                self.assertTrue(payload["ok"])
+                self.assertTrue(executed["value"])
+            finally:
+                self._stop_bridge(originals, thread, stop)
+
+    def test_bridge_survives_a_client_that_closes_before_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scope_tmp = os.path.join(tmp, "scope")
+            os.makedirs(scope_tmp)
+            audit_path = os.path.join(tmp, "audit.jsonl")
+            handler = MOD.Handler("docker", ["project_a"], [scope_tmp], 30, 4096, audit_path)
+            sock_dir = os.path.join(tmp, "run")
+            os.makedirs(sock_dir)
+            executed = {"value": False}
+
+            def execute(docker_bin, container_id, argv, cwd, timeout, max_bytes):
+                executed["value"] = True
+                return {"ok": True, "rc": 0, "stdout": "ok\n", "stderr": "", "timedOut": False, "truncated": False}
+
+            patches = {
+                "scoped_containers": lambda docker_bin, networks, roots: {
+                    "abc": {"id": "abc", "name": "test", "blockedReason": None}
+                },
+                "run_exec": execute,
+            }
+            originals, thread, stop, sock_path = self._start_bridge(sock_dir, handler, patches)
+            try:
+                client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                client.connect(sock_path)
+                client.sendall((json.dumps({"op": "exec", "container": "abc", "argv": ["true"]}) + "\n").encode("utf-8"))
+                client.close()
+                deadline = time.monotonic() + 5
+                records = []
+                while time.monotonic() < deadline:
+                    if os.path.exists(audit_path):
+                        with open(audit_path, encoding="ascii") as handle:
+                            records = [json.loads(line) for line in handle if line.strip()]
+                    if any(r.get("op") == "client-gone" for r in records):
+                        break
+                    time.sleep(0.01)
+                if any(r.get("op") == "client-gone" for r in records):
+                    self.assertFalse(executed["value"])
+                    self.assertFalse(any(r.get("op") == "exec" for r in records))
+                else:
+                    payload = self._request(sock_path, {"op": "list"})
+                    self.assertTrue(payload["ok"])
+            finally:
+                self._stop_bridge(originals, thread, stop)
+
+    def test_bridge_answers_invalid_error_when_handle_raises_oserror(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scope_tmp = os.path.join(tmp, "scope")
+            os.makedirs(scope_tmp)
+            audit_path = os.path.join(tmp, "audit.jsonl")
+            handler = MOD.Handler("docker", ["project_a"], [scope_tmp], 30, 4096, audit_path)
+
+            def broken_handle(request):
+                raise OSError("docker binary missing")
+
+            handler.handle = broken_handle
+            sock_dir = os.path.join(tmp, "run")
+            os.makedirs(sock_dir)
+            originals, thread, stop, sock_path = self._start_bridge(sock_dir, handler, {})
+            try:
+                payload = self._request(sock_path, {"op": "list"})
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["kind"], "invalid")
+                self.assertIn("docker binary missing", payload["error"])
+                payload2 = self._request(sock_path, {"op": "list"})
+                self.assertFalse(payload2["ok"])
+                self.assertEqual(payload2["kind"], "invalid")
+            finally:
+                self._stop_bridge(originals, thread, stop)
 
 
 if __name__ == "__main__":

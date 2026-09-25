@@ -4,18 +4,22 @@
     "pr": ""
   },
   "remoteControlAtStartup": false,
+  "statusLine": {
+    "type": "command",
+    "command": "python3 @HOME@/.claude/hooks/usage_statusline.py"
+  },
   "permissions": {
     "defaultMode": "bypassPermissions"
   },
   "autoMode": {
     "allow": [
       "$defaults",
-      "Cbox Codex Delegation: Calling the cbox codex MCP delegates (mcp__codex-astra, mcp__codex-sol, mcp__codex-terra, mcp__codex-terra-light, mcp__codex-luna) with approval-policy=never and sandbox=danger-full-access is NOT Create Unsafe Agents when Claude Code runs inside the cbox container. The container is the security boundary, not the codex sandbox: bubblewrap cannot create namespaces inside it, so read-only and workspace-write both fail the moment codex runs any shell command, and on-request would make codex elicit a human Accept/Decline answer that an unattended run hangs on forever. Every such call is independently gated by the codex_mode_guard.py PreToolUse hook on an in-scope git-worktree cwd, a one-hop delegation depth limit, and a bytewise audit log. This exception is scoped to those five MCP tools inside the container and clears nothing else."
+      "Cbox Codex Delegation: Calling the cbox codex MCP delegates (mcp__codex-astra, mcp__codex-sol, mcp__codex-luna) with approval-policy=never and sandbox=danger-full-access is NOT Create Unsafe Agents when Claude Code runs inside the cbox container. The container is the security boundary, not the codex sandbox: bubblewrap cannot create namespaces inside it, so read-only and workspace-write both fail the moment codex runs any shell command, and on-request would make codex elicit a human Accept/Decline answer that an unattended run hangs on forever. Every such call is independently gated by the codex_mode_guard.py PreToolUse hook on an in-scope git-worktree cwd, a one-hop delegation depth limit, and a bytewise audit log. This exception is scoped to those three MCP tools inside the container and clears nothing else."
     ]
   },
   "env": {
     "DISABLE_ERROR_REPORTING": "1",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5[1m]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5-5[1m]",
     "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-fable-5[1m]",
     "CBOX_AGENT_MODEL_DENY": "opus-4",
     "CBOX_AGENT_MODEL_BAN": "fable-5-1",
@@ -27,9 +31,27 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 @HOME@/.claude/hooks/continuity_session_start.py",
+            "command": "python3 @HOME@/.claude/hooks/continuity_session_start.py --section core",
             "timeout": 10,
-            "statusMessage": "continuity session start"
+            "statusMessage": "continuity session start (core)"
+          },
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/continuity_session_start.py --section memory",
+            "timeout": 10,
+            "statusMessage": "continuity session start (memory)"
+          },
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/continuity_session_start.py --section ledger",
+            "timeout": 10,
+            "statusMessage": "continuity session start (ledger)"
+          },
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/continuity_session_start.py --section progress",
+            "timeout": 10,
+            "statusMessage": "continuity session start (progress)"
           }
         ]
       }
@@ -47,7 +69,7 @@
         ]
       },
       {
-        "matcher": "Agent",
+        "matcher": "Agent|Workflow",
         "hooks": [
           {
             "type": "command",
@@ -87,6 +109,17 @@
             "command": "python3 @HOME@/.claude/hooks/rm_glob_guard.py",
             "timeout": 10,
             "statusMessage": "rm-glob guard"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/net_proxy_guard.py",
+            "timeout": 10,
+            "statusMessage": "net-proxy guard"
           }
         ]
       },

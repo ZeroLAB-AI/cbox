@@ -101,7 +101,7 @@ run_install_group() {
     '"$PROBESHA_FN"'
     '"$WANT_FN"'
     _cbox_bins_volume() { printf "vol-%s" "$1"; }
-    _cbox_probe_codex_argv() { printf "mcp-server"; }
+    _cbox_probe_codex_argv() { printf "app-server"; }
     id() { printf "u"; }
     docker() {
       case "$1" in
@@ -145,15 +145,15 @@ _ok "history: unchanged version installs stay silent (no redundant history line)
 H5="$TMPBASE/h5"
 mkdir -p "$H5/.config/cbox"
 printf 'vol-codex|codex|latest|0.154.0|1000\n' > "$H5/.config/cbox/bins.stamp"
-run_install_group "$H5" "claude codex" 'cbox-bins: codex 0.153.4 abcd1234 rollback 0.154.0 mcp-server handshake: no developer-instructions' >"$H5.out" 2>"$H5.err"
-grep -Eq '^[0-9]+\|vol-codex\|codex\|latest\|0\.154\.0\|0\.153\.4\|rollback\|mcp-server handshake: no developer-instructions$' "$H5/.config/cbox/bins.history" \
+run_install_group "$H5" "claude codex" 'cbox-bins: codex 0.153.4 abcd1234 rollback 0.154.0 app-server handshake: no userAgent' >"$H5.out" 2>"$H5.err"
+grep -Eq '^[0-9]+\|vol-codex\|codex\|latest\|0\.154\.0\|0\.153\.4\|rollback\|app-server handshake: no userAgent$' "$H5/.config/cbox/bins.history" \
   || _fail "parser: a rollback status_word must append a history line with from=badver, to=restored, status=rollback, note=reason: $(cat "$H5/.config/cbox/bins.history" 2>/dev/null)"
 grep -q 'vol-codex|codex|latest|0.153.4|' "$H5/.config/cbox/bins.stamp" \
   || _fail "parser: a rollback status_word must cache_put the restored version"
 [ -f "$H5/.config/cbox/bins.hold.vol-codex" ] || _fail "parser: a rollback status_word must write a hold file"
 grep -q '^version=0.153.4$' "$H5/.config/cbox/bins.hold.vol-codex" || _fail "parser: hold file must record the good (restored) version"
 grep -q '^bad=0.154.0$' "$H5/.config/cbox/bins.hold.vol-codex" || _fail "parser: hold file must record the bad version"
-grep -q '^reason=mcp-server handshake: no developer-instructions$' "$H5/.config/cbox/bins.hold.vol-codex" || _fail "parser: hold file must record the reason"
+grep -q '^reason=app-server handshake: no userAgent$' "$H5/.config/cbox/bins.hold.vol-codex" || _fail "parser: hold file must record the reason"
 grep -q 'rolled back to 0.153.4 and held there' "$H5.err" || _fail "parser: a rollback status_word must print an operator-facing hold notice"
 _ok "parser: a rollback status_word writes history + cache + hold + stderr notice"
 
@@ -541,7 +541,7 @@ run_doctor_binaries_row_locked() {
     _bins_doctor_next_check() { echo "next"; }
     _bins_doctor_lock_suffix() {
       case "$1" in
-        codex) printf " [LOCKED 0.153.4 (bad 0.154.0: mcp-server handshake: no developer-instructions)]" ;;
+        codex) printf " [LOCKED 0.153.4 (bad 0.154.0: app-server handshake: no userAgent)]" ;;
       esac
     }
     _cbox_doctor_row() { printf "%s|%s|%s\n" "$1" "$2" "$3"; }
@@ -553,7 +553,7 @@ run_doctor_binaries_row_locked() {
 }
 
 ROW="$(run_doctor_binaries_row_locked)"
-printf '%s\n' "$ROW" | grep -qF 'codex=0.153.4 [LOCKED 0.153.4 (bad 0.154.0: mcp-server handshake: no developer-instructions)]' \
+printf '%s\n' "$ROW" | grep -qF 'codex=0.153.4 [LOCKED 0.153.4 (bad 0.154.0: app-server handshake: no userAgent)]' \
   || _fail "doctor binaries row: LOCKED marker must be inserted after the held tool's version (got: $ROW)"
 printf '%s\n' "$ROW" | grep -qF 'last probe 2026-09-13T00:00:00Z' \
   || _fail "doctor binaries row: last-probe timestamp must be present (got: $ROW)"

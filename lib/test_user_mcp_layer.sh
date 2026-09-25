@@ -356,7 +356,7 @@ test_cbox_only_render_byte_identical_no_user_dir() {
     > "$empty_dir_codex"
   local got_claude want_claude got_codex want_codex
   got_claude="$(sha256sum "$no_arg_claude" | awk '{print $1}')"
-  want_claude="5f586d02a69b55441334653cb2ce85f5e7b6335ede37f39cfdd2031686b44e16"
+  want_claude="c13a1c8849ecb6ce859f3f99c759883fbc7739639328e00cb64f09412cab2139"
   got_codex="$(sha256sum "$no_arg_codex" | awk '{print $1}')"
   want_codex="ddde00b645e9cf9d74f0dd7611f36ad4543caee7dcf8273d8e36715edf911ca3"
   [ "$got_claude" = "$want_claude" ] \

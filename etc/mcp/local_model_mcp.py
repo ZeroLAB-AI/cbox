@@ -303,7 +303,7 @@ def main():
     if not base_url():
         sys.stderr.write(
             "local_model_mcp.py: " + URL_VAR + " is not set - refusing to "
-            "start; see cbox/etc/docs/LOCAL_MODEL_RUNBOOK.md\n")
+            "start; see cbox/docs/LOCAL_MODEL_RUNBOOK.md\n")
         return 2
     ok, reason = health_probe()
     if not ok:

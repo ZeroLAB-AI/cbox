@@ -47,13 +47,13 @@ assert 'hermes-local' not in data, data.keys()
 _ok "hermes-local is absent from selection=all render when CBOX_HERMES_DELEGATE is unset"
 
 ERR_EXPLICIT="$TMPBASE/explicit.err"
-if env -u CBOX_HERMES_DELEGATE \
+if env -u CBOX_HERMES_DELEGATE -u CBOX_HERMES \
   python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
   "$INSTALL_DIR/etc/mcp/delegates.json" hermes-local "/home/x/.claude/hooks" off claude \
   >/dev/null 2>"$ERR_EXPLICIT"; then
   _fail "render_mcp.py accepted an explicit hermes-local selection with CBOX_HERMES_DELEGATE unset"
 fi
-grep -q "explicitly selected but CBOX_HERMES_DELEGATE is not set" "$ERR_EXPLICIT" \
+grep -q "explicitly selected but CBOX_HERMES_DELEGATE, CBOX_HERMES is not set" "$ERR_EXPLICIT" \
   || _fail "render_mcp.py refusal message missing for unconfigured explicit hermes-local selection"
 _ok "render_mcp.py refuses an explicit unconfigured hermes-local selection loudly"
 

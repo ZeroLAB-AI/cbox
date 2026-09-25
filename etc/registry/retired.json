@@ -1,0 +1,28 @@
+{
+  "agents": {
+    "codex-terra": [
+      "780dab7d34a0974e9ec77b97844329a7341c95db9660f2986e2ea2b5d696fec4",
+      "9ec9bd243f52803e419be6dcc51069d4939fca6beeef6bf1a7e436b673914c56",
+      "05707f30881dac6bab25d33b3d20c761559457fc17eb7fdb7e008f6bff1a367d",
+      "0ec5024a6bbf0ea8a4b85e20253bc1025c0f303efc0637c0dad49ee2fa748bb7",
+      "075079dac458a5e0c638121d2d884b0085a45b49a886f09402ddb3212df8380f",
+      "af2ae3b41e2966f7e5c7993f69e6a048ee4b4eafb2800e3d1c450ee6c340caaf"
+    ],
+    "codex-terra-light": [
+      "21dc16d1db793b0083a61cdd17607adf44970a841c4ff8f4deff3cfddb87ac7b",
+      "fa0449264b0e4c8e158ada43f84f03294ef4bb13c6c66036d74b6bb3066a4d1e",
+      "be4ff685a7ea2e20d5b32b07e63ca8456e5ac6bd65b3eefa61ef179d97b2a420",
+      "09607ccdab03341487a02c47f1276f8dcce553992e6ccd751b62f468251beecd",
+      "bbb3db9b9a445d926035930158cb5700ee509a9303a327d5e1072e0ef989f196",
+      "61bfeda97b38702002dfd83656d2393a75978c33312793274327eaf66cf53958"
+    ],
+    "test-runner": [
+      "3820dfa804b6fd29daadefd3b3fa0ee0a6ca9ea496e8460716e607fa4f69d9f5",
+      "2a6c6e3891213c93cc62941959f2e7db229685961ac16ade2bdbaa710049bd94"
+    ]
+  },
+  "mcp_servers": [
+    "codex-terra",
+    "codex-terra-light"
+  ]
+}

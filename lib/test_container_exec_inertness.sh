@@ -53,6 +53,7 @@ _render_claude_kernel_block() {
     export CLAUDE_MD_KERNEL_MARK_START CLAUDE_MD_KERNEL_MARK_END
     export CBOX_CONTAINER_EXEC_TOOL="$gate"
     source "$INSTALL_DIR/lib/portable.sh"
+    source "$INSTALL_DIR/templates/generators.sh"
     die() { echo "die: $*" >&2; exit 1; }
     apply_name_substitution() {
       local src="$1" dst="$2" u name
@@ -65,6 +66,11 @@ _render_claude_kernel_block() {
     }
     eval "$(awk '
       /^claude_md_container_exec_paragraph\(\) \{/ { infunc=1 }
+      infunc { print }
+      infunc && /^\}/ { infunc=0 }
+    ' "$INSTALL_DIR/lib/cbox-setup.sh")"
+    eval "$(awk '
+      /^claude_md_netaccess_line\(\) \{/ { infunc=1 }
       infunc { print }
       infunc && /^\}/ { infunc=0 }
     ' "$INSTALL_DIR/lib/cbox-setup.sh")"

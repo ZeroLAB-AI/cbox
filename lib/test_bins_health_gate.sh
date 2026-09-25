@@ -97,7 +97,7 @@ GATE_SCRIPT="$TMPBASE/gate_driver.sh"
   printf '%s\n' "$RBGROUP_FN"
   cat << 'STUB'
 _cbox_bins_volume() { printf 'vol-%s' "$1"; }
-_cbox_probe_codex_argv() { printf 'mcp-server'; }
+_cbox_probe_codex_argv() { printf 'app-server'; }
 id() { printf 'u'; }
 docker() {
   printf '%s\n' "docker $*" >> "$CALLLOG"

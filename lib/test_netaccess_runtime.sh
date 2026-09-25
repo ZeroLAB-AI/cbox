@@ -81,10 +81,12 @@ grep -qF 'from: 172.20.0.0/24 to: 10.10.0.0/24' "$TMPBASE/proxy/sockd.conf" || f
 grep -qF 'from: 172.20.0.0/24 to: 10.42.0.0/16' "$TMPBASE/proxy/sockd.conf" || fail "raw CIDR pass rule missing"
 grep -qF 'from: 0.0.0.0/0 to: 0.0.0.0/0' "$TMPBASE/proxy/sockd.conf" || fail "default block rule missing"
 [ "$(grep -c '^internal:' "$TMPBASE/proxy/sockd.conf")" -eq 1 ] || fail "sockd must bind exactly one internal address"
+[ "$(cat "$TMPBASE/proxy/internal-cidr")" = "172.20.0.0/24" ] || fail "gen_sockd_conf_into must write internal-cidr next to internal-ip"
+[ -x "$TMPBASE/proxy/sockd-start.sh" ] || fail "gen_sockd_conf_into must render an executable sockd-start.sh"
 
 gen_supervisord_conf_into "$TMPBASE/proxy"
-grep -qF 'command=/usr/sbin/sockd -f /etc/cbox-generated/sockd.conf' "$TMPBASE/proxy/supervisord.conf" \
-  || fail "supervisord must run sockd in the foreground"
+grep -qF 'command=/bin/sh /etc/cbox-generated/sockd-start.sh' "$TMPBASE/proxy/supervisord.conf" \
+  || fail "supervisord must run sockd through the live-address rewrite wrapper, not sockd directly"
 if grep -qE 'sockd .*-D' "$TMPBASE/proxy/supervisord.conf"; then
   fail "sockd must not daemonize under supervisord - dante -D forks, the parent exits, supervisord respawns into Address in use and ends FATAL while the orphan serves unsupervised"
 fi
@@ -278,6 +280,27 @@ if grep -q 'ollama' "$ISOD2/eff/docker-compose.yml"; then
 fi
 _ok_render "isolated compose variant omits ollama entirely when the feature is off"
 
+ISOD2B="$TMPBASE/isolated-render-egress-only-no-netaccess"
+mkdir -p "$ISOD2B/eff/claude-config/projects" "$ISOD2B/claude" "$ISOD2B/codex"
+(
+  set -e
+  export CBOX_CLAUDE_MODE=mount CBOX_CODEX_MODE=mount CBOX_SESSION_SCOPE=isolated
+  export CBOX_CLAUDE_PATH="$ISOD2B/claude" CBOX_CODEX_PATH="$ISOD2B/codex"
+  export CBOX_EGRESS_MODE=allowlist CBOX_EGRESS_APPLIED=1
+  export CBOX_NETACCESS_MODE=off CBOX_NETACCESS_APPLIED=0
+  export CBOX_OLLAMA_MODE=off
+  export CBOX_LOCAL_MODEL_URL="" CBOX_HERMES_MODEL_URL="" CBOX_HERMES_DELEGATE_BASE_URL=""
+  gen_compose_isolated "$ISOD2B/eff" "$ISOP" testimg testhash123456 >/dev/null 2>&1
+)
+YML2B="$ISOD2B/eff/docker-compose.yml"
+PROXY_BLOCK2B="$(awk '/^  proxy:$/,/^volumes:$/' "$YML2B")"
+printf '%s\n' "$PROXY_BLOCK2B" | grep -qF 'restart: "no"' \
+  || fail "egress-only (no netaccess) proxy restart policy must stay as configured"
+if grep -qF '/etc/cbox/net' "$YML2B"; then
+  fail "netmap mount must not appear when netaccess is off (egress-only)"
+fi
+_ok_render "egress-only compose: proxy restart policy unaffected, no netmap mount without netaccess"
+
 ISOD3="$TMPBASE/isolated-render-netaccess"
 mkdir -p "$ISOD3/eff/claude-config/projects" "$ISOD3/claude" "$ISOD3/codex"
 (
@@ -305,7 +328,23 @@ fi
 if grep -qF '|| nc -z' "$YML"; then
   fail "netaccess compose: healthcheck must not OR feature ports - a live tinyproxy would mask a dead sockd"
 fi
+PROXY_BLOCK3="$(awk '/^  proxy:$/,/^volumes:$/' "$YML")"
+MAIN_RESTART3="$(awk '/^  proxy:$/{exit} /^    restart:/{print; exit}' "$YML")"
+[ -n "$MAIN_RESTART3" ] || fail "netaccess compose: main service restart policy not found"
+printf '%s\n' "$PROXY_BLOCK3" | grep -qxF "$MAIN_RESTART3" \
+  || fail "netaccess active: the proxy sidecar must share the cbox service restart policy ($MAIN_RESTART3)"
+if printf '%s\n' "$PROXY_BLOCK3" | grep -qF 'unless-stopped'; then
+  fail "netaccess active: the proxy must not outlive cbox with its own unless-stopped policy"
+fi
+printf '%s\n' "$PROXY_BLOCK3" | grep -qF 'cbox.kind: proxy' \
+  || fail "netaccess active: the proxy service must carry the cbox.kind=proxy label so cbox gc's sidecar sweep stops it"
+grep -qF "$ISOD3/eff/proxy/netmap:/etc/cbox/net:ro" "$YML" \
+  || fail "netaccess active must mount <eff>/proxy/netmap read-only at /etc/cbox/net on the main service"
+[ -d "$ISOD3/eff/proxy/netmap" ] || fail "the netmap host directory must be created before compose up, not left to docker to auto-vivify"
+grep -qF 'if [ -f /run/cbox/internal-ip ]; then ip=$$(cat /run/cbox/internal-ip); elif [ -f /etc/cbox-generated/internal-ip ]; then ip=$$(cat /etc/cbox-generated/internal-ip); fi' "$YML" \
+  || fail "healthcheck must prefer /run/cbox/internal-ip, fall back to /etc/cbox-generated/internal-ip"
 _ok_render "netaccess-only compose: internal-scoped proxy alias, alias-based endpoint, no ALL_PROXY, healthcheck probes only the SOCKS port"
+_ok_render "netaccess-only compose: proxy shares the cbox restart policy, netmap mounted read-only, healthcheck prefers /run/cbox/internal-ip"
 
 ISOD4="$TMPBASE/isolated-render-both"
 mkdir -p "$ISOD4/eff/claude-config/projects" "$ISOD4/claude" "$ISOD4/codex"
@@ -355,9 +394,13 @@ grep -qF 'socks block {' "$TMPBASE/proxy/sockd.conf" || fail "sockd placeholder 
 if grep -qF 'socks pass' "$TMPBASE/proxy/sockd.conf"; then
   fail "sockd placeholder must not carry any pass rule - it is fail-closed until apply renders the real config"
 fi
+[ ! -f "$TMPBASE/proxy/internal-cidr" ] || fail "sockd placeholder must not leave a stale internal-cidr - its presence is how sockd-start.sh tells placeholder from real config"
+[ -x "$TMPBASE/proxy/sockd-start.sh" ] || fail "sockd placeholder must still render sockd-start.sh (supervisord always execs it)"
 CBOX_NETACCESS_MODE=off
 gen_sockd_placeholder_into "$TMPBASE/proxy"
 [ ! -f "$TMPBASE/proxy/sockd.conf" ] || fail "sockd placeholder must be removed when netaccess is off"
+[ ! -f "$TMPBASE/proxy/sockd-start.sh" ] || fail "sockd-start.sh must be removed when netaccess is off"
+[ ! -f "$TMPBASE/proxy/internal-cidr" ] || fail "internal-cidr must be removed when netaccess is off"
 CBOX_NETACCESS_MODE=socks
 _ok_render "sockd placeholder is fail-closed on loopback in prepare/regen (never leaves a stale real sockd.conf), removed when off"
 
@@ -418,5 +461,186 @@ if printf '%s' "$vl_cmd" | grep -qF 'touch /pwned'; then
 fi
 printf '%s' "$vl_cmd" | grep -qF ' 1080' || fail "a malformed CBOX_NETACCESS_SOCKS_PORT must fall back to 1080 in the listener probe, got '$vl_cmd'"
 echo "ok: _cbox_netaccess_verify_listener sanitizes a malformed CBOX_NETACCESS_SOCKS_PORT before building the docker exec probe string"
+
+printf '%s' "$vl_cmd" | grep -qF '/run/cbox/internal-ip' || fail "_cbox_netaccess_verify_listener must prefer /run/cbox/internal-ip over the old /etc/cbox-generated path, got '$vl_cmd'"
+printf '%s' "$vl_cmd" | grep -qF '/etc/cbox-generated/internal-ip' || fail "_cbox_netaccess_verify_listener must still fall back to /etc/cbox-generated/internal-ip, got '$vl_cmd'"
+echo "ok: _cbox_netaccess_verify_listener prefers /run/cbox/internal-ip, falls back to /etc/cbox-generated/internal-ip"
+
+RENDER_MODE_FN="$(awk '/^_cbox_netaccess_render\(\) \{/,/^}$/' "$INSTALL_DIR/cbox")"
+[ -n "$RENDER_MODE_FN" ] || fail "cannot extract _cbox_netaccess_render for the netmap-only mode check"
+
+NETMAP_ONLY_SCRIPT="$TMPBASE/render-netmap-only.sh"
+{
+  echo 'set -uo pipefail'
+  echo "INSTALL_DIR=\"$INSTALL_DIR\""
+  echo 'PY_ARGS_LOG=""'
+  echo 'python3() {'
+  echo '  PY_ARGS_LOG="$*"'
+  echo '  echo "{}"'
+  echo '}'
+  echo '_cbox_proxy_active() { return 0; }'
+  echo '_cbox_netaccess_active() { return 0; }'
+  echo '_cbox_netaccess_scope() { printf list; }'
+  echo '_cbox_proxy_internal_alias() { printf cbox-proxy-internal; }'
+  printf '%s\n' "$RENDER_MODE_FN"
+} > "$NETMAP_ONLY_SCRIPT"
+
+netmap_only_out="$(bash -c '
+  . "$1"
+  CBOX_NETACCESS_NETWORKS="project_a"
+  _cbox_netaccess_render cid123 "$2" netmap-only
+  printf "%s" "$PY_ARGS_LOG"
+' _ "$NETMAP_ONLY_SCRIPT" "$TMPBASE/netmap-only-state")"
+printf '%s' "$netmap_only_out" | grep -qF -- '--netmap-only' || fail "netmap-only mode must pass --netmap-only to cbox_netaccess.py, got: $netmap_only_out"
+printf '%s' "$netmap_only_out" | grep -qF -- '--netmap-out' || fail "netmap-only mode must still pass --netmap-out, got: $netmap_only_out"
+if printf '%s' "$netmap_only_out" | grep -qF -- '--scope list --network project_a --network'; then
+  fail "netmap-only mode must not duplicate the network arguments, got: $netmap_only_out"
+fi
+echo "ok: _cbox_netaccess_render netmap-only mode calls cbox_netaccess.py with --netmap-only and --netmap-out"
+
+SOCKD_START_PATH="$TMPBASE/sockd-live"
+mkdir -p "$SOCKD_START_PATH/gen"
+CBOX_NETACCESS_MODE=socks
+CBOX_NETACCESS_APPLIED=1
+CBOX_NETACCESS_SOCKS_PORT=1080
+gen_sockd_conf_into "$SOCKD_START_PATH/gen" 172.20.0.2 172.20.0.0/24 '10.10.0.2,10.10.0.0/24'
+[ -f "$SOCKD_START_PATH/gen/sockd-start.sh" ] || fail "gen_sockd_conf_into must render sockd-start.sh"
+
+FAKE_IP_DIR="$TMPBASE/fake-ip-bin"
+mkdir -p "$FAKE_IP_DIR"
+FAKE_SOCKD="$TMPBASE/fake-sockd"
+FAKE_SOCKD_LOG="$TMPBASE/fake-sockd.log"
+
+cat > "$FAKE_SOCKD" <<'FAKESOCKD'
+#!/bin/sh
+echo "$@" >> "$FAKE_SOCKD_LOG"
+FAKESOCKD
+chmod +x "$FAKE_SOCKD"
+
+write_fake_ip() {
+  cat > "$FAKE_IP_DIR/ip" <<FAKEIP
+#!/bin/sh
+printf '%s\n' "$1"
+FAKEIP
+  chmod +x "$FAKE_IP_DIR/ip"
+}
+
+run_dir="$TMPBASE/sockd-run-unchanged"
+mkdir -p "$run_dir"
+: > "$FAKE_SOCKD_LOG"
+write_fake_ip '1: eth0    inet 172.20.0.2/24 brd 172.20.0.255 scope global eth0
+2: eth1    inet 10.10.0.2/24 brd 10.10.0.255 scope global eth1'
+FAKE_SOCKD_LOG="$FAKE_SOCKD_LOG" PATH="$FAKE_IP_DIR:$PATH" \
+  CBOX_SOCKD_GEN_DIR="$SOCKD_START_PATH/gen" CBOX_SOCKD_RUN_DIR="$run_dir" CBOX_SOCKD_BIN="$FAKE_SOCKD" \
+  sh "$SOCKD_START_PATH/gen/sockd-start.sh"
+[ ! -f "$run_dir/sockd.conf" ] || fail "sockd-start.sh must exec the rendered file unchanged when live addresses match the render, not write a /run copy"
+grep -qF -- "-f $SOCKD_START_PATH/gen/sockd.conf" "$FAKE_SOCKD_LOG" || fail "unchanged case must exec sockd on the rendered file, got: $(cat "$FAKE_SOCKD_LOG")"
+[ "$(cat "$run_dir/internal-ip" 2>/dev/null)" = "172.20.0.2" ] || fail "fast path must still write the live internal address to run_dir/internal-ip, never leave it stale/absent"
+echo "ok: sockd-start.sh execs the rendered config unchanged when live addresses match the render"
+
+run_dir_egress="$TMPBASE/sockd-run-unchanged-egress"
+mkdir -p "$run_dir_egress"
+: > "$FAKE_SOCKD_LOG"
+write_fake_ip '1: eth0    inet 172.20.0.2/24 brd 172.20.0.255 scope global eth0
+2: eth1    inet 10.10.0.2/24 brd 10.10.0.255 scope global eth1
+3: eth2    inet 192.168.77.5/24 brd 192.168.77.255 scope global eth2'
+FAKE_SOCKD_LOG="$FAKE_SOCKD_LOG" PATH="$FAKE_IP_DIR:$PATH" \
+  CBOX_SOCKD_GEN_DIR="$SOCKD_START_PATH/gen" CBOX_SOCKD_RUN_DIR="$run_dir_egress" CBOX_SOCKD_BIN="$FAKE_SOCKD" \
+  sh "$SOCKD_START_PATH/gen/sockd-start.sh"
+[ ! -f "$run_dir_egress/sockd.conf" ] || fail "an always-present egress-interface address that no raw CIDR target needs must not force a rewrite of a still-correct rendered file"
+grep -qF -- "-f $SOCKD_START_PATH/gen/sockd.conf" "$FAKE_SOCKD_LOG" || fail "unchanged-plus-egress case must exec sockd on the rendered file, got: $(cat "$FAKE_SOCKD_LOG")"
+[ "$(cat "$run_dir_egress/internal-ip" 2>/dev/null)" = "172.20.0.2" ] || fail "fast path must write run_dir/internal-ip even when an extra live egress address is present"
+echo "ok: sockd-start.sh ignores an extra live egress-interface address not referenced by the rendered external targets and still execs the rendered file"
+
+run_dir2="$TMPBASE/sockd-run-changed"
+mkdir -p "$run_dir2"
+: > "$FAKE_SOCKD_LOG"
+write_fake_ip '1: eth0    inet 172.20.0.9/24 brd 172.20.0.255 scope global eth0
+2: eth1    inet 10.10.0.9/24 brd 10.10.0.255 scope global eth1'
+FAKE_SOCKD_LOG="$FAKE_SOCKD_LOG" PATH="$FAKE_IP_DIR:$PATH" \
+  CBOX_SOCKD_GEN_DIR="$SOCKD_START_PATH/gen" CBOX_SOCKD_RUN_DIR="$run_dir2" CBOX_SOCKD_BIN="$FAKE_SOCKD" \
+  sh "$SOCKD_START_PATH/gen/sockd-start.sh"
+[ -f "$run_dir2/sockd.conf" ] || fail "sockd-start.sh must write a corrected copy to the run dir when live addresses differ"
+grep -qF 'internal: 172.20.0.9 port = 1080' "$run_dir2/sockd.conf" || fail "corrected copy must carry the live internal address"
+grep -qF 'external: 10.10.0.9' "$run_dir2/sockd.conf" || fail "corrected copy must carry the live external address"
+grep -qF 'to: 172.20.0.9/32' "$run_dir2/sockd.conf" || fail "corrected copy must rewrite the client pass destination"
+[ "$(cat "$run_dir2/internal-ip")" = "172.20.0.9" ] || fail "corrected copy must record the live internal-ip in the run dir"
+grep -qF -- "-f $run_dir2/sockd.conf" "$FAKE_SOCKD_LOG" || fail "changed case must exec sockd on the corrected /run copy, got: $(cat "$FAKE_SOCKD_LOG")"
+echo "ok: sockd-start.sh rewrites internal/external addresses and the client pass destination when live addresses differ, execs the corrected /run copy"
+
+run_dir3="$TMPBASE/sockd-run-placeholder"
+mkdir -p "$run_dir3"
+gen_dir_ph="$TMPBASE/sockd-gen-placeholder"
+mkdir -p "$gen_dir_ph"
+gen_sockd_placeholder_into "$gen_dir_ph"
+: > "$FAKE_SOCKD_LOG"
+write_fake_ip '1: eth0    inet 172.20.0.9/24 brd 172.20.0.255 scope global eth0'
+FAKE_SOCKD_LOG="$FAKE_SOCKD_LOG" PATH="$FAKE_IP_DIR:$PATH" \
+  CBOX_SOCKD_GEN_DIR="$gen_dir_ph" CBOX_SOCKD_RUN_DIR="$run_dir3" CBOX_SOCKD_BIN="$FAKE_SOCKD" \
+  sh "$gen_dir_ph/sockd-start.sh"
+[ ! -f "$run_dir3/sockd.conf" ] || fail "the fail-closed placeholder (no internal-cidr) must never produce a /run copy"
+grep -qF -- "-f $gen_dir_ph/sockd.conf" "$FAKE_SOCKD_LOG" || fail "the placeholder must exec the rendered (loopback) file unchanged, got: $(cat "$FAKE_SOCKD_LOG")"
+echo "ok: sockd-start.sh execs the fail-closed placeholder unchanged when internal-cidr is absent"
+
+run_dir4="$TMPBASE/sockd-run-no-live-internal"
+mkdir -p "$run_dir4"
+STDERR4="$TMPBASE/sockd-stderr-no-live-internal.txt"
+: > "$FAKE_SOCKD_LOG"
+write_fake_ip '1: eth0    inet 10.0.0.5/24 brd 10.0.0.255 scope global eth0'
+FAKE_SOCKD_LOG="$FAKE_SOCKD_LOG" PATH="$FAKE_IP_DIR:$PATH" \
+  CBOX_SOCKD_GEN_DIR="$SOCKD_START_PATH/gen" CBOX_SOCKD_RUN_DIR="$run_dir4" CBOX_SOCKD_BIN="$FAKE_SOCKD" \
+  sh "$SOCKD_START_PATH/gen/sockd-start.sh" 2> "$STDERR4"
+[ ! -f "$run_dir4/sockd.conf" ] || fail "must not produce a /run copy when no live address matches internal-cidr"
+grep -qF -- "-f $SOCKD_START_PATH/gen/sockd.conf" "$FAKE_SOCKD_LOG" || fail "must exec the rendered file when no live internal address is found, got: $(cat "$FAKE_SOCKD_LOG")"
+grep -qF 'no live IPv4 address found' "$STDERR4" || fail "must name the reason on stderr when the live internal address cannot be determined, got: $(cat "$STDERR4")"
+echo "ok: sockd-start.sh prints the reason to stderr and execs the rendered file when no live address matches internal-cidr"
+
+gen_dir_badcidr="$TMPBASE/sockd-gen-badcidr"
+mkdir -p "$gen_dir_badcidr"
+gen_sockd_conf_into "$gen_dir_badcidr" 172.20.0.2 172.20.0.0/24 ''
+printf 'not-a-cidr\n' > "$gen_dir_badcidr/internal-cidr"
+run_dir5="$TMPBASE/sockd-run-badcidr"
+mkdir -p "$run_dir5"
+STDERR5="$TMPBASE/sockd-stderr-badcidr.txt"
+: > "$FAKE_SOCKD_LOG"
+write_fake_ip '1: eth0    inet 172.20.0.2/24 brd 172.20.0.255 scope global eth0'
+FAKE_SOCKD_LOG="$FAKE_SOCKD_LOG" PATH="$FAKE_IP_DIR:$PATH" \
+  CBOX_SOCKD_GEN_DIR="$gen_dir_badcidr" CBOX_SOCKD_RUN_DIR="$run_dir5" CBOX_SOCKD_BIN="$FAKE_SOCKD" \
+  sh "$gen_dir_badcidr/sockd-start.sh" 2> "$STDERR5"
+[ ! -f "$run_dir5/sockd.conf" ] || fail "must not produce a /run copy when internal-cidr is malformed"
+grep -qF -- "-f $gen_dir_badcidr/sockd.conf" "$FAKE_SOCKD_LOG" || fail "must exec the rendered file when internal-cidr is malformed, got: $(cat "$FAKE_SOCKD_LOG")"
+grep -qF 'is malformed' "$STDERR5" || fail "must name the reason on stderr when internal-cidr is malformed, got: $(cat "$STDERR5")"
+echo "ok: sockd-start.sh falls back to the rendered file and warns on stderr when internal-cidr is malformed"
+
+gen_dir_empty="$TMPBASE/sockd-gen-empty-targets"
+mkdir -p "$gen_dir_empty"
+gen_sockd_conf_into "$gen_dir_empty" 172.20.0.2 172.20.0.0/24 ''
+run_dir6="$TMPBASE/sockd-run-empty-targets"
+mkdir -p "$run_dir6"
+: > "$FAKE_SOCKD_LOG"
+write_fake_ip '1: eth0    inet 172.20.0.2/24 brd 172.20.0.255 scope global eth0'
+FAKE_SOCKD_LOG="$FAKE_SOCKD_LOG" PATH="$FAKE_IP_DIR:$PATH" \
+  CBOX_SOCKD_GEN_DIR="$gen_dir_empty" CBOX_SOCKD_RUN_DIR="$run_dir6" CBOX_SOCKD_BIN="$FAKE_SOCKD" \
+  sh "$gen_dir_empty/sockd-start.sh"
+[ ! -f "$run_dir6/sockd.conf" ] || fail "empty targets_spec with an unchanged live internal address must exec the rendered file unchanged, not write a /run copy"
+grep -qF -- "-f $gen_dir_empty/sockd.conf" "$FAKE_SOCKD_LOG" || fail "empty targets_spec with an unchanged live internal address must exec the rendered file, got: $(cat "$FAKE_SOCKD_LOG")"
+[ "$(cat "$run_dir6/internal-ip" 2>/dev/null)" = "172.20.0.2" ] || fail "fast path with empty targets_spec must still write run_dir/internal-ip"
+echo "ok: sockd-start.sh treats a rendered external equal to the internal address (empty targets_spec) as no external, execs the rendered file when live addresses are unchanged"
+
+run_dir7="$TMPBASE/sockd-run-empty-targets-egress"
+mkdir -p "$run_dir7"
+: > "$FAKE_SOCKD_LOG"
+write_fake_ip '1: eth0    inet 172.20.0.2/24 brd 172.20.0.255 scope global eth0
+2: eth1    inet 192.168.88.4/24 brd 192.168.88.255 scope global eth1'
+FAKE_SOCKD_LOG="$FAKE_SOCKD_LOG" PATH="$FAKE_IP_DIR:$PATH" \
+  CBOX_SOCKD_GEN_DIR="$gen_dir_empty" CBOX_SOCKD_RUN_DIR="$run_dir7" CBOX_SOCKD_BIN="$FAKE_SOCKD" \
+  sh "$gen_dir_empty/sockd-start.sh"
+[ ! -f "$run_dir7/sockd.conf" ] || fail "no raw CIDR target needs the egress address - it must not force a rewrite when targets_spec is empty"
+grep -qF -- "-f $gen_dir_empty/sockd.conf" "$FAKE_SOCKD_LOG" || fail "empty targets_spec plus a live egress address must still exec the rendered file, got: $(cat "$FAKE_SOCKD_LOG")"
+[ "$(cat "$run_dir7/internal-ip" 2>/dev/null)" = "172.20.0.2" ] || fail "fast path with empty targets_spec and a live egress address must still write run_dir/internal-ip"
+echo "ok: sockd-start.sh with empty targets_spec ignores a live egress address that no raw CIDR target needs"
+
+CBOX_NETACCESS_MODE=off
+CBOX_NETACCESS_APPLIED=0
 
 echo "PASS: netaccess runtime rendering"

@@ -303,4 +303,50 @@ printf '%s\n' "$render_err" | grep -qF 'cbox: netaccess: SKIPPING granted networ
 printf '%s\n' "$render_err" | grep -qiF 'ollama' && _fail "_cbox_netaccess_render must not warn about scope=all infrastructure noise under scope=list: $render_err"
 _ok "_cbox_netaccess_render warns loudly, once per absent granted network, on stderr"
 
+SHELL_ENSURE_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_netaccess_shell_ensure)"
+APPLY_GLOBAL_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_netaccess_apply_global)"
+[ -n "$SHELL_ENSURE_FN" ] || _fail "cannot extract _cbox_netaccess_shell_ensure from cbox"
+[ -n "$APPLY_GLOBAL_FN" ] || _fail "cannot extract _cbox_netaccess_apply_global from cbox"
+
+ENSURE_LOG="$TMPBASE/ensure-compose.log"
+: > "$ENSURE_LOG"
+FAKE_COMPOSE_BIN="$TMPBASE/fake-compose"
+cat > "$FAKE_COMPOSE_BIN" <<FAKECOMPOSE
+#!/usr/bin/env bash
+echo "\$*" >> "$ENSURE_LOG"
+exit 0
+FAKECOMPOSE
+chmod +x "$FAKE_COMPOSE_BIN"
+
+ensure_out="$(bash -c '
+  set -u
+  INSTALL_DIR="'"$INSTALL_DIR"'"
+  COMPOSE=("'"$FAKE_COMPOSE_BIN"'")
+  _cbox_proxy_active() { return 0; }
+  _cbox_netaccess_active() { return 0; }
+  _cbox_netaccess_render() { echo "RENDER $*"; return 0; }
+  _cbox_netaccess_verify_listener() { echo "VERIFY $*"; return 0; }
+  '"$APPLY_GLOBAL_FN"'
+  '"$SHELL_ENSURE_FN"'
+  _cbox_netaccess_shell_ensure
+' 2>&1)"
+grep -qF 'up -d proxy' "$ENSURE_LOG" \
+  || _fail "shell ensure must start the stopped proxy via compose up -d, got compose log:
+$(cat "$ENSURE_LOG")
+and output: $ensure_out"
+restart_line=$(grep -nF 'restart proxy' "$ENSURE_LOG" | head -n1 | cut -d: -f1)
+[ -n "$restart_line" ] \
+  || _fail "shell ensure must run the normal apply with a proxy restart after compose up -d, got compose log:
+$(cat "$ENSURE_LOG")
+and output: $ensure_out"
+up_line=$(grep -nF 'up -d proxy' "$ENSURE_LOG" | head -n1 | cut -d: -f1)
+[ "$restart_line" -gt "$up_line" ] \
+  || _fail "shell ensure must restart the proxy only after compose up -d started it, got compose log:
+$(cat "$ENSURE_LOG")"
+printf '%s\n' "$ensure_out" | grep -q '^RENDER' \
+  || _fail "shell ensure must still render the granted networks onto the freshly started proxy: $ensure_out"
+printf '%s\n' "$ensure_out" | grep -q '^VERIFY' \
+  || _fail "shell ensure must still verify the SOCKS listener after the fresh start: $ensure_out"
+_ok "_cbox_netaccess_shell_ensure runs the normal apply (render plus restart proxy) after compose up -d proxy"
+
 echo "PASS: all netaccess verb checks"

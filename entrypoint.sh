@@ -112,7 +112,7 @@ _bins_channel_want() {
 }
 
 _bins_start_fallback() {
-  local name="$1" want link stampf cur p
+  local name="$1" want link stampf cur p reason
   case "$name" in
     claude) want="$CBOX_CLAUDE_TARGET"; link="$CLROOT/bin/claude"; stampf="$CLROOT/.cbox-stamp" ;;
     codex) want="$CBOX_CODEX_VERSION"; link="$CLROOT/bin/codex"; stampf="$CXPKG/.cbox-stamp" ;;
@@ -122,7 +122,20 @@ _bins_start_fallback() {
   p="$(_resolve_bin "$link")" || return 1
   cur="$(_stamp_field "$stampf" 1 2>/dev/null)" || cur=unknown
   cur="$(_want_compat "$name" "$cur")"
-  echo "entrypoint: $name tuple is stamped '$cur' but this project wants '$want' - starting the installed binary anyway; run 'cbox reinstall-bins --force' on the host to move the shared tuple" >&2
+  if [ "$cur" != "$want" ]; then
+    reason="tuple is stamped '$cur' but this project wants '$want'"
+  else
+    local stamped_path
+    stamped_path="$(_stamp_field "$stampf" 2 2>/dev/null)" || stamped_path=""
+    if [ -z "$stamped_path" ]; then
+      reason="tuple is stamped '$cur' (matches '$want') but the stamp has no resolved binary path recorded"
+    elif [ "$p" != "$stamped_path" ]; then
+      reason="tuple is stamped '$cur' (matches '$want') but the resolved binary $p differs from the stamped path $stamped_path - the shared tuple moved after this container's session started"
+    else
+      reason="tuple is stamped '$cur' (matches '$want') but the ready-check failed for an unexplained reason"
+    fi
+  fi
+  echo "entrypoint: $name $reason - starting the installed binary anyway; run 'cbox reinstall-bins --force' on the host to move the shared tuple" >&2
   printf '%s' "$p"
 }
 
@@ -274,10 +287,10 @@ for name, spec in servers.items():
         any(isinstance(a, str) and a == flag for a in args)
         for flag in REQUIRED_FLAGS
     )
-    has_codex_mcp_server = any(
-        isinstance(a, str) and a == "mcp-server" for a in args
+    has_codex_child = any(
+        isinstance(a, str) and a in ("mcp-server", "app-server") for a in args
     ) and any(isinstance(a, str) and a == "codex" for a in args)
-    if not (has_shim and has_flags and has_codex_mcp_server):
+    if not (has_shim and has_flags and has_codex_child):
         stale.append(name)
 
 if stale:
@@ -786,6 +799,12 @@ _hermes_compose_session_prompt() {
   fi
 }
 
+_hermes_netaccess_line() {
+  local netmap=/etc/cbox/net/netmap.json
+  [ -f "$netmap" ] && [ ! -L "$netmap" ] || return 0
+  printf '%s' "Docker networks here are reachable only through the cbox SOCKS gateway: call cbox-net net_map first, then net_probe; target containers by name over socks5h; never guess IPs or set ALL_PROXY; a down gateway is a host-side fix."
+}
+
 _guard_socks_proxy
 
 case "${1:-}" in
@@ -864,6 +883,10 @@ case "${1:-}" in
     _hermes_user_preamble="$(_hermes_user_policies_preamble)"
     _hermes_session_prompt="$(_hermes_kernel_preamble)"
     _hermes_session_prompt="$(_hermes_compose_session_prompt "$_hermes_user_preamble" "$_hermes_session_prompt")"
+    _hermes_netaccess_line="$(_hermes_netaccess_line)"
+    if [ -n "$_hermes_netaccess_line" ]; then
+      _hermes_session_prompt="${_hermes_session_prompt:+$_hermes_session_prompt$'\n\n'}$_hermes_netaccess_line"
+    fi
     if [ -n "${HERMES_EPHEMERAL_SYSTEM_PROMPT:-}" ]; then
       _hermes_session_prompt="${_hermes_session_prompt:+$_hermes_session_prompt$'\n\n'}$HERMES_EPHEMERAL_SYSTEM_PROMPT"
     fi

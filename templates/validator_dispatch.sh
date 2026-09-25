@@ -98,6 +98,9 @@ _cbox_reg_validate_var_dispatch() {
     CBOX_CONTAINER_EXEC_TOOL)
       _cbox_val_kind_enum "$val" 'off' 'on' || return 1
       ;;
+    CBOX_NETMAP_ACTIVE)
+      _cbox_val_kind_enum "$val" 'off' 'on' || return 1
+      ;;
     CBOX_HOST_ROUTE_MODE)
       _cbox_val_kind_enum "$val" 'off' 'host-proxy' || return 1
       ;;
@@ -130,6 +133,9 @@ _cbox_reg_validate_var_dispatch() {
       ;;
     CBOX_CODEX_PROGRESS_MODE)
       _cbox_val_kind_enum "$val" 'off' 'shim' || return 1
+      ;;
+    CBOX_CODEX_SHIM_TURN_TIMEOUT_SEC)
+      _cbox_val_kind_uint_or_empty "$val" || return 1
       ;;
     CBOX_LOCAL_MODEL)
       _cbox_val_kind_enum "$val" 'off' 'on' || return 1

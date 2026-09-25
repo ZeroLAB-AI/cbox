@@ -33,22 +33,22 @@ _mkstub() {
 }
 
 _run_probe() {
-  local tool="$1" path="$2" argv="${3:-mcp-server}" to="${4:-2}"
+  local tool="$1" path="$2" argv="${3:-app-server}" to="${4:-2}"
   CBOX_PROBE_CODEX_ARGV="$argv" CBOX_HEALTH_PROBE_TIMEOUT="$to" sh -c "$HEALTH_SH" cbox-health-probe health "$tool" "$path"
 }
 
-echo "--- codex: a good binary (help ok, handshake emits developer-instructions) probes healthy ---"
+echo "--- codex: a good binary (help ok, handshake emits userAgent) probes healthy ---"
 GOOD_CODEX="$TMPBASE/good-codex"
 _mkstub "$GOOD_CODEX" '
 case "$1" in
-  mcp-server)
+  app-server)
     shift
     if [ "$1" = "--help" ]; then
-      echo "usage: mcp-server"
+      echo "usage: app-server"
       exit 0
     fi
     cat >/dev/null
-    printf "{\"result\":{\"text\":\"...developer-instructions...\"}}\n"
+    printf "{\"id\":1,\"result\":{\"userAgent\":\"codex-cli/9.9.9\"}}\n"
     exit 0
     ;;
 esac
@@ -57,16 +57,16 @@ exit 1
 rc=0
 OUT="$(_run_probe codex "$GOOD_CODEX")" || rc=$?
 [ "$rc" = 0 ] || _fail "codex: good binary must probe healthy (rc 0), got $rc: $OUT"
-_ok "codex: good binary (help ok + developer-instructions in handshake) probes healthy (exit 0)"
+_ok "codex: good binary (help ok + userAgent in handshake) probes healthy (exit 0)"
 
-echo "--- codex: a 0.154-style binary (help rc=0, handshake produces nothing) is a definitive failure ---"
-BAD154_CODEX="$TMPBASE/bad154-codex"
-_mkstub "$BAD154_CODEX" '
+echo "--- codex: a 0.156-style binary (help rc=0, handshake produces nothing) is a definitive failure ---"
+BAD156_CODEX="$TMPBASE/bad156-codex"
+_mkstub "$BAD156_CODEX" '
 case "$1" in
-  mcp-server)
+  app-server)
     shift
     if [ "$1" = "--help" ]; then
-      echo "usage: mcp-server"
+      echo "usage: app-server"
       exit 0
     fi
     cat >/dev/null
@@ -76,17 +76,17 @@ esac
 exit 1
 '
 rc=0
-OUT="$(_run_probe codex "$BAD154_CODEX")" || rc=$?
-[ "$rc" = 2 ] || _fail "codex: 0.154-style binary must probe as a definitive failure (rc 2), got $rc: $OUT"
-printf '%s\n' "$OUT" | grep -qF "no developer-instructions" \
-  || _fail "codex: 0.154-style failure must name the missing developer-instructions handshake, got: $OUT"
-_ok "codex: 0.154-style binary (help rc=0 but empty handshake) is a definitive failure (exit 2) - proves --help alone is never the trigger"
+OUT="$(_run_probe codex "$BAD156_CODEX")" || rc=$?
+[ "$rc" = 2 ] || _fail "codex: 0.156-style binary must probe as a definitive failure (rc 2), got $rc: $OUT"
+printf '%s\n' "$OUT" | grep -qF "no userAgent" \
+  || _fail "codex: 0.156-style failure must name the missing userAgent handshake, got: $OUT"
+_ok "codex: 0.156-style binary (help rc=0 but empty handshake) is a definitive failure (exit 2) - proves --help alone is never the trigger"
 
 echo "--- codex: a binary whose --help itself fails is a definitive failure before any handshake is attempted ---"
 BADHELP_CODEX="$TMPBASE/badhelp-codex"
 _mkstub "$BADHELP_CODEX" '
 case "$1" in
-  mcp-server)
+  app-server)
     shift
     if [ "$1" = "--help" ]; then
       exit 1
@@ -105,7 +105,7 @@ echo "--- codex: a hanging handshake is inconclusive, never a rollback trigger -
 HANG_CODEX="$TMPBASE/hang-codex"
 _mkstub "$HANG_CODEX" '
 case "$1" in
-  mcp-server)
+  app-server)
     shift
     if [ "$1" = "--help" ]; then
       echo ok
@@ -120,7 +120,7 @@ exit 1
 '
 rc=0
 start="$(date +%s)"
-OUT="$(_run_probe codex "$HANG_CODEX" mcp-server 1)" || rc=$?
+OUT="$(_run_probe codex "$HANG_CODEX" app-server 1)" || rc=$?
 elapsed=$(( $(date +%s) - start ))
 [ "$rc" = 3 ] || _fail "codex: a hanging handshake must be inconclusive (rc 3), got $rc: $OUT"
 [ "$elapsed" -lt 10 ] || _fail "codex: the probe must honor the shortened timeout, took ${elapsed}s"
@@ -290,7 +290,7 @@ OUTA="$(HOST_HOME="$HOMEA" CLROOT="$CLROOTA" CBOX_CLAUDE_TARGET=stable CBOX_INST
   '"$INSTALLONE_FN"'
   _health_check() {
     case "$2" in
-      *"/versions/2.0.0/"*) _HEALTH_CHECK_NOTE="mcp-server handshake: no developer-instructions"; return 2 ;;
+      *"/versions/2.0.0/"*) _HEALTH_CHECK_NOTE="app-server handshake: no userAgent"; return 2 ;;
       *) _HEALTH_CHECK_NOTE=""; return 0 ;;
     esac
   }

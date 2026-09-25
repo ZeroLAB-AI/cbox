@@ -19,10 +19,15 @@ SPEC.loader.exec_module(MOD)
 
 
 class FakeCompletedProcess:
-    def __init__(self, stdout, returncode=0):
+    def __init__(self, stdout, returncode=0, session_id=None,
+                 cancelled=False, timed_out=False, partial_text=""):
         self.stdout = stdout
         self.stderr = ""
         self.returncode = returncode
+        self.session_id = session_id
+        self.cancelled = cancelled
+        self.timed_out = timed_out
+        self.partial_text = partial_text
 
 
 class ValidModelTokenTests(unittest.TestCase):
@@ -154,18 +159,18 @@ class RunClaudeArgvTests(unittest.TestCase):
         os.environ.pop(MOD.FALLBACK_MODEL_ENV, None)
         self.captured = {}
 
-    def _fake_run(self, cmd, **kwargs):
-        self.captured["cmd"] = cmd
+    def _fake_spawn(self, attempt_cmd, cwd, env, budget):
+        self.captured["cmd"] = attempt_cmd
         return FakeCompletedProcess(json.dumps({"result": "ok", "is_error": False}))
 
     def test_default_model_has_no_fallback_flag(self):
-        with mock.patch.object(MOD.subprocess, "run", self._fake_run):
+        with mock.patch.object(MOD, "spawn_claude_attempt", self._fake_spawn):
             MOD.run_claude({"prompt": "hello"})
         cmd = self.captured["cmd"]
         self.assertNotIn("--fallback-model", cmd)
 
     def test_fable_model_gets_default_fallback_chain(self):
-        with mock.patch.object(MOD.subprocess, "run", self._fake_run):
+        with mock.patch.object(MOD, "spawn_claude_attempt", self._fake_spawn):
             MOD.run_claude({"prompt": "hello", "model": "fable"})
         cmd = self.captured["cmd"]
         self.assertIn("--fallback-model", cmd)
@@ -179,7 +184,7 @@ class RunClaudeArgvTests(unittest.TestCase):
 
     def test_operator_override_chain_used_verbatim(self):
         os.environ[MOD.FALLBACK_MODEL_ENV] = "custom-a,custom-b"
-        with mock.patch.object(MOD.subprocess, "run", self._fake_run):
+        with mock.patch.object(MOD, "spawn_claude_attempt", self._fake_spawn):
             MOD.run_claude({"prompt": "hello", "model": "fable"})
         cmd = self.captured["cmd"]
         i = cmd.index("--fallback-model")
@@ -189,11 +194,11 @@ class RunClaudeArgvTests(unittest.TestCase):
         os.environ[MOD.FALLBACK_MODEL_ENV] = "-bad"
         called = {"n": 0}
 
-        def _should_not_run(cmd, **kwargs):
+        def _should_not_spawn(attempt_cmd, cwd, env, budget):
             called["n"] += 1
             return FakeCompletedProcess(json.dumps({"result": "x"}))
 
-        with mock.patch.object(MOD.subprocess, "run", _should_not_run):
+        with mock.patch.object(MOD, "spawn_claude_attempt", _should_not_spawn):
             result = MOD.run_claude({"prompt": "hello", "model": "sonnet"})
         self.assertEqual(called["n"], 0)
         self.assertTrue(result["isError"])
@@ -234,13 +239,16 @@ class RetryFlagPreservationTests(unittest.TestCase):
         calls = []
         safety = types.SimpleNamespace(
             returncode=1, stdout="",
-            stderr="API Error: safety measures that flagged this message")
+            stderr="API Error: safety measures that flagged this message",
+            session_id=None, cancelled=False, timed_out=False,
+            partial_text="")
 
-        def fake_run(cmd, **kwargs):
-            calls.append(list(cmd))
+        def fake_spawn(attempt_cmd, cwd, env, budget):
+            calls.append(list(attempt_cmd))
             return safety
 
-        with unittest.mock.patch.object(MOD.subprocess, "run", fake_run), \
+        with unittest.mock.patch.object(
+                MOD, "spawn_claude_attempt", fake_spawn), \
                 unittest.mock.patch.dict(
                     os.environ, {MOD.FALLBACK_MODEL_ENV: "m2,m3"}):
             MOD.run_claude({"prompt": "hello", "model": "m1"})
@@ -268,13 +276,16 @@ class RetryFlagPreservationTests(unittest.TestCase):
         calls = []
         proc = types.SimpleNamespace(
             returncode=1, stdout="",
-            stderr="safety measures that flagged")
+            stderr="safety measures that flagged",
+            session_id=None, cancelled=False, timed_out=False,
+            partial_text="")
 
-        def fake_run(cmd, **kwargs):
-            calls.append(list(cmd))
+        def fake_spawn(attempt_cmd, cwd, env, budget):
+            calls.append(list(attempt_cmd))
             return proc
 
-        with unittest.mock.patch.object(MOD.subprocess, "run", fake_run), \
+        with unittest.mock.patch.object(
+                MOD, "spawn_claude_attempt", fake_spawn), \
                 unittest.mock.patch.dict(
                     os.environ, {MOD.FALLBACK_MODEL_ENV: "m2"}):
             MOD.run_claude({"prompt": "echo safety measures that flagged",
@@ -285,13 +296,17 @@ class RetryFlagPreservationTests(unittest.TestCase):
 class DelegateIsALeafTests(unittest.TestCase):
     def _cmds(self, args, in_container=True):
         calls = []
-        proc = types.SimpleNamespace(returncode=0, stdout='{"result":"ok"}', stderr="")
+        proc = types.SimpleNamespace(
+            returncode=0, stdout='{"result":"ok"}', stderr="",
+            session_id=None, cancelled=False, timed_out=False,
+            partial_text="")
 
-        def fake_run(cmd, **kwargs):
-            calls.append(list(cmd))
+        def fake_spawn(attempt_cmd, cwd, env, budget):
+            calls.append(list(attempt_cmd))
             return proc
 
-        with unittest.mock.patch.object(MOD.subprocess, "run", fake_run), \
+        with unittest.mock.patch.object(
+                MOD, "spawn_claude_attempt", fake_spawn), \
                 unittest.mock.patch.object(MOD, "in_container", lambda: in_container), \
                 unittest.mock.patch.object(MOD, "check_cwd", lambda p: (p, None)):
             MOD.run_claude(args)
@@ -380,13 +395,13 @@ class ModelPolicyTests(unittest.TestCase):
     def test_alias_resolves_through_env(self):
         with mock.patch.dict(os.environ, self.ENV, clear=False):
             self.assertEqual(MOD.resolve_model_alias("fable"), "claude-fable-5[1m]")
-            self.assertEqual(MOD.resolve_model_alias("claude-opus-5[1m]"), "claude-opus-5[1m]")
+            self.assertEqual(MOD.resolve_model_alias("claude-opus-5-5[1m]"), "claude-opus-5-5[1m]")
 
     def test_pinned_tiers_pass(self):
         with mock.patch.dict(os.environ, self.ENV, clear=False):
             self.assertIsNone(MOD.model_refusal("fable", "task"))
             self.assertIsNone(MOD.model_refusal("claude-fable-5[1m]", "task"))
-            self.assertIsNone(MOD.model_refusal("claude-opus-5[1m]", "task"))
+            self.assertIsNone(MOD.model_refusal("claude-opus-5-5[1m]", "task"))
 
     def test_banned_point_release_refused_even_with_fallback_note(self):
         with mock.patch.dict(os.environ, self.ENV, clear=False):
@@ -418,9 +433,9 @@ class ModelPolicyTests(unittest.TestCase):
 
     def test_banned_entries_never_survive_into_the_attempt_chain(self):
         with mock.patch.dict(os.environ, self.ENV, clear=False):
-            chain = ["claude-fable-5-1[1m]", "claude-opus-5[1m]", "claude-opus-4-8[1m]"]
+            chain = ["claude-fable-5-1[1m]", "claude-opus-5-5[1m]", "claude-opus-4-8[1m]"]
             kept = [m for m in chain if MOD.model_banned(m) is None]
-            self.assertEqual(kept, ["claude-opus-5[1m]", "claude-opus-4-8[1m]"])
+            self.assertEqual(kept, ["claude-opus-5-5[1m]", "claude-opus-4-8[1m]"])
             self.assertIsNotNone(MOD.model_banned("claude-fable-5-1[1m]"))
             self.assertIsNotNone(MOD.model_banned("claude-fable-5-1"))
 

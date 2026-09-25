@@ -437,8 +437,8 @@ CODEX_HEALTH_KIND="$(python3 "$PY" get "$REG" codex health.kind)"
 _ok "get codex health.kind == subcommand-handshake"
 
 CODEX_HEALTH_EXPECT="$(python3 "$PY" get "$REG" codex health.expect)"
-[ "$CODEX_HEALTH_EXPECT" = "developer-instructions" ] || _fail "codex health.expect mismatch: $CODEX_HEALTH_EXPECT"
-_ok "get codex health.expect == developer-instructions"
+[ "$CODEX_HEALTH_EXPECT" = "userAgent" ] || _fail "codex health.expect mismatch: $CODEX_HEALTH_EXPECT"
+_ok "get codex health.expect == userAgent"
 
 for eng in claude hermes; do
   hk="$(python3 "$PY" get "$REG" "$eng" health.kind)"
@@ -476,5 +476,40 @@ EOF
 python3 "$PY" validate "$W/health_absent.json" >/dev/null 2>&1 \
   || _fail "registry entry with no health field at all should still validate (backward compatible)"
 _ok "engine entries with no health field at all still validate (field is optional)"
+
+W4="$TMPBASE/drifted_argv1"
+mkdir -p "$W4/etc/engines" "$W4/templates"
+python3 - "$REG" "$W4/etc/engines/engines.json" <<'PYEOF'
+import json, sys
+src, dst = sys.argv[1], sys.argv[2]
+data = json.load(open(src))
+data["engines"]["codex"]["probe"]["infra_filter_argv1"] = ["totally-bogus-argv1-literal"]
+json.dump(data, open(dst, "w"))
+PYEOF
+cp "$PY" "$W4/etc/engines/engines_registry.py"
+cp "$v_install_bins" "$W4/install-bins.sh"
+cp "$v_entrypoint" "$W4/entrypoint.sh"
+cp "$v_sections" "$W4/templates/sections.sh"
+cp "$v_cbox" "$W4/cbox"
+
+HARNESS4="$TMPBASE/live_verify_harness_drifted_argv1.sh"
+{
+  echo '#!/usr/bin/env bash'
+  echo 'set -uo pipefail'
+  echo "INSTALL_DIR=\"\$1\""
+  echo 'VN=0; VOK=0; VFAIL=0; VSKIP=0'
+  echo 'v_t() { VN=$((VN + 1)); :; }'
+  echo 'v_ok() { VOK=$((VOK + 1)); }'
+  echo 'v_fail() { VFAIL=$((VFAIL + 1)); echo "verify-check v_fail: ${1:-}" >&2; }'
+  echo 'v_skip() { VSKIP=$((VSKIP + 1)); }'
+  awk '/^_cbox_verify_engines_registry\(\) \{/,/^}$/' "$v_cbox"
+  echo '_cbox_verify_engines_registry'
+} > "$HARNESS4"
+
+bash "$HARNESS4" "$W4" > "$TMPBASE/drifted_argv1_check.out" 2>&1 || true
+grep -qE 'verify-check v_fail:.*infra_filter_argv1 literals absent.*codex.infra_filter_argv1:totally-bogus-argv1-literal' "$TMPBASE/drifted_argv1_check.out" \
+  || _fail "an engines.json infra_filter_argv1 literal absent from the cbox _CBOX_PROBE_SH heredoc was not flagged:
+$(cat "$TMPBASE/drifted_argv1_check.out")"
+_ok "exe-stamp infra_filter_argv1 literal not present in _CBOX_PROBE_SH is flagged (registry/probe-heredoc drift guard)"
 
 echo "PASS: all engines_registry checks"

@@ -265,7 +265,7 @@ Optional: generate the peer's entire keypair locally if they cannot run cbox too
 cbox wg peer config peer-name --generate-key
 ```
 
-This prints a ready-to-paste `[Peer]` block containing this node's public key, the tunnel endpoint, and a newly generated private key for the peer. The peer can paste that block into their WireGuard config; this mode is less secure (the peer's private key crosses the network) but can be useful in bootstrapping.
+This prints a ready-to-paste `[Interface]`/`[Peer]` config for the peer: `[Interface] Address = <the peer's own tunnel address>` and `PrivateKey = <contents of peer-<name>.key>`, then `[Peer]` with this node's public key, this node's tunnel address as `AllowedIPs`, and (for a server-role peer) this node's endpoint. The generated private key itself is written to a `0600` file outside the wireguard sidecar mount (`~/.config/cbox/infra/wireguard-peer-keys/peer-<name>.key`), never printed to the terminal. The peer copies that config, substituting the file's contents on the `PrivateKey` line; this mode is less secure (the peer's private key was generated off the peer's own machine) but can be useful in bootstrapping. `cbox wg peer rm <name>` also deletes that key file.
 
 ## Verifying the tunnel
 
@@ -347,11 +347,11 @@ Print the peers file: one line per peer, format `name|pubkey|allowed-address`.
 
 ### `cbox wg peer config <name> [--generate-key]`
 
-Print a ready-to-paste `[Peer]` block for the named peer containing this node's public key, endpoint, and this node's own tunnel address as the `AllowedIPs` `/32` (the block describes this node from the peer's side).
+Print a ready-to-paste config for the named peer: `[Interface] Address = <the peer's own tunnel address>`, then `[Peer]` with this node's public key, this node's own tunnel address as the `AllowedIPs` `/32` (the block describes this node from the peer's side), and an `Endpoint` line only when the peer is server-role (it dials this node) - a client-role peer (added with its own `--endpoint`) gets no `Endpoint` line, since this node dials it instead. If `CBOX_WG_PUBLISH_ADDR` is empty or `0.0.0.0`, `Endpoint` is a placeholder rather than an address nobody can reach.
 
-Without `--generate-key`, no private key is involved.
+Without `--generate-key`, no private key is involved; `[Interface]` notes that the peer uses its own privately generated key.
 
-With `--generate-key`, generates the peer's own private key locally and writes it to a `0600` file (`peer-<name>.key` in the wireguard key directory) instead of printing it - stdout would land in session transcripts and shell history. Move that file to the peer's machine and delete it here. The preferred path remains: the peer generates its own key and sends you only the public key.
+With `--generate-key`, generates the peer's own private key locally and writes it to a `0600` file (`peer-<name>.key`) under `~/.config/cbox/infra/wireguard-peer-keys` - a sibling of the wireguard key directory, outside the directory mounted into the sidecar - instead of printing it (stdout would land in session transcripts and shell history). Refuses instead of overwriting if a key file already exists for that peer name. Move that file to the peer's machine and delete it here; `cbox wg peer rm <name>` deletes it too. The preferred path remains: the peer generates its own key and sends you only the public key.
 
 ## Design constraints
 

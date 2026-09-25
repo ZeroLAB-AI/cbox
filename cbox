@@ -155,9 +155,33 @@ _cbox_compose_files_digest() {
   printf '%s' "$out" | _cbox_sha256
 }
 
+_cbox_compose_removing_ids() {
+  local project
+  project="$("$@" config --format json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("name",""))' 2>/dev/null)" || project=""
+  [ -n "$project" ] || return 0
+  docker ps -a -q --filter "label=com.docker.compose.project=$project" --filter status=removing 2>/dev/null
+  docker ps -a -q --filter "label=com.docker.compose.project=$project" --filter status=dead 2>/dev/null
+}
+
+_cbox_compose_up_wait_removed() {
+  local ids i=0 id pending
+  ids="$(_cbox_compose_removing_ids "$@")"
+  [ -n "$ids" ] || return 1
+  while [ "$i" -lt 20 ]; do
+    pending=0
+    for id in $ids; do
+      docker inspect "$id" >/dev/null 2>&1 && pending=1
+    done
+    [ "$pending" = 0 ] && return 0
+    sleep 1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 _cbox_compose_up() {
   local stamp="$1"; shift
-  local new old="" force=0 rc=0 have=""
+  local new old="" force=0 rc=0 have="" try
   new="$(_cbox_compose_files_digest "$@")"
   [ -n "$stamp" ] && [ -f "$stamp" ] && old="$(cat "$stamp" 2>/dev/null || true)"
   have="$("$@" ps -q cbox 2>/dev/null | head -n1)" || have=""
@@ -167,11 +191,18 @@ _cbox_compose_up() {
   if [ -n "$have" ] && [ "$old" != "$new" ]; then
     force=1
   fi
-  if [ "$force" = 1 ]; then
-    "$@" up -d --force-recreate || rc=$?
-  else
-    "$@" up -d || rc=$?
-  fi
+  for try in 1 2; do
+    rc=0
+    if [ "$force" = 1 ]; then
+      "$@" up -d --force-recreate || rc=$?
+    else
+      "$@" up -d || rc=$?
+    fi
+    [ "$rc" -eq 0 ] && break
+    [ "$try" -eq 2 ] && break
+    _cbox_compose_up_wait_removed "$@" || break
+    echo "cbox: a container of this project was still being removed by docker - it is gone now, retrying once" >&2
+  done
   if [ "$rc" -eq 0 ] && [ -n "$stamp" ]; then
     printf '%s\n' "$new" > "$stamp" 2>/dev/null || true
   fi
@@ -179,7 +210,7 @@ _cbox_compose_up() {
 }
 
 _cbox_netaccess_render() {
-  local container_id="$1" state_dir="$2" scope network cidr result internal_ip internal_cidr targets skipped_line
+  local container_id="$1" state_dir="$2" mode="${3:-apply}" scope network cidr result internal_ip internal_cidr targets skipped_line
   local -a args=()
   CBOX_NETACCESS_SKIPPED=""
   _cbox_proxy_active || return 0
@@ -192,8 +223,23 @@ _cbox_netaccess_render() {
     for cidr in ${CBOX_NETACCESS_CIDRS:-}; do
       args+=(--cidr "$cidr")
     done
+    local netmap_port="${CBOX_NETACCESS_SOCKS_PORT:-1080}"
+    case "$netmap_port" in
+      ''|*[!0-9]*) netmap_port=1080 ;;
+      *) { [ "${#netmap_port}" -le 5 ] && [ "$netmap_port" -ge 1 ] && [ "$netmap_port" -le 65535 ]; } || netmap_port=1080 ;;
+    esac
+    args+=(--netmap-out "$state_dir/netmap/netmap.json" --proxy-url "socks5h://$(_cbox_proxy_internal_alias):$netmap_port")
   else
     scope=list
+  fi
+  if [ "$mode" = netmap-only ]; then
+    python3 "$INSTALL_DIR/lib/cbox_netaccess.py" \
+      --container "$container_id" \
+      --state-dir "$state_dir" \
+      --scope "$scope" \
+      --netmap-only \
+      "${args[@]}" >/dev/null || return 1
+    return 0
   fi
   result="$(python3 "$INSTALL_DIR/lib/cbox_netaccess.py" \
     --container "$container_id" \
@@ -229,7 +275,7 @@ _cbox_netaccess_verify_listener() {
     *) [ "${#port}" -le 5 ] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || port=1080 ;;
   esac
   for i in 1 2 3 4 5; do
-    if docker exec "$container_id" sh -c "nc -z -w 2 127.0.0.1 $port || nc -z -w 2 \"\$(cat /etc/cbox-generated/internal-ip 2>/dev/null)\" $port" >/dev/null 2>&1; then
+    if docker exec "$container_id" sh -c "ip=\$(cat /run/cbox/internal-ip 2>/dev/null); [ -n \"\$ip\" ] || ip=\$(cat /etc/cbox-generated/internal-ip 2>/dev/null); nc -z -w 2 127.0.0.1 $port || nc -z -w 2 \"\$ip\" $port" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.5
@@ -1632,41 +1678,78 @@ _cbox_wg_peer_config_cmd() {
     echo "cbox: usage: $0 wg peer config <name> [--generate-key]" >&2
     return 1
   fi
-  local line pname ppub paddr found=0
+  if [ -n "$genkey" ] && [ "$genkey" != "--generate-key" ]; then
+    echo "cbox: usage: $0 wg peer config <name> [--generate-key]" >&2
+    return 1
+  fi
+  local line pname ppub paddr pendpoint found=0
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     pname="$(_cbox_wg_peer_field "$line" 0)"
     if [ "$pname" = "$name" ]; then
       ppub="$(_cbox_wg_peer_field "$line" 1)"
       paddr="$(_cbox_wg_peer_field "$line" 2)"
+      pendpoint="$(_cbox_wg_peer_field "$line" 3)"
       found=1
       break
     fi
   done < <(_cbox_wg_peer_list)
   [ "$found" = 1 ] || { echo "cbox: no peer named '$name' found" >&2; return 1; }
   _cbox_wg_ensure_keys || return 1
-  local my_pub endpoint_host
+  local my_pub key_file=""
   my_pub="$(_cbox_wg_pubkey)" || { echo "cbox: this node has no wireguard public key yet - run 'cbox wg keygen' first" >&2; return 1; }
-  endpoint_host="${CBOX_WG_PUBLISH_ADDR:-<this-machine-address>}"
   echo "# paste this on the '$name' machine, in its own cbox.conf or wg config"
   echo "# preferred: let '$name' generate its own private key locally and only send you the public key with 'cbox wg peer add'"
-  echo "[Peer]"
   if [ "$genkey" = "--generate-key" ]; then
     echo "cbox: --generate-key requested - generating a private key for peer '$name' on THIS machine (not the documented preference; the peer generating its own key is preferred)" >&2
-    local tmp_priv tmp_pub key_file
     _cbox_wg_tools_available || { echo "cbox: wireguard-tools ('wg') not found on this host - cannot generate a key" >&2; return 1; }
-    key_file="$(_cbox_wg_dir)/peer-$name.key"
-    tmp_priv="$(wg genkey)"
-    printf '%s\n' "$tmp_priv" | _cbox_wg_write_secret "$key_file"
-    tmp_pub="$(printf '%s' "$tmp_priv" | wg pubkey)"
+    key_file="$(_cbox_wg_peer_key_file "$name")"
+    if [ -e "$key_file" ]; then
+      echo "cbox: refusing - a key file already exists at $key_file for peer '$name' - remove it yourself first if you really mean to replace it (this would invalidate whatever key was handed to '$name' before)" >&2
+      return 1
+    fi
+    local tmp_priv tmp_pub
+    tmp_priv="$(wg genkey)" || { echo "cbox: 'wg genkey' failed - no key was generated or saved" >&2; return 1; }
+    if [ -z "$tmp_priv" ]; then
+      echo "cbox: 'wg genkey' produced no output - no key was generated or saved" >&2
+      return 1
+    fi
+    if ! tmp_pub="$(printf '%s' "$tmp_priv" | wg pubkey)" || [ -z "$tmp_pub" ]; then
+      tmp_priv=""
+      echo "cbox: 'wg pubkey' failed on the generated key - no key was saved" >&2
+      return 1
+    fi
+    if ! printf '%s\n' "$tmp_priv" | _cbox_wg_write_secret "$key_file"; then
+      tmp_priv=""
+      echo "cbox: failed to save the generated private key to $key_file - the key was NOT saved" >&2
+      return 1
+    fi
     tmp_priv=""
-    echo "# generated private key for '$name' saved to $key_file (0600, never printed) -"
-    echo "# move that file to the peer's machine and delete it from here, then put its contents on the PrivateKey line"
-    echo "PrivateKey = <contents of $key_file>"
+    echo "# generated private key for '$name' saved to $key_file (0700 dir, 0600 file, outside the wireguard sidecar mount, never printed) -"
+    echo "# move that file to the peer's machine and delete it from here, then put its contents on the PrivateKey line below"
     echo "# this node's [Peer] entry to use $name's newly generated public key: $tmp_pub"
   fi
+  echo "[Interface]"
+  echo "Address = $paddr"
+  if [ "$genkey" = "--generate-key" ]; then
+    echo "PrivateKey = <contents of $key_file>"
+  else
+    echo "# '$name' uses its own privately generated private key here - this node never sees it"
+  fi
+  echo
+  echo "[Peer]"
   echo "PublicKey = $my_pub"
-  echo "Endpoint = ${endpoint_host}:${CBOX_WG_LISTEN_PORT:-51820}"
+  if [ -n "$pendpoint" ]; then
+    echo "# this node dials '$name' directly at $pendpoint - '$name' does not need this node's Endpoint"
+  else
+    local endpoint_host
+    endpoint_host="${CBOX_WG_PUBLISH_ADDR:-}"
+    if [ -z "$endpoint_host" ] || [ "$endpoint_host" = "0.0.0.0" ]; then
+      echo "Endpoint = <this node's reachable address>:${CBOX_WG_LISTEN_PORT:-51820}"
+    else
+      echo "Endpoint = ${endpoint_host}:${CBOX_WG_LISTEN_PORT:-51820}"
+    fi
+  fi
   if [ -n "${CBOX_WG_ADDRESS:-}" ]; then
     echo "AllowedIPs = ${CBOX_WG_ADDRESS%%/*}/32"
   else
@@ -3330,7 +3413,7 @@ for p in /proc/[0-9]*/exe; do
   if [ -n "$xp" ] && [ "$e" = "$xp" ]; then
     [ -e "$d" ] || continue
     a1="$(tr "\0" "\n" < "$d" 2>/dev/null | sed -n 2p)"
-    case "$a1" in mcp-server) continue ;; esac
+    case "$a1" in mcp-server|app-server) continue ;; esac
     n=$((n+1)); continue
   fi
   case "$e" in
@@ -3365,31 +3448,30 @@ if [ -z "$path" ] || [ ! -x "$path" ]; then
 fi
 case "$tool" in
   codex)
-    argv="${CBOX_PROBE_CODEX_ARGV:-mcp-server}"
+    argv="${CBOX_PROBE_CODEX_ARGV:-app-server}"
     case "$argv" in
-      ''|*[!a-zA-Z0-9_-]*) argv=mcp-server ;;
+      ''|*[!a-zA-Z0-9_-]*) argv=app-server ;;
     esac
     if ! timeout -k 5 "$to" "$path" $argv --help >/dev/null 2>&1; then
-      echo "mcp-server --help failed"
+      echo "app-server --help failed"
       exit 2
     fi
-    init="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"cbox-health-probe\",\"version\":\"1\"}}}"
-    ready="{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"
-    list="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}"
+    init="{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"cbox-health-probe\",\"version\":\"1\"}}}"
+    ready="{\"method\":\"initialized\"}"
     out="$(mktemp)" || { echo "cannot create probe scratch file"; exit 2; }
-    printf "%s\n%s\n%s\n" "$init" "$ready" "$list" | timeout -k 5 "$to" "$path" $argv >"$out" 2>/dev/null
+    printf "%s\n%s\n" "$init" "$ready" | timeout -k 5 "$to" "$path" $argv >"$out" 2>/dev/null
     hrc=$?
     if [ "$hrc" = 124 ]; then
       rm -f "$out"
-      echo "mcp-server handshake timed out"
+      echo "app-server handshake timed out"
       exit 3
     fi
-    if grep -qF developer-instructions "$out"; then
+    if grep -qF userAgent "$out"; then
       rm -f "$out"
       exit 0
     fi
     rm -f "$out"
-    echo "mcp-server handshake: no developer-instructions"
+    echo "app-server handshake: no userAgent"
     exit 2
     ;;
   claude)
@@ -3433,7 +3515,7 @@ import json, sys
 try:
     data = json.load(open(sys.argv[1]))
 except (OSError, ValueError):
-    print("mcp-server")
+    print("app-server")
     sys.exit(0)
 argv0s = set()
 for name, spec in data.items():
@@ -3447,8 +3529,8 @@ for name, spec in data.items():
 if len(argv0s) == 1:
     print(next(iter(argv0s)))
 else:
-    print("mcp-server")
-' "$INSTALL_DIR/etc/mcp/delegates.json" 2>/dev/null || printf 'mcp-server'
+    print("app-server")
+' "$INSTALL_DIR/etc/mcp/delegates.json" 2>/dev/null || printf 'app-server'
 }
 
 _cbox_probe_exes_file() {
@@ -3491,7 +3573,12 @@ _cbox_probe_exes_seed() {
 }
 
 _probe() {
-  local cid="$1" eff="${2:-}" f cp xp
+  local cid="$1" eff="${2:-}" f cp xp running
+  running="$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" || running=""
+  if [ "$running" = false ]; then
+    printf '0'
+    return 0
+  fi
   f="$(_cbox_probe_exes_file "$eff" 2>/dev/null)" || f=""
   if [ -z "$f" ] || [ ! -f "$f" ]; then
     printf 'unknown'
@@ -3744,6 +3831,91 @@ _cbox_rebless_local_templates() {
   )
 }
 
+_cbox_global_drift_truncate() {
+  local v="$1"
+  if [ "${#v}" -gt 60 ]; then
+    printf '%.57s...' "$v"
+  else
+    printf '%s' "$v"
+  fi
+}
+
+_cbox_global_drift_declined_file() {
+  printf '%s/.global_drift_declined' "$1"
+}
+
+_cbox_global_drift_check_interactive() {
+  local eff="$1" root="$2"
+  [ "$HAVE_GLOBAL_CONF" = 1 ] || return 0
+  [ -f "$eff/cbox.base" ] || return 0
+  local now_tmp
+  now_tmp="$(mktemp)"
+  _cbox_conf_kv "$INSTALL_DIR/cbox.conf" "$now_tmp"
+  local -a changed=()
+  local k
+  while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    changed+=("$k")
+  done < <(_cbox_conf_changed_keys "$eff/cbox.base" "$now_tmp")
+  local decl_file
+  decl_file="$(_cbox_global_drift_declined_file "$eff")"
+  if [ "${#changed[@]}" -eq 0 ]; then
+    rm -f "$now_tmp" "$decl_file"
+    return 0
+  fi
+  local ovr_keys
+  ovr_keys=$'\n'
+  while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    ovr_keys="$ovr_keys$k"$'\n'
+  done < <(_cbox_override_keys "$eff")
+  local -a offer=() overridden=()
+  for k in "${changed[@]}"; do
+    case "$ovr_keys" in
+      *$'\n'"$k"$'\n'*) overridden+=("$k") ;;
+      *) offer+=("$k") ;;
+    esac
+  done
+  if [ "${#offer[@]}" -eq 0 ]; then
+    rm -f "$now_tmp"
+    return 0
+  fi
+  local digest
+  digest="$(_cbox_sha256 "$now_tmp")"
+  if [ -f "$decl_file" ] && [ "$(cat "$decl_file" 2>/dev/null)" = "$digest" ]; then
+    rm -f "$now_tmp"
+    return 0
+  fi
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    echo "cbox: global cbox profile changed since $root was derived - re-derive with cbox setup --local $root --from-global to pull it in (project overrides stay)" >&2
+    rm -f "$now_tmp"
+    return 0
+  fi
+  echo "cbox: global cbox profile changed since $root was derived:" >&2
+  local bv gv
+  for k in "${offer[@]}"; do
+    bv="$(grep -m1 "^${k}=" "$eff/cbox.base" 2>/dev/null)"; bv="${bv#*=}"
+    gv="$(grep -m1 "^${k}=" "$now_tmp" 2>/dev/null)"; gv="${gv#*=}"
+    printf '  %s: %s -> %s\n' "$k" "$(_cbox_global_drift_truncate "$bv")" "$(_cbox_global_drift_truncate "$gv")" >&2
+  done
+  if [ "${#overridden[@]}" -gt 0 ]; then
+    printf '  (project overrides %s - kept either way)\n' "${overridden[*]}" >&2
+  fi
+  local ans
+  printf 'Pull these global changes into %s? Project overrides stay. [y/N] ' "$root" >&2
+  read -r ans || ans=n
+  rm -f "$now_tmp"
+  case "$ans" in
+    y|Y)
+      rm -f "$decl_file"
+      _cbox_rebless_local "$root" "$eff" || die "re-bless failed for $root"
+      ;;
+    *)
+      printf '%s\n' "$digest" | _cbox_write "$decl_file"
+      ;;
+  esac
+}
+
 _cbox_manifest_verify_conf_interactive() {
   local eff="$1" root="$2" status ans reason
   status="$(_cbox_manifest_status "$eff" "$root")"
@@ -3782,6 +3954,7 @@ _run_isolated() {
     _first_run_init "$root" "$eff" || return 1
   fi
   _cbox_manifest_verify_conf_interactive "$eff" "$root"
+  _cbox_global_drift_check_interactive "$eff" "$root"
   (
     set -e
     unset CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL CBOX_CODEX_TARGET
@@ -3906,9 +4079,10 @@ down_project() {
 shell_isolated() {
   local eff root rc=0
   eff="$(_project_eff_from_cwd)"
+  root="$(cat "$eff/workspace" 2>/dev/null)" || return 1
+  _cbox_global_drift_check_interactive "$eff" "$root"
   . "$eff/cbox.conf"
   _cbox_load_machine_scoped_vars
-  root="$(cat "$eff/workspace" 2>/dev/null)" || return 1
   exec 8> "$eff/session.lock"
   _cbox_flock -s 8 || { echo "cbox: cannot lock session for $eff" >&2; exec 8>&-; return 1; }
   _clip_bridge_start "$(_cbox_clip_dir "p$(basename "$eff")")"
@@ -3951,12 +4125,26 @@ logs_isolated() {
   _compose_p "$eff" logs "$@"
 }
 
+_cbox_stop_with_sidecars() {
+  local cid="$1" project ids
+  project="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$cid" 2>/dev/null)" || project=""
+  if [ -n "$project" ] && [ "$project" != "<no value>" ] \
+    && printf '%s' "$project" | grep -Eq '^cbox(-p[0-9a-f]{12})?$'; then
+    ids="$(docker ps -q --filter "label=com.docker.compose.project=$project" --filter "label=cbox.kind" 2>/dev/null)" || ids=""
+    if [ -n "$ids" ]; then
+      printf '%s\n' "$ids" | xargs docker stop >/dev/null 2>&1 || true
+      return 0
+    fi
+  fi
+  docker stop "$cid" >/dev/null 2>&1 || true
+}
+
 gc() {
   local cid eff n1 n2
   while IFS="$(printf '\t')" read -r cid eff; do
     [ -n "$cid" ] || continue
     if [ ! -d "$eff" ]; then
-      docker stop "$cid" >/dev/null 2>&1 || true
+      _cbox_stop_with_sidecars "$cid"
       continue
     fi
     exec 9> "$eff/session.lock"
@@ -3972,17 +4160,25 @@ gc() {
       if _cbox_flock -n -x 9; then
         n2="$(_probe "$cid" "$eff" 2>/dev/null)" || n2=unknown
         if [ "$n2" = 0 ]; then
-          _compose_p "$eff" down --remove-orphans >/dev/null 2>&1 || docker stop "$cid" >/dev/null 2>&1 || true
+          _compose_p "$eff" down --remove-orphans >/dev/null 2>&1 || _cbox_stop_with_sidecars "$cid"
         fi
       fi
     fi
     exec 9>&-
   done < <(docker ps --filter label=cbox.kind=isolated --format '{{.ID}}'$'\t''{{.Label "cbox.effdir"}}')
-  local _cbox_gc_exited_ids
-  _cbox_gc_exited_ids="$(docker ps -a --filter label=cbox.kind=isolated --filter status=exited -q)"
-  if [ -n "$_cbox_gc_exited_ids" ]; then
-    printf '%s\n' "$_cbox_gc_exited_ids" | xargs docker rm >/dev/null 2>&1 || true
-  fi
+  local _cbox_gc_exited_cid _cbox_gc_exited_eff
+  while IFS="$(printf '\t')" read -r _cbox_gc_exited_cid _cbox_gc_exited_eff; do
+    [ -n "$_cbox_gc_exited_cid" ] || continue
+    if [ -z "$_cbox_gc_exited_eff" ] || [ ! -d "$_cbox_gc_exited_eff" ]; then
+      docker rm "$_cbox_gc_exited_cid" >/dev/null 2>&1 || true
+      continue
+    fi
+    exec 9> "$_cbox_gc_exited_eff/session.lock"
+    if _cbox_flock -n -x 9; then
+      docker rm "$_cbox_gc_exited_cid" >/dev/null 2>&1 || true
+    fi
+    exec 9>&-
+  done < <(docker ps -a --filter label=cbox.kind=isolated --filter status=exited --format '{{.ID}}'$'\t''{{.Label "cbox.effdir"}}')
   _cbox_ollama_gc_scope_networks
   _cbox_gc_orphan_proxy_networks
   _gc_legacy_bins_volumes
@@ -4239,6 +4435,22 @@ restart_isolated() {
   echo "cbox: restart: the project container for $root is down; the next 'cbox run <engine>' recreates it with the current configuration" >&2
 }
 
+_cbox_netaccess_shell_ensure() {
+  _cbox_netaccess_active || return 0
+  local container_id
+  container_id="$("${COMPOSE[@]}" ps -q proxy 2>/dev/null | head -n1)" || container_id=""
+  if [ -z "$container_id" ]; then
+    if "${COMPOSE[@]}" up -d proxy >/dev/null 2>&1; then
+      _cbox_netaccess_apply_global || echo "cbox: netaccess: proxy started but applying the granted networks failed - check 'cbox logs proxy' and 'cbox netaccess status'" >&2
+    else
+      echo "cbox: netaccess: could not start the stopped proxy - network access inside this shell may be unavailable; try 'cbox run'" >&2
+    fi
+    return 0
+  fi
+  _cbox_netaccess_render "$container_id" "$INSTALL_DIR/generated/proxy" netmap-only \
+    || echo "cbox: netaccess: netmap refresh failed - the map served at /etc/cbox/net may be stale; try 'cbox netaccess status'" >&2
+}
+
 shell() {
   local workspace_root
   require_global_conf
@@ -4251,6 +4463,7 @@ shell() {
     exec 8>&-
     return 1
   }
+  _cbox_netaccess_shell_ensure
   _cbox_netaccess_socks_exec_env
   exec "${COMPOSE[@]}" exec -it "${CBOX_CONTAINER_EXEC_ENV[@]}" "${CBOX_SOCKS_EXEC_ENV[@]}" "$SERVICE" /entrypoint.sh bash
 }
@@ -4263,7 +4476,7 @@ logs() {
 install_hooks() {
   require_global_conf
   [ -t 0 ] || { echo "cbox: install-hooks requires a TTY"; return 1; }
-  local files=(codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py orchestrator-global.txt conduct-kernel.txt session-core.txt codex_scope.container.json ask_claude_mcp.py codex_notify.py codex_bump_probe.sh codex_mcp_shim.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py continuity_session_start.py session_scope_farm.py limit_watchdog.py session_pane_map.py)
+  local files=(codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py orchestrator-global.txt conduct-kernel.txt session-core.txt codex_scope.container.json ask_claude_mcp.py codex_notify.py codex_bump_probe.sh codex_mcp_shim.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py continuity_session_start.py session_scope_farm.py limit_watchdog.py session_pane_map.py usage_statusline.py cbox_budget.py)
   local srcs=(
     "$INSTALL_DIR/etc/hooks/codex_mode_guard.py"
     "$INSTALL_DIR/etc/hooks/agent_label_guard.py"
@@ -4284,6 +4497,8 @@ install_hooks() {
     "$INSTALL_DIR/etc/hooks/session_scope_farm.py"
     "$INSTALL_DIR/etc/hooks/limit_watchdog.py"
     "$INSTALL_DIR/etc/hooks/session_pane_map.py"
+    "$INSTALL_DIR/etc/hooks/usage_statusline.py"
+    "$INSTALL_DIR/etc/hooks/cbox_budget.py"
   )
   local s f i stage target ans changed=0
   for s in "${srcs[@]}"; do
@@ -4629,14 +4844,14 @@ verify() {
     v_fail "stamp missing or want '${got:-}' != pin '$want'"
   fi
 
-  v_t "Codex MCP contract exposes developer-instructions"
+  v_t "Codex app-server contract exposes userAgent"
   if "${X[@]}" env \
     CBOX_HEALTH_SH="$_CBOX_HEALTH_SH" \
     CBOX_PROBE_CODEX_ARGV="$(_cbox_probe_codex_argv)" \
     sh -c 'p="$(command -v codex)" && sh -c "$CBOX_HEALTH_SH" cbox-health-probe health codex "$p"'; then
     v_ok
   else
-    v_fail "Codex MCP contract broken: developer-instructions not found"
+    v_fail "Codex app-server contract broken: userAgent not found"
     exit 1
   fi
 
@@ -4796,14 +5011,14 @@ case "$("$p" --version 2>&1)" in *"$v"*) exit 0;; *) exit 1;; esac
   if [ -z "$gitws" ]; then
     v_skip "no git work-tree among workspaces"
   else
-    printf -v payload '{"tool_name":"mcp__codex-terra__codex","permission_mode":"auto","tool_input":{"cwd":"%s","sandbox":"danger-full-access","approval-policy":"never"}}' "$gitws"
+    printf -v payload '{"tool_name":"mcp__codex-astra__codex","permission_mode":"auto","tool_input":{"cwd":"%s","sandbox":"danger-full-access","approval-policy":"never"}}' "$gitws"
     rc=0
     printf '%s' "$payload" | "${COMPOSE[@]}" exec -T "$SERVICE" /entrypoint.sh sh -c 'CODEX_GUARD_CONFIG="$HOME/.claude/hooks/codex_scope.container.json" python3 "$HOME/.claude/hooks/codex_mode_guard.py"' >/dev/null 2>&1 || rc=$?
     if [ "$rc" -eq 0 ]; then v_ok "$gitws"; else v_fail "exit $rc"; fi
   fi
 
   v_t "guard denies out-of-scope cwd (git gate)"
-  payload='{"tool_name":"mcp__codex-terra__codex","permission_mode":"bypassPermissions","tool_input":{"cwd":"/etc","sandbox":"danger-full-access","approval-policy":"never"}}'
+  payload='{"tool_name":"mcp__codex-astra__codex","permission_mode":"bypassPermissions","tool_input":{"cwd":"/etc","sandbox":"danger-full-access","approval-policy":"never"}}'
   rc=0
   printf '%s' "$payload" | "${COMPOSE[@]}" exec -T "$SERVICE" /entrypoint.sh sh -c 'CODEX_GUARD_CONFIG="$HOME/.claude/hooks/codex_scope.container.json" python3 "$HOME/.claude/hooks/codex_mode_guard.py"' >/dev/null 2>&1 || rc=$?
   if [ "$rc" -eq 2 ]; then v_ok; else v_fail "exit $rc, expected 2"; fi
@@ -5170,6 +5385,30 @@ _cbox_verify_engines_registry() {
       v_ok
     else
       v_fail "probe literals absent from _CBOX_PROBE_SH:${cp_missing}"
+    fi
+  fi
+
+  v_t "engines registry: exe-stamp infra_filter_argv1 literals appear verbatim in the _CBOX_PROBE_SH heredoc"
+  if [ ! -f "$cbox_self" ]; then
+    v_skip "cbox script not present at $cbox_self (host-side check)"
+  else
+    local es_probe_kind es_missing="" es_none=1 es_argv1_json es_argv1_item
+    for name in $names; do
+      es_probe_kind="$(python3 "$py" get "$reg" "$name" probe.kind 2>/dev/null)" || es_probe_kind=""
+      [ "$es_probe_kind" = "exe-stamp" ] || continue
+      es_argv1_json="$(python3 "$py" get "$reg" "$name" probe.infra_filter_argv1 2>/dev/null)" || es_argv1_json=""
+      [ -n "$es_argv1_json" ] || continue
+      es_none=0
+      for es_argv1_item in $(printf '%s' "$es_argv1_json" | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)))' 2>/dev/null); do
+        grep -qF -- "$es_argv1_item" "$cbox_self" || es_missing="$es_missing $name.infra_filter_argv1:$es_argv1_item"
+      done
+    done
+    if [ "$es_none" = 1 ]; then
+      v_skip "no exe-stamp engines declare infra_filter_argv1"
+    elif [ -z "$es_missing" ]; then
+      v_ok
+    else
+      v_fail "infra_filter_argv1 literals absent from _CBOX_PROBE_SH:${es_missing}"
     fi
   fi
 
@@ -5822,6 +6061,11 @@ doctor() {
     else
       _cbox_doctor_row "container-exec" OFF "no scoped host exec bridge in this session"
     fi
+    if [ -f /etc/cbox/net/netmap.json ]; then
+      _cbox_doctor_row "cbox-net" ACTIVE "network map present at /etc/cbox/net/netmap.json"
+    else
+      _cbox_doctor_row "cbox-net" OFF "no network map in this session - see: cbox netaccess status"
+    fi
     _cbox_doctor_row "hostroute" HOST-CHECK "host forward-proxy route decided host-side"
     _cbox_doctor_row "gpu" HOST-CHECK "CDI/nvidia-ctk wiring decided host-side"
     _cbox_doctor_row "ssh" HOST-CHECK "agent-forward/keys mount decided host-side"
@@ -5849,6 +6093,11 @@ doctor() {
       _cbox_doctor_row "container-exec" CONFIG-ONLY "host bridge is session-bound; explicit networks=[${CBOX_NETACCESS_NETWORKS:-}], workspace-guard=${CBOX_NETACCESS_EXEC_WORKSPACE_GUARD:-off}"
     else
       _cbox_doctor_row "container-exec" OFF "CBOX_NETACCESS_EXEC_MODE=${CBOX_NETACCESS_EXEC_MODE:-off}"
+    fi
+    if _cbox_netaccess_active; then
+      _cbox_doctor_row "cbox-net" CONFIG-ONLY "netaccess active - the cbox-net MCP tool renders for claude, codex and hermes"
+    else
+      _cbox_doctor_row "cbox-net" OFF "netaccess is off - the cbox-net MCP tool is not rendered"
     fi
     local hostroute_detail_suffix=""
     if [ "${CBOX_HOST_GATEWAY_ALIAS:-off}" = on ] && _cbox_is_rootless_docker; then
@@ -5891,7 +6140,7 @@ doctor() {
   elif [ "${CBOX_LOCAL_MODEL:-off}" = on ]; then
     _cbox_doctor_row "local-model" CONFIG-ONLY "CBOX_LOCAL_MODEL=on but CBOX_LOCAL_MODEL_URL or CBOX_LOCAL_MODEL_NAME unset - delegate absent from render"
   else
-    _cbox_doctor_row "local-model" OFF "CBOX_LOCAL_MODEL unset or off (default) - see cbox/etc/docs/LOCAL_MODEL_RUNBOOK.md"
+    _cbox_doctor_row "local-model" OFF "CBOX_LOCAL_MODEL unset or off (default) - see cbox/docs/LOCAL_MODEL_RUNBOOK.md"
   fi
 
   if [ "${CBOX_CONTAINER_EXEC_TOOL:-off}" = on ]; then
@@ -5953,23 +6202,41 @@ doctor() {
   if [ "${CBOX_HERMES_DELEGATE:-off}" = on ]; then
     if [ "${CBOX_HERMES:-off}" != on ]; then
       _cbox_doctor_row "hermes-delegate" CONFIG-ONLY "CBOX_HERMES_DELEGATE=on but CBOX_HERMES != on - the delegate requires the hermes console engine"
+      _cbox_doctor_row "hermes-agent" CONFIG-ONLY "CBOX_HERMES_DELEGATE=on but CBOX_HERMES != on - hermes-local tool not rendered yet, agent file check not applicable"
     else
-      local hd_seed
+      local hd_seed ha_dir
       if [ "${CBOX_CLAUDE_MODE:-mount}" = mount ]; then
         hd_seed="$INSTALL_DIR/generated/claude-config/.claude.json"
       else
         hd_seed="$INSTALL_DIR/generated/state/claude.json"
       fi
       if [ "$in_container" = 1 ]; then
+        ha_dir="$claude_dir/agents"
+      else
+        ha_dir="${CBOX_CLAUDE_PATH:-$home/.claude}/agents"
+      fi
+      if [ "$in_container" = 1 ]; then
         _cbox_doctor_row "hermes-delegate" ACTIVE "CBOX_HERMES_DELEGATE=on, CBOX_HERMES=on"
+        if [ -f "$ha_dir/hermes-local.md" ]; then
+          _cbox_doctor_row "hermes-agent" ACTIVE "hermes-local.md present in $ha_dir"
+        else
+          _cbox_doctor_row "hermes-agent" CONFIG-ONLY "CBOX_HERMES_DELEGATE=on but $ha_dir/hermes-local.md missing - run cbox setup update agents"
+        fi
       elif [ -f "$hd_seed" ] && grep -q '"hermes-local"' "$hd_seed" 2>/dev/null; then
         _cbox_doctor_row "hermes-delegate" ACTIVE "CBOX_HERMES_DELEGATE=on, hermes-local present in the rendered seed"
+        if [ -f "$ha_dir/hermes-local.md" ]; then
+          _cbox_doctor_row "hermes-agent" ACTIVE "hermes-local.md present in $ha_dir"
+        else
+          _cbox_doctor_row "hermes-agent" CONFIG-ONLY "CBOX_HERMES_DELEGATE=on, hermes-local tool rendered but $ha_dir/hermes-local.md missing - run cbox setup update agents"
+        fi
       else
         _cbox_doctor_row "hermes-delegate" CONFIG-ONLY "CBOX_HERMES_DELEGATE=on but hermes-local absent from the rendered seed - regenerate (cbox up or cbox setup update hermes-delegate)"
+        _cbox_doctor_row "hermes-agent" CONFIG-ONLY "CBOX_HERMES_DELEGATE=on but hermes-local tool not yet rendered - resolve hermes-delegate first"
       fi
     fi
   else
     _cbox_doctor_row "hermes-delegate" OFF "CBOX_HERMES_DELEGATE unset or off (default)"
+    _cbox_doctor_row "hermes-agent" OFF "CBOX_HERMES_DELEGATE unset or off (default)"
   fi
 
   if [ "$in_container" = 1 ]; then

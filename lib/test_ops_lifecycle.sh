@@ -36,6 +36,8 @@ RHB_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _resolve_hermes_bin)"
 HHASH_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _hermes_hash)"
 RHI_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _run_hermes_install)"
 CUP_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_compose_up)"
+WAITREM_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_compose_up_wait_removed)"
+RMIDS_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_compose_removing_ids)"
 CDIG_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_compose_files_digest)"
 RIB_FN="$(_extract_fn "$INSTALL_DIR/cbox" reinstall_bins)"
 BCR_FN="$(_extract_fn "$INSTALL_DIR/cbox" _bins_conflict_report)"
@@ -60,6 +62,8 @@ done
 [ -n "$EOFF_FN" ] || _fail "cannot extract _engine_autoupdate_off"
 [ -n "$INST_FN" ] || _fail "cannot extract _install_one"
 [ -n "$CUP_FN" ] || _fail "cannot extract _cbox_compose_up"
+[ -n "$WAITREM_FN" ] || _fail "cannot extract _cbox_compose_up_wait_removed"
+[ -n "$RMIDS_FN" ] || _fail "cannot extract _cbox_compose_removing_ids"
 [ -n "$CDIG_FN" ] || _fail "cannot extract _cbox_compose_files_digest"
 [ -n "$RIB_FN" ] || _fail "cannot extract reinstall_bins"
 [ -n "$BCR_FN" ] || _fail "cannot extract _bins_conflict_report"
@@ -521,6 +525,86 @@ FORCE_OUT="$FORCE_OUT" TMPBASE="$TMPBASE" INSTALL_DIR="$INSTALL_DIR" bash -c '
 grep -qx 'up -d --force-recreate' "$FORCE_OUT" || _fail "compose: managed-settings repair must force recreate"
 _ok "compose: managed-settings repair forces recreation"
 
+run_compose_up_retry() {
+  local scenario="$1" out
+  local calls="$TMPBASE/cup-$scenario.calls"
+  local stamp="$TMPBASE/cup-$scenario.stamp"
+  rm -f "$calls" "$stamp"
+  out="$(INSTALL_DIR="$INSTALL_DIR" CALLS="$calls" SCENARIO="$scenario" bash -c '
+    set -u
+    source "$INSTALL_DIR/lib/portable.sh"
+    '"$CDIG_FN"'
+    '"$RMIDS_FN"'
+    '"$WAITREM_FN"'
+    '"$CUP_FN"'
+    sleep() { :; }
+    docker() {
+      case "$1" in
+        ps)
+          case "$*" in
+            *status=removing*) [ "$SCENARIO" = unrelated ] || printf "deadbeef\n" ;;
+          esac
+          return 0 ;;
+        inspect) return 1 ;;
+      esac
+      return 0
+    }
+    fake_compose() {
+      case "$1" in
+        config) printf "{\"name\": \"cbox-ptest\"}\n"; return 0 ;;
+        ps) printf "cid\n"; return 0 ;;
+        up)
+          local n
+          n="$(cat "$CALLS" 2>/dev/null || echo 0)"
+          n=$((n + 1))
+          echo "$n" > "$CALLS"
+          case "$SCENARIO" in
+            recovers)
+              if [ "$n" = 1 ]; then
+                echo "Error response from daemon: container is marked for removal and cannot be started" >&2
+                return 1
+              fi
+              return 0
+              ;;
+            persistent)
+              echo "Error response from daemon: container is marked for removal and cannot be started" >&2
+              return 1
+              ;;
+            unrelated)
+              echo "Error response from daemon: pull access denied for cbox-img" >&2
+              return 1
+              ;;
+          esac
+          ;;
+      esac
+      return 0
+    }
+    _cbox_compose_up "'"$stamp"'" fake_compose
+    echo "RC=$?"
+  ' cupretry 2>&1)"
+  printf '%s' "$out"
+}
+
+OUT="$(run_compose_up_retry recovers)"
+printf '%s\n' "$OUT" | grep -q "RC=0" || _fail "compose retry: a removal-in-progress failure that clears must end in success (got: $OUT)"
+[ "$(cat "$TMPBASE/cup-recovers.calls")" = 2 ] || _fail "compose retry: must call up exactly twice when the first attempt hits removal-in-progress"
+[ -f "$TMPBASE/cup-recovers.stamp" ] || _fail "compose retry: a recovered up must still write the compose digest stamp"
+_ok "compose retry: 'marked for removal' failure is retried once and succeeds"
+
+OUT="$(run_compose_up_retry persistent)"
+printf '%s\n' "$OUT" | grep -q "RC=0" && _fail "compose retry: a persistently failing up must not be reported as success (got: $OUT)"
+[ "$(cat "$TMPBASE/cup-persistent.calls")" = 2 ] || _fail "compose retry: a persistent removal-in-progress failure must retry exactly once (bounded), not loop"
+[ ! -f "$TMPBASE/cup-persistent.stamp" ] || _fail "compose retry: a failed up must not write the compose digest stamp"
+_ok "compose retry: bounded to exactly one retry, never an infinite loop"
+
+OUT="$(run_compose_up_retry unrelated)"
+[ "$(cat "$TMPBASE/cup-unrelated.calls")" = 1 ] || _fail "compose retry: an unrelated up failure must not trigger the removal-wait retry"
+_ok "compose retry: an unrelated failure is not mistaken for a removal race"
+if printf '%s\n' "$CUP_FN" | grep -qE 'up -d[^|]*2>'; then
+  _fail "compose retry: compose up stderr must stream to the terminal, not be captured into a file"
+fi
+_ok "compose retry: compose up output is streamed live (progress animation intact)"
+
 RIB_INST="$TMPBASE/rib-install"
 mkdir -p "$RIB_INST"
 : > "$RIB_INST/image.inputs"
@@ -684,5 +768,40 @@ _ok "start fallback: exact codex pin stays fail-closed"
 
 run_start_fallback_env codex stable latest 1 >/dev/null && _fail "start fallback: a missing binary must stay fail-closed even on a channel want"
 _ok "start fallback: missing binary stays fail-closed"
+
+run_start_fallback_path_mismatch() {
+  local tool="$1" want="$2" cur_path="$3" resolved_path="$4"
+  bash -c '
+    set -eu
+    tool="$1"; want="$2"; cur_path="$3"; resolved_path="$4"
+    CLROOT=/fake-clroot
+    CXPKG=/fake-cxpkg
+    CBOX_CLAUDE_TARGET="$want"
+    CBOX_CODEX_VERSION="$want"
+    '"$BCW_FN"'
+    '"$BSF_FN"'
+    _resolve_bin() { printf "%s" "$resolved_path"; }
+    _stamp_field() {
+      case "$2" in
+        1) printf "%s" "$want" ;;
+        2) printf "%s" "$cur_path" ;;
+      esac
+    }
+    _want_compat() { printf "%s" "$2"; }
+    _bins_start_fallback "$tool"
+  ' bsfpm "$tool" "$want" "$cur_path" "$resolved_path" 2>"$TMPBASE/bsf-pm.stderr"
+}
+
+OUT="$(run_start_fallback_path_mismatch claude latest /old/claude /new/claude)" || _fail "start fallback: a resolved-path divergence with a matching want must still fall back"
+[ "$OUT" = "/new/claude" ] || _fail "start fallback: must print the resolved (new) path, not the stamped one (got '$OUT')"
+grep -q "resolved binary /new/claude differs from the stamped path /old/claude" "$TMPBASE/bsf-pm.stderr" \
+  || _fail "start fallback: must name both paths when the divergence is not a want mismatch (got: $(cat "$TMPBASE/bsf-pm.stderr"))"
+grep -q "but this project wants" "$TMPBASE/bsf-pm.stderr" && _fail "start fallback: must not claim a want mismatch when cur already equals want (got: $(cat "$TMPBASE/bsf-pm.stderr"))"
+_ok "start fallback: resolved-path-differs-from-stamp is reported by its real cause, not mislabeled as a want mismatch"
+
+OUT="$(run_start_fallback_path_mismatch claude latest "" /new/claude)" || _fail "start fallback: a stamp with no recorded path must still fall back"
+grep -q "no resolved binary path recorded" "$TMPBASE/bsf-pm.stderr" \
+  || _fail "start fallback: an empty stamped path must say so, not claim a want mismatch (got: $(cat "$TMPBASE/bsf-pm.stderr"))"
+_ok "start fallback: empty stamped path is reported by its real cause"
 
 echo "PASS: ops lifecycle"

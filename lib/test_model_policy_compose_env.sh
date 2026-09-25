@@ -20,7 +20,7 @@ python3 - "$INSTALL_DIR/etc/claude/settings.merge.json" <<'PY' || _fail "setting
 import json, sys
 env = json.load(open(sys.argv[1]))["env"]
 assert env["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "claude-fable-5[1m]", env
-assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "claude-opus-5[1m]", env
+assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "claude-opus-5-5[1m]", env
 assert "fable-5-1" in env["CBOX_AGENT_MODEL_BAN"], env
 assert "opus-4" in env["CBOX_AGENT_MODEL_DENY"], env
 PY
@@ -62,7 +62,7 @@ check_file() {
   local f="$1" label="$2"
   grep -qF "      - 'ANTHROPIC_DEFAULT_FABLE_MODEL=claude-fable-5[1m]'" "$f" \
     || _fail "$label: ANTHROPIC_DEFAULT_FABLE_MODEL missing from the container environment"
-  grep -qF "      - 'ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5[1m]'" "$f" \
+  grep -qF "      - 'ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5-5[1m]'" "$f" \
     || _fail "$label: ANTHROPIC_DEFAULT_OPUS_MODEL missing from the container environment"
   grep -qF "      - 'CBOX_AGENT_MODEL_BAN=fable-5-1'" "$f" \
     || _fail "$label: CBOX_AGENT_MODEL_BAN missing from the container environment"

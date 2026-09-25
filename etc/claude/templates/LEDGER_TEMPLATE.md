@@ -7,6 +7,7 @@ Standalone norm (no dependency on any specific project). Applies to `.cbox/LEDGE
 - **Top = now.** The latest state always on top; older waves further down.
 - **Three permanent sections:** **STATE** (done and verified), **OPEN QUEUE** (in progress / PENDING / HELD), **WAITING-ON-USER** (needs a user decision or action).
 - **Facts anchored.** Every accept carries a commit hash and evidence (gate, test, verify output). No evidence = PENDING.
+- **Rulings marked.** A resolved ambiguity or an owner-only safe default an agent picked on its own is a line `!!! <what was decided> - <why> - <cost if wrong>`, kept next to the item it affects.
 - **RESUME safeguard.** A "NEW SESSION - RESUME HERE" block on top with the exact first move.
 
 ## Item states

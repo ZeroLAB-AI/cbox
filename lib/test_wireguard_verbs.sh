@@ -20,6 +20,7 @@ _ok "bash -n clean on cbox and templates/generators.sh"
 
 VALID_PUBKEY="aRcYqQIm9uH5B9V0IEQKddz3nO2FnHOEcYcQ0YQnMBs="
 OTHER_PUBKEY="cRcYqQIm9uH5B9V0IEQKddz3nO2FnHOEcYcQ0YQnMBs="
+THIRD_PUBKEY="dRcYqQIm9uH5B9V0IEQKddz3nO2FnHOEcYcQ0YQnMBs="
 
 grep -q 'wg) shift; wg_cmd "\$@";;' "$INSTALL_DIR/cbox" || _fail "wg verb not wired into the dispatcher"
 grep -q 'wg {status|up|down|keygen|peer {add|rm|list|config}}' "$INSTALL_DIR/cbox" || _fail "wg missing from usage text"
@@ -209,6 +210,127 @@ grep -q 'AllowedIPs = 10.90.0.1/32' "$TMPBASE/peerconfig.out" || _fail "peer con
 grep -q 'Endpoint = 203.0.113.9:51820' "$TMPBASE/peerconfig.out" || _fail "peer config live run: missing this node's endpoint"
 ! grep -qi 'PrivateKey' "$TMPBASE/peerconfig.out" || _fail "peer config live run (no --generate-key): must never print a private key"
 _ok "peer config output (live run): contains the public key, endpoint, and this node's tunnel /32 as AllowedIPs; never a private key when --generate-key is not passed"
+
+CFGHOME3="$TMPBASE/config-out3"
+mkdir -p "$CFGHOME3"
+(
+  set -e
+  cd "$TMPBASE"
+  source "$INSTALL_DIR/templates/generators.sh"
+  eval "$PEER_CONFIG_CMD_FN"
+  export HOME="$CFGHOME3"
+  export PATH="$WGBINDIR:$PATH"
+  _cbox_wg_ensure_keys
+  _cbox_wg_peer_add laptop "$VALID_PUBKEY" "10.90.0.3/32"
+  _cbox_wg_peer_add desktop "$OTHER_PUBKEY" "10.90.0.4/32"
+  export CBOX_WG_PUBLISH_ADDR=203.0.113.9 CBOX_WG_LISTEN_PORT=51820 CBOX_WG_KEEPALIVE=25 CBOX_WG_ADDRESS=10.90.0.1/24
+  _cbox_wg_peer_config_cmd laptop --generate-key > "$TMPBASE/peerconfig-genkey.out" 2> "$TMPBASE/peerconfig-genkey.err"
+)
+KEYFILE3="$CFGHOME3/.config/cbox/infra/wireguard-peer-keys/peer-laptop.key"
+GENKEY_STUB="cGwWRIbAQD8FKgYYs8gyRcgJelPeQ7WPfFdBIRO4EEo="
+! grep -q "$GENKEY_STUB" "$TMPBASE/peerconfig-genkey.out" \
+  || _fail "peer config --generate-key must never print the generated private key to stdout"
+! grep -q "$GENKEY_STUB" "$TMPBASE/peerconfig-genkey.err" \
+  || _fail "peer config --generate-key must never print the generated private key to stderr"
+[ -f "$KEYFILE3" ] || _fail "peer config --generate-key did not write the private key file"
+[ "$(stat -c '%a' "$KEYFILE3")" = 600 ] || _fail "peer config --generate-key key file must be mode 600"
+[ ! -e "$CFGHOME3/.config/cbox/infra/wireguard/peer-laptop.key" ] \
+  || _fail "peer config --generate-key must not write the key inside the sidecar-mounted wireguard directory"
+_ok "peer config --generate-key: private key never on stdout/stderr, saved 0600 outside the sidecar mount"
+
+IFACE_LINE="$(grep -n '^\[Interface\]$' "$TMPBASE/peerconfig-genkey.out" | head -1 | cut -d: -f1)"
+PEER_LINE="$(grep -n '^\[Peer\]$' "$TMPBASE/peerconfig-genkey.out" | head -1 | cut -d: -f1)"
+[ -n "$IFACE_LINE" ] && [ -n "$PEER_LINE" ] && [ "$IFACE_LINE" -lt "$PEER_LINE" ] \
+  || _fail "peer config output must have an [Interface] block before the [Peer] block"
+grep -q '^Address = 10.90.0.3/32$' "$TMPBASE/peerconfig-genkey.out" \
+  || _fail "peer config [Interface] Address must be the peer's own tunnel address, not this node's"
+grep -q '^AllowedIPs = 10.90.0.1/32$' "$TMPBASE/peerconfig-genkey.out" \
+  || _fail "peer config [Peer] AllowedIPs must remain this node's own tunnel address as /32"
+grep -q "^PrivateKey = <contents of $KEYFILE3>$" "$TMPBASE/peerconfig-genkey.out" \
+  || _fail "peer config --generate-key must point to the saved key file as a placeholder, never inline the key"
+_ok "peer config output: [Interface] precedes [Peer], Address is the peer's own address, PrivateKey is a file placeholder"
+
+if (
+  cd "$TMPBASE"
+  source "$INSTALL_DIR/templates/generators.sh"
+  eval "$PEER_CONFIG_CMD_FN"
+  export HOME="$CFGHOME3"
+  export PATH="$WGBINDIR:$PATH"
+  export CBOX_WG_PUBLISH_ADDR=203.0.113.9 CBOX_WG_LISTEN_PORT=51820 CBOX_WG_KEEPALIVE=25 CBOX_WG_ADDRESS=10.90.0.1/24
+  _cbox_wg_peer_config_cmd laptop --generate-key
+) >/dev/null 2>"$TMPBASE/peerconfig-genkey-dup.err"; then
+  _fail "peer config --generate-key must refuse to overwrite an existing key file"
+fi
+grep -qi 'already exists' "$TMPBASE/peerconfig-genkey-dup.err" \
+  || _fail "peer config --generate-key overwrite refusal must explain why"
+_ok "peer config --generate-key: refuses to overwrite an existing key file for the same peer"
+
+(
+  set -e
+  cd "$TMPBASE"
+  source "$INSTALL_DIR/templates/generators.sh"
+  eval "$PEER_CONFIG_CMD_FN"
+  export HOME="$CFGHOME3"
+  export PATH="$WGBINDIR:$PATH"
+  export CBOX_WG_PUBLISH_ADDR=203.0.113.9 CBOX_WG_LISTEN_PORT=51820 CBOX_WG_KEEPALIVE=25
+  unset CBOX_WG_ADDRESS
+  _cbox_wg_peer_config_cmd desktop > "$TMPBASE/peerconfig-noaddr.out" 2>&1
+)
+grep -q "AllowedIPs = <this node's tunnel address>/32" "$TMPBASE/peerconfig-noaddr.out" \
+  || _fail "peer config with an empty CBOX_WG_ADDRESS must print a placeholder AllowedIPs, not blank"
+_ok "peer config: empty CBOX_WG_ADDRESS renders an AllowedIPs placeholder"
+
+(
+  set -e
+  cd "$TMPBASE"
+  source "$INSTALL_DIR/templates/generators.sh"
+  eval "$PEER_CONFIG_CMD_FN"
+  export HOME="$CFGHOME3"
+  export PATH="$WGBINDIR:$PATH"
+  export CBOX_WG_PUBLISH_ADDR=203.0.113.9 CBOX_WG_LISTEN_PORT=51820 CBOX_WG_KEEPALIVE=25 CBOX_WG_ADDRESS=10.90.0.1
+  _cbox_wg_peer_config_cmd desktop > "$TMPBASE/peerconfig-noprefix.out" 2>&1
+)
+grep -q '^AllowedIPs = 10.90.0.1/32$' "$TMPBASE/peerconfig-noprefix.out" \
+  || _fail "peer config with CBOX_WG_ADDRESS carrying no /prefix must still render a clean /32 AllowedIPs"
+_ok "peer config: CBOX_WG_ADDRESS without a /prefix still renders AllowedIPs as a clean /32"
+
+(
+  set -e
+  cd "$TMPBASE"
+  source "$INSTALL_DIR/templates/generators.sh"
+  eval "$PEER_CONFIG_CMD_FN"
+  export HOME="$CFGHOME3"
+  export PATH="$WGBINDIR:$PATH"
+  export CBOX_WG_PUBLISH_ADDR=0.0.0.0 CBOX_WG_LISTEN_PORT=51820 CBOX_WG_KEEPALIVE=25 CBOX_WG_ADDRESS=10.90.0.1/24
+  _cbox_wg_peer_config_cmd desktop > "$TMPBASE/peerconfig-0000.out" 2>&1
+)
+grep -q '^Endpoint = <this node.s reachable address>:51820$' "$TMPBASE/peerconfig-0000.out" \
+  || _fail "peer config with CBOX_WG_PUBLISH_ADDR=0.0.0.0 must render an Endpoint placeholder, not 0.0.0.0"
+_ok "peer config: CBOX_WG_PUBLISH_ADDR=0.0.0.0 renders an Endpoint placeholder"
+
+(
+  set -e
+  cd "$TMPBASE"
+  source "$INSTALL_DIR/templates/generators.sh"
+  eval "$PEER_CONFIG_CMD_FN"
+  export HOME="$CFGHOME3"
+  export PATH="$WGBINDIR:$PATH"
+  export CBOX_WG_PUBLISH_ADDR=203.0.113.9 CBOX_WG_LISTEN_PORT=51820 CBOX_WG_KEEPALIVE=25 CBOX_WG_ADDRESS=10.90.0.1/24
+  _cbox_wg_peer_add tablet "$THIRD_PUBKEY" "10.90.0.6/32" 198.51.100.7:51820
+  _cbox_wg_peer_config_cmd tablet > "$TMPBASE/peerconfig-client.out" 2>&1
+)
+! grep -q '^Endpoint = ' "$TMPBASE/peerconfig-client.out" \
+  || _fail "peer config for a client-role peer (this node dials it) must omit the Endpoint line"
+_ok "peer config: a client-role peer (registered with its own endpoint) gets no Endpoint line"
+
+(
+  set -e
+  source "$INSTALL_DIR/templates/generators.sh"
+  export HOME="$CFGHOME3"
+  _cbox_wg_peer_remove laptop
+)
+[ ! -e "$KEYFILE3" ] || _fail "peer rm did not remove the peer's saved key file"
+_ok "peer rm: also removes the peer's saved key file"
 
 for fn in _cbox_wg_status_cmd _cbox_wg_up_cmd _cbox_wg_down_cmd _cbox_wg_keygen_cmd _cbox_wg_peer_add_cmd _cbox_wg_peer_rm_cmd _cbox_wg_peer_list_cmd _cbox_wg_peer_config_cmd; do
   grep -q "^$fn() {" "$INSTALL_DIR/cbox" || _fail "expected implementation function $fn missing"

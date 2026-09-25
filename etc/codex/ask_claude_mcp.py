@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
+import collections
 import hashlib
 import json
 import os
+import queue
 import re
+import select
+import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 
 SERVER_NAME = "cbox-ask-claude"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.3.0"
 DEFAULT_PROTOCOL = "2024-11-05"
 DEPTH_VAR = "CBOX_DELEGATION_DEPTH"
 LEGACY_DEPTH_VAR = "CBOX_MCP_DEPTH"
@@ -37,6 +43,18 @@ MODE_PROMPT = {
     "plan": ("You are in plan mode: produce an implementation plan only, "
              "make no modifications."),
 }
+
+KILL_GRACE_SEC = 3
+PROGRESS_MIN_GAP_SEC = 5
+PROGRESS_INTERVAL_ENV = "ASK_CLAUDE_PROGRESS_INTERVAL_SEC"
+DEFAULT_PROGRESS_INTERVAL_SEC = 30.0
+CANCELLED_MESSAGE = "cancelled by the client"
+CANCEL_MEMORY = 256
+MAX_TOKEN_LEN = 256
+MAX_STDIN_LINE_BYTES = 4 * 1024 * 1024
+STREAM_LINE_MAX_BYTES = 5 * 1024 * 1024
+PARTIAL_OUTPUT_MAX_BYTES = 2000
+MAX_STDERR_BYTES = 200000
 
 
 def in_container():
@@ -198,7 +216,10 @@ def tool_description():
         "and the whole call still obeys one overall timeout. Set "
         + FALLBACK_MODEL_ENV +
         " to a comma-separated override list, or leave it unset for a "
-        "built-in default chain keyed on the requested model. " +
+        "built-in default chain keyed on the requested model. A cancelled "
+        "call and a running one both report a session_id when the "
+        "underlying claude run reached one, so a stalled call can be "
+        "diagnosed without waiting for the whole timeout. " +
         delegation_note)
 
 
@@ -270,7 +291,8 @@ def audit_digest(value):
     return hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()[:16]
 
 
-def audit(decision, reason, args, mode):
+def audit(decision, reason, args, mode, duration_sec=None, session_id=None,
+          outcome=None):
     try:
         os.makedirs(os.path.dirname(AUDIT), exist_ok=True)
         if os.path.isfile(AUDIT) and os.path.getsize(AUDIT) > AUDIT_MAX_BYTES:
@@ -284,6 +306,10 @@ def audit(decision, reason, args, mode):
                "max_turns": args.get("max_turns")
                if isinstance(args.get("max_turns"), int) else None,
                "mode": audit_text(mode, 16),
+               "duration_sec": round(duration_sec, 3)
+               if isinstance(duration_sec, (int, float)) else None,
+               "session_id": audit_text(session_id, 128),
+               "outcome": audit_text(outcome, 32),
                "runtime": "container" if in_container() else "host"}
         line = json.dumps(rec, ensure_ascii=True)
         if len(line.encode("utf-8")) > AUDIT_LINE_MAX:
@@ -296,9 +322,97 @@ def audit(decision, reason, args, mode):
         pass
 
 
+_SEND_LOCK = threading.Lock()
+_STATE_LOCK = threading.Lock()
+_CANCEL = threading.Event()
+_CLOSED = threading.Event()
+_CALL = {"id": None, "token": None, "seq": 0, "last": 0.0}
+_CANCELLED_IDS = collections.OrderedDict()
+_SHUTDOWN = [False]
+_IN_CALL = [False]
+_LIVE_PROC = [None]
+
+
+def valid_id(value):
+    return isinstance(value, (str, int)) and not isinstance(value, bool)
+
+
 def send(msg):
-    sys.stdout.write(json.dumps(msg, ensure_ascii=True) + "\n")
-    sys.stdout.flush()
+    line = json.dumps(msg, ensure_ascii=True) + "\n"
+    with _SEND_LOCK:
+        try:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            _CLOSED.set()
+
+
+def begin_call(req_id, token):
+    with _STATE_LOCK:
+        _CALL["id"] = req_id
+        _CALL["token"] = token
+        _CALL["seq"] = 0
+        _CALL["last"] = 0.0
+        _CANCEL.clear()
+        _IN_CALL[0] = True
+        if valid_id(req_id) and req_id in _CANCELLED_IDS:
+            del _CANCELLED_IDS[req_id]
+            return False
+    return True
+
+
+def end_call():
+    with _STATE_LOCK:
+        _CALL["id"] = None
+        _CALL["token"] = None
+        _IN_CALL[0] = False
+
+
+def cancel_request(req_id):
+    if not valid_id(req_id):
+        return
+    with _STATE_LOCK:
+        if _CALL["id"] is not None and _CALL["id"] == req_id:
+            _CANCEL.set()
+            return
+        _CANCELLED_IDS[req_id] = True
+        _CANCELLED_IDS.move_to_end(req_id)
+        while len(_CANCELLED_IDS) > CANCEL_MEMORY:
+            _CANCELLED_IDS.popitem(last=False)
+
+
+def client_gone():
+    if _SHUTDOWN[0] or _CLOSED.is_set():
+        return True
+    try:
+        poller = select.poll()
+        poller.register(sys.stdout.fileno(), select.POLLERR | select.POLLHUP)
+        if poller.poll(0):
+            _CLOSED.set()
+            return True
+    except (OSError, ValueError, AttributeError):
+        pass
+    return False
+
+
+def cancelled():
+    return _CANCEL.is_set() or client_gone()
+
+
+def emit_progress(message, force=False):
+    now = time.monotonic()
+    with _STATE_LOCK:
+        token = _CALL["token"]
+        if token is None:
+            return
+        if not force and now - _CALL["last"] < PROGRESS_MIN_GAP_SEC:
+            return
+        _CALL["seq"] += 1
+        _CALL["last"] = now
+        seq = _CALL["seq"]
+    send({"jsonrpc": "2.0", "method": "notifications/progress",
+          "params": {"progressToken": token, "progress": seq,
+                     "message": message}})
 
 
 def reply(req_id, result):
@@ -351,9 +465,164 @@ def check_cwd(cwd):
     return real, None
 
 
+def progress_interval_sec():
+    raw = os.environ.get(PROGRESS_INTERVAL_ENV)
+    if not raw:
+        return DEFAULT_PROGRESS_INTERVAL_SEC
+    try:
+        val = float(raw)
+    except ValueError:
+        return DEFAULT_PROGRESS_INTERVAL_SEC
+    return val if val > 0 else DEFAULT_PROGRESS_INTERVAL_SEC
+
+
+def _kill_group(proc, grace=KILL_GRACE_SEC):
+    pgid = proc.pid
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        pass
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            break
+        time.sleep(0.05)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _parse_stream_line(line):
+    try:
+        obj = json.loads(line.decode("utf-8", "replace"))
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+class AttemptResult:
+    def __init__(self):
+        self.returncode = None
+        self.stdout = ""
+        self.stderr = ""
+        self.session_id = None
+        self.timed_out = False
+        self.cancelled = False
+        self.partial_text = ""
+
+
+def spawn_claude_attempt(attempt_cmd, cwd, env, timeout_budget):
+    argv = list(attempt_cmd)
+    setpriv_path = shutil.which("setpriv")
+    if setpriv_path:
+        argv = [setpriv_path, "--pdeathsig", "KILL"] + argv
+
+    proc = subprocess.Popen(
+        argv, cwd=cwd, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL, start_new_session=True)
+
+    result = AttemptResult()
+    _LIVE_PROC[0] = proc
+    started = time.monotonic()
+    deadline = started + max(timeout_budget, 0)
+    last_progress = started
+    gap = progress_interval_sec()
+    line_buf = bytearray()
+    err_buf = bytearray()
+    partial_buf = bytearray()
+    final_line = None
+    try:
+        open_fds = [proc.stdout, proc.stderr]
+        while open_fds:
+            if cancelled():
+                _kill_group(proc)
+                result.cancelled = True
+                break
+            now = time.monotonic()
+            remaining = deadline - now
+            if remaining <= 0:
+                _kill_group(proc)
+                result.timed_out = True
+                break
+            if now - last_progress >= gap:
+                last_progress = now
+                emit_progress(
+                    "claude running (%ds)" % int(now - started), force=True)
+            wait = max(min(remaining, 1.0, gap), 0.05)
+            rlist, _, _ = select.select(open_fds, [], [], wait)
+            for fh in rlist:
+                chunk = os.read(fh.fileno(), 65536)
+                if not chunk:
+                    open_fds.remove(fh)
+                    continue
+                if fh is proc.stdout:
+                    line_buf += chunk
+                    partial_buf += chunk
+                    if len(partial_buf) > PARTIAL_OUTPUT_MAX_BYTES:
+                        del partial_buf[:len(partial_buf) - PARTIAL_OUTPUT_MAX_BYTES]
+                    while True:
+                        idx = line_buf.find(b"\n")
+                        if idx < 0:
+                            break
+                        line = bytes(line_buf[:idx])
+                        del line_buf[:idx + 1]
+                        obj = _parse_stream_line(line)
+                        if obj is not None:
+                            sid = obj.get("session_id")
+                            if isinstance(sid, str) and sid:
+                                result.session_id = sid
+                            if obj.get("type") == "result":
+                                final_line = line
+                    if len(line_buf) > STREAM_LINE_MAX_BYTES:
+                        del line_buf[:len(line_buf) - 65536]
+                else:
+                    err_buf += chunk
+                    if len(err_buf) > MAX_STDERR_BYTES:
+                        del err_buf[:len(err_buf) - MAX_STDERR_BYTES]
+    finally:
+        try:
+            rc = proc.wait(timeout=KILL_GRACE_SEC)
+        except subprocess.TimeoutExpired:
+            _kill_group(proc)
+            try:
+                rc = proc.wait(timeout=KILL_GRACE_SEC)
+            except Exception:
+                rc = -1
+        result.returncode = rc
+        _LIVE_PROC[0] = None
+        for fh in (proc.stdout, proc.stderr):
+            try:
+                fh.close()
+            except Exception:
+                pass
+
+    if final_line is None and not result.cancelled and not result.timed_out \
+            and line_buf:
+        obj = _parse_stream_line(bytes(line_buf))
+        if obj is not None and obj.get("type") == "result":
+            final_line = bytes(line_buf)
+            sid = obj.get("session_id")
+            if isinstance(sid, str) and sid:
+                result.session_id = sid
+
+    if final_line is not None:
+        result.stdout = final_line.decode("utf-8", "replace")
+    else:
+        result.stdout = bytes(line_buf).decode("utf-8", "replace")
+    result.stderr = bytes(err_buf).decode("utf-8", "replace")
+    result.partial_text = bytes(partial_buf).decode("utf-8", "replace").strip()
+    return result
+
+
 def run_claude(args):
+    call_start = time.monotonic()
     if depth_reached():
-        audit("deny", "depth limit", args, None)
+        audit("deny", "depth limit", args, None,
+              duration_sec=time.monotonic() - call_start, outcome="refused")
         return tool_text(
             "ask-claude refused: delegation depth limit reached - a Claude "
             "instance spawned over MCP may not spawn another one", True)
@@ -375,7 +644,8 @@ def run_claude(args):
                          "analyse, plan, full", True)
     refusal = model_refusal(model, prompt)
     if refusal:
-        audit("deny", "model-policy", args, mode)
+        audit("deny", "model-policy", args, mode,
+              duration_sec=time.monotonic() - call_start, outcome="refused")
         return tool_text("ask-claude refused: " + refusal, True)
     max_turns = args.get("max_turns")
     if max_turns is None:
@@ -396,11 +666,14 @@ def run_claude(args):
     if cwd:
         real, reason = check_cwd(cwd)
         if reason:
-            audit("deny", reason, args, mode)
+            audit("deny", reason, args, mode,
+                  duration_sec=time.monotonic() - call_start,
+                  outcome="refused")
             return tool_text("ask-claude refused: " + reason, True)
         run_dir = real
 
-    base_cmd = ["claude", "-p", prompt, "--output-format", "json"]
+    base_cmd = ["claude", "-p", prompt, "--output-format", "stream-json",
+                "--verbose"]
     cmd = []
     if effort:
         cmd += ["--effort", effort]
@@ -435,13 +708,14 @@ def run_claude(args):
     env[DEPTH_VAR] = "1"
     env[LEGACY_DEPTH_VAR] = "1"
 
-    audit("allow", "", args, mode)
+    audit("allow", "", args, mode, duration_sec=time.monotonic() - call_start)
     attempts = [model]
     for m in fallback_models:
         if m not in attempts and model_banned(m) is None:
             attempts.append(m)
     deadline = time.monotonic() + CALL_TIMEOUT
     proc = None
+    session_id = None
     for index, attempt_model in enumerate(attempts):
         remaining = attempts[index + 1:]
         budget = deadline - time.monotonic()
@@ -452,36 +726,78 @@ def run_claude(args):
             attempt_cmd += ["--fallback-model", ",".join(remaining)]
         attempt_cmd += cmd
         try:
-            proc = subprocess.run(attempt_cmd, cwd=run_dir, env=env,
-                                  capture_output=True, text=True,
-                                  timeout=budget)
-        except subprocess.TimeoutExpired:
-            audit("error", "timeout", args, mode)
-            return tool_text(
-                f"ask-claude failed: claude run exceeded {CALL_TIMEOUT}s", True)
+            proc = spawn_claude_attempt(attempt_cmd, run_dir, env, budget)
         except FileNotFoundError:
-            audit("error", "claude binary not found", args, mode)
+            audit("error", "claude binary not found", args, mode,
+                  duration_sec=time.monotonic() - call_start,
+                  session_id=session_id, outcome="error")
             return tool_text("ask-claude failed: claude binary not found", True)
+
+        if proc.session_id:
+            session_id = proc.session_id
+
+        if proc.cancelled:
+            audit("cancel", CANCELLED_MESSAGE, args, mode,
+                  duration_sec=time.monotonic() - call_start,
+                  session_id=session_id, outcome="cancelled")
+            body = "ask-claude failed: " + CANCELLED_MESSAGE
+            if session_id:
+                body += " (session_id: %s)" % session_id
+            return tool_text(body, True)
+
+        if proc.timed_out:
+            audit("error", "timeout", args, mode,
+                  duration_sec=time.monotonic() - call_start,
+                  session_id=session_id, outcome="timeout")
+            body = "ask-claude failed: claude run exceeded %ds" % CALL_TIMEOUT
+            if session_id:
+                body += " (session_id: %s)" % session_id
+            if proc.partial_text:
+                body += "\n[partial output]\n" + proc.partial_text
+            return tool_text(body, True)
+
         if not remaining or not is_safety_refusal(proc, prompt):
             break
         audit("safety-fallback", attempt_model + " -> " + remaining[0],
-              args, mode)
+              args, mode, duration_sec=time.monotonic() - call_start,
+              session_id=session_id)
+
+    if proc is None:
+        audit("error", "timeout before first attempt", args, mode,
+              duration_sec=time.monotonic() - call_start,
+              session_id=session_id, outcome="timeout")
+        return tool_text(
+            "ask-claude failed: call timeout expired before any attempt "
+            "could run", True)
 
     try:
         out = json.loads(proc.stdout)
         text = out.get("result") or ""
         is_error = bool(out.get("is_error")) or proc.returncode != 0
+        if not session_id:
+            session_id = out.get("session_id")
         if is_error and not text:
             text = "claude run failed"
             errors = out.get("errors")
             if errors:
                 text += ": " + "; ".join(str(e) for e in errors[:3])
+        if session_id:
+            text += "\n[session_id: %s]" % session_id
+        audit("allow" if not is_error else "error",
+              "" if not is_error else "claude run failed", args, mode,
+              duration_sec=time.monotonic() - call_start,
+              session_id=session_id, outcome="ok" if not is_error else "error")
         return tool_text(text, is_error)
     except ValueError:
         tail = (proc.stdout or proc.stderr or "").strip()[-2000:]
         if proc.returncode == 0 and tail:
+            audit("allow", "", args, mode,
+                  duration_sec=time.monotonic() - call_start,
+                  session_id=session_id, outcome="ok")
             return tool_text(tail)
-        audit("error", "unparseable claude output", args, mode)
+        audit("error", "unparseable claude output", args, mode,
+              duration_sec=time.monotonic() - call_start,
+              session_id=session_id, outcome="error")
         return tool_text(
             "ask-claude failed: unparseable claude output"
             + (": " + tail if tail else ""), True)
@@ -513,29 +829,107 @@ def handle(msg):
             reply_error(req_id, -32602,
                         "unknown tool: " + str(params.get("name")))
             return
-        reply(req_id, run_claude(params.get("arguments") or {}))
+        if req_id is None:
+            return
+        meta = params.get("_meta")
+        token = meta.get("progressToken") if isinstance(meta, dict) else None
+        if not valid_id(token) or (
+                isinstance(token, str) and len(token) > MAX_TOKEN_LEN):
+            token = None
+        try:
+            if not begin_call(req_id, token):
+                return
+            result = run_claude(params.get("arguments") or {})
+        finally:
+            end_call()
+        if cancelled():
+            return
+        reply(req_id, result)
     elif req_id is not None:
         reply_error(req_id, -32601, "method not found: " + str(method))
 
 
-def main():
-    for line in sys.stdin:
-        line = line.strip()
+def _stdin_lines(stream):
+    while True:
+        line = stream.readline(MAX_STDIN_LINE_BYTES + 1)
         if not line:
+            return
+        if len(line) > MAX_STDIN_LINE_BYTES and not line.endswith(b"\n"):
+            while True:
+                rest = stream.readline(MAX_STDIN_LINE_BYTES)
+                if not rest or rest.endswith(b"\n"):
+                    break
+            yield None
             continue
+        yield line
+
+
+def _read_stdin(inbox):
+    try:
+        for line in _stdin_lines(sys.stdin.buffer):
+            if line is None:
+                send({"jsonrpc": "2.0", "id": None,
+                      "error": {"code": -32600,
+                                "message": "request line too long"}})
+                continue
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                send({"jsonrpc": "2.0", "id": None,
+                      "error": {"code": -32700, "message": "parse error"}})
+                continue
+            if not isinstance(msg, dict):
+                send({"jsonrpc": "2.0", "id": None,
+                      "error": {"code": -32600, "message": "invalid request"}})
+                continue
+            method = msg.get("method")
+            if method == "notifications/cancelled":
+                params = msg.get("params")
+                if isinstance(params, dict):
+                    cancel_request(params.get("requestId"))
+                continue
+            if method == "ping" and msg.get("id") is not None:
+                reply(msg.get("id"), {})
+                continue
+            inbox.put(msg)
+    except Exception:
+        pass
+    inbox.put(None)
+
+
+def _on_signal(signum, frame):
+    _SHUTDOWN[0] = True
+    proc = _LIVE_PROC[0]
+    if proc is not None:
+        _kill_group(proc)
+    if not _IN_CALL[0]:
+        raise SystemExit(128 + signum)
+
+
+def main():
+    inbox = queue.Queue()
+    reader = threading.Thread(target=_read_stdin, args=(inbox,), daemon=True)
+    reader.start()
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(sig, _on_signal)
+    while not client_gone():
         try:
-            msg = json.loads(line)
-        except ValueError:
-            send({"jsonrpc": "2.0", "id": None,
-                  "error": {"code": -32700, "message": "parse error"}})
+            msg = inbox.get(timeout=0.5)
+        except queue.Empty:
             continue
+        if msg is None:
+            break
         try:
             handle(msg)
         except Exception as e:
             if msg.get("id") is not None:
                 reply_error(msg.get("id"), -32603,
                             "internal error: " + type(e).__name__)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

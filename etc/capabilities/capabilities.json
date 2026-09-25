@@ -265,6 +265,27 @@
       },
       "degrade_floor": "advisory-text"
     },
+    "guard-net-proxy": {
+      "class": "guard",
+      "enforcement": "behavioral",
+      "audience": "driver",
+      "sources": [
+        "etc/hooks/net_proxy_guard.py"
+      ],
+      "enabled_when_env": null,
+      "planes": [
+        "native"
+      ],
+      "bindings": {
+        "claude": {
+          "mechanism": "pretooluse-hook",
+          "matcher": "Bash",
+          "artifact": "etc/hooks/net_proxy_guard.py",
+          "status": "live"
+        }
+      },
+      "degrade_floor": "advisory-text"
+    },
     "guard-rm-permission": {
       "class": "guard",
       "enforcement": "behavioral",
@@ -321,7 +342,7 @@
       "bindings": {
         "claude": {
           "mechanism": "pretooluse-hook",
-          "matcher": "Agent",
+          "matcher": "Agent|Workflow",
           "artifact": "etc/hooks/agent_label_guard.py",
           "status": "live"
         }
@@ -432,28 +453,26 @@
       },
       "degrade_floor": "mine-history"
     },
-    "codex-terra-light": {
-      "class": "tool",
+    "observe-usage-metrics": {
+      "class": "observe",
       "enforcement": "advisory",
       "audience": "driver",
       "sources": [
-        "etc/mcp/delegates.json"
+        "etc/hooks/usage_statusline.py",
+        "etc/hooks/cbox_budget.py"
       ],
       "enabled_when_env": null,
       "planes": [
-        "mediated"
+        "native"
       ],
       "bindings": {
         "claude": {
-          "mechanism": "mcp-config-render",
-          "status": "live"
-        },
-        "hermes": {
-          "mechanism": "mcp-config-render",
+          "mechanism": "statusline-command",
+          "artifact": "etc/hooks/usage_statusline.py",
           "status": "live"
         }
       },
-      "degrade_floor": "feature-off"
+      "degrade_floor": "none"
     },
     "codex-sol": {
       "class": "tool",
@@ -479,29 +498,6 @@
       "degrade_floor": "feature-off"
     },
     "codex-astra": {
-      "class": "tool",
-      "enforcement": "advisory",
-      "audience": "driver",
-      "sources": [
-        "etc/mcp/delegates.json"
-      ],
-      "enabled_when_env": null,
-      "planes": [
-        "mediated"
-      ],
-      "bindings": {
-        "claude": {
-          "mechanism": "mcp-config-render",
-          "status": "live"
-        },
-        "hermes": {
-          "mechanism": "mcp-config-render",
-          "status": "live"
-        }
-      },
-      "degrade_floor": "feature-off"
-    },
-    "codex-terra": {
       "class": "tool",
       "enforcement": "advisory",
       "audience": "driver",
@@ -610,6 +606,35 @@
       ],
       "enabled_when_env": [
         "CBOX_CONTAINER_EXEC_TOOL"
+      ],
+      "planes": [
+        "mediated"
+      ],
+      "bindings": {
+        "claude": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        },
+        "codex": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        },
+        "hermes": {
+          "mechanism": "mcp-config-render",
+          "status": "live"
+        }
+      },
+      "degrade_floor": "feature-off"
+    },
+    "cbox-net": {
+      "class": "tool",
+      "enforcement": "advisory",
+      "audience": "driver",
+      "sources": [
+        "etc/mcp/delegates.json"
+      ],
+      "enabled_when_env": [
+        "CBOX_NETMAP_ACTIVE"
       ],
       "planes": [
         "mediated"

@@ -260,7 +260,7 @@ printf '%s' "$BINSPROJ" > "$BEFF/workspace"
   printf 'cbox-bins-claude|claude|stable|2.1.0|1000\n'
   printf 'cbox-bins-codex|codex|latest|0.153.4|1000\n'
 } > "$BINSHOME/.config/cbox/bins.stamp"
-printf 'version=0.153.4\nbad=0.154.0\nreason=mcp-server handshake failed\nsince=1000\n' \
+printf 'version=0.153.4\nbad=0.154.0\nreason=app-server handshake failed\nsince=1000\n' \
   > "$BINSHOME/.config/cbox/bins.hold.cbox-bins-codex"
 
 BINSSPY_LOG="$TMPBASE/bins_spy.log"

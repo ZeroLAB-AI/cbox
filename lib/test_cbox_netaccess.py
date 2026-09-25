@@ -16,6 +16,7 @@ SPEC.loader.exec_module(MOD)
 class FakeDocker:
     def __init__(self):
         self.project = "cbox-p1"
+        self.container_id = "a" * 64
         self.endpoints = {
             "cbox-p1_internal": {"IPAddress": "172.20.0.2"},
             "cbox-p1_egress": {"IPAddress": "172.21.0.2"},
@@ -29,6 +30,7 @@ class FakeDocker:
             "cbox-ollama-u1000-global": self.ollama_network("10.55.0.0/24"),
             "cbox-ollama-u1000-p1": self.ollama_network("10.56.0.0/24"),
         }
+        self.other_containers = {}
         self.connected = []
         self.disconnected = []
 
@@ -51,7 +53,27 @@ class FakeDocker:
             "NetworkSettings": {"Networks": self.endpoints},
         }
 
+    def add_container_to_network(self, network, cid, name, ipv4, aliases=None, dns_names=None, ports=None):
+        containers = self.docs[network].setdefault("Containers", {})
+        containers[cid] = {"Name": name, "IPv4Address": ipv4 + "/24"}
+        self.other_containers[cid] = {
+            "Id": cid,
+            "Config": {"ExposedPorts": {p: {} for p in (ports or [])}},
+            "NetworkSettings": {
+                "Networks": {
+                    network: {
+                        "Aliases": aliases or [],
+                        "DNSNames": dns_names or [],
+                    }
+                }
+            },
+        }
+
     def __call__(self, docker_bin, args, timeout=15):
+        if args[:1] == ["inspect"] and len(args) > 1 and args[1] != self.container_id:
+            ids = args[1:]
+            result = [self.other_containers[cid] for cid in ids if cid in self.other_containers]
+            return json.dumps(result)
         if args == ["network", "ls", "--format", "{{.Name}}"]:
             return "\n".join(self.docs) + "\n"
         if args[:2] == ["network", "inspect"]:
@@ -198,6 +220,224 @@ class NetaccessTests(unittest.TestCase):
             MOD.apply(self.args(["project_a"]))
         self.assertEqual(self.fake.connected, ["project_a"])
         self.assertEqual(self.fake.disconnected, ["project_a"])
+
+    def test_apply_writes_netmap_with_containers_aliases_and_ports(self):
+        cid = "b" * 64
+        self.fake.add_container_to_network(
+            "project_a", cid, "webapp", "10.10.0.5",
+            aliases=["webapp", cid[:12]],
+            dns_names=["webapp", cid[:12], "webapp.project_a"],
+            ports=["80/tcp"],
+        )
+        args = self.args(["project_a"])
+        netmap_out = os.path.join(self.tmp.name, "netmap", "netmap.json")
+        args.netmap_out = netmap_out
+        args.proxy_url = "socks5h://cbox-proxy-internal:1080"
+        MOD.apply(args)
+        with open(netmap_out, encoding="ascii") as fh:
+            netmap = json.load(fh)
+        self.assertEqual(netmap["version"], 1)
+        self.assertEqual(netmap["scope"], "list")
+        self.assertEqual(netmap["proxy"], {
+            "url": "socks5h://cbox-proxy-internal:1080",
+            "host": "cbox-proxy-internal",
+            "port": 1080,
+        })
+        net = next(n for n in netmap["networks"] if n["name"] == "project_a")
+        self.assertEqual(net["subnet"], "10.10.0.0/24")
+        self.assertEqual(len(net["containers"]), 1)
+        entry = net["containers"][0]
+        self.assertEqual(entry["name"], "webapp")
+        self.assertEqual(entry["ipv4"], "10.10.0.5")
+        self.assertEqual(entry["ports"], ["80/tcp"])
+        self.assertTrue(entry["name_routable"])
+        self.assertIn("webapp", entry["aliases"])
+        self.assertNotIn("webapp.project_a", entry["aliases"])
+        self.assertNotIn(cid[:12], entry["aliases"])
+        self.assertEqual(entry["aliases"].count("webapp"), 1)
+        self.assertEqual(net["dropped"], 1)
+
+    def test_injection_shaped_alias_dropped(self):
+        cid = "c" * 64
+        self.fake.add_container_to_network(
+            "project_a", cid, "webapp", "10.10.0.6",
+            aliases=["webapp", "evil$(whoami)", "evil;rm -rf /", "evil name"],
+            ports=["80/tcp"],
+        )
+        args = self.args(["project_a"])
+        netmap_out = os.path.join(self.tmp.name, "netmap", "netmap.json")
+        args.netmap_out = netmap_out
+        args.proxy_url = "socks5h://cbox-proxy-internal:1080"
+        MOD.apply(args)
+        with open(netmap_out, encoding="ascii") as fh:
+            netmap = json.load(fh)
+        net = next(n for n in netmap["networks"] if n["name"] == "project_a")
+        entry = net["containers"][0]
+        self.assertEqual(entry["aliases"], ["webapp"])
+        self.assertEqual(net["dropped"], 3)
+
+    def test_injection_shaped_port_dropped(self):
+        cid = "d" * 64
+        self.fake.add_container_to_network(
+            "project_a", cid, "webapp", "10.10.0.7",
+            aliases=["webapp"],
+            ports=["80/tcp", "80/tcp; rm -rf /", "not-a-port", "70000/tcp", "0/tcp"],
+        )
+        args = self.args(["project_a"])
+        netmap_out = os.path.join(self.tmp.name, "netmap", "netmap.json")
+        args.netmap_out = netmap_out
+        args.proxy_url = "socks5h://cbox-proxy-internal:1080"
+        MOD.apply(args)
+        with open(netmap_out, encoding="ascii") as fh:
+            netmap = json.load(fh)
+        net = next(n for n in netmap["networks"] if n["name"] == "project_a")
+        entry = net["containers"][0]
+        self.assertEqual(entry["ports"], ["80/tcp"])
+        self.assertEqual(net["dropped"], 4)
+
+    def test_dotted_alias_always_dropped(self):
+        cid = "e" * 64
+        self.fake.add_container_to_network(
+            "project_a", cid, "webapp", "10.10.0.8",
+            aliases=["webapp", "github.com", "webapp"],
+        )
+        args = self.args(["project_a"])
+        netmap_out = os.path.join(self.tmp.name, "netmap", "netmap.json")
+        args.netmap_out = netmap_out
+        args.proxy_url = "socks5h://cbox-proxy-internal:1080"
+        MOD.apply(args)
+        with open(netmap_out, encoding="ascii") as fh:
+            netmap = json.load(fh)
+        net = next(n for n in netmap["networks"] if n["name"] == "project_a")
+        entry = net["containers"][0]
+        self.assertEqual(entry["aliases"], ["webapp"])
+        self.assertEqual(net["dropped"], 1)
+
+    def test_dotted_container_name_is_not_routable(self):
+        cid = "1" * 64
+        self.fake.add_container_to_network(
+            "project_a", cid, "github.com", "10.10.0.10",
+            aliases=["github.com", "webapp"],
+        )
+        args = self.args(["project_a"])
+        netmap_out = os.path.join(self.tmp.name, "netmap", "netmap.json")
+        args.netmap_out = netmap_out
+        args.proxy_url = "socks5h://cbox-proxy-internal:1080"
+        MOD.apply(args)
+        with open(netmap_out, encoding="ascii") as fh:
+            netmap = json.load(fh)
+        net = next(n for n in netmap["networks"] if n["name"] == "project_a")
+        entry = net["containers"][0]
+        self.assertEqual(entry["name"], "github.com")
+        self.assertEqual(entry["ipv4"], "10.10.0.10")
+        self.assertFalse(entry["name_routable"])
+        self.assertNotIn("github.com", entry["aliases"])
+        self.assertEqual(entry["aliases"], ["webapp"])
+
+    def test_alias_and_port_caps_enforced_per_container(self):
+        cid = "f" * 64
+        aliases = ["a-%d" % i for i in range(20)]
+        ports = ["%d/tcp" % (1000 + i) for i in range(40)]
+        self.fake.add_container_to_network(
+            "project_a", cid, "webapp", "10.10.0.9",
+            aliases=aliases, ports=ports,
+        )
+        args = self.args(["project_a"])
+        netmap_out = os.path.join(self.tmp.name, "netmap", "netmap.json")
+        args.netmap_out = netmap_out
+        args.proxy_url = "socks5h://cbox-proxy-internal:1080"
+        MOD.apply(args)
+        with open(netmap_out, encoding="ascii") as fh:
+            netmap = json.load(fh)
+        net = next(n for n in netmap["networks"] if n["name"] == "project_a")
+        entry = net["containers"][0]
+        self.assertEqual(len(entry["aliases"]), 16)
+        self.assertEqual(len(entry["ports"]), 32)
+        self.assertEqual(net["dropped"], 4 + 8)
+
+    def test_container_cap_enforced_per_network(self):
+        for i in range(520):
+            cid = ("%040x" % i) + "0" * 24
+            self.fake.add_container_to_network(
+                "project_a", cid, "webapp-%d" % i, "10.10.1.%d" % (i % 250),
+            )
+        args = self.args(["project_a"])
+        netmap_out = os.path.join(self.tmp.name, "netmap", "netmap.json")
+        args.netmap_out = netmap_out
+        args.proxy_url = "socks5h://cbox-proxy-internal:1080"
+        MOD.apply(args)
+        with open(netmap_out, encoding="ascii") as fh:
+            netmap = json.load(fh)
+        net = next(n for n in netmap["networks"] if n["name"] == "project_a")
+        self.assertEqual(len(net["containers"]), 512)
+        self.assertEqual(net["dropped"], 8)
+
+    def test_apply_netmap_excludes_the_proxy_container_itself(self):
+        self.fake.add_container_to_network(
+            "project_a", self.fake.container_id, "cbox-proxy", "10.10.0.2",
+        )
+        args = self.args(["project_a"])
+        netmap_out = os.path.join(self.tmp.name, "netmap", "netmap.json")
+        args.netmap_out = netmap_out
+        args.proxy_url = "socks5h://cbox-proxy-internal:1080"
+        MOD.apply(args)
+        with open(netmap_out, encoding="ascii") as fh:
+            netmap = json.load(fh)
+        net = next(n for n in netmap["networks"] if n["name"] == "project_a")
+        self.assertEqual(net["containers"], [])
+
+    def test_apply_without_netmap_out_writes_nothing(self):
+        args = self.args(["project_a"])
+        MOD.apply(args)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "netmap")))
+
+    def test_netmap_only_makes_no_connect_or_disconnect_calls(self):
+        args = self.args(["project_a"])
+        netmap_out = os.path.join(self.tmp.name, "netmap", "netmap.json")
+        args.netmap_out = netmap_out
+        args.proxy_url = "socks5h://cbox-proxy-internal:1080"
+        netmap = MOD.netmap_only(args)
+        self.assertEqual(self.fake.connected, [])
+        self.assertEqual(self.fake.disconnected, [])
+        self.assertEqual(netmap["networks"], [])
+        skipped = {item["network"]: item["reason"] for item in netmap["skipped"]}
+        self.assertIn("project_a", skipped)
+        self.assertIn("not attached", skipped["project_a"])
+
+    def test_netmap_only_reports_already_attached_networks_without_reconnecting(self):
+        cid = "c" * 64
+        self.fake.add_container_to_network("project_a", cid, "webapp", "10.10.0.5", ports=["80/tcp"])
+        apply_args = self.args(["project_a"])
+        MOD.apply(apply_args)
+        self.assertEqual(self.fake.connected, ["project_a"])
+        args = self.args(["project_a"])
+        netmap_out = os.path.join(self.tmp.name, "netmap", "netmap.json")
+        args.netmap_out = netmap_out
+        args.proxy_url = "socks5h://cbox-proxy-internal:1080"
+        netmap = MOD.netmap_only(args)
+        self.assertEqual(self.fake.connected, ["project_a"])
+        self.assertEqual(self.fake.disconnected, [])
+        net = next(n for n in netmap["networks"] if n["name"] == "project_a")
+        self.assertEqual(net["containers"][0]["name"], "webapp")
+
+    def test_valid_hostname_rejects_trailing_newline(self):
+        self.assertFalse(MOD.valid_hostname("webapp\n"))
+        self.assertTrue(MOD.valid_hostname("webapp"))
+
+    def test_valid_port_spec_rejects_trailing_newline(self):
+        self.assertFalse(MOD.valid_port_spec("80/tcp\n"))
+        self.assertTrue(MOD.valid_port_spec("80/tcp"))
+
+    def test_netmap_dir_symlink_is_rejected(self):
+        target = os.path.join(self.tmp.name, "netmap-target")
+        link = os.path.join(self.tmp.name, "netmap-link")
+        os.mkdir(target)
+        os.symlink(target, link)
+        args = self.args(["project_a"])
+        args.netmap_out = os.path.join(link, "netmap.json")
+        args.proxy_url = "socks5h://cbox-proxy-internal:1080"
+        with self.assertRaises(PermissionError):
+            MOD.apply(args)
 
 
 if __name__ == "__main__":

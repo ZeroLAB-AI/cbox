@@ -266,7 +266,7 @@ def render(delegates, selection, hooks_dir, shim_mode, target, explicit=None):
                 raise DelegateEntryError(
                     "render_mcp.py: delegate entry %r was explicitly "
                     "selected but %s is not set - it cannot run "
-                    "unconfigured; see cbox/etc/docs/LOCAL_MODEL_RUNBOOK.md"
+                    "unconfigured; see cbox/docs/LOCAL_MODEL_RUNBOOK.md"
                     % (name, unmet)
                 )
             if target != "hermes":

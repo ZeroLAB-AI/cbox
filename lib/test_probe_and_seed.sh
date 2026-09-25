@@ -60,6 +60,13 @@ n="$(CBOX_PROBE_CP="$CLAUDE_BIN" CBOX_PROBE_XP="$CODEX_BIN" sh -c "${PROBE_SH//\
 [ "$n" = 3 ] || _fail "probe: vanished cmdline should be skipped, got $n"
 _ok "probe filter: missing cmdline skipped"
 
+_mkproc 24 "$CODEX_BIN" app-server
+n="$(CBOX_PROBE_CP="$CLAUDE_BIN" CBOX_PROBE_XP="$CODEX_BIN" sh -c "${PROBE_SH//\/proc\//$PROC/}")"
+[ "$n" = 3 ] || _fail "probe: codex app-server relay subprocess must be excluded from the live count, got $n"
+_ok "probe filter: codex app-server relay subprocess excluded (same as mcp-server)"
+rm -f "$PROC/24/exe" "$PROC/24/cmdline"
+rmdir "$PROC/24" 2>/dev/null || true
+
 rm -rf "$PROC"
 _mkproc 11 "$CLAUDE_BIN"
 _mkproc 21 "$CODEX_BIN" exec do-something
@@ -249,5 +256,28 @@ printf '%s\n%s\n' "/good/claude" "/good/codex" > "$PR/probe-exes"
 ( PATH="$STUBDIR:$PATH"; _cbox_probe_exes_refresh "$PR" stubcid ) && _fail "probe A0 producer: refresh must return nonzero when docker exec fails"
 [ "$(sed -n 1p "$PR/probe-exes")" = "/good/claude" ] || _fail "probe A0 producer: a transient docker-exec failure must NOT overwrite a previously good cache"
 _ok "probe A0 producer: docker-exec failure leaves the prior good cache intact (no empty-cache overwrite)"
+
+cat > "$STUBDIR/docker" <<'DOCKEREOF'
+#!/usr/bin/env bash
+if [ "$1" = inspect ]; then
+  case "$*" in
+    *deadcid*) printf 'false\n'; exit 0 ;;
+    *livecid*) printf 'true\n'; exit 0 ;;
+  esac
+  exit 1
+fi
+exit 0
+DOCKEREOF
+chmod +x "$STUBDIR/docker"
+
+PD="$TMPBASE/effdeadprobe"
+mkdir -p "$PD"
+rc="$(PATH="$STUBDIR:$PATH" _probe deadcid "$PD")"
+[ "$rc" = 0 ] || _fail "probe: a docker-confirmed not-running container must report 0 live processes without needing the probe-exes cache, got '$rc'"
+_ok "probe: docker-confirmed not-running container short-circuits to 0 (reap/gc can clean it up instead of leaving it up as 'unknown')"
+
+rc="$(PATH="$STUBDIR:$PATH" _probe livecid "$PD")"
+[ "$rc" = unknown ] || _fail "probe: a running container with no probe-exes cache must still fail safe to unknown, got '$rc'"
+_ok "probe: a running container without a cache still fails safe to unknown (the not-running fast path never widens to the running case)"
 
 echo "PASS: all probe+seed+compose checks"

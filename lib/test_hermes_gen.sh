@@ -504,14 +504,14 @@ FI_EMPTY="$TMPBASE/fi_empty"
 _make_fake_install_with_delegates "$FI_EMPTY" "$(cat "$INSTALL_DIR/etc/mcp/delegates.json")"
 MCP_OUT_EMPTY="$FI_EMPTY/generated/hermes/mcp_servers.yaml"
 (
-  unset CBOX_HERMES_DELEGATE CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME CBOX_CONTAINER_EXEC_TOOL
+  unset CBOX_HERMES_DELEGATE CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME CBOX_CONTAINER_EXEC_TOOL CBOX_NETMAP_ACTIVE
   _render_hermes_mcp_servers "$FI_EMPTY" "$MCP_OUT_EMPTY"
 )
 [ -f "$MCP_OUT_EMPTY" ] || _fail "gen_hermes_mcp_servers_into did not write $MCP_OUT_EMPTY"
 grep -q '^mcp_servers:$' "$MCP_OUT_EMPTY" \
   || _fail "gen_hermes_mcp_servers_into: default render missing top-level mcp_servers: key (real delegates.json opts codex-* and hermes-local into hermes):
 $(cat "$MCP_OUT_EMPTY")"
-for tier in codex-astra codex-sol codex-terra codex-terra-light codex-luna; do
+for tier in codex-astra codex-sol codex-luna; do
   grep -q "\"$tier\":" "$MCP_OUT_EMPTY" \
     || _fail "gen_hermes_mcp_servers_into: default render missing opted-in $tier:
 $(cat "$MCP_OUT_EMPTY")"
@@ -546,7 +546,13 @@ $(cat "$MCP_OUT_EMPTY")"
 _gated_entry_disabled container-exec "$MCP_OUT_EMPTY" \
   || _fail "gen_hermes_mcp_servers_into: default render's container-exec entry does not carry enabled: false with CBOX_CONTAINER_EXEC_TOOL unset:
 $(cat "$MCP_OUT_EMPTY")"
-_ok "gen_hermes_mcp_servers_into: real delegates.json default render carries the 5 codex tiers (shim-wrapped) plus hermes-local/local-qwen/container-exec rendered disabled since their gates are unset"
+grep -q '"cbox-net":' "$MCP_OUT_EMPTY" \
+  || _fail "gen_hermes_mcp_servers_into: default render missing cbox-net - it is now available_to hermes and must show up disabled, not vanish:
+$(cat "$MCP_OUT_EMPTY")"
+_gated_entry_disabled cbox-net "$MCP_OUT_EMPTY" \
+  || _fail "gen_hermes_mcp_servers_into: default render's cbox-net entry does not carry enabled: false with CBOX_NETMAP_ACTIVE unset:
+$(cat "$MCP_OUT_EMPTY")"
+_ok "gen_hermes_mcp_servers_into: real delegates.json default render carries the 5 codex tiers (shim-wrapped) plus hermes-local/local-qwen/container-exec/cbox-net rendered disabled since their gates are unset"
 
 FI_OPTED="$TMPBASE/fi_opted"
 OPTED_JSON="$(python3 -c '
@@ -581,7 +587,9 @@ MCP_OUT_REAL_OPTED="$FI_REAL_OPTED/generated/hermes/mcp_servers.yaml"
   CBOX_LOCAL_MODEL=on CBOX_LOCAL_MODEL_URL="http://127.0.0.1:11500"
   CBOX_LOCAL_MODEL_NAME="qwen2.5:7b"
   CBOX_CONTAINER_EXEC_TOOL="on"
-  export CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME CBOX_CONTAINER_EXEC_TOOL
+  CBOX_NETACCESS_MODE="socks"
+  CBOX_NETACCESS_APPLIED="1"
+  export CBOX_LOCAL_MODEL CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME CBOX_CONTAINER_EXEC_TOOL CBOX_NETACCESS_MODE CBOX_NETACCESS_APPLIED
   _render_hermes_mcp_servers "$FI_REAL_OPTED" "$MCP_OUT_REAL_OPTED"
 )
 grep -q '"local-qwen":' "$MCP_OUT_REAL_OPTED" \
@@ -590,11 +598,17 @@ $(cat "$MCP_OUT_REAL_OPTED")"
 grep -q '"container-exec":' "$MCP_OUT_REAL_OPTED" \
   || _fail "gen_hermes_mcp_servers_into: real delegates.json opted-in render missing container-exec:
 $(cat "$MCP_OUT_REAL_OPTED")"
+grep -q '"cbox-net":' "$MCP_OUT_REAL_OPTED" \
+  || _fail "gen_hermes_mcp_servers_into: real delegates.json opted-in render missing cbox-net:
+$(cat "$MCP_OUT_REAL_OPTED")"
 grep -q 'timeout: 3600$' "$MCP_OUT_REAL_OPTED" \
   || _fail "gen_hermes_mcp_servers_into: real local-qwen tool_timeout_sec (3600) did not carry through as timeout:
 $(cat "$MCP_OUT_REAL_OPTED")"
 grep -q 'timeout: 3600$' "$MCP_OUT_REAL_OPTED" \
   || _fail "gen_hermes_mcp_servers_into: real container-exec tool_timeout_sec (3600) did not carry through as timeout:
+$(cat "$MCP_OUT_REAL_OPTED")"
+grep -q 'timeout: 30$' "$MCP_OUT_REAL_OPTED" \
+  || _fail "gen_hermes_mcp_servers_into: real cbox-net tool_timeout_sec (30) did not carry through as timeout:
 $(cat "$MCP_OUT_REAL_OPTED")"
 _gated_entry_disabled local-qwen "$MCP_OUT_REAL_OPTED" \
   && _fail "gen_hermes_mcp_servers_into: local-qwen should carry no enabled key once its gate is satisfied:
@@ -602,7 +616,10 @@ $(cat "$MCP_OUT_REAL_OPTED")"
 _gated_entry_disabled container-exec "$MCP_OUT_REAL_OPTED" \
   && _fail "gen_hermes_mcp_servers_into: container-exec should carry no enabled key once its gate is satisfied:
 $(cat "$MCP_OUT_REAL_OPTED")"
-_ok "gen_hermes_mcp_servers_into: real delegates.json local-qwen and container-exec render enabled for hermes with their timeouts (3600, 3600) carried through once their gates are set"
+_gated_entry_disabled cbox-net "$MCP_OUT_REAL_OPTED" \
+  && _fail "gen_hermes_mcp_servers_into: cbox-net should carry no enabled key once its gate is satisfied:
+$(cat "$MCP_OUT_REAL_OPTED")"
+_ok "gen_hermes_mcp_servers_into: real delegates.json local-qwen, container-exec and cbox-net render enabled for hermes with their timeouts (3600, 3600, 30) carried through once their gates are set"
 
 _apply_mcp_servers_func() {
   awk '

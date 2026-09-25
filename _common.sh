@@ -56,13 +56,18 @@ _cbox_tpl_sha() {
   cat "$INSTALL_DIR/_common.sh" "$INSTALL_DIR/templates/generators.sh" | _cbox_sha256
 }
 
+_cbox_netaccess_active() {
+  [ "${CBOX_NETACCESS_MODE:-off}" != "off" ] && [ "${CBOX_NETACCESS_APPLIED:-0}" = "1" ]
+}
+
 mcp_all_names() {
   local target="${1:-claude}"
   local etc="${ETC_DIR:-$INSTALL_DIR/etc}"
   [ -f "$etc/mcp/delegates.json" ] || return 0
   local user_dir="${CBOX_USER_DIR-$HOME/.config/cbox/user}"
-  local rendered
-  rendered="$(python3 "$etc/mcp/render_mcp.py" "$etc/mcp/delegates.json" all "$HOME/.claude/hooks" off "$target" "$user_dir")" \
+  local rendered netmap_active="off"
+  _cbox_netaccess_active && netmap_active="on"
+  rendered="$(CBOX_NETMAP_ACTIVE="$netmap_active" python3 "$etc/mcp/render_mcp.py" "$etc/mcp/delegates.json" all "$HOME/.claude/hooks" off "$target" "$user_dir")" \
     || die "mcp_all_names: render_mcp.py rejected $etc/mcp/delegates.json (malformed registry entry - see stderr above)"
   python3 -c '
 import json

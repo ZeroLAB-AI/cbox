@@ -176,6 +176,9 @@ def command_basename(cmd):
     parts = cmd.split()
     if not parts:
         return None
+    for token in parts:
+        if token.endswith((".py", ".sh")):
+            return os.path.basename(token)
     script = parts[-1]
     return os.path.basename(script)
 

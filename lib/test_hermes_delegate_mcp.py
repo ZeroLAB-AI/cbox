@@ -4,12 +4,16 @@ import io
 import json
 import os
 import pathlib
+import re
+import signal
 import shlex
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -26,6 +30,7 @@ SPEC.loader.exec_module(MOD)
 STUB_SOURCE = '''#!/usr/bin/env python3
 import json
 import os
+import sqlite3
 import sys
 import time
 
@@ -112,6 +117,12 @@ if len(sys.argv) >= 2 and sys.argv[1] == "-z":
         time.sleep(float(control.get("sleep_sec", 10)))
         sys.stdout.write("should not get here\\n")
         sys.exit(0)
+    if mode == "sleep_with_output":
+        sys.stdout.write("sleep-with-output-started\\n")
+        sys.stdout.flush()
+        time.sleep(float(control.get("sleep_sec", 10)))
+        sys.stdout.write("should not get here\\n")
+        sys.exit(0)
     if mode == "heartbeat":
         beats = int(control.get("beats", 4))
         gap = float(control.get("beat_gap_sec", 0.3))
@@ -129,6 +140,38 @@ if len(sys.argv) >= 2 and sys.argv[1] == "-z":
     if mode == "fail":
         sys.stderr.write("stub failure\\n")
         sys.exit(1)
+    if mode == "sqlite":
+        steps = int(control.get("sqlite_steps", 3))
+        gap = float(control.get("sqlite_gap_sec", 0.2))
+        db_path = os.path.join(os.environ.get("HERMES_HOME", ""), "state.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            "CREATE TABLE sessions (id INTEGER PRIMARY KEY, name TEXT)")
+        conn.execute(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "session_id INTEGER, role TEXT, content TEXT, tool_call_id TEXT, "
+            "tool_calls TEXT, tool_name TEXT, timestamp TEXT, "
+            "finish_reason TEXT, reasoning TEXT)")
+        conn.execute("INSERT INTO sessions (id, name) VALUES (1, 'test')")
+        conn.commit()
+        for i in range(steps):
+            time.sleep(gap)
+            tool_calls = json.dumps([{
+                "function": {
+                    "name": "terminal",
+                    "arguments": json.dumps(
+                        {"command": "pytest -q lib/x_%%d.py" %% i}),
+                }
+            }])
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, "
+                "tool_calls) VALUES (1, 'assistant', ?, ?)",
+                ("step %%d done" %% i, tool_calls))
+            conn.commit()
+        conn.close()
+        sys.stdout.write("stub-sqlite-answer\\n")
+        sys.exit(0)
     sys.stdout.write("stub-canned-answer\\n")
     sys.exit(0)
 
@@ -216,6 +259,8 @@ class HermesDelegateUnitTests(unittest.TestCase):
         self.env_backup = dict(os.environ)
         os.environ["HERMES_BIN"] = self.stub
         os.environ["CBOX_HERMES_DELEGATE_HOME_TEMPLATE"] = self.template_home
+        os.environ[MOD.LOCK_DIR_VAR] = os.path.join(self.tmpdir, "locks")
+        os.environ[MOD.RUNS_DIR_VAR] = os.path.join(self.tmpdir, "runs")
         os.environ["CBOX_HERMES_DELEGATE_PROVIDER"] = "local"
         os.environ["CBOX_HERMES_DELEGATE_BASE_URL"] = "http://127.0.0.1:11434"
         os.environ.pop("CBOX_HERMES_DELEGATE_MODEL", None)
@@ -249,6 +294,50 @@ class HermesDelegateUnitTests(unittest.TestCase):
         self.assertIn(
             "untrusted local-model output", result["content"][0]["text"])
         self.assertEqual(before, after)
+
+    def _spawn_argv_for(self, which_fake):
+        recorded = []
+        real_popen = subprocess.Popen
+
+        def recording_popen(*args, **kwargs):
+            if list(args[0]).count("-z") == 1:
+                recorded.append(list(args[0]))
+            return real_popen(*args, **kwargs)
+
+        with mock.patch.object(MOD.subprocess, "Popen", recording_popen), \
+                mock.patch.object(MOD.shutil, "which", which_fake):
+            result = MOD.run_hermes_delegate({"prompt": "hello"})
+        self.assertFalse(result["isError"], result)
+        self.assertIn("stub-canned-answer", result["content"][0]["text"])
+        self.assertEqual(len(recorded), 1)
+        return recorded[0]
+
+    def test_spawn_argv_prefixed_with_setpriv_pdeathsig_when_available(self):
+        fake_setpriv = os.path.join(self.tmpdir, "setpriv")
+        with open(fake_setpriv, "w") as fh:
+            fh.write(
+                "#!/bin/sh\n"
+                "while [ $# -gt 0 ]; do\n"
+                "  case \"$1\" in\n"
+                "    --pdeathsig) shift; shift ;;\n"
+                "    *) break ;;\n"
+                "  esac\n"
+                "done\n"
+                "exec \"$@\"\n"
+            )
+        os.chmod(fake_setpriv, 0o755)
+        which_fake = lambda name: fake_setpriv if name == "setpriv" \
+            else shutil.which(name)
+        argv = self._spawn_argv_for(which_fake)
+        self.assertEqual(
+            argv[:3], [fake_setpriv, "--pdeathsig", "KILL"])
+        self.assertEqual(argv[3:], [self.stub, "-z", "hello", "--ignore-rules"])
+
+    def test_spawn_argv_plain_when_setpriv_is_missing(self):
+        which_fake = lambda name: None if name == "setpriv" \
+            else shutil.which(name)
+        argv = self._spawn_argv_for(which_fake)
+        self.assertEqual(argv, [self.stub, "-z", "hello", "--ignore-rules"])
 
     def test_audit_record_carries_caller_name(self):
         audit_path = os.path.join(self.tmpdir, "audit.jsonl")
@@ -337,7 +426,7 @@ class HermesDelegateUnitTests(unittest.TestCase):
         self.assertIn("timed out", result["content"][0]["text"])
 
     def test_timeout_defaults_leave_room_for_long_local_work(self):
-        self.assertEqual(MOD.DEFAULT_TIMEOUT_SEC, 1800)
+        self.assertEqual(MOD.DEFAULT_TIMEOUT_SEC, 0)
         self.assertEqual(MOD.DEFAULT_IDLE_TIMEOUT_SEC, 900)
 
     def test_hard_cap_error_names_the_var_and_the_running_generation(self):
@@ -349,10 +438,9 @@ class HermesDelegateUnitTests(unittest.TestCase):
         self.assertIn("CBOX_HERMES_DELEGATE_TIMEOUT_SEC", text)
         self.assertIn("still be finishing this generation", text)
 
-    def test_idle_timeout_kills_a_child_that_writes_nothing(self):
+    def test_idle_gate_fires_on_the_default_uncapped_call(self):
         write_control(self.control_file, mode="sleep", sleep_sec=10)
-        os.environ["CBOX_HERMES_DELEGATE_TIMEOUT_SEC"] = "60"
-        os.environ["CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC"] = "1"
+        os.environ[MOD.IDLE_TIMEOUT_VAR] = "1"
         started = time.monotonic()
         result = MOD.run_hermes_delegate({"prompt": "hi"})
         self.assertTrue(result["isError"])
@@ -360,6 +448,25 @@ class HermesDelegateUnitTests(unittest.TestCase):
         self.assertIn("stalled", text)
         self.assertIn("CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC", text)
         self.assertLess(time.monotonic() - started, 30)
+
+    def test_idle_gate_fires_with_an_explicit_positive_cap(self):
+        write_control(self.control_file, mode="sleep", sleep_sec=10)
+        os.environ[MOD.TIMEOUT_VAR] = "60"
+        os.environ[MOD.IDLE_TIMEOUT_VAR] = "1"
+        started = time.monotonic()
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertTrue(result["isError"])
+        text = result["content"][0]["text"]
+        self.assertIn("stalled", text)
+        self.assertIn("CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC", text)
+        self.assertLess(time.monotonic() - started, 30)
+
+    def test_explicit_cap_zero_idle_zero_lets_the_child_finish(self):
+        os.environ[MOD.TIMEOUT_VAR] = "0"
+        os.environ[MOD.IDLE_TIMEOUT_VAR] = "0"
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertFalse(result["isError"], result)
+        self.assertIn("stub-canned-answer", result["content"][0]["text"])
 
     def test_writes_in_the_ephemeral_home_count_as_progress(self):
         write_control(self.control_file, mode="heartbeat", beats=6,
@@ -749,6 +856,460 @@ class HermesDelegateUnitTests(unittest.TestCase):
         finally:
             os.environ.pop("ALL_PROXY", None)
 
+    def test_progress_carries_live_step_count_and_last_tool_summary(self):
+        write_control(self.control_file, mode="sqlite", sqlite_steps=4,
+                      sqlite_gap_sec=0.2)
+        recorded = []
+        with mock.patch.object(
+                MOD, "send", side_effect=lambda m: recorded.append(m)), \
+                mock.patch.object(MOD, "PROGRESS_MIN_GAP_SEC", 0), \
+                mock.patch.object(MOD, "HEARTBEAT_POLL_SEC", 0.05):
+            self.assertTrue(MOD.begin_call(1, "tok"))
+            text, err, meta = MOD.spawn_hermes("hi", None)
+        MOD.end_call()
+        self.assertIsNone(err, (text, err))
+        self.assertIn("stub-sqlite-answer", text)
+        pings = [
+            m["params"]["message"] for m in recorded
+            if m.get("method") == "notifications/progress"
+        ]
+        matches = [p for p in pings if "steps)" in p and "terminal:" in p]
+        self.assertTrue(matches, pings)
+        self.assertRegex(matches[0], r"steps\): terminal: pytest -q lib/x_")
+        self.assertEqual(meta["steps"], 4)
+        self.assertEqual(len(meta["tool_calls"]), 4)
+
+    def test_run_saved_with_summary_and_permissions(self):
+        write_control(self.control_file, mode="sqlite", sqlite_steps=2,
+                      sqlite_gap_sec=0.05)
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertFalse(result["isError"], result)
+        text = result["content"][0]["text"]
+        m = re.search(r"hermes-delegate run (\S+): (\d+) steps", text)
+        self.assertIsNotNone(m, text)
+        run_id, steps = m.group(1), int(m.group(2))
+        self.assertTrue(MOD._valid_run_id(run_id))
+        self.assertEqual(steps, 2)
+
+        run_dir = os.path.join(os.environ[MOD.RUNS_DIR_VAR], run_id)
+        self.assertTrue(os.path.isdir(run_dir))
+        self.assertEqual(stat.S_IMODE(os.stat(run_dir).st_mode), 0o700)
+
+        summary_path = os.path.join(run_dir, "summary.json")
+        self.assertEqual(
+            stat.S_IMODE(os.stat(summary_path).st_mode), 0o600)
+        with open(summary_path) as fh:
+            summary = json.load(fh)
+        self.assertEqual(summary["run_id"], run_id)
+        self.assertEqual(summary["outcome"], "ok")
+        self.assertEqual(summary["mode"], "qa")
+        self.assertEqual(summary["steps"], 2)
+        self.assertEqual(len(summary["tool_calls"]), 2)
+        self.assertTrue(summary["final_text_tail"])
+
+        db_copy = os.path.join(run_dir, "state.db")
+        self.assertTrue(os.path.isfile(db_copy))
+        self.assertEqual(stat.S_IMODE(os.stat(db_copy).st_mode), 0o600)
+
+    def test_no_automatic_pruning_after_many_runs(self):
+        write_control(self.control_file, mode="sqlite", sqlite_steps=1,
+                      sqlite_gap_sec=0.01)
+        for _ in range(25):
+            result = MOD.run_hermes_delegate({"prompt": "hi"})
+            self.assertFalse(result["isError"], result)
+        root = os.environ[MOD.RUNS_DIR_VAR]
+        remaining = [n for n in os.listdir(root) if MOD._valid_run_id(n)]
+        self.assertEqual(len(remaining), 25)
+
+    def test_processed_runs_deletes_named_runs_and_reports_remaining(self):
+        root = os.environ[MOD.RUNS_DIR_VAR]
+        os.makedirs(root, exist_ok=True)
+        ids = []
+        for i in range(3):
+            rid = "202601%02dT000000Z-%06x" % (i + 1, i)
+            os.makedirs(os.path.join(root, rid))
+            ids.append(rid)
+        result = MOD.run_hermes_delegate(
+            {"processed_runs": [ids[0], ids[1]]})
+        self.assertFalse(result["isError"], result)
+        text = result["content"][0]["text"]
+        self.assertIn(ids[0], text)
+        self.assertIn(ids[1], text)
+        self.assertFalse(os.path.isdir(os.path.join(root, ids[0])))
+        self.assertFalse(os.path.isdir(os.path.join(root, ids[1])))
+        self.assertTrue(os.path.isdir(os.path.join(root, ids[2])))
+        self.assertIn("1 unprocessed runs kept", text)
+        self.assertIn(
+            "delete processed ones with processed_runs", text)
+
+    def test_processed_runs_unknown_id_reported_not_found(self):
+        unknown = "20200101T000000Z-abcdef"
+        result = MOD.run_hermes_delegate({"processed_runs": [unknown]})
+        self.assertFalse(result["isError"], result)
+        text = result["content"][0]["text"]
+        self.assertIn("not found", text)
+        self.assertIn(unknown, text)
+
+    def test_processed_runs_malformed_ids_refused_without_filesystem_access(
+            self):
+        for bad in ("../x", "", "abc", "x" * 300, "a/b"):
+            with mock.patch("os.lstat") as m_lstat, \
+                    mock.patch("os.listdir") as m_listdir, \
+                    mock.patch("shutil.rmtree") as m_rmtree:
+                result = MOD.run_hermes_delegate(
+                    {"processed_runs": [bad]})
+            self.assertTrue(result["isError"], (bad, result))
+            self.assertIn(
+                "processed_runs", result["content"][0]["text"])
+            m_lstat.assert_not_called()
+            m_listdir.assert_not_called()
+            m_rmtree.assert_not_called()
+
+    def test_processed_runs_over_the_limit_refused(self):
+        ids = ["202601%02dT000000Z-%06x" % (i % 28 + 1, i) for i in range(51)]
+        result = MOD.run_hermes_delegate({"processed_runs": ids})
+        self.assertTrue(result["isError"], result)
+        self.assertIn("processed_runs", result["content"][0]["text"])
+
+    def test_processed_runs_symlinked_entry_not_followed(self):
+        root = os.environ[MOD.RUNS_DIR_VAR]
+        os.makedirs(root, exist_ok=True)
+        real_target = os.path.join(self.tmpdir, "sym_target")
+        os.makedirs(real_target)
+        keep_file = os.path.join(real_target, "keepme.txt")
+        with open(keep_file, "w") as fh:
+            fh.write("x")
+        rid = "20260101T000000Z-abcdef"
+        link_path = os.path.join(root, rid)
+        os.symlink(real_target, link_path)
+        result = MOD.run_hermes_delegate({"processed_runs": [rid]})
+        self.assertFalse(result["isError"], result)
+        text = result["content"][0]["text"]
+        self.assertIn("not found", text)
+        self.assertTrue(os.path.exists(keep_file))
+        self.assertTrue(os.path.islink(link_path))
+
+    def test_processed_runs_only_call_deletes_and_spawns_nothing(self):
+        root = os.environ[MOD.RUNS_DIR_VAR]
+        os.makedirs(root, exist_ok=True)
+        rid = "20260101T000000Z-abcdef"
+        os.makedirs(os.path.join(root, rid))
+        with mock.patch.object(MOD, "spawn_hermes") as spawned:
+            result = MOD.run_hermes_delegate({"processed_runs": [rid]})
+        spawned.assert_not_called()
+        self.assertFalse(result["isError"], result)
+        text = result["content"][0]["text"]
+        self.assertIn(rid, text)
+        self.assertIn("unprocessed runs kept", text)
+        self.assertFalse(os.path.isdir(os.path.join(root, rid)))
+
+    def test_processed_runs_empty_array_call_spawns_nothing(self):
+        with mock.patch.object(MOD, "spawn_hermes") as spawned:
+            result = MOD.run_hermes_delegate({"processed_runs": []})
+        spawned.assert_not_called()
+        self.assertFalse(result["isError"], result)
+        self.assertIn(
+            "unprocessed runs kept", result["content"][0]["text"])
+
+    def test_audit_record_carries_run_id_and_outcome(self):
+        audit_path = os.path.join(self.tmpdir, "audit_runid.jsonl")
+        os.environ["CBOX_HERMES_DELEGATE_AUDIT"] = audit_path
+        try:
+            result = MOD.run_hermes_delegate({"prompt": "hi"})
+            self.assertFalse(result["isError"], result)
+            m = re.search(
+                r"hermes-delegate run (\S+):", result["content"][0]["text"])
+            self.assertIsNotNone(m)
+            run_id = m.group(1)
+            with open(audit_path) as fh:
+                rec = json.loads(fh.readline())
+            self.assertEqual(rec["run_id"], run_id)
+            self.assertEqual(rec["outcome"], "ok")
+        finally:
+            os.environ.pop("CBOX_HERMES_DELEGATE_AUDIT", None)
+
+    def test_tool_description_byte_cap(self):
+        for mode in ("qa", "agent"):
+            os.environ["CBOX_HERMES_DELEGATE_MODE"] = mode
+            size = len(MOD.tool_description().encode("utf-8"))
+            self.assertLessEqual(size, 1200, (mode, size))
+        os.environ.pop("CBOX_HERMES_DELEGATE_MODE", None)
+
+    def test_output_log_created_at_spawn_and_contains_stub_output(self):
+        write_control(self.control_file)
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertFalse(result["isError"], result)
+        m = re.search(
+            r"hermes-delegate run (\S+):", result["content"][0]["text"])
+        self.assertIsNotNone(m)
+        run_id = m.group(1)
+        log_path = os.path.join(
+            os.environ[MOD.RUNS_DIR_VAR], run_id, "output.log")
+        self.assertTrue(os.path.isfile(log_path))
+        with open(log_path, "rb") as fh:
+            content = fh.read()
+        self.assertIn(b"[out] stub-canned-answer", content)
+
+    def test_timeout_error_includes_run_id_and_steps(self):
+        write_control(self.control_file, mode="sleep", sleep_sec=10)
+        os.environ["CBOX_HERMES_DELEGATE_TIMEOUT_SEC"] = "1"
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertTrue(result["isError"])
+        text = result["content"][0]["text"]
+        self.assertIn("run id:", text)
+        self.assertIn("steps:", text)
+        self.assertIn("last tool calls: none", text)
+        self.assertIn("files changed: none", text)
+        m = re.search(r"run id: (\S+)", text)
+        self.assertIsNotNone(m, text)
+        run_id = m.group(1)
+        self.assertTrue(MOD._valid_run_id(run_id))
+        run_dir = os.path.join(os.environ[MOD.RUNS_DIR_VAR], run_id)
+        self.assertTrue(os.path.isdir(run_dir))
+        with open(os.path.join(run_dir, "summary.json")) as fh:
+            summary = json.load(fh)
+        self.assertEqual(summary["outcome"], "timeout")
+
+    def test_cancelled_call_returns_plain_error_without_run_detail(self):
+        self.addCleanup(MOD._CANCEL.clear)
+        self.addCleanup(MOD._CANCELLED_IDS.clear)
+        pid_file = os.path.join(self.tmpdir, "pid_cancel_run.txt")
+        stub_path = make_pid_stub(self.tmpdir, pid_file, 60)
+        os.environ["HERMES_BIN"] = stub_path
+        outcome = {}
+
+        def runner():
+            outcome["result"] = MOD.run_hermes_delegate({"prompt": "hi"})
+
+        self.assertTrue(MOD.begin_call(42, None))
+        thread = threading.Thread(target=runner, daemon=True)
+        thread.start()
+        pid = wait_for_pid_file(pid_file, 5)
+        self.assertIsNotNone(pid, "the stub never recorded its pid")
+        time.sleep(0.3)
+        MOD.cancel_request(42)
+        thread.join(timeout=10)
+        MOD.end_call()
+        self.assertFalse(thread.is_alive())
+        result = outcome["result"]
+        self.assertTrue(result["isError"])
+        self.assertIn("cancelled", result["content"][0]["text"])
+        self.assertNotIn("run id", result["content"][0]["text"])
+
+    def test_symlinked_runs_dir_refused_but_call_still_succeeds(self):
+        real_target = os.path.join(self.tmpdir, "real_runs_target")
+        os.makedirs(real_target)
+        link_path = os.path.join(self.tmpdir, "runs_symlink")
+        os.symlink(real_target, link_path)
+        os.environ[MOD.RUNS_DIR_VAR] = link_path
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertFalse(result["isError"], result)
+        text = result["content"][0]["text"]
+        self.assertIn("retention warning", text)
+        self.assertIn("symlink", text)
+        self.assertEqual(os.listdir(real_target), [])
+
+    def test_read_state_db_summary_tolerates_missing_file(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        steps, calls, tail = MOD._read_state_db_summary(d)
+        self.assertEqual((steps, calls, tail), (0, [], ""))
+
+    def test_read_state_db_summary_tolerates_a_corrupt_file(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        with open(os.path.join(d, "state.db"), "wb") as fh:
+            fh.write(b"not a sqlite database at all")
+        steps, calls, tail = MOD._read_state_db_summary(d)
+        self.assertEqual((steps, calls, tail), (0, [], ""))
+
+    def test_read_state_db_summary_tolerates_a_locked_file(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "state.db")
+        conn = sqlite3.connect(path)
+        conn.execute(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY, role TEXT, "
+            "tool_calls TEXT, content TEXT)")
+        conn.commit()
+        conn.execute("BEGIN EXCLUSIVE")
+        conn.execute("INSERT INTO messages (role) VALUES ('assistant')")
+        try:
+            steps, calls, tail = MOD._read_state_db_summary(d)
+            self.assertEqual((steps, calls, tail), (0, [], ""))
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def _evil_repo(self):
+        repo = os.path.join(self.tmpdir, "evilrepo")
+        os.makedirs(repo)
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.tmpdir,
+               "GIT_CONFIG_NOSYSTEM": "1"}
+        run = lambda *a: subprocess.run(["git", "-C", repo] + list(a), check=True,
+                                        env=env, stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL)
+        run("init", "-q")
+        run("config", "user.email", "t@t")
+        run("config", "user.name", "t")
+        with open(os.path.join(repo, "a.txt"), "w") as fh:
+            fh.write("one\n")
+        run("add", "a.txt")
+        run("commit", "-q", "-m", "init")
+        marker = os.path.join(self.tmpdir, "evil_marker")
+        hook = os.path.join(self.tmpdir, "evil.sh")
+        with open(hook, "w") as fh:
+            fh.write("#!/bin/sh\ntouch %s\ncat\n" % marker)
+        os.chmod(hook, 0o755)
+        with open(os.path.join(repo, ".gitattributes"), "w") as fh:
+            fh.write("* filter=evil\n")
+        run("config", "filter.evil.clean", hook)
+        run("config", "filter.evil.process", hook)
+        run("config", "core.fsmonitor", hook)
+        return repo, marker
+
+    def test_workspace_snapshot_never_runs_repository_code(self):
+        repo, marker = self._evil_repo()
+        with mock.patch.object(MOD.subprocess, "Popen",
+                               side_effect=AssertionError("no process may be spawned")), \
+                mock.patch.object(MOD.subprocess, "run",
+                                  side_effect=AssertionError("no process may be spawned")):
+            before = MOD._workspace_snapshot(repo)
+            with open(os.path.join(repo, "a.txt"), "w") as fh:
+                fh.write("two, longer content\n")
+            with open(os.path.join(repo, "new.txt"), "w") as fh:
+                fh.write("x\n")
+            after = MOD._workspace_snapshot(repo)
+        self.assertFalse(os.path.exists(marker))
+        changed = MOD._files_changed_diff(before, after)
+        self.assertIn("a.txt", changed)
+        self.assertIn("new.txt", changed)
+        self.assertFalse(any(p.startswith(".git" + os.sep) for p in changed))
+
+    def test_workspace_snapshot_reports_deletions_and_skips_git_dir(self):
+        repo, _marker = self._evil_repo()
+        before = MOD._workspace_snapshot(repo)
+        self.assertFalse(any(p == ".git" or p.startswith(".git" + os.sep) for p in before))
+        os.remove(os.path.join(repo, "a.txt"))
+        after = MOD._workspace_snapshot(repo)
+        self.assertEqual(MOD._files_changed_diff(before, after), ["a.txt"])
+
+    def test_workspace_snapshot_does_not_follow_directory_symlinks(self):
+        root = os.path.join(self.tmpdir, "ws")
+        outside = os.path.join(self.tmpdir, "outside")
+        os.makedirs(root)
+        os.makedirs(outside)
+        with open(os.path.join(outside, "secret.txt"), "w") as fh:
+            fh.write("s\n")
+        os.symlink(outside, os.path.join(root, "link"))
+        snap = MOD._workspace_snapshot(root)
+        self.assertIn("link", snap)
+        self.assertNotIn(os.path.join("link", "secret.txt"), snap)
+
+    def test_workspace_snapshot_gives_up_past_the_file_cap(self):
+        root = os.path.join(self.tmpdir, "many")
+        os.makedirs(root)
+        for i in range(6):
+            open(os.path.join(root, "f%d" % i), "w").close()
+        self.assertIsNone(MOD._workspace_snapshot(root, max_files=3))
+        self.assertIsNotNone(MOD._workspace_snapshot(root, max_files=10))
+
+    def test_sweep_runs_in_finally_on_normal_completion(self):
+        called = []
+
+        def fake_sweep(home, grace_sec=MOD.SWEEP_GRACE_SEC):
+            called.append(home)
+
+        with mock.patch.object(MOD, "_sweep_hermes_home", side_effect=fake_sweep):
+            result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(len(called), 1)
+
+    def test_sweep_runs_in_finally_on_the_generic_exception_path(self):
+        called = []
+
+        def fake_sweep(home, grace_sec=MOD.SWEEP_GRACE_SEC):
+            called.append(home)
+
+        with mock.patch.object(MOD, "_sweep_hermes_home", side_effect=fake_sweep), \
+                mock.patch.object(
+                    MOD.subprocess, "Popen", side_effect=RuntimeError("boom")):
+            result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertTrue(result["isError"], result)
+        self.assertEqual(len(called), 1)
+
+    def test_create_run_for_writing_refuses_an_existing_dir(self):
+        root, err = MOD._prepare_runs_dir()
+        self.assertIsNone(err, err)
+        run_id = MOD._new_run_id()
+        os.makedirs(os.path.join(root, run_id))
+        run_dir, fd, err = MOD._create_run_for_writing(run_id)
+        self.assertIsNone(run_dir)
+        self.assertIsNone(fd)
+        self.assertIn("already exists", err)
+
+    def test_progress_due_respects_the_gap_and_the_force_flag(self):
+        self.assertTrue(MOD.begin_call(1, "tok"))
+        try:
+            with mock.patch.object(MOD, "PROGRESS_MIN_GAP_SEC", 100):
+                MOD._CALL["last"] = time.monotonic()
+                self.assertFalse(MOD.progress_due())
+                self.assertTrue(MOD.progress_due(force=True))
+        finally:
+            MOD.end_call()
+
+    def test_progress_due_false_without_an_active_call(self):
+        MOD.end_call()
+        self.assertFalse(MOD.progress_due())
+
+    def test_live_activity_query_skipped_when_progress_is_not_due(self):
+        write_control(self.control_file, mode="sqlite", sqlite_steps=3,
+                      sqlite_gap_sec=0.2)
+        calls = []
+
+        def spy(home):
+            calls.append(home)
+            return 0, None
+
+        with mock.patch.object(MOD, "progress_due", return_value=False), \
+                mock.patch.object(MOD, "_read_latest_tool_call", side_effect=spy), \
+                mock.patch.object(MOD, "HEARTBEAT_POLL_SEC", 0.05), \
+                mock.patch.object(MOD, "send"):
+            self.assertTrue(MOD.begin_call(1, "tok"))
+            text, err, meta = MOD.spawn_hermes("hi", None)
+        MOD.end_call()
+        self.assertIsNone(err, (text, err))
+        self.assertEqual(calls, [])
+
+    def test_read_latest_tool_call_returns_only_the_last_call(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        conn = sqlite3.connect(os.path.join(d, "state.db"))
+        conn.execute(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "role TEXT, content TEXT, tool_calls TEXT)")
+        for i in range(3):
+            tool_calls = json.dumps([{
+                "function": {
+                    "name": "terminal",
+                    "arguments": json.dumps({"command": "cmd-%d" % i}),
+                }
+            }])
+            conn.execute(
+                "INSERT INTO messages (role, content, tool_calls) VALUES "
+                "('assistant', ?, ?)", ("step-%d" % i, tool_calls))
+        conn.commit()
+        conn.close()
+        steps, last_call = MOD._read_latest_tool_call(d)
+        self.assertEqual(steps, 3)
+        self.assertEqual(last_call, ("terminal", "cmd-2"))
+
+    def test_read_latest_tool_call_tolerates_a_missing_file(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        steps, last_call = MOD._read_latest_tool_call(d)
+        self.assertEqual((steps, last_call), (0, None))
+
 
 class DelegateModeTests(unittest.TestCase):
     def test_default_mode_is_qa(self):
@@ -852,6 +1413,8 @@ class HermesDelegateStdioTests(unittest.TestCase):
         self.env = dict(os.environ)
         self.env["HERMES_BIN"] = self.stub
         self.env["CBOX_HERMES_DELEGATE_HOME_TEMPLATE"] = self.template_home
+        self.env[MOD.LOCK_DIR_VAR] = os.path.join(self.tmpdir, "locks")
+        self.env[MOD.RUNS_DIR_VAR] = os.path.join(self.tmpdir, "runs")
         self.env["CBOX_HERMES_DELEGATE_PROVIDER"] = "local"
         self.env["CBOX_HERMES_DELEGATE_BASE_URL"] = "http://127.0.0.1:11434"
         self.env.pop("CBOX_OLLAMA_CONTEXT_LENGTH", None)
@@ -1115,6 +1678,7 @@ class ConcurrencySlotTests(unittest.TestCase):
         self.lockdir = os.path.join(self.tmpdir, "locks")
         self.env_backup = dict(os.environ)
         os.environ["CBOX_HERMES_DELEGATE_LOCK_DIR"] = self.lockdir
+        os.environ[MOD.RUNS_DIR_VAR] = os.path.join(self.tmpdir, "runs")
         os.environ.pop("CBOX_HERMES_DELEGATE_MAX_CONCURRENCY", None)
         os.environ.pop("OLLAMA_NUM_PARALLEL", None)
         os.environ.pop("CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC", None)
@@ -1233,8 +1797,12 @@ class EmptyEnvDefaultsTests(unittest.TestCase):
             self.assertNotEqual(MOD.audit_path(), "")
 
     def test_empty_lock_dir_still_acquires_a_slot(self):
-        with mock.patch.dict(os.environ, {MOD.LOCK_DIR_VAR: ""}, clear=False):
+        fallback = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, fallback, True)
+        with mock.patch.dict(os.environ, {MOD.LOCK_DIR_VAR: ""}, clear=False), \
+                mock.patch.object(MOD, "DEFAULT_LOCK_DIR", fallback):
             handle, err = MOD.acquire_slot()
+            self.assertTrue(os.path.exists(os.path.join(fallback, "slot.0")))
             self.assertIsNone(
                 err,
                 "an empty lock dir must fall back to the default, not fail: %r" % (err,))
@@ -1303,6 +1871,7 @@ class AgentModeTests(unittest.TestCase):
                   "CBOX_HERMES_DELEGATE_LOCK_DIR", "CBOX_SCOPE_ROOT"):
             os.environ.pop(k, None)
         os.environ["CBOX_HERMES_DELEGATE_LOCK_DIR"] = os.path.join(self.tmpdir, "locks")
+        os.environ[MOD.RUNS_DIR_VAR] = os.path.join(self.tmpdir, "runs")
         self.guard_script = os.path.join(self.tmpdir, "hermes_guard_bridge.py")
         with open(self.guard_script, "w") as fh:
             fh.write("import sys\nsys.exit(0)\n")
@@ -1460,6 +2029,746 @@ class AgentModeTests(unittest.TestCase):
         os.environ["CBOX_HERMES_DELEGATE_MODE"] = "qa"
         self.assertIn("qa mode", MOD.tool_description())
         self.assertNotIn("agent mode", MOD.tool_description())
+
+
+PID_STUB_SOURCE = '''#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+
+PID_FILE = %(pid_file)r
+SLEEP_SEC = %(sleep_sec)r
+CONFIG_PATH = os.path.join(os.environ.get("HERMES_HOME", ""), "config.yaml")
+if len(sys.argv) >= 3 and sys.argv[1] == "config" and sys.argv[2] == "set":
+    sys.exit(0)
+if (len(sys.argv) >= 4 and sys.argv[1] == "config" and sys.argv[2] == "get"
+        and sys.argv[3] == "agent.disabled_toolsets"):
+    with open(CONFIG_PATH) as fh:
+        cfg = json.load(fh)
+    sys.stdout.write(json.dumps(
+        (cfg.get("agent") or {}).get("disabled_toolsets")) + "\\n")
+    sys.exit(0)
+if len(sys.argv) >= 2 and sys.argv[1] == "-z":
+    with open(PID_FILE, "w") as fh:
+        fh.write(str(os.getpid()) + "\\n")
+    sys.stdout.write("pid-stub-started\\n")
+    sys.stdout.flush()
+    time.sleep(SLEEP_SEC)
+    sys.stdout.write("pid-stub-done\\n")
+    sys.exit(0)
+sys.exit(0)
+'''
+
+
+def make_pid_stub(tmpdir, pid_file, sleep_sec):
+    stub_path = os.path.join(tmpdir, "pid-stub.py")
+    with open(stub_path, "w") as fh:
+        fh.write(PID_STUB_SOURCE % {"pid_file": pid_file,
+                                    "sleep_sec": sleep_sec})
+    os.chmod(stub_path, os.stat(stub_path).st_mode | stat.S_IEXEC)
+    install_fake_venv_python(tmpdir)
+    return stub_path
+
+
+def wait_for_pid_file(path, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if os.path.exists(path):
+            with open(path) as fh:
+                raw = fh.read().strip()
+            if raw and raw[0].isdigit():
+                return int(raw)
+        time.sleep(0.05)
+    return None
+
+
+def process_is_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+class HermesDelegateCancelProgressTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.control_file = os.path.join(self.tmpdir, "control.json")
+        write_control(self.control_file)
+        self.stub = make_stub(self.tmpdir, self.control_file)
+        self.env_backup = dict(os.environ)
+        os.environ["HERMES_BIN"] = self.stub
+        os.environ[MOD.TEMPLATE_HOME_VAR] = \
+            make_template_home(self.tmpdir)
+        os.environ[MOD.LOCK_DIR_VAR] = os.path.join(self.tmpdir, "locks")
+        os.environ[MOD.RUNS_DIR_VAR] = os.path.join(self.tmpdir, "runs")
+        os.environ[MOD.PROVIDER_VAR] = "local"
+        os.environ[MOD.BASE_URL_VAR] = "http://127.0.0.1:11434"
+        for name in (MOD.MODEL_VAR, MOD.CONSOLE_PROVIDER_VAR,
+                     MOD.CONSOLE_BASE_URL_VAR, MOD.CONSOLE_MODEL_VAR,
+                     "CBOX_OLLAMA_CONTEXT_LENGTH", MOD.TIMEOUT_VAR,
+                     MOD.IDLE_TIMEOUT_VAR, MOD.MAX_PROMPT_VAR,
+                     MOD.MAX_RESPONSE_VAR, MOD.DEPTH_VAR,
+                     MOD.LEGACY_DEPTH_VAR, MOD.CONCURRENCY_VAR,
+                     "OLLAMA_NUM_PARALLEL", MOD.QUEUE_WAIT_VAR):
+            os.environ.pop(name, None)
+        os.environ[MOD.AUDIT_VAR] = os.path.join(self.tmpdir, "audit.jsonl")
+        for reset in (lambda: MOD._CANCEL.clear(),
+                      lambda: MOD._CLOSED.clear(),
+                      MOD.end_call,
+                      lambda: MOD._SHUTDOWN.__setitem__(0, False),
+                      lambda: MOD._LIVE_PROC.__setitem__(0, None),
+                      lambda: MOD._LIVE_HOME.__setitem__(0, None),
+                      lambda: MOD._CANCELLED_IDS.clear()):
+            try:
+                reset()
+            except AttributeError:
+                pass
+
+    def tearDown(self):
+        for reset in (lambda: MOD._CANCEL.clear(),
+                      lambda: MOD._CLOSED.clear(),
+                      MOD.end_call,
+                      lambda: MOD._SHUTDOWN.__setitem__(0, False),
+                      lambda: MOD._LIVE_PROC.__setitem__(0, None),
+                      lambda: MOD._LIVE_HOME.__setitem__(0, None),
+                      lambda: MOD._CANCELLED_IDS.clear()):
+            try:
+                reset()
+            except AttributeError:
+                pass
+        os.environ.clear()
+        os.environ.update(self.env_backup)
+
+    def _pid_stub(self, tag, sleep_sec):
+        pid_file = os.path.join(self.tmpdir, "pid_%s.txt" % tag)
+        stub_path = make_pid_stub(self.tmpdir, pid_file, sleep_sec)
+        os.environ["HERMES_BIN"] = stub_path
+        return pid_file
+
+    def _heartbeat_stub(self, beats, beat_gap_sec):
+        write_control(self.control_file, mode="heartbeat", beats=beats,
+                      beat_gap_sec=beat_gap_sec)
+        os.environ["HERMES_BIN"] = self.stub
+
+    def test_progress_notifies_while_running(self):
+        self._heartbeat_stub(beats=8, beat_gap_sec=0.3)
+        recorded = []
+        with mock.patch.object(
+                MOD, "send", side_effect=lambda m: recorded.append(m)), \
+                mock.patch.object(MOD, "PROGRESS_MIN_GAP_SEC", 0), \
+                mock.patch.object(MOD, "HEARTBEAT_POLL_SEC", 0.1):
+            self.assertTrue(MOD.begin_call(7, "tok"))
+            text, err, meta = MOD.spawn_hermes("hi", None)
+        MOD.end_call()
+        self.assertIsNone(err, (text, err))
+        self.assertIn("stub-heartbeat-answer", text)
+        pings = [
+            m for m in recorded
+            if m.get("method") == "notifications/progress"
+        ]
+        self.assertGreaterEqual(len(pings), 2, recorded)
+        for m in pings:
+            self.assertEqual(m["params"]["progressToken"], "tok")
+        seqs = [m["params"]["progress"] for m in pings]
+        for earlier, later in zip(seqs, seqs[1:]):
+            self.assertLess(earlier, later, seqs)
+
+    def test_no_progress_token_sends_nothing(self):
+        self._heartbeat_stub(beats=8, beat_gap_sec=0.3)
+        recorded = []
+        with mock.patch.object(
+                MOD, "send", side_effect=lambda m: recorded.append(m)), \
+                mock.patch.object(MOD, "PROGRESS_MIN_GAP_SEC", 0), \
+                mock.patch.object(MOD, "HEARTBEAT_POLL_SEC", 0.1):
+            self.assertTrue(MOD.begin_call(8, None))
+            text, err, meta = MOD.spawn_hermes("hi", None)
+        MOD.end_call()
+        self.assertIsNone(err, (text, err))
+        self.assertIn("stub-heartbeat-answer", text)
+        pings = [
+            m for m in recorded
+            if m.get("method") == "notifications/progress"
+        ]
+        self.assertEqual(pings, [], recorded)
+
+    def test_cancel_kills_the_hermes_child(self):
+        pid_file = self._pid_stub("kill", 60)
+        outcome = {}
+
+        def runner():
+            outcome["result"] = MOD.spawn_hermes("hi", None)
+
+        self.assertTrue(MOD.begin_call(9, None))
+        thread = threading.Thread(target=runner, daemon=True)
+        thread.start()
+        pid = wait_for_pid_file(pid_file, 5)
+        self.assertIsNotNone(pid, "the stub never recorded its pid")
+        time.sleep(0.3)
+        MOD.cancel_request(9)
+        thread.join(timeout=10)
+        self.assertFalse(
+            thread.is_alive(), "spawn_hermes did not exit after cancel")
+        text, err, meta = outcome["result"]
+        self.assertIsNone(text)
+        self.assertEqual(err, MOD.CANCELLED_MESSAGE)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if not process_is_alive(pid):
+                break
+            time.sleep(0.1)
+        self.assertFalse(
+            process_is_alive(pid),
+            "hermes child %d is still alive after cancel" % pid)
+
+    def test_cancel_before_begin_refuses_that_call_only(self):
+        MOD.cancel_request(10)
+        self.assertFalse(MOD.begin_call(10, None))
+        self.assertTrue(MOD.begin_call(11, None))
+        self.assertFalse(MOD.cancelled())
+        MOD.end_call()
+
+    def test_stdio_cancel_suppresses_the_reply(self):
+        pid_file = self._pid_stub("stdio", 60)
+        env = dict(os.environ)
+        script = str(ROOT / "etc" / "mcp" / "hermes_delegate_mcp.py")
+        proc = subprocess.Popen(
+            [sys.executable, script],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=env)
+        out_chunks = []
+        err_chunks = []
+
+        def pump(fh, sink):
+            sink.append(fh.read())
+            fh.close()
+
+        out_thread = threading.Thread(
+            target=pump, args=(proc.stdout, out_chunks), daemon=True)
+        err_thread = threading.Thread(
+            target=pump, args=(proc.stderr, err_chunks), daemon=True)
+        out_thread.start()
+        err_thread.start()
+        try:
+            def write_msg(msg):
+                proc.stdin.write((json.dumps(msg) + "\n").encode())
+                proc.stdin.flush()
+
+            write_msg(
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                 "params": {"protocolVersion": "2024-11-05"}})
+            time.sleep(0.4)
+            write_msg(
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                 "params": {"name": "hermes-delegate",
+                            "arguments": {"prompt": "hi"},
+                            "_meta": {"progressToken": "p1"}}})
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if os.path.exists(pid_file):
+                    break
+                time.sleep(0.05)
+            self.assertTrue(
+                os.path.exists(pid_file),
+                "the long-sleeping stub never started")
+            time.sleep(0.5)
+            write_msg(
+                {"jsonrpc": "2.0", "method": "notifications/cancelled",
+                 "params": {"requestId": 2}})
+            time.sleep(0.3)
+            write_msg({"jsonrpc": "2.0", "id": 3, "method": "ping"})
+            proc.stdin.close()
+        except Exception:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            raise
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and proc.poll() is None:
+            time.sleep(0.05)
+        self.assertIsNotNone(
+            proc.poll(), "server did not exit within 15s after cancel")
+        self.assertEqual(proc.returncode, 0, b"".join(err_chunks).decode())
+        out_thread.join(timeout=5)
+        out = b"".join(out_chunks).decode()
+        lines = [l for l in out.splitlines() if l.strip()]
+        messages = [json.loads(l) for l in lines]
+        by_id = {m["id"]: m for m in messages if m.get("id") is not None}
+        self.assertIn(1, by_id)
+        self.assertIn(3, by_id)
+        self.assertNotIn(2, by_id,
+                         "a cancelled call must not be replied to")
+        pings = [
+            m for m in messages
+            if m.get("method") == "notifications/progress"
+            and m.get("params", {}).get("progressToken") == "p1"
+        ]
+        self.assertGreaterEqual(len(pings), 1, messages)
+        with open(pid_file) as fh:
+            pid = int(fh.read().strip())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if not process_is_alive(pid):
+                break
+            time.sleep(0.1)
+        self.assertFalse(
+            process_is_alive(pid),
+            "the stub pid %d survived a client cancellation" % pid)
+
+    def test_eof_alone_does_not_cancel_a_piped_call(self):
+        write_control(self.control_file)
+        os.environ["HERMES_BIN"] = self.stub
+        env = dict(os.environ)
+        script = str(ROOT / "etc" / "mcp" / "hermes_delegate_mcp.py")
+        messages = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": "2024-11-05"}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "hermes-delegate",
+                        "arguments": {"prompt": "hello"}}},
+        ]
+        payload = "".join(json.dumps(m) + "\n" for m in messages).encode()
+        proc = subprocess.run(
+            [sys.executable, script], input=payload,
+            capture_output=True, env=env, timeout=15)
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+        replies = [
+            json.loads(l)
+            for l in proc.stdout.decode().splitlines() if l.strip()
+        ]
+        by_id = {m["id"]: m for m in replies if m.get("id") is not None}
+        self.assertIn(2, by_id, replies)
+        self.assertFalse(by_id[2]["result"]["isError"])
+        self.assertIn(
+            "stub-canned-answer", by_id[2]["result"]["content"][0]["text"])
+
+    def test_cancel_request_ignores_invalid_ids_and_begin_call_accepts_any(self):
+        for bad in ({}, [], True):
+            MOD.cancel_request(bad)
+            self.assertEqual(len(MOD._CANCELLED_IDS), 0,
+                             "cancel_request(%r) must be ignored" % (bad,))
+        self.assertTrue(MOD.begin_call([], None))
+        MOD.end_call()
+
+    def test_cancelled_ids_ring_caps_at_256_dropping_oldest(self):
+        for i in range(1, 301):
+            MOD.cancel_request(i)
+        self.assertEqual(len(MOD._CANCELLED_IDS), MOD.CANCEL_MEMORY)
+        self.assertFalse(MOD.begin_call(300, None))
+        MOD.end_call()
+        self.assertTrue(MOD.begin_call(1, None))
+        MOD.end_call()
+
+    def _stdio_server(self):
+        env = dict(os.environ)
+        script = str(ROOT / "etc" / "mcp" / "hermes_delegate_mcp.py")
+        proc = subprocess.Popen(
+            [sys.executable, script],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=env)
+        out_chunks = []
+        err_chunks = []
+
+        def pump(fh, sink):
+            sink.append(fh.read())
+            fh.close()
+
+        out_thread = threading.Thread(
+            target=pump, args=(proc.stdout, out_chunks), daemon=True)
+        err_thread = threading.Thread(
+            target=pump, args=(proc.stderr, err_chunks), daemon=True)
+        out_thread.start()
+        err_thread.start()
+        return proc, out_thread, out_chunks, err_chunks
+
+    def _read_messages(self, out_chunks):
+        out = b"".join(out_chunks).decode("utf-8", "replace")
+        lines = [l for l in out.splitlines() if l.strip()]
+        return [json.loads(l) for l in lines]
+
+    def test_stdio_cancelled_with_dict_request_id_keeps_serving(self):
+        write_control(self.control_file)
+        os.environ["HERMES_BIN"] = self.stub
+        proc, out_thread, out_chunks, _ = self._stdio_server()
+        try:
+            def write_msg(msg):
+                proc.stdin.write((json.dumps(msg) + "\n").encode())
+                proc.stdin.flush()
+
+            write_msg(
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                 "params": {"protocolVersion": "2024-11-05"}})
+            write_msg(
+                {"jsonrpc": "2.0",
+                 "method": "notifications/cancelled",
+                 "params": {"requestId": {}}})
+            write_msg(
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                 "params": {"name": "hermes-delegate",
+                            "arguments": {"prompt": "hi"}}})
+            write_msg({"jsonrpc": "2.0", "id": 3, "method": "ping"})
+            proc.stdin.close()
+        except Exception:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            raise
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and proc.poll() is None:
+            time.sleep(0.05)
+        self.assertIsNotNone(proc.poll(),
+                             "server did not exit within 15s")
+        out_thread.join(timeout=5)
+        messages = self._read_messages(out_chunks)
+        by_id = {m["id"]: m for m in messages if "id" in m}
+        self.assertIn(2, by_id,
+                      "a tools/call after a dict requestId must be answered")
+        self.assertIn("stub-canned-answer",
+                      by_id[2]["result"]["content"][0]["text"])
+        self.assertIn(3, by_id, "server must still serve a ping after")
+
+    def test_stdio_tools_call_without_id_is_ignored_and_never_spawned(self):
+        marker = os.path.join(self.tmpdir, "marker_no_id.txt")
+        write_control(self.control_file, marker=marker)
+        os.environ["HERMES_BIN"] = self.stub
+        proc, out_thread, out_chunks, _ = self._stdio_server()
+        try:
+            def write_msg(msg):
+                proc.stdin.write((json.dumps(msg) + "\n").encode())
+                proc.stdin.flush()
+
+            write_msg(
+                {"jsonrpc": "2.0", "method": "tools/call",
+                 "params": {"name": "hermes-delegate",
+                            "arguments": {"prompt": "hi"}}})
+            write_msg({"jsonrpc": "2.0", "id": 5, "method": "ping"})
+            proc.stdin.close()
+        except Exception:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            raise
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and proc.poll() is None:
+            time.sleep(0.05)
+        self.assertIsNotNone(proc.poll(),
+                             "server did not exit within 15s")
+        out_thread.join(timeout=5)
+        messages = self._read_messages(out_chunks)
+        by_id = {m["id"]: m for m in messages if "id" in m}
+        self.assertIn(5, by_id, "the ping must be answered")
+        for m in messages:
+            self.assertNotIn("hermes-delegate",
+                             json.dumps(m.get("result", {})),
+                             "a tools/call without an id must not be run: %r"
+                             % (m,))
+        self.assertFalse(os.path.exists(marker),
+                         "the stub must never be spawned for an id-less "
+                         "tools/call")
+
+    def test_stdio_progress_token_over_max_len_is_treated_as_absent(self):
+        write_control(self.control_file, mode="heartbeat", beats=4,
+                      beat_gap_sec=0.3)
+        os.environ["HERMES_BIN"] = self.stub
+        os.environ["CBOX_HERMES_DELEGATE_TIMEOUT_SEC"] = "60"
+        os.environ["CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC"] = "2"
+        proc, out_thread, out_chunks, _ = self._stdio_server()
+        try:
+            def write_msg(msg):
+                proc.stdin.write((json.dumps(msg) + "\n").encode())
+                proc.stdin.flush()
+
+            write_msg(
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                 "params": {"protocolVersion": "2024-11-05"}})
+            write_msg(
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                 "params": {"name": "hermes-delegate",
+                            "arguments": {"prompt": "hi"},
+                            "_meta": {"progressToken": "x" * 300}}})
+            write_msg({"jsonrpc": "2.0", "id": 3, "method": "ping"})
+            proc.stdin.close()
+        except Exception:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            raise
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and proc.poll() is None:
+            time.sleep(0.05)
+        self.assertIsNotNone(proc.poll(),
+                             "server did not exit within 15s")
+        out_thread.join(timeout=5)
+        messages = self._read_messages(out_chunks)
+        by_id = {m["id"]: m for m in messages if "id" in m}
+        self.assertIn(2, by_id, messages)
+        self.assertIn("stub-heartbeat-answer",
+                      by_id[2]["result"]["content"][0]["text"])
+        pings = [
+            m for m in messages
+            if m.get("method") == "notifications/progress"
+        ]
+        self.assertEqual(pings, [],
+                         "no progress may be sent for a token longer than "
+                         "%d chars: %r" % (MOD.MAX_TOKEN_LEN, pings))
+
+    def test_stdio_sigterm_kills_the_live_hermes_process_group(self):
+        pid_file = self._pid_stub("sigterm", 60)
+        proc, out_thread, out_chunks, _ = self._stdio_server()
+        try:
+            def write_msg(msg):
+                proc.stdin.write((json.dumps(msg) + "\n").encode())
+                proc.stdin.flush()
+
+            write_msg(
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                 "params": {"protocolVersion": "2024-11-05"}})
+            write_msg(
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                 "params": {"name": "hermes-delegate",
+                            "arguments": {"prompt": "hi"}}})
+            pid = wait_for_pid_file(pid_file, 5)
+            self.assertIsNotNone(pid, "the long-sleeping stub never started")
+            proc.send_signal(signal.SIGTERM)
+        except Exception:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            raise
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and proc.poll() is None:
+            time.sleep(0.05)
+        self.assertIsNotNone(proc.poll(),
+                             "server did not exit within 10s of SIGTERM")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if not process_is_alive(pid):
+                break
+            time.sleep(0.1)
+        self.assertFalse(process_is_alive(pid),
+                         "stub pid %d survived the SIGTERM" % pid)
+        out_thread.join(timeout=5)
+
+    def test_stdio_oversized_line_gets_error_and_server_keeps_serving(self):
+        write_control(self.control_file)
+        os.environ["HERMES_BIN"] = self.stub
+        proc, out_thread, out_chunks, _ = self._stdio_server()
+        try:
+            long_line = b"{" + b"a" * (4 * 1024 * 1024 + 98) + b"\n"
+            proc.stdin.write(long_line)
+            proc.stdin.write(
+                (json.dumps({"jsonrpc": "2.0", "id": 9, "method": "ping"})
+                 + "\n").encode())
+            proc.stdin.flush()
+            proc.stdin.close()
+        except Exception:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            raise
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and proc.poll() is None:
+            time.sleep(0.05)
+        self.assertIsNotNone(proc.poll(),
+                             "server did not exit within 15s")
+        out_thread.join(timeout=5)
+        messages = self._read_messages(out_chunks)
+        by_id = {m["id"]: m for m in messages if "id" in m}
+        self.assertIn(9, by_id,
+                      "the ping after the oversized line must be answered")
+        too_long = [
+            m for m in messages
+            if isinstance(m.get("error"), dict)
+            and m["error"].get("message") == "request line too long"
+        ]
+        self.assertTrue(
+            too_long, "expected a -32600 'request line too long' error: %r"
+            % (messages,))
+        self.assertEqual(too_long[0]["error"]["code"], -32600)
+
+    def test_output_log_present_on_timeout(self):
+        write_control(self.control_file, mode="sleep_with_output",
+                      sleep_sec=10)
+        os.environ["HERMES_BIN"] = self.stub
+        os.environ[MOD.TIMEOUT_VAR] = "1"
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertTrue(result["isError"], result)
+        text = result["content"][0]["text"]
+        self.assertIn("timed out", text)
+        m = re.search(r"run id: (\S+)", text)
+        self.assertIsNotNone(m, text)
+        run_id = m.group(1)
+        log_path = os.path.join(
+            os.environ[MOD.RUNS_DIR_VAR], run_id, "output.log")
+        deadline = time.monotonic() + 5
+        content = b""
+        while time.monotonic() < deadline:
+            if os.path.isfile(log_path):
+                with open(log_path, "rb") as fh:
+                    content = fh.read()
+                if content:
+                    break
+            time.sleep(0.1)
+        self.assertIn(b"[out] sleep-with-output-started", content)
+
+    def test_output_log_present_on_cancel(self):
+        pid_file = self._pid_stub("cancel-log", 60)
+        outcome = {}
+
+        def runner():
+            outcome["result"] = MOD.spawn_hermes("hi", None)
+
+        self.assertTrue(MOD.begin_call(20, None))
+        thread = threading.Thread(target=runner, daemon=True)
+        thread.start()
+        pid = wait_for_pid_file(pid_file, 5)
+        self.assertIsNotNone(pid, "the stub never recorded its pid")
+        time.sleep(0.3)
+        MOD.cancel_request(20)
+        thread.join(timeout=10)
+        MOD.end_call()
+        text, err, meta = outcome["result"]
+        self.assertEqual(err, MOD.CANCELLED_MESSAGE)
+        run_id = meta.get("run_id")
+        self.assertIsNotNone(run_id)
+        log_path = os.path.join(
+            os.environ[MOD.RUNS_DIR_VAR], run_id, "output.log")
+        self.assertTrue(os.path.isfile(log_path))
+        with open(log_path, "rb") as fh:
+            content = fh.read()
+        self.assertIn(b"[out] pid-stub-started", content)
+
+    def test_cancelled_run_saved_with_outcome_and_audit_carries_run_id(self):
+        pid_file = self._pid_stub("cancel-audit", 60)
+        outcome = {}
+
+        def runner():
+            outcome["result"] = MOD.run_hermes_delegate({"prompt": "hi"})
+
+        self.assertTrue(MOD.begin_call(21, None))
+        thread = threading.Thread(target=runner, daemon=True)
+        thread.start()
+        pid = wait_for_pid_file(pid_file, 5)
+        self.assertIsNotNone(pid, "the stub never recorded its pid")
+        time.sleep(0.3)
+        MOD.cancel_request(21)
+        thread.join(timeout=10)
+        MOD.end_call()
+        result = outcome["result"]
+        self.assertTrue(result["isError"])
+        self.assertIn("cancelled", result["content"][0]["text"])
+        with open(os.environ[MOD.AUDIT_VAR]) as fh:
+            recs = [json.loads(l) for l in fh if l.strip()]
+        cancelled_recs = [r for r in recs if r.get("outcome") == "cancelled"]
+        self.assertTrue(cancelled_recs, recs)
+        run_id = cancelled_recs[-1]["run_id"]
+        self.assertIsNotNone(run_id)
+        run_dir = os.path.join(os.environ[MOD.RUNS_DIR_VAR], run_id)
+        self.assertTrue(os.path.isdir(run_dir))
+        with open(os.path.join(run_dir, "summary.json")) as fh:
+            summary = json.load(fh)
+        self.assertEqual(summary["outcome"], "cancelled")
+
+
+class SweepHermesHomeTests(unittest.TestCase):
+    GRANDCHILD_SCRIPT = (
+        "import os, sys, time\n"
+        "with open(sys.argv[1], 'w') as fh:\n"
+        "    fh.write(str(os.getpid()))\n"
+        "    fh.flush()\n"
+        "time.sleep(30)\n"
+    )
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _spawn(self, script, pid_file, hermes_home):
+        env = dict(os.environ)
+        if hermes_home is None:
+            env.pop("HERMES_HOME", None)
+        else:
+            env["HERMES_HOME"] = hermes_home
+        return subprocess.Popen(
+            [sys.executable, script, pid_file], env=env,
+            start_new_session=True)
+
+    def test_sweep_kills_matching_process_and_spares_unrelated_one(self):
+        home = os.path.join(self.tmpdir, "eph-home")
+        os.makedirs(home)
+        other_home = os.path.join(self.tmpdir, "eph-home-other")
+        os.makedirs(other_home)
+        script = os.path.join(self.tmpdir, "grandchild.py")
+        with open(script, "w") as fh:
+            fh.write(self.GRANDCHILD_SCRIPT)
+        pid_file_match = os.path.join(self.tmpdir, "match.pid")
+        pid_file_other = os.path.join(self.tmpdir, "other.pid")
+        proc_match = self._spawn(script, pid_file_match, home)
+        proc_other = self._spawn(script, pid_file_other, other_home)
+        try:
+            pid_match = wait_for_pid_file(pid_file_match, 5)
+            pid_other = wait_for_pid_file(pid_file_other, 5)
+            self.assertIsNotNone(pid_match)
+            self.assertIsNotNone(pid_other)
+            MOD._sweep_hermes_home(home, grace_sec=1)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline \
+                    and proc_match.poll() is None:
+                time.sleep(0.1)
+            self.assertIsNotNone(
+                proc_match.poll(),
+                "matching process survived the sweep")
+            self.assertIsNone(
+                proc_other.poll(),
+                "unrelated process was killed by the sweep")
+        finally:
+            for p in (proc_match, proc_other):
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                try:
+                    p.wait(timeout=5)
+                except Exception:
+                    pass
+
+    def test_sweep_with_no_hermes_home_is_a_noop(self):
+        MOD._sweep_hermes_home(None)
+        MOD._sweep_hermes_home("")
+
+
+class PidfdSignalTests(unittest.TestCase):
+    def test_pidfd_open_returns_none_for_an_invalid_pid(self):
+        self.assertIsNone(MOD._pidfd_open(-1))
+
+    def test_signal_target_falls_back_to_kill_when_no_pidfd(self):
+        with mock.patch("os.kill") as m_kill:
+            MOD._signal_target(999999, None, signal.SIGTERM)
+        m_kill.assert_called_once_with(999999, signal.SIGTERM)
+
+    def test_signal_target_uses_pidfd_send_signal_when_pidfd_is_given(self):
+        with mock.patch.object(
+                MOD.signal, "pidfd_send_signal", create=True) as m_send, \
+                mock.patch("os.kill") as m_kill:
+            MOD._signal_target(999999, 7, signal.SIGTERM)
+        m_send.assert_called_once_with(7, signal.SIGTERM, None, 0)
+        m_kill.assert_not_called()
+
+    def test_target_alive_falls_back_to_pid_alive_when_no_pidfd(self):
+        with mock.patch.object(MOD, "_pid_alive", return_value=True) as m_alive:
+            self.assertTrue(MOD._target_alive(999999, None))
+        m_alive.assert_called_once_with(999999)
 
 
 if __name__ == "__main__":

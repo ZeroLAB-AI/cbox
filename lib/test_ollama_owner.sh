@@ -14,6 +14,18 @@ _ok() {
   echo "ok: $1"
 }
 
+_wait_for_line() {
+  local file="$1" line="$2" tries=0
+  while [ "$tries" -lt 500 ]; do
+    if [ -f "$file" ] && grep -qx "$line" "$file" 2>/dev/null; then
+      return 0
+    fi
+    tries=$((tries + 1))
+    sleep 0.01
+  done
+  return 1
+}
+
 bash -n "$INSTALL_DIR/cbox" || _fail "cbox fails bash -n"
 bash -n "$INSTALL_DIR/templates/generators.sh" || _fail "generators.sh fails bash -n"
 _ok "bash -n clean on cbox and templates/generators.sh"
@@ -490,6 +502,55 @@ grep -q 'label=cbox.kind=isolated' "$TMPBASE/docker.calls" || _fail "gc() simula
 ! grep -qi 'cbox.kind=infra' "$TMPBASE/docker.calls" || _fail "gc() simulation touched cbox.kind=infra: $(cat "$TMPBASE/docker.calls")"
 ! grep -q '^stop \|^rm ' "$TMPBASE/docker.calls" || _fail "gc() simulation with an empty isolated set must not stop or remove anything: $(cat "$TMPBASE/docker.calls")"
 _ok "regression (behavioral): a stubbed gc() run with no isolated containers never issues docker stop/rm and every docker ps call carries the isolated-only label filter - an owner container is structurally unreachable, not just absent by coincidence"
+
+GCX="$TMPBASE/gc-exited"
+mkdir -p "$GCX/locked" "$GCX/free"
+: > "$GCX/locked/session.lock"
+: > "$GCX/free/session.lock"
+
+LOG_GCX="$TMPBASE/gc-exited-locker.log"
+(
+  . "$INSTALL_DIR/lib/portable.sh"
+  exec 9> "$GCX/locked/session.lock"
+  _cbox_flock -x 9 || exit 1
+  echo HELD >> "$LOG_GCX"
+  while [ ! -e "$TMPBASE/gc-exited-locker.release" ]; do sleep 0.01; done
+) &
+GCX_LOCKER_PID=$!
+_wait_for_line "$LOG_GCX" HELD || _fail "gc(): exited-container test locker never signaled HELD"
+
+run_gc_exited_sim() {
+  DOCKER_CALLS="$TMPBASE/gc-exited.calls" GCX="$GCX" INSTALL_DIR="$INSTALL_DIR" bash -c '
+    set -u
+    . "$INSTALL_DIR/lib/portable.sh"
+    : > "$DOCKER_CALLS"
+    docker() {
+      printf "%s\n" "$*" >> "$DOCKER_CALLS"
+      case "$1" in
+        ps)
+          if printf "%s\n" "$@" | grep -q "status=exited"; then
+            printf "lockedcid\t%s/locked\n" "$GCX"
+            printf "freecid\t%s/free\n" "$GCX"
+          fi
+          ;;
+        rm) echo "RM:$2" >> "$DOCKER_CALLS.rm" ;;
+        *) : ;;
+      esac
+    }
+    _gc_legacy_bins_volumes() { :; }
+    '"$GC_FN"'
+    gc
+  ' gcexitedsim 2>&1
+}
+
+: > "$TMPBASE/gc-exited.calls.rm"
+run_gc_exited_sim >/dev/null
+: > "$TMPBASE/gc-exited-locker.release"
+wait "$GCX_LOCKER_PID" 2>/dev/null || true
+
+grep -qx "RM:lockedcid" "$TMPBASE/gc-exited.calls.rm" && _fail "gc(): exited-container cleanup removed a container whose project session.lock is held by a live process - the exact race this fix closes"
+grep -qx "RM:freecid" "$TMPBASE/gc-exited.calls.rm" || _fail "gc(): exited-container cleanup must still remove an exited container whose session.lock is free"
+_ok "regression: gc()'s exited-container cleanup takes the same per-project session.lock as the live-probe pass - a container whose session.lock is held (a session starting/using it) is left alone, a genuinely free one is still reaped"
 
 LOCKOPEN_FN="$(awk '/^_cbox_ollama_lock_fd_open\(\) \{/,/^}$/' "$INSTALL_DIR/cbox")"
 [ -n "$LOCKOPEN_FN" ] || _fail "cannot extract _cbox_ollama_lock_fd_open"

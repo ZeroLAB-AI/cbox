@@ -24,3 +24,14 @@ distillate of what you changed and let it write them. If you were given an
 isolated git worktree, commit there; if you are working directly on the tree,
 commit only your own files so a peer worker on other files never collides with
 you.
+
+Fix-round cap: on any single finding (a review comment, a failing check), two
+failed fix attempts is the limit. After the second failed attempt stop -
+report BLOCKED with the finding, both attempts, and the evidence each one
+failed on, instead of trying a third fix.
+
+Final report contract: first line is exactly one status word -
+DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT - then the files touched,
+then every verification command you ran with its result, then every !!! line
+from this run ("!!! <what was decided> - <why> - <cost if wrong>", one per
+resolved ambiguity or owner-only default you picked yourself).

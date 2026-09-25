@@ -1,29 +1,9 @@
 {
-  "codex-terra-light": {
-    "type": "stdio",
-    "command": "codex",
-    "args": [
-      "mcp-server"
-    ],
-    "_cbox": {
-      "adapter": "codex-mcp",
-      "available_to": [
-        "claude",
-        "hermes"
-      ],
-      "backend": "codex",
-      "side_effects": [
-        "spawns-codex-subprocess"
-      ],
-      "model": "gpt-5.6-terra",
-      "model_reasoning_effort": "medium"
-    }
-  },
   "codex-sol": {
     "type": "stdio",
     "command": "codex",
     "args": [
-      "mcp-server"
+      "app-server"
     ],
     "_cbox": {
       "adapter": "codex-mcp",
@@ -35,7 +15,7 @@
       "side_effects": [
         "spawns-codex-subprocess"
       ],
-      "model": "gpt-5.6-sol",
+      "model": "gpt-6-sol",
       "model_reasoning_effort": "xhigh"
     }
   },
@@ -43,7 +23,7 @@
     "type": "stdio",
     "command": "codex",
     "args": [
-      "mcp-server"
+      "app-server"
     ],
     "_cbox": {
       "adapter": "codex-mcp",
@@ -59,31 +39,11 @@
       "model_reasoning_effort": "xhigh"
     }
   },
-  "codex-terra": {
-    "type": "stdio",
-    "command": "codex",
-    "args": [
-      "mcp-server"
-    ],
-    "_cbox": {
-      "adapter": "codex-mcp",
-      "available_to": [
-        "claude",
-        "hermes"
-      ],
-      "backend": "codex",
-      "side_effects": [
-        "spawns-codex-subprocess"
-      ],
-      "model": "gpt-5.6-terra",
-      "model_reasoning_effort": "max"
-    }
-  },
   "codex-luna": {
     "type": "stdio",
     "command": "codex",
     "args": [
-      "mcp-server"
+      "app-server"
     ],
     "_cbox": {
       "adapter": "codex-mcp",
@@ -95,7 +55,7 @@
       "side_effects": [
         "spawns-codex-subprocess"
       ],
-      "model": "gpt-5.6-luna",
+      "model": "gpt-6-luna",
       "model_reasoning_effort": "max"
     }
   },
@@ -172,6 +132,29 @@
         "spawns-docker-exec-subprocess"
       ],
       "enabled_when_env": "CBOX_CONTAINER_EXEC_TOOL"
+    }
+  },
+  "cbox-net": {
+    "type": "stdio",
+    "command": "python3",
+    "args": [
+      "cbox_net_mcp.py"
+    ],
+    "startup_timeout_sec": 30,
+    "tool_timeout_sec": 30,
+    "_cbox": {
+      "adapter": "stdio-mcp",
+      "available_to": [
+        "claude",
+        "codex",
+        "hermes"
+      ],
+      "backend": "cbox-net-proxy",
+      "side_effects": [
+        "reads-netmap-file",
+        "opens-socks5-tcp-probe"
+      ],
+      "enabled_when_env": "CBOX_NETMAP_ACTIVE"
     }
   },
   "hermes-local": {

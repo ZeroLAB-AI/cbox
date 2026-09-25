@@ -54,6 +54,21 @@ def cmd_seed_adopt_nofollow():
         fh.write(body)
 
 
+def _cbox_rendered_codex_shape(entry):
+    if not isinstance(entry, dict):
+        return False
+    command = entry.get("command")
+    args = entry.get("args")
+    if not isinstance(args, list):
+        args = []
+    if command == "python3" and args and isinstance(args[0], str) \
+            and os.path.basename(args[0]) == "codex_mcp_shim.py":
+        return True
+    if command == "codex" and args and args[0] == "mcp-server":
+        return True
+    return False
+
+
 def cmd_cbox_json_seed_merge():
     mcp = json.loads(sys.argv[2])
     cur = {}
@@ -70,11 +85,24 @@ def cmd_cbox_json_seed_merge():
             known_cbox = set(json.load(fh).keys())
     except (OSError, ValueError):
         known_cbox = set()
+    retired_mcp = set()
+    if len(sys.argv) >= 6:
+        try:
+            with open(sys.argv[5], "r", encoding="utf-8") as fh:
+                retired_names = json.load(fh).get("mcp_servers") or []
+            if isinstance(retired_names, list):
+                retired_mcp.update(n for n in retired_names if isinstance(n, str))
+        except (OSError, ValueError):
+            pass
     existing = cur.get("mcpServers")
     if not isinstance(existing, dict):
         existing = {}
     for name in list(existing):
-        if name in known_cbox and name not in mcp:
+        if name in mcp:
+            continue
+        if name in known_cbox:
+            existing.pop(name, None)
+        elif name in retired_mcp and _cbox_rendered_codex_shape(existing[name]):
             existing.pop(name, None)
     existing.update(mcp)
     cur["hasCompletedOnboarding"] = True

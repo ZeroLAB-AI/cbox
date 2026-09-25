@@ -6,6 +6,7 @@ Chronological daily record of work in the project: `./.cbox/PROGRESS_YYYY_MM_DD.
 
 - Write step by step top to bottom (chronologically), short lines `HH:MM - action - result/anchor (hash, test, file)`.
 - Write continuously at every major step, not retroactively at day's end.
+- A resolved ambiguity or an owner-only safe default an agent picked on its own gets its own line: `!!! <what was decided> - <why> - <cost if wrong>`.
 - **Before every write, check today's date:** if it is newer than the existing file's date, start a new `PROGRESS_YYYY_MM_DD.md` with today's date and write there (do not keep writing into the old one - first append a Carry-over section to it).
 - At the end of the day, a **Carry-over** section - what remains open and where to pick it up (typically the LEDGER queue or the next daily file).
 

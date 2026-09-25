@@ -171,6 +171,7 @@ _render_claude_md_kernel_block() {
       unset CBOX_KERNEL_LANG_REASONING 2>/dev/null || true
     fi
     source "$INSTALL_DIR/lib/portable.sh"
+    source "$INSTALL_DIR/templates/generators.sh"
     die() { echo "die: $*" >&2; exit 1; }
     apply_name_substitution() {
       local src="$1" dst="$2" u name
@@ -193,6 +194,11 @@ _render_claude_md_kernel_block() {
     ' "$INSTALL_DIR/lib/cbox-setup.sh")"
     eval "$(awk '
       /^claude_md_container_exec_paragraph\(\) \{/ { infunc=1 }
+      infunc { print }
+      infunc && /^\}/ { infunc=0 }
+    ' "$INSTALL_DIR/lib/cbox-setup.sh")"
+    eval "$(awk '
+      /^claude_md_netaccess_line\(\) \{/ { infunc=1 }
       infunc { print }
       infunc && /^\}/ { infunc=0 }
     ' "$INSTALL_DIR/lib/cbox-setup.sh")"

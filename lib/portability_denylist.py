@@ -136,7 +136,7 @@ def write_baseline(per_file):
     out = {
         "schema_version": 1,
         "regen_command": "python3 lib/portability_denylist.py regen",
-        "note": "pinned occurrence counts for the GNU/bashism denylist over host-layer files (cbox/docs/MULTIPLATFORM_DESIGN.md section 4 step 0a); a new occurrence anywhere fails the ratchet, a reduced count fails too until this baseline is regenerated",
+        "note": "pinned occurrence counts for the GNU/bashism denylist over host-layer files (docs/MULTIPLATFORM_DESIGN.md section 4 step 0a); a new occurrence anywhere fails the ratchet, a reduced count fails too until this baseline is regenerated",
         "totals": totals,
         "per_file": per_file,
     }

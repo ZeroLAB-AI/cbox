@@ -1,5 +1,5 @@
 {
-  "note": "pinned occurrence counts for the GNU/bashism denylist over host-layer files (cbox/docs/MULTIPLATFORM_DESIGN.md section 4 step 0a); a new occurrence anywhere fails the ratchet, a reduced count fails too until this baseline is regenerated",
+  "note": "pinned occurrence counts for the GNU/bashism denylist over host-layer files (docs/MULTIPLATFORM_DESIGN.md section 4 step 0a); a new occurrence anywhere fails the ratchet, a reduced count fails too until this baseline is regenerated",
   "per_file": {
     "cbox": {
       "ip_route": 1,

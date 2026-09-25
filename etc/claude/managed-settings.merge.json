@@ -6,8 +6,6 @@
   "permissions": {
     "allow": [
       "mcp__codex-luna",
-      "mcp__codex-terra",
-      "mcp__codex-terra-light",
       "mcp__codex-sol",
       "mcp__codex-astra"
     ],
@@ -16,7 +14,7 @@
     ]
   },
   "env": {
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5[1m]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5-5[1m]",
     "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-fable-5[1m]",
     "CBOX_AGENT_MODEL_DENY": "opus-4",
     "CBOX_AGENT_MODEL_BAN": "fable-5-1"
@@ -35,7 +33,7 @@
         ]
       },
       {
-        "matcher": "Agent",
+        "matcher": "Agent|Workflow",
         "hooks": [
           {
             "type": "command",
@@ -75,6 +73,17 @@
             "command": "python3 @HOME@/.claude/hooks/rm_glob_guard.py",
             "timeout": 10,
             "statusMessage": "rm-glob guard"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/net_proxy_guard.py",
+            "timeout": 10,
+            "statusMessage": "net-proxy guard"
           }
         ]
       },

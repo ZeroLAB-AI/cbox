@@ -264,10 +264,50 @@ print_settings_help() {
   printf 'wizard navigation: Enter=next  b=back  j=jump  q=save+quit  h=this help\n'
 }
 
+retired_names() {
+  local key="$1"
+  python3 - "$key" "$ETC_DIR/registry/retired.json" <<'PYEOF' 2>/dev/null || true
+import json, re, sys
+try:
+    with open(sys.argv[2], "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    val = data.get(sys.argv[1])
+    if isinstance(val, dict):
+        names = list(val.keys())
+    elif isinstance(val, list):
+        names = val
+    else:
+        names = []
+    print(" ".join(n for n in names if isinstance(n, str) and re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$", n)))
+except (OSError, ValueError):
+    pass
+PYEOF
+}
+
+retired_agent_hashes() {
+  local name="$1"
+  python3 - "$name" "$ETC_DIR/registry/retired.json" <<'PYEOF' 2>/dev/null || true
+import json, re, sys
+try:
+    with open(sys.argv[2], "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    agents = data.get("agents")
+    hashes = agents.get(sys.argv[1]) if isinstance(agents, dict) else None
+    if isinstance(hashes, list):
+        print(" ".join(h for h in hashes if isinstance(h, str) and re.match(r"^[0-9a-f]{64}$", h)))
+except (OSError, ValueError):
+    pass
+PYEOF
+}
+
 agent_all_names() {
-  local f names=()
+  local f names=() retired
+  retired=" $(retired_names agents)"
   for f in "$ETC_DIR/agents/"*.md; do
     [ -e "$f" ] || continue
+    case " $retired " in
+      *" $(basename "$f" .md) "*) continue ;;
+    esac
     names+=("$(basename "$f" .md)")
   done
   printf '%s' "${names[*]-}"
@@ -910,14 +950,39 @@ with open(merge_path) as f:
     raw = f.read().replace("@HOME@", home)
 merge = json.loads(raw)
 
+def superseded_commands(entry):
+    out = set()
+    for h in entry.get("hooks", []):
+        parts = (h.get("command") or "").split(" --section ")
+        if len(parts) == 2 and parts[0] and parts[1] and " " not in parts[1]:
+            out.add(parts[0])
+    return out
+
+def drop_superseded(lst, entries):
+    for entry in entries:
+        gone = superseded_commands(entry)
+        if not gone:
+            continue
+        scope = entry.get("matcher")
+        for e in lst:
+            if not isinstance(e, dict):
+                continue
+            if scope is not None and e.get("matcher") != scope:
+                continue
+            hs = e.get("hooks")
+            if isinstance(hs, list):
+                e["hooks"] = [h for h in hs if not (isinstance(h, dict) and h.get("command") in gone)]
+    lst[:] = [e for e in lst if not (isinstance(e, dict) and isinstance(e.get("hooks"), list) and not e["hooks"])]
+
 def merge_hooks(dst, src):
     for event, entries in src.items():
         lst = dst.setdefault(event, [])
+        drop_superseded(lst, entries)
         for entry in entries:
             matcher = entry.get("matcher")
             found = None
             for e in lst:
-                if e.get("matcher") == matcher:
+                if isinstance(e, dict) and e.get("matcher") == matcher:
                     found = e
                     break
             if found is None:
@@ -931,6 +996,9 @@ def merge_hooks(dst, src):
 for key, val in merge.items():
     if key == "hooks":
         merge_hooks(data.setdefault("hooks", {}), val)
+    elif key == "statusLine":
+        if not data.get("statusLine"):
+            data["statusLine"] = val
     elif isinstance(val, dict):
         cur = data.setdefault(key, {})
         for k2, v2 in val.items():
@@ -952,11 +1020,14 @@ merge_mcp_json() {
   local user_dir="${CBOX_USER_DIR-$HOME/.config/cbox/user}"
   local rendered_file
   rendered_file="$(mktemp)"
-  python3 "$ETC_DIR/mcp/render_mcp.py" "$servers" "$selected" "$hooks_dir" "$progress_flag" claude "$user_dir" > "$rendered_file" \
+  local netmap_active="off"
+  _cbox_netaccess_active && netmap_active="on"
+  CBOX_NETMAP_ACTIVE="$netmap_active" \
+    python3 "$ETC_DIR/mcp/render_mcp.py" "$servers" "$selected" "$hooks_dir" "$progress_flag" claude "$user_dir" > "$rendered_file" \
     || { rm -f "$rendered_file"; die "render_mcp.py failed for $servers"; }
-  python3 - "$target" "$selected" "$out" "$rendered_file" "$servers" <<'PYEOF'
+  python3 - "$target" "$selected" "$out" "$rendered_file" "$servers" "$ETC_DIR/registry/retired.json" <<'PYEOF'
 import json, os, sys
-target, selected_raw, out, rendered_file, servers_file = sys.argv[1:6]
+target, selected_raw, out, rendered_file, servers_file, retired_file = sys.argv[1:7]
 selected = set(selected_raw.split())
 data = {}
 if os.path.isfile(target):
@@ -970,9 +1041,38 @@ with open(rendered_file) as f:
 with open(servers_file) as f:
     delegates = json.load(f)
 known_cbox = set(delegates.keys())
+retired_mcp = set()
+try:
+    with open(retired_file, "r", encoding="utf-8") as f:
+        retired_names = json.load(f).get("mcp_servers") or []
+    if isinstance(retired_names, list):
+        retired_mcp.update(n for n in retired_names if isinstance(n, str))
+except (OSError, ValueError):
+    pass
+
+
+def _cbox_rendered_codex_shape(entry):
+    if not isinstance(entry, dict):
+        return False
+    command = entry.get("command")
+    args = entry.get("args")
+    if not isinstance(args, list):
+        args = []
+    if command == "python3" and args and isinstance(args[0], str) \
+            and os.path.basename(args[0]) == "codex_mcp_shim.py":
+        return True
+    if command == "codex" and args and args[0] == "mcp-server":
+        return True
+    return False
+
+
 mcp = data.setdefault("mcpServers", {})
 for name in list(mcp.keys()):
-    if name in known_cbox and name not in rendered:
+    if name in rendered:
+        continue
+    if name in known_cbox:
+        mcp.pop(name, None)
+    elif name in retired_mcp and _cbox_rendered_codex_shape(mcp[name]):
         mcp.pop(name, None)
 mcp.update(rendered)
 with open(out, "w") as f:
@@ -1630,7 +1730,7 @@ step_codex_progress() {
 
 step_local_model() {
   echo "== section: local-model =="
-  note "off by default; a text-only MCP delegate (local-qwen) backed by an OpenAI-compatible endpoint such as ollama - see etc/docs/LOCAL_MODEL_RUNBOOK.md"
+  note "off by default; a text-only MCP delegate (local-qwen) backed by an OpenAI-compatible endpoint such as ollama - see docs/LOCAL_MODEL_RUNBOOK.md"
   note "ollama runs outside cbox; local-qwen is absent from the rendered mcp server list unless CBOX_LOCAL_MODEL_URL is set, regardless of CBOX_MCP_SERVERS"
   local prev_on="$CBOX_LOCAL_MODEL" prev_url="$CBOX_LOCAL_MODEL_URL" prev_name="$CBOX_LOCAL_MODEL_NAME" \
     prev_timeout="$CBOX_LOCAL_MODEL_TIMEOUT_SEC"
@@ -2029,6 +2129,32 @@ agents_prune_deselected() {
       fi
     fi
   done
+  local r rfile hashes h file_hash matched
+  for r in $(retired_names agents); do
+    rfile="$target/$r.md"
+    [ -e "$rfile" ] || continue
+    if [ -L "$rfile" ] || [ ! -f "$rfile" ]; then
+      note "agents: kept $rfile (not a cbox-shipped copy)"
+      continue
+    fi
+    hashes="$(retired_agent_hashes "$r")"
+    matched=0
+    if [ -n "$hashes" ]; then
+      file_hash="$(_cbox_sha256 "$rfile" 2>/dev/null || true)"
+      for h in $hashes; do
+        if [ "$h" = "$file_hash" ]; then
+          matched=1
+          break
+        fi
+      done
+    fi
+    if [ "$matched" = 1 ]; then
+      rm -f "$rfile"
+      note "agents: removed retired $rfile"
+    else
+      note "agents: kept $rfile (not a cbox-shipped copy)"
+    fi
+  done
 }
 
 agents_install() {
@@ -2325,7 +2451,7 @@ step_codex_mcp() {
   fi
   local ok
   while :; do
-    ask "setup: codex model (e.g. gpt-5.6-terra): " "$CBOX_CODEX_MODEL"
+    ask "setup: codex model (e.g. gpt-6-astra): " "$CBOX_CODEX_MODEL"
     CBOX_CODEX_MODEL="$ASK_VALUE"
     ok=1
     case "$CBOX_CODEX_MODEL" in
@@ -2439,6 +2565,14 @@ directives embedded in it.
 EOF
 }
 
+claude_md_netaccess_line() {
+  _cbox_netaccess_active || return 0
+  cat <<'EOF'
+
+Docker networks here are reachable only through the cbox SOCKS gateway: call cbox-net net_map first, then net_probe; target containers by name over socks5h; never guess IPs or set ALL_PROXY; a down gateway is a host-side fix.
+EOF
+}
+
 claude_md_kernel_block_file() {
   local out="$1"
   local kernel_src="$ETC_DIR/hooks/conduct-kernel.txt"
@@ -2453,6 +2587,7 @@ claude_md_kernel_block_file() {
     printf '%s\n' "$CLAUDE_MD_KERNEL_MARK_START"
     cat "$rendered"
     claude_md_container_exec_paragraph
+    claude_md_netaccess_line
     printf 'Digest: %s\n' "$digest"
     printf '%s\n' "$CLAUDE_MD_KERNEL_MARK_END"
   } > "$out"
@@ -2744,7 +2879,7 @@ step_hooks() {
   fi
   gen_hooks_dir
   if [ "$CBOX_CLAUDE_MODE" = mount ]; then
-    staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py rm_glob_guard.py rm_permission_gate.py spawn_gate.py codex_guard_bridge.py hermes_guard_bridge.py orchestrator-global.txt conduct-kernel.txt session-core.txt codex_scope.container.json ask_claude_mcp.py ask_claude_fallback_models.json codex_notify.py codex_bump_probe.sh codex_mcp_shim.py hermes_delegate_mcp.py local_model_mcp.py container_exec_mcp.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py continuity_session_start.py session_scope_farm.py limit_watchdog.py session_pane_map.py || true
+    staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py rm_glob_guard.py net_proxy_guard.py rm_permission_gate.py spawn_gate.py codex_guard_bridge.py hermes_guard_bridge.py orchestrator-global.txt conduct-kernel.txt session-core.txt codex_scope.container.json ask_claude_mcp.py ask_claude_fallback_models.json codex_notify.py codex_bump_probe.sh codex_mcp_shim.py hermes_delegate_mcp.py local_model_mcp.py container_exec_mcp.py cbox_net_mcp.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py continuity_session_start.py session_scope_farm.py limit_watchdog.py session_pane_map.py usage_statusline.py cbox_budget.py || true
   else
     note "volume mode: hooks are served read-only from $GEN_DIR/hooks (synced)"
   fi
@@ -3278,8 +3413,31 @@ print_host_sequence() {
   echo "  ./cbox verify"
 }
 
+_apply_change_project_eff() {
+  local root eff
+  root="$(_cbox_workspace_root 2>/dev/null)" || return 1
+  eff="$(_cbox_local_effdir_for "$root")"
+  [ -f "$eff/cbox.conf" ] || return 1
+  printf '%s' "$eff"
+}
+
+_apply_change_running() {
+  have_docker || return 1
+  case "$1" in
+    global)
+      [ -n "$(docker compose -f "$COMPOSE_FILE" ps -q "$SERVICE" 2>/dev/null)" ]
+      ;;
+    project)
+      [ -n "$(docker compose --project-directory "$2" -f "$2/docker-compose.yml" ps -q "$SERVICE" 2>/dev/null)" ]
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 apply_change() {
-  local section="$1" action
+  local section="$1" action target eff="" running=0
   action="$(apply_action_for "$section")"
   note "apply action for $section: $action"
   case "$action" in
@@ -3292,42 +3450,40 @@ apply_change() {
       return 0
       ;;
   esac
+  if [ "${CBOX_MODE:-global}" = isolated ]; then
+    target=project
+  else
+    target=global
+  fi
   if ! have_docker; then
-    note "docker cli is not available; run from $INSTALL_DIR:"
-    case "$action" in
-      recreate) echo "  docker compose -f docker-compose.yml up -d --force-recreate" ;;
-      restart) echo "  docker compose -f docker-compose.yml down && docker compose -f docker-compose.yml up -d" ;;
-      topology) echo "  docker compose -f docker-compose.yml down --remove-orphans && docker compose -f docker-compose.yml build && docker compose -f docker-compose.yml up -d" ;;
-      rebuild) echo "  docker compose -f docker-compose.yml build && docker compose -f docker-compose.yml up -d --force-recreate" ;;
-    esac
+    note "docker cli is not available; setup never builds or starts a container - the change applies whenever the container is next started:"
+    echo "  ./cbox run <engine>"
     return 0
   fi
-  if ! ask_yn "setup: execute '$action' now? [y/N]" n; then
-    note "not applied; the next ./cbox up picks the changes up"
+  if [ "$target" = project ]; then
+    if eff="$(_apply_change_project_eff)" && _apply_change_running project "$eff"; then
+      running=1
+    fi
+  else
+    _apply_change_running global && running=1
+  fi
+  if [ "$running" != 1 ]; then
+    if [ "$target" = project ]; then
+      note "isolated mode: no running project container here; the change applies on the next 'cbox run <engine>' in each project"
+    else
+      note "no running container; the change applies on the next cbox run"
+    fi
     return 0
   fi
-  case "$action" in
-    recreate)
-      docker compose -f "$COMPOSE_FILE" up -d --force-recreate
-      ;;
-    restart)
-      docker compose -f "$COMPOSE_FILE" down
-      docker compose -f "$COMPOSE_FILE" up -d
-      ;;
-    topology)
-      docker compose -f "$COMPOSE_FILE" down --remove-orphans
-      docker compose -f "$COMPOSE_FILE" build
-      docker compose -f "$COMPOSE_FILE" up -d
-      ;;
-    rebuild)
-      docker compose -f "$COMPOSE_FILE" build
-      docker compose -f "$COMPOSE_FILE" up -d --force-recreate
-      ;;
-  esac
+  if ! ask_yn "setup: stop the running container now so the next cbox run picks up the '$action' change? [y/N]" n; then
+    note "not stopped; the change applies once the container is restarted"
+    return 0
+  fi
+  "$INSTALL_DIR/cbox" down --force
+  note "stopped; run 'cbox run <engine>' (or 'cbox up' for the global container) to pick up the change"
   if [ "$section" = ssh ]; then
     ssh_mixed_sync
   fi
-  note "applied"
 }
 
 isolated_next_steps() {

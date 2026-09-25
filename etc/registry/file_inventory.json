@@ -88,6 +88,10 @@
       "layer": "template-generating-container-content",
       "purpose": "M4 codex dialect wrapper: Bash-only deny-only translator for codex experimental PreToolUse (spec-based payload shape), runs rm_glob_guard.py/commit_guard.py unmodified and denies when they deny; gated behind CBOX_CODEX_HOOKS=on (default off), copied into generated/hooks, staged into container claude hooks"
     },
+    "etc/hooks/cbox_budget.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "copied into generated/hooks, staged into container claude hooks; reads ~/.claude/cbox-usage/{claude,codex}.json and reports per-window usage metrics (used_percentage, resets_at, elapsed_fraction, pace, age, stale) via `metrics` CLI subcommand"
+    },
     "etc/hooks/commit_guard.py": {
       "layer": "template-generating-container-content",
       "purpose": "copied into generated/hooks, staged into container claude hooks"
@@ -120,6 +124,10 @@
       "layer": "template-generating-container-content",
       "purpose": "copied into generated/hooks, staged into container claude hooks"
     },
+    "etc/hooks/net_proxy_guard.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "PreToolUse Bash guard: denies assigning or exporting ALL_PROXY/all_proxy while /etc/cbox/net/netmap.json (overridable by CBOX_NETMAP_FILE) exists, hint-grade and fail-open on any internal error; copied into generated/hooks, staged into container claude hooks"
+    },
     "etc/hooks/rm_permission_gate.py": {
       "layer": "template-generating-container-content",
       "purpose": "copied into generated/hooks, staged into container claude hooks"
@@ -136,9 +144,17 @@
       "layer": "template-generating-container-content",
       "purpose": "copied into generated/hooks, staged into container claude hooks"
     },
+    "etc/hooks/usage_statusline.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "copied into generated/hooks, staged into container claude hooks; wired as statusLine command, reads CC's rate_limits stdin JSON, atomically writes ~/.claude/cbox-usage/claude.json, prints the short usage line"
+    },
     "etc/host/90-cbox-net-refresh": {
       "layer": "host",
       "purpose": "host NetworkManager dispatcher script, sh not bash, /bin/sh shebang, host ip/docker restart on network events"
+    },
+    "etc/mcp/cbox_net_mcp.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "_cbox_write copies verbatim into generated/hooks, an in-container MCP server"
     },
     "etc/mcp/codex_mcp_shim.py": {
       "layer": "template-generating-container-content",
@@ -194,11 +210,11 @@
     },
     "lib/cbox_host.py": {
       "layer": "host",
-      "purpose": "python3-stdlib implementation backing lib/portable.sh (the P1 waist skeleton, cbox/docs/MULTIPLATFORM_DESIGN.md section 3); sourced/invoked host-side only"
+      "purpose": "python3-stdlib implementation backing lib/portable.sh (the P1 waist skeleton, docs/MULTIPLATFORM_DESIGN.md section 3); sourced/invoked host-side only"
     },
     "lib/cbox_hub.py": {
       "layer": "host",
-      "purpose": "the H1 python hub core (cbox/docs/MULTIPLATFORM_DESIGN.md track H); invoked host-side by cbox's bare-invocation dispatch arm when python3 is present and the file py_compiles, reads scope context from 'cbox __hub_context' and renders/dispatches the interactive crossroads; falls back to the existing bash hub() otherwise"
+      "purpose": "the H1 python hub core (docs/MULTIPLATFORM_DESIGN.md track H); invoked host-side by cbox's bare-invocation dispatch arm when python3 is present and the file py_compiles, reads scope context from 'cbox __hub_context' and renders/dispatches the interactive crossroads; falls back to the existing bash hub() otherwise"
     },
     "lib/cbox_settings.py": {
       "layer": "host",
@@ -215,6 +231,10 @@
     "lib/cbox_session_nofollow.py": {
       "layer": "host",
       "purpose": "invoked host-side by lib/cbox-session.sh via python3 on host paths"
+    },
+    "lib/fixtures/stub_app_server.py": {
+      "layer": "test",
+      "purpose": "fixture stub for codex app-server JSON-RPC over stdio, used by the codex MCP shim tests"
     },
     "lib/fixtures/cbox.pre_conf_writer_snapshot": {
       "layer": "fixture-snapshot",
@@ -248,7 +268,15 @@
       "layer": "test",
       "purpose": "agent-label guard unit tests: label rewrite from the agent definition, the model deny (safety-fallback) and ban patterns, the fable alias pin, and the local-first P0 over P5 gate keyed to hermes-local or CBOX_HERMES_DELEGATE"
     },
+    "lib/test_apply_change_lifecycle.sh": {
+      "layer": "test",
+      "purpose": "setup apply_change lifecycle: for every apply action (recreate, restart, topology, rebuild) asserts setup never runs docker compose up/build and never builds or starts a container - it only offers to stop an already-running container (cbox down --force) for the global or, in isolated mode, the current project scope, and otherwise notes that the change applies on the next cbox run"
+    },
     "lib/test_ask_claude_fallback.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_ask_claude_mcp.py": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
@@ -285,6 +313,10 @@
       "purpose": "M1 referential-integrity test for capabilities.json: engine/env/delegate cross-references, hook-command coverage, projection-aware dispatch-site inventory, null-history and two-live-mains negative fixtures"
     },
     "lib/test_cbox_ai_local_qwen.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_cbox_net_mcp.py": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
@@ -396,6 +428,10 @@
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
+    "lib/test_gc_sidecars.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
     "lib/test_gpu_render.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
@@ -403,6 +439,10 @@
     "lib/test_hermes_delegate_mcp.py": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_hermes_agent_doctor.sh": {
+      "layer": "test",
+      "purpose": "doctor finding for a missing ~/.claude/agents/hermes-local.md while CBOX_HERMES_DELEGATE=on"
     },
     "lib/test_hermes_delegate_render.sh": {
       "layer": "test",
@@ -432,6 +472,22 @@
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
+    "lib/test_settings_merge_sessionstart.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_settings_merge_statusline.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite; asserts merge_settings_json only installs cbox's statusLine when the target has none, and leaves an existing user statusLine untouched"
+    },
+    "lib/test_usage_statusline.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite; usage_statusline.py stdin handling, atomic claude.json write and permissions, printed line, ISO/epoch resets_at"
+    },
+    "lib/test_cbox_budget.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite; cbox_budget.py pace math, elapsed-fraction floor, stale flag, missing/malformed sources, metrics CLI"
+    },
     "lib/test_settings_menu.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
@@ -447,6 +503,10 @@
     "lib/test_layered_config.sh": {
       "layer": "test",
       "purpose": "layered project config (INC5): base/override derive, KEEP/DROP merge against a moved global key, reset, bootstrap adopt, manifest base=/override= lines and the G8 drifted refusal"
+    },
+    "lib/test_global_drift_pull.sh": {
+      "layer": "test",
+      "purpose": "run-path global profile drift: a changed global key is offered and pulled on y, declined answers are remembered per global digest and re-asked only after a further change, project-overridden and machine-scoped keys are never offered, and a no-TTY run only prints the re-derive command"
     },
     "lib/test_jobs_farm_mirror.sh": {
       "layer": "test",
@@ -471,6 +531,14 @@
     "lib/test_model_policy_compose_env.sh": {
       "layer": "test",
       "purpose": "settings.merge.json pins the fable and opus tiers and bans the fable point release, and both compose renderers carry that model policy env (ANTHROPIC_DEFAULT_*_MODEL, CBOX_AGENT_MODEL_DENY, CBOX_AGENT_MODEL_BAN) into the container so hooks, codex and ask-claude see one source of truth"
+    },
+    "lib/test_net_discovery_line.sh": {
+      "layer": "test",
+      "purpose": "on/off suite for the netaccess discovery line: CLAUDE.md kernel block and AGENTS.override.md carry the exact 240-byte-budget line exactly once when CBOX_NETACCESS_MODE=socks CBOX_NETACCESS_APPLIED=1 and not at all when off, and entrypoint.sh's _hermes_netaccess_line renders it only when /etc/cbox/net/netmap.json is a regular file (not a symlink, not missing)"
+    },
+    "lib/test_net_proxy_guard.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
     },
     "lib/test_netaccess_runtime.sh": {
       "layer": "test",
@@ -515,6 +583,10 @@
     "lib/test_probe_and_seed.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_retired_names.sh": {
+      "layer": "test",
+      "purpose": "retired-name registry suite: agent_all_names skips retired agent .md files, agents_prune_deselected removes retired live copies and notes the removal, merge_mcp_json / claude.py cbox-json-seed-merge (with and without the 5th-arg retired.json) drop retired mcp servers from a user .claude.json while foreign entries survive"
     },
     "lib/test_render_mcp.sh": {
       "layer": "test",
@@ -625,7 +697,7 @@
       "purpose": "sourced by cbox/setup.sh on the host"
     }
   },
-  "generated_by": "step 0 of the multiplatform migration (cbox/docs/MULTIPLATFORM_DESIGN.md section 4)",
+  "generated_by": "step 0 of the multiplatform migration (docs/MULTIPLATFORM_DESIGN.md section 4)",
   "layers": {
     "container": "runs inside the cbox docker image; Linux forever, never ported, excluded from the portability gates",
     "fixture-snapshot": "a frozen historical snapshot read as fixture data by a parity test, never executed as a live script; excluded from every gate",

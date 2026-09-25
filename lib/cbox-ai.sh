@@ -48,7 +48,7 @@ _cbox_ai_usage() {
   cat >&2 <<'EOF'
 usage: cbox ai <analyse|plan|full> [claude|codex|local-qwen|auto] [--host|--container]
               [-p <prompt> | -] [--model M] [--effort E] [--dry-run]
-local-qwen requires CBOX_LOCAL_MODEL=on plus CBOX_LOCAL_MODEL_URL/CBOX_LOCAL_MODEL_NAME; see cbox/etc/docs/LOCAL_MODEL_RUNBOOK.md
+local-qwen requires CBOX_LOCAL_MODEL=on plus CBOX_LOCAL_MODEL_URL/CBOX_LOCAL_MODEL_NAME; see cbox/docs/LOCAL_MODEL_RUNBOOK.md
 EOF
 }
 
@@ -398,11 +398,11 @@ _cbox_ai_host_codex_cmd() {
 
 _cbox_ai_local_qwen_preflight() {
   if [ "${CBOX_LOCAL_MODEL:-off}" != on ]; then
-    echo "cbox ai: local model disabled - set CBOX_LOCAL_MODEL=on plus CBOX_LOCAL_MODEL_URL and CBOX_LOCAL_MODEL_NAME, see cbox/etc/docs/LOCAL_MODEL_RUNBOOK.md" >&2
+    echo "cbox ai: local model disabled - set CBOX_LOCAL_MODEL=on plus CBOX_LOCAL_MODEL_URL and CBOX_LOCAL_MODEL_NAME, see cbox/docs/LOCAL_MODEL_RUNBOOK.md" >&2
     return 1
   fi
   if [ -z "${CBOX_LOCAL_MODEL_URL:-}" ] || [ -z "${CBOX_LOCAL_MODEL_NAME:-}" ]; then
-    echo "cbox ai: local model disabled - CBOX_LOCAL_MODEL_URL and CBOX_LOCAL_MODEL_NAME must both be set, see cbox/etc/docs/LOCAL_MODEL_RUNBOOK.md" >&2
+    echo "cbox ai: local model disabled - CBOX_LOCAL_MODEL_URL and CBOX_LOCAL_MODEL_NAME must both be set, see cbox/docs/LOCAL_MODEL_RUNBOOK.md" >&2
     return 1
   fi
   return 0

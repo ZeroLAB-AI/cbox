@@ -90,12 +90,62 @@ test_core_payload_cap() {
 JSON
 )"
   bytes="$(_body_bytes core "$payload")" || _fail "missing core payload"
-  [ "$bytes" -le 7000 ] || _fail "core body is $bytes B, exceeds 7000 B"
+  [ "$bytes" -le 10000 ] || _fail "core body is $bytes B, exceeds 10000 B"
   case "$payload" in
     *"SESSION CORE"*) : ;;
     *) _fail "core payload missing" ;;
   esac
-  echo "PASS: required core retains its 7000 B ceiling"
+  echo "PASS: required core retains its 10000 B ceiling"
+}
+
+test_core_payload_not_truncated() {
+  local d="$TMPBASE/core-full" payload core_src last_line
+  _make_repo "$d"
+  core_src="$INSTALL_DIR/etc/hooks/session-core.txt"
+  last_line="$(grep -v '^[[:space:]]*$' "$core_src" | tail -n 1)"
+  [ -n "$last_line" ] || _fail "shipped session-core.txt has no non-empty last line"
+  payload="$(python3 "$HOOK" <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+  case "$payload" in
+    *"$last_line"*) : ;;
+    *) _fail "core payload truncated: shipped session-core.txt last line ($last_line) missing" ;;
+  esac
+  case "$payload" in
+    *"(remainder on disk, not injected)"*) _fail "core payload carries a truncation marker despite the shipped core fitting under the cap" ;;
+    *) ;;
+  esac
+  echo "PASS: full shipped session-core.txt body is injected untruncated"
+}
+
+test_core_payload_over_cap_still_truncates() {
+  local hookdir="$TMPBASE/oversized-core" payload
+  mkdir -p "$hookdir"
+  cp "$INSTALL_DIR/etc/hooks/continuity_session_start.py" "$hookdir/continuity_session_start.py"
+  python3 - "$hookdir/session-core.txt" <<'PY'
+import sys
+
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    f.write("SESSION CORE (oversized synthetic fixture)\n\n")
+    f.write(("filler line to exceed the core byte cap\n") * 500)
+    f.write("\nVersion: session-core v7\n")
+PY
+  local d="$TMPBASE/oversized-core-repo"
+  _make_repo "$d"
+  payload="$(python3 "$hookdir/continuity_session_start.py" <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+  case "$payload" in
+    *"(remainder on disk, not injected)"*) : ;;
+    *) _fail "oversized core: expected truncation marker, cap did not engage" ;;
+  esac
+  case "$payload" in
+    *"Version: session-core v7"*) _fail "oversized core: full body present, fixture did not exceed the cap" ;;
+    *) ;;
+  esac
+  echo "PASS: a core file larger than the cap still truncates with the marker"
 }
 
 test_light_profile_has_security_floor() {
@@ -110,6 +160,27 @@ JSON
     *) _fail "light profile core payload missing security-reviewer gate rule" ;;
   esac
   echo "PASS: light profile retains security-reviewer gate rule"
+}
+
+test_embedded_kernels_name_verifier() {
+  local d="$TMPBASE/verifier_names" payload
+  _make_repo "$d"
+  payload="$(CBOX_CONTEXT_PROFILE=light python3 "$HOOK" <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+  payload="$payload$(python3 "$HOOK" <<JSON
+{"source":"resume","cwd":"$d"}
+JSON
+)"
+  case "$payload" in
+    *"test-runner"*) _fail "light or resume core payload still names the retired test-runner agent" ;;
+  esac
+  case "$payload" in
+    *"verifier"*) : ;;
+    *) _fail "light or resume core payload does not name the verifier agent" ;;
+  esac
+  echo "PASS: light and resume core payloads name verifier, not test-runner"
 }
 
 test_light_profile_has_local_first_first() {
@@ -138,8 +209,8 @@ JSON
     *) _fail "resume profile core payload does not open with the LOCAL FIRST rule" ;;
   esac
   case "$payload" in
-    *"session-core v6 resume"*) : ;;
-    *) _fail "resume profile core version is not session-core v6" ;;
+    *"session-core v7 resume"*) : ;;
+    *) _fail "resume profile core version is not session-core v7" ;;
   esac
   echo "PASS: resume profile opens with the LOCAL FIRST rule"
 }
@@ -441,9 +512,9 @@ PY
 {"source":"startup","cwd":"$d"}
 JSON
 )"
-    [ "$n" -le 8500 ] || _fail "section $sec: emission $n B exceeds 8500 B persist-safety ceiling"
+    [ "$n" -le 11000 ] || _fail "section $sec: emission $n B exceeds 11000 B persist-safety ceiling"
   done
-  echo "PASS: every single-section emission stays under the 8500 B persist-safety ceiling"
+  echo "PASS: every single-section emission stays under the 11000 B persist-safety ceiling"
 }
 
 test_stale_binds_detection() {
@@ -557,6 +628,8 @@ JSON
 
 test_reference_payload_cap
 test_core_payload_cap
+test_core_payload_not_truncated
+test_core_payload_over_cap_still_truncates
 test_section_concat_equals_noarg
 test_section_bogus_falls_back_with_warning
 test_section_emissions_under_persist_threshold
@@ -564,6 +637,7 @@ test_light_profile_has_security_floor
 test_resume_profile_has_security_floor
 test_light_profile_has_local_first_first
 test_resume_profile_has_local_first_first
+test_embedded_kernels_name_verifier
 test_shared_session_memory_injection
 test_empty_sid_reject_is_scoped_not_global
 test_shared_memory_tail_retention_vs_ledger_prefix

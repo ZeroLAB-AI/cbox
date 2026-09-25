@@ -53,7 +53,7 @@ cbox_preflight_check() {
   _cbox_preflight_os="$(_cbox_preflight_uname "$_cbox_preflight_uname_override")"
 
   if [ "$_cbox_preflight_os" = Darwin ]; then
-    printf 'cbox: warning: macOS support is EXPERIMENTAL. The host layer is bash-3.2-clean with darwin branches for the process-liveness, peer-credential and stat paths, but the darwin-specific code (ps lstart parsing, LOCAL_PEERCRED/xucred layout, BSD flock) has not been verified on real macOS hardware - treat failures as expected and report them. See cbox/docs/MULTIPLATFORM_DESIGN.md.\n' >&2
+    printf 'cbox: warning: macOS support is EXPERIMENTAL. The host layer is bash-3.2-clean with darwin branches for the process-liveness, peer-credential and stat paths, but the darwin-specific code (ps lstart parsing, LOCAL_PEERCRED/xucred layout, BSD flock) has not been verified on real macOS hardware - treat failures as expected and report them. See docs/MULTIPLATFORM_DESIGN.md.\n' >&2
   fi
 
   if ! _cbox_preflight_version_ge "$_cbox_preflight_bash_major" "$_cbox_preflight_bash_minor" "$_CBOX_BASH_FLOOR_MAJOR" "$_CBOX_BASH_FLOOR_MINOR"; then

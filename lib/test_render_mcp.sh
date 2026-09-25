@@ -58,7 +58,7 @@ test_render_byte_identity_progress_off() {
   _render "$all" off "$TMPBASE/render_off.json"
   local got want
   got="$(sha256sum "$TMPBASE/render_off.json" | awk '{print $1}')"
-  want="5f586d02a69b55441334653cb2ce85f5e7b6335ede37f39cfdd2031686b44e16"
+  want="c13a1c8849ecb6ce859f3f99c759883fbc7739639328e00cb64f09412cab2139"
   [ "$got" = "$want" ] || _fail "render selection=all progress=off changed (got $got want $want)"
   echo "PASS: render byte-identity progress=off"
 }
@@ -69,7 +69,7 @@ test_render_byte_identity_progress_on() {
   _render "$all" on "$TMPBASE/render_on.json"
   local got want
   got="$(sha256sum "$TMPBASE/render_on.json" | awk '{print $1}')"
-  want="26fb1f3159c8266bd590d19453f42cca2e7e53d1ee96826be9e9f70511cbbff4"
+  want="aefe6a38a4c73d7fc3400e1b1c3c6f5f4ca19df5207b3778ea75c1057c395510"
   [ "$got" = "$want" ] || _fail "render selection=all progress=on changed (got $got want $want)"
   echo "PASS: render byte-identity progress=on"
 }
@@ -81,13 +81,13 @@ test_seed_shape_byte_identity() {
   _seed_shape "$TMPBASE/render_off2.json" "$TMPBASE/seed_off.json"
   local got want
   got="$(sha256sum "$TMPBASE/seed_off.json" | awk '{print $1}')"
-  want="1721ccbf2432263426a8a8642280a0697c23ff0bd8cc8ce266ddf227946d7f38"
+  want="a876735f0a970d1fd2470136bcb2e9f0c66bb3e354a7abe2dfd945c1f88cc984"
   [ "$got" = "$want" ] || _fail "seed shape progress=off changed (got $got want $want)"
 
   _render "$all" on "$TMPBASE/render_on2.json"
   _seed_shape "$TMPBASE/render_on2.json" "$TMPBASE/seed_on.json"
   got="$(sha256sum "$TMPBASE/seed_on.json" | awk '{print $1}')"
-  want="864c24e5d9bad4b0299d87b7a19331fde296dd9ef63cd82bc423abad994ad921"
+  want="dec458056806ab6820759f05fe3a03312bbd4b7f4fb11558c5df637878682469"
   [ "$got" = "$want" ] || _fail "seed shape progress=on changed (got $got want $want)"
   echo "PASS: seed shape byte-identity (gen_claude_json_seed consumer)"
 }
@@ -99,8 +99,9 @@ test_merge_mcp_json_call_site() {
     infunc { print }
     infunc && /^\}/ { infunc=0 }
   ' "$INSTALL_DIR/lib/cbox-setup.sh" > "$extracted"
-  die() { echo "die: $*" >&2; exit 1; }
   ETC_DIR="$INSTALL_DIR/etc"
+  source "$INSTALL_DIR/_common.sh"
+  die() { echo "die: $*" >&2; exit 1; }
   source "$extracted"
   local target="$TMPBASE/merge_target.json"
   echo '{"mcpServers":{}}' > "$target"
@@ -142,7 +143,7 @@ assert args[1:9] == [
     "--progress", "off",
 ], args
 assert args[9] == "--", args
-assert args[10:] == ["codex", "mcp-server"], args
+assert args[10:] == ["codex", "app-server"], args
 PY
   done
   echo "PASS: shim argv contract holds for every tier"
@@ -186,6 +187,65 @@ json.dump(d, open(sys.argv[1], "w"))
     _fail "entrypoint boot gate accepted a tampered (unwrapped codex-*) seed"
   fi
   echo "PASS: entrypoint boot gate refuses a tampered seed"
+}
+
+test_entrypoint_gate_fails_on_raw_app_server_seed() {
+  local hosthome="$TMPBASE/hosthome_bad_appserver"
+  mkdir -p "$hosthome"
+  python3 -c '
+import json
+import sys
+d = {"hasCompletedOnboarding": True, "mcpServers": {"codex-sol": {"type": "stdio", "command": "codex", "args": ["app-server"]}}}
+json.dump(d, open(sys.argv[1], "w"))
+' "$hosthome/.claude.json"
+  local gatefunc="$TMPBASE/gate_func2b.sh"
+  awk '
+    /^_check_codex_mcp_shim_seed(_one)?\(\) \{/ { infunc=1 }
+    infunc { print }
+    infunc && /^\}/ { infunc=0 }
+  ' "$INSTALL_DIR/entrypoint.sh" > "$gatefunc"
+  if ( HOST_HOME="$hosthome"; source "$gatefunc"; _check_codex_mcp_shim_seed ) 2>/dev/null; then
+    _fail "entrypoint boot gate accepted a raw (unwrapped codex-*) app-server seed"
+  fi
+  echo "PASS: entrypoint boot gate refuses a raw app-server seed"
+}
+
+test_entrypoint_gate_passes_on_shim_wrapped_app_server_seed() {
+  local hosthome="$TMPBASE/hosthome_good_appserver"
+  mkdir -p "$hosthome"
+  python3 -c '
+import json
+import sys
+d = {
+    "hasCompletedOnboarding": True,
+    "mcpServers": {
+        "codex-sol": {
+            "type": "stdio",
+            "command": "python3",
+            "args": [
+                "/opt/cbox/etc/mcp/codex_mcp_shim.py",
+                "--tier", "codex-sol",
+                "--model", "m",
+                "--effort", "e",
+                "--progress", "off",
+                "--",
+                "codex", "app-server",
+            ],
+        }
+    },
+}
+json.dump(d, open(sys.argv[1], "w"))
+' "$hosthome/.claude.json"
+  local gatefunc="$TMPBASE/gate_func2c.sh"
+  awk '
+    /^_check_codex_mcp_shim_seed(_one)?\(\) \{/ { infunc=1 }
+    infunc { print }
+    infunc && /^\}/ { infunc=0 }
+  ' "$INSTALL_DIR/entrypoint.sh" > "$gatefunc"
+  if ! ( HOST_HOME="$hosthome"; source "$gatefunc"; _check_codex_mcp_shim_seed ); then
+    _fail "entrypoint boot gate rejected a shim-wrapped codex app-server seed"
+  fi
+  echo "PASS: entrypoint boot gate accepts a shim-wrapped codex app-server seed"
 }
 
 test_entrypoint_gate_checks_active_config_dir_state() {
@@ -305,17 +365,16 @@ avail = {
     for n, s in data.items()
     if isinstance(s, dict) and isinstance(s.get("_cbox"), dict)
 }
-codex_tiers = ["codex-astra", "codex-luna", "codex-sol", "codex-terra", "codex-terra-light"]
+codex_tiers = ["codex-astra", "codex-luna", "codex-sol"]
 expected_avail = {
     "codex-astra": ["claude", "hermes"],
     "codex-luna": ["claude", "hermes"],
     "codex-sol": ["claude", "hermes"],
-    "codex-terra": ["claude", "hermes"],
-    "codex-terra-light": ["claude", "hermes"],
     "ask-claude": ["codex", "hermes"],
     "local-qwen": ["claude", "codex", "hermes"],
     "hermes-local": ["claude", "codex", "hermes"],
     "container-exec": ["claude", "codex", "hermes"],
+    "cbox-net": ["claude", "codex", "hermes"],
 }
 assert avail == expected_avail, avail
 gated = sorted(
@@ -324,11 +383,11 @@ gated = sorted(
     and isinstance(s.get("_cbox"), dict)
     and s["_cbox"].get("enabled_when_env")
 )
-expected_gated = sorted(["local-qwen", "hermes-local", "container-exec"])
+expected_gated = sorted(["local-qwen", "hermes-local", "container-exec", "cbox-net"])
 assert gated == expected_gated, gated
 assert sorted(data.keys()) == sorted(expected_avail.keys()), sorted(data.keys())
 ' "$INSTALL_DIR/etc/mcp/delegates.json"
-  echo "PASS: delegates.json reproduces the current default set exactly (5 codex tiers available to claude+hermes, ask-claude codex+hermes, local-qwen/container-exec/hermes-local claude+codex+hermes env-gated, no other new entry)"
+  echo "PASS: delegates.json reproduces the current default set exactly (3 codex tiers available to claude+hermes, ask-claude codex+hermes, local-qwen/container-exec/hermes-local/cbox-net claude+codex+hermes env-gated, no other new entry)"
 }
 
 test_codex_delegates_share_one_probe_argv0() {
@@ -346,9 +405,9 @@ for name, spec in data.items():
     argv0s.add(args[0])
 assert argv0s, "no codex-* delegates found"
 assert len(argv0s) == 1, "codex-* delegates disagree on args[0]: %r" % sorted(argv0s)
-assert next(iter(argv0s)) == "mcp-server", "codex-* delegates args[0] is not mcp-server: %r" % argv0s
+assert next(iter(argv0s)) == "app-server", "codex-* delegates args[0] is not app-server: %r" % argv0s
 ' "$INSTALL_DIR/etc/mcp/delegates.json"
-  echo "PASS: all codex-* delegates share one args[0] (mcp-server) - the INC3 health probe derives CBOX_PROBE_CODEX_ARGV from this single source"
+  echo "PASS: all codex-* delegates share one args[0] (app-server) - the INC3 health probe derives CBOX_PROBE_CODEX_ARGV from this single source"
 }
 
 test_render_refuses_codex_named_non_codex_mcp_adapter() {
@@ -755,25 +814,35 @@ print(" ".join(sorted(found)))
       *" $gate "*) reachable_via_reg=1 ;;
     esac
     for f in "$INSTALL_DIR/lib/cbox-setup.sh" "$INSTALL_DIR/cbox"; do
-      local direct=0 calls_reg=0
+      local direct=0 calls_reg=0 derived_prefix=0
       grep -Eq "^[[:space:]]*export[[:space:]]+([A-Z0-9_]+[[:space:]]+)*${gate}([[:space:]]|\$)" "$f" && direct=1
       grep -Eq "_cbox_reg_export_vars" "$f" && calls_reg=1
-      if [ "$direct" = 1 ]; then
+      local check_files=("$f")
+      if [ "$f" = "$INSTALL_DIR/cbox" ]; then
+        check_files+=("$INSTALL_DIR/templates/generators.sh")
+      fi
+      local cf
+      for cf in "${check_files[@]}"; do
+        if grep -Eq "(^|[[:space:]])${gate}=\"[^\"]*\"" "$cf" && grep -q "render_mcp.py" "$cf"; then
+          derived_prefix=1
+        fi
+      done
+      if [ "$direct" = 1 ] || [ "$derived_prefix" = 1 ]; then
         continue
       fi
       if [ "$calls_reg" = 1 ] && [ "$reachable_via_reg" = 1 ]; then
         continue
       fi
-      _fail "gate var $gate (from delegates.json enabled_when_env): $f neither exports it directly nor calls _cbox_reg_export_vars while templates/conf_lib.sh's _cbox_reg_export_vars actually exports it"
+      _fail "gate var $gate (from delegates.json enabled_when_env): $f neither exports it directly, nor calls _cbox_reg_export_vars while conf_lib.sh's _cbox_reg_export_vars actually exports it, nor sets it as a per-call env prefix on a render_mcp.py invocation"
     done
   done
-  echo "PASS: every enabled_when_env gate in delegates.json is exported at least once (directly, or via a _cbox_reg_export_vars call whose generated export list actually contains the gate) reachable from both setup.sh and cbox"
+  echo "PASS: every enabled_when_env gate in delegates.json is reachable at least once (direct export, a _cbox_reg_export_vars call whose generated export list actually contains the gate, or a per-call env prefix on a render_mcp.py invocation) from both setup.sh and cbox"
 }
 
 test_hermes_target_default_render_carries_opted_in_entries_only() {
   local rendered="$TMPBASE/hermes_default.json"
   env -u CBOX_HERMES_DELEGATE -u CBOX_LOCAL_MODEL_URL -u CBOX_LOCAL_MODEL_NAME \
-    -u CBOX_CONTAINER_EXEC_TOOL \
+    -u CBOX_CONTAINER_EXEC_TOOL -u CBOX_NETMAP_ACTIVE \
     python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
     "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off hermes > "$rendered"
   python3 -c '
@@ -782,8 +851,8 @@ import sys
 
 data = json.load(open(sys.argv[1]))
 servers = json.load(open(sys.argv[2]))
-codex_tiers = ["codex-astra", "codex-luna", "codex-sol", "codex-terra", "codex-terra-light"]
-gated_off = ["hermes-local", "local-qwen", "container-exec"]
+codex_tiers = ["codex-astra", "codex-luna", "codex-sol"]
+gated_off = ["hermes-local", "local-qwen", "container-exec", "cbox-net"]
 always_on = ["ask-claude"]
 assert sorted(data.keys()) == sorted(codex_tiers + gated_off + always_on), data.keys()
 for tier in codex_tiers:
@@ -796,7 +865,7 @@ for tier in codex_tiers:
         "--tier", tier, "--model", cbox["model"],
         "--effort", cbox["model_reasoning_effort"], "--progress", "off",
     ], (tier, args)
-    assert args[9:] == ["--", "codex", "mcp-server"], (tier, args)
+    assert args[9:] == ["--", "codex", "app-server"], (tier, args)
     assert "timeout" not in spec, (tier, spec)
 hl = data["hermes-local"]
 assert hl["command"] == "python3", hl
@@ -809,6 +878,9 @@ assert lq["enabled"] is False, lq
 assert lq["timeout"] == 3600, lq
 ce = data["container-exec"]
 assert ce["enabled"] is False, ce
+cn = data["cbox-net"]
+assert cn["enabled"] is False, cn
+assert cn["timeout"] == 30, cn
 ac = data["ask-claude"]
 ac_cbox = servers["ask-claude"]["_cbox"]
 assert ac["command"] == "python3", ac
@@ -817,7 +889,24 @@ assert "enabled" not in ac, ac
 assert ac["timeout"] == ac_cbox["tool_timeout_sec"], ac
 assert ac["connect_timeout"] == ac_cbox["startup_timeout_sec"], ac
 ' "$rendered" "$INSTALL_DIR/etc/mcp/delegates.json"
-  echo "PASS: hermes target default render carries exactly the opted-in entries (5 codex tiers shim-wrapped, hermes-local/local-qwen/container-exec disabled since their gates are unset) and nothing else"
+  echo "PASS: hermes target default render carries exactly the opted-in entries (3 codex tiers shim-wrapped, hermes-local/local-qwen/container-exec/cbox-net disabled since their gates are unset) and nothing else"
+}
+
+test_hermes_target_cbox_net_gate_on_renders_for_claude() {
+  local rendered="$TMPBASE/cbox_net_on_claude.json"
+  CBOX_NETMAP_ACTIVE=on python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
+    "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$rendered"
+  python3 -c '
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+assert "cbox-net" in data, data.keys()
+spec = data["cbox-net"]
+assert spec["command"] == "python3", spec
+assert spec["args"] == ["/home/x/.claude/hooks/cbox_net_mcp.py"], spec
+' "$rendered"
+  echo "PASS: CBOX_NETMAP_ACTIVE=on renders cbox-net for claude"
 }
 
 test_hermes_target_entry_absent_without_available_to() {
@@ -932,7 +1021,7 @@ test_claude_and_codex_renders_unaffected_by_hermes_target() {
   got_claude="$(sha256sum "$claude_rendered" | awk '{print $1}')"
   got_codex="$(sha256sum "$codex_rendered" | awk '{print $1}')"
   local want_claude want_codex
-  want_claude="5f586d02a69b55441334653cb2ce85f5e7b6335ede37f39cfdd2031686b44e16"
+  want_claude="c13a1c8849ecb6ce859f3f99c759883fbc7739639328e00cb64f09412cab2139"
   want_codex="ddde00b645e9cf9d74f0dd7611f36ad4543caee7dcf8273d8e36715edf911ca3"
   [ "$got_claude" = "$want_claude" ] || _fail "claude target render changed after adding the hermes target (got $got_claude want $want_claude)"
   [ "$got_codex" = "$want_codex" ] || _fail "codex target render changed after adding the hermes target (got $got_codex want $want_codex)"
@@ -946,6 +1035,8 @@ test_merge_mcp_json_call_site
 test_shim_argv_contract_per_tier
 test_entrypoint_gate_passes_on_golden_seed
 test_entrypoint_gate_fails_on_tampered_seed
+test_entrypoint_gate_fails_on_raw_app_server_seed
+test_entrypoint_gate_passes_on_shim_wrapped_app_server_seed
 test_entrypoint_gate_checks_active_config_dir_state
 test_codex_profile_toml_golden_mcp0
 test_codex_profile_toml_golden_mcp1
@@ -975,6 +1066,7 @@ test_fixture_stdio_mcp_invisible_to_boot_gate
 test_fixture_selection_expansion_works
 test_enabled_when_env_gates_are_exported_everywhere
 test_hermes_target_default_render_carries_opted_in_entries_only
+test_hermes_target_cbox_net_gate_on_renders_for_claude
 test_hermes_target_entry_absent_without_available_to
 test_hermes_target_shape_and_timeout
 test_hermes_target_gated_off_entry_renders_enabled_false

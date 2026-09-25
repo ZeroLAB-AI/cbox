@@ -28,6 +28,13 @@ if ! command -v codex >/dev/null 2>&1; then
   exit 1
 fi
 
+if codex app-server --help >/dev/null 2>&1; then
+  pass app-server-present "codex app-server subcommand exists"
+else
+  fail app-server-present "codex app-server subcommand is missing - upstream removed the app-server backend, the cbox shim can no longer drive codex at all"
+  exit 1
+fi
+
 cat > "$PROBE_HOME/config.toml" <<'EOF'
 model = "base-model-x"
 model_provider = "dead"
@@ -53,14 +60,13 @@ import os
 import sys
 import subprocess
 import threading
-import time
 
 codex_home = sys.argv[1]
 env = dict(os.environ)
 env["CODEX_HOME"] = codex_home
 
 proc = subprocess.Popen(
-    ["codex", "mcp-server"],
+    ["codex", "app-server"],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
     env=env, text=True, bufsize=1,
 )
@@ -81,11 +87,9 @@ def reader():
                 m = json.loads(line)
             except ValueError:
                 continue
-            if m.get("method") == "codex/event":
-                msg = m.get("params", {}).get("msg", {})
-                if msg.get("type") == "session_configured":
-                    found_model[0] = msg.get("model")
-                    return
+            if m.get("id") == 2 and "result" in m:
+                found_model[0] = m["result"].get("model")
+                return
     except Exception:
         pass
 
@@ -93,16 +97,14 @@ t = threading.Thread(target=reader, daemon=True)
 t.start()
 
 try:
-    send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-        "protocolVersion": "2024-11-05", "capabilities": {},
+    send({"id": 1, "method": "initialize", "params": {
         "clientInfo": {"name": "cbox-bump-probe", "version": "0.0.1"}}})
-    send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-    send({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
-        "name": "codex", "arguments": {
-            "prompt": "hi", "model": "probe-model-x",
-            "config": {"model_reasoning_effort": "low"},
-            "approval-policy": "never", "sandbox": "danger-full-access",
-            "cwd": codex_home}}})
+    send({"method": "initialized"})
+    send({"id": 2, "method": "thread/start", "params": {
+        "model": "probe-model-x",
+        "config": {"model_reasoning_effort": "low"},
+        "approvalPolicy": "never", "sandbox": "danger-full-access",
+        "cwd": codex_home}})
     t.join(timeout=15)
 finally:
     proc.terminate()
@@ -179,7 +181,7 @@ env = dict(os.environ)
 env["CODEX_HOME"] = codex_home
 
 proc = subprocess.Popen(
-    ["codex", "mcp-server", "-c", "model=cflag-model"],
+    ["codex", "app-server", "-c", "model=cflag-model", "-c", "model_provider=dead"],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
     env=env, text=True, bufsize=1,
 )
@@ -200,11 +202,9 @@ def reader():
                 m = json.loads(line)
             except ValueError:
                 continue
-            if m.get("method") == "codex/event":
-                msg = m.get("params", {}).get("msg", {})
-                if msg.get("type") == "session_configured":
-                    found_model[0] = msg.get("model")
-                    return
+            if m.get("id") == 2 and "result" in m:
+                found_model[0] = m["result"].get("model")
+                return
     except Exception:
         pass
 
@@ -212,12 +212,10 @@ t = threading.Thread(target=reader, daemon=True)
 t.start()
 
 try:
-    send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-        "protocolVersion": "2024-11-05", "capabilities": {},
+    send({"id": 1, "method": "initialize", "params": {
         "clientInfo": {"name": "cbox-bump-probe", "version": "0.0.1"}}})
-    send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-    send({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
-        "name": "codex", "arguments": {"prompt": "hi", "cwd": codex_home}}})
+    send({"method": "initialized"})
+    send({"id": 2, "method": "thread/start", "params": {"cwd": codex_home}})
     t.join(timeout=15)
 finally:
     proc.terminate()
@@ -231,11 +229,11 @@ PYEOF
 )"
 
 if [ "$cflag_result" = "cflag-model" ]; then
-  note cflag "alive - session model = cflag-model (-c model= now works for mcp-server)"
+  note cflag "alive - thread model = cflag-model (-c model= is honored by app-server)"
 elif [ -n "$cflag_result" ]; then
-  note cflag "dead - session model = $cflag_result (config default, -c model= still ignored)"
+  note cflag "dead - thread model = $cflag_result (config default, -c model= ignored)"
 else
-  note cflag "no session event observed"
+  note cflag "no thread/start result observed"
 fi
 
 oss_mock_port=11577

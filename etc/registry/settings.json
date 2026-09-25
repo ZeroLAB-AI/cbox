@@ -77,7 +77,8 @@
       "doctor_rows": [
         "netaccess",
         "container-exec",
-        "container-exec-tool"
+        "container-exec-tool",
+        "cbox-net"
       ]
     },
     {
@@ -138,7 +139,7 @@
     {
       "id": "local-model",
       "title": "Local model",
-      "description": "Off by default. A text-only MCP delegate (local-qwen) backed by a local OpenAI-compatible endpoint such as ollama - see etc/docs/LOCAL_MODEL_RUNBOOK.md. Machine-scoped: the endpoint is a fact about this host, not about a project, so it is configured once and every project on the machine reads the same value.",
+      "description": "Off by default. A text-only MCP delegate (local-qwen) backed by a local OpenAI-compatible endpoint such as ollama - see docs/LOCAL_MODEL_RUNBOOK.md. Machine-scoped: the endpoint is a fact about this host, not about a project, so it is configured once and every project on the machine reads the same value.",
       "apply_class": "restart",
       "profile": "skip",
       "scope": "machine",
@@ -163,7 +164,10 @@
       "profile": "skip",
       "scope": "machine",
       "dependencies": [],
-      "doctor_rows": null
+      "doctor_rows": [
+        "hermes-delegate",
+        "hermes-agent"
+      ]
     },
     {
       "id": "ollama",
@@ -867,6 +871,23 @@
       "validator": null
     },
     {
+      "key": "CBOX_NETMAP_ACTIVE",
+      "section": "netaccess",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "off",
+      "role": "internal",
+      "export": false,
+      "prompt": null,
+      "help": "Internal: derived, not a stored setting. Computed fresh at every render_mcp.py call site from _cbox_netaccess_active (CBOX_NETACCESS_MODE != off and CBOX_NETACCESS_APPLIED = 1) and passed as that command's env prefix. Gates the cbox-net MCP tool (net_map, net_probe) for claude, codex and hermes.",
+      "validator": null
+    },
+    {
       "key": "CBOX_HOST_ROUTE_MODE",
       "section": "hostroute",
       "type": {
@@ -1037,11 +1058,24 @@
           "shim"
         ]
       },
-      "default": "off",
+      "default": "shim",
       "role": "setting",
       "export": false,
       "prompt": "setup: codex progress relay",
       "help": "Wrap codex-* MCP servers in a shim that translates codex events into MCP progress notifications.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_CODEX_SHIM_TURN_TIMEOUT_SEC",
+      "section": "codex-progress",
+      "type": {
+        "kind": "uint-or-empty"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": null,
+      "help": "Wall-clock cap on a single codex shim turn, in seconds (default 3600s, 0 disables it). On expiry the shim interrupts the turn and returns an error naming the thread id and rollout path.",
       "validator": null
     },
     {
@@ -1317,7 +1351,7 @@
       "role": "setting",
       "export": true,
       "prompt": null,
-      "help": "Wall-clock cap on a single hermes delegate call, in seconds (default 1800s). It governs the whole call, not idle time - a long task is killed at this point even while it is making progress.",
+      "help": "Optional wall-clock cap on a single hermes delegate call, in seconds. 0 or unset = no wall-clock cap; the idle gate still stops a run that makes no progress. A positive value kills the call at that point even while it is making progress.",
       "validator": null
     },
     {
@@ -1926,10 +1960,10 @@
         "kind": "string",
         "escape_hatch": "codex-model-slug"
       },
-      "default": "gpt-5.6-terra",
+      "default": "gpt-6-astra",
       "role": "setting",
       "export": false,
-      "prompt": "setup: codex model (e.g. gpt-5.6-terra): ",
+      "prompt": "setup: codex model (e.g. gpt-6-astra): ",
       "help": "Model slug rendered as model= into the generated read-only codex profile (cbox-container.config.toml).",
       "validator": null
     },

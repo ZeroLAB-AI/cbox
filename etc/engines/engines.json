@@ -17,7 +17,7 @@
     "codex": {
       "bin": "codex",
       "install": "bins-volume",
-      "probe": {"kind": "exe-stamp", "stamp": "$HOST_HOME/.codex/packages/.cbox-stamp", "infra_filter_argv1": ["mcp-server"]},
+      "probe": {"kind": "exe-stamp", "stamp": "$HOST_HOME/.codex/packages/.cbox-stamp", "infra_filter_argv1": ["mcp-server", "app-server"]},
       "version_vars": ["CBOX_CODEX_VERSION", "CBOX_CODEX_TARGET"],
       "enabled_var": null,
       "login": "port-bridge:1455",
@@ -25,7 +25,7 @@
       "resume_argv": "resume {id}",
       "seed_channel": "sessionstart-hook",
       "history_read": "codex-jsonl",
-      "health": {"kind": "subcommand-handshake", "expect": "developer-instructions"}
+      "health": {"kind": "subcommand-handshake", "expect": "userAgent"}
     },
     "hermes": {
       "bin": "hermes",
