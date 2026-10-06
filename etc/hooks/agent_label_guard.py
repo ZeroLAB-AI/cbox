@@ -5,6 +5,7 @@ import os
 import re
 import stat
 import sys
+import time
 
 GUARD_READ_CAP_BYTES = 65536
 WORKFLOW_SCRIPT_CAP_BYTES = 524288
@@ -40,6 +41,10 @@ try:
     import cbox_budget
 except Exception:
     cbox_budget = None
+try:
+    import limit_watchdog
+except Exception:
+    limit_watchdog = None
 
 EXEMPT = {"", "Explore", "Plan", "general-purpose", "claude", "fork"}
 SUBSTITUTABLE = {"worker", "code-reviewer", "debugger", "verifier", "doc-writer"}
@@ -105,6 +110,7 @@ QUOTA_EXEMPT_REASONS = ("security-gate", "owner-explanation")
 
 
 _QUOTA_SNAPSHOT_CACHE = {}
+_REQUEST_CONTEXT = {}
 
 
 def _quota_snapshot(family="claude"):
@@ -128,13 +134,32 @@ def _fmt_resets(epoch):
     if epoch is None:
         return "unknown"
     try:
-        return datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+        return datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     except Exception:
         return "unknown"
 
 
 def _fmt_used(val):
     return "?" if val is None else "%d" % round(val)
+
+
+def _quota_reason(budget, threshold=QUOTA_B_DENY):
+    b = budget.get("b")
+    reset_at = budget.get("resets_at") or budget.get("override_until")
+    reason = ("quota: B=%.2f below %.1f (5h %s%%, 7d %s%%); blocked until %s - "
+              "end your turn, cbox resumes this session then" %
+              (b, threshold, _fmt_used(budget.get("five_hour_used")),
+               _fmt_used(budget.get("seven_day_used")), _fmt_resets(reset_at)))
+    if budget.get("status") == "override":
+        reason += "; override active until %s" % _fmt_resets(budget.get("override_until"))
+    if limit_watchdog is not None and reset_at is not None:
+        try:
+            limit_watchdog.write_regulator_marker(
+                _REQUEST_CONTEXT.get("session_id"),
+                _REQUEST_CONTEXT.get("transcript_path"), reset_at + 2, time.time())
+        except Exception:
+            pass
+    return reason
 
 
 def quota_deny_reason(text, family="claude"):
@@ -148,19 +173,15 @@ def quota_deny_reason(text, family="claude"):
     b = budget.get("b")
     if b is None:
         return None
+    if budget.get("resets_at") is None and budget.get("override_until") is None:
+        return None
     if hermes.get("state") != "available":
         return None
     if b >= QUOTA_B_DENY:
         return None
     if marker_reason(text) in QUOTA_EXEMPT_REASONS:
         return None
-    reason = ("quota: claude B=%.1f (5h %s%%, 7d %s%%, resets %s); send this step to "
-              "hermes-local or wait for the reset"
-              % (b, _fmt_used(budget.get("five_hour_used")),
-                 _fmt_used(budget.get("seven_day_used")), _fmt_resets(budget.get("resets_at"))))
-    if budget.get("status") == "override":
-        reason += "; override active until %s" % _fmt_resets(budget.get("override_until"))
-    return reason
+    return _quota_reason(budget)
 
 
 def quota_local_busy_deny_reason(family="claude"):
@@ -173,12 +194,9 @@ def quota_local_busy_deny_reason(family="claude"):
     b = budget.get("b")
     if b is None or b >= QUOTA_LOCAL_BUSY_MIN:
         return None
-    reason = ("quota: claude B=%.1f is below 1.0 while hermes-local is busy; wait for a free "
-              "slot or the reset (%s) instead of spending paid quota"
-              % (b, _fmt_resets(budget.get("resets_at"))))
-    if budget.get("status") == "override":
-        reason += "; override active until %s" % _fmt_resets(budget.get("override_until"))
-    return reason
+    if budget.get("resets_at") is None and budget.get("override_until") is None:
+        return None
+    return _quota_reason(budget, QUOTA_LOCAL_BUSY_MIN)
 
 
 def quota_n_claude(family="claude"):
@@ -218,9 +236,6 @@ def frontmatter(path):
     return meta
 
 
-LOCAL_TIER_FALSY = ("", "off", "0", "false", "no")
-
-
 def resolve_model(model):
     if model.isalpha():
         return os.environ.get("ANTHROPIC_DEFAULT_%s_MODEL" % model.upper()) or model
@@ -249,14 +264,14 @@ def model_policy_reason(model, note_text):
     return None
 
 
-def _delegate_on():
-    return (os.environ.get("CBOX_HERMES_DELEGATE", "").strip().lower()
-            not in LOCAL_TIER_FALSY)
-
-
 def local_tier_installed():
-    return (os.path.isfile(os.path.expanduser("~/.claude/agents/hermes-local.md"))
-            or _delegate_on())
+    if cbox_budget is None:
+        return True
+    try:
+        cwd = _REQUEST_CONTEXT.get("cwd") if isinstance(_REQUEST_CONTEXT, dict) else None
+        return bool(cbox_budget.local_tier_present(cwd))
+    except Exception:
+        return True
 
 
 def justification(text):
@@ -361,6 +376,7 @@ def _options_after(tokens, k):
 
 def _literal_prop(tokens, start, end, name):
     depth = 0
+    found = None
     for t in range(start, end):
         kind, val, _ = tokens[t]
         if kind == "p" and val in "([{":
@@ -369,16 +385,36 @@ def _literal_prop(tokens, start, end, name):
             depth -= 1
         elif depth == 1 and kind == "id" and val == name \
                 and t + 1 < end and tokens[t + 1][:2] == ("p", ":"):
+            if found is not None:
+                return "dynamic", None
+            found = ("dynamic", None)
             if t + 2 < end and tokens[t + 2][0] == "str":
                 nxt = tokens[t + 3] if t + 3 < end else ("p", "}", 0)
                 if nxt[0] == "p" and nxt[1] in ",}":
-                    return "literal", tokens[t + 2][1]
-            return "dynamic", None
-    return "absent", None
+                    found = ("literal", tokens[t + 2][1])
+    return found if found is not None else ("absent", None)
 
 
-def workflow_violations(script):
+def _script_runs_local_agent(tokens):
+    for k, (kind, val, _) in enumerate(tokens):
+        if kind != "id" or val != "agent":
+            continue
+        prev = tokens[k - 1] if k else ("p", "", 0)
+        nxt = tokens[k + 1] if k + 1 < len(tokens) else ("p", "", 0)
+        if prev[:2] == ("p", ".") or nxt[:2] != ("p", "("):
+            continue
+        opts, close = _options_after(tokens, k + 1)
+        if opts is None:
+            continue
+        tstate, atype = _literal_prop(tokens, opts, close, "agentType")
+        if tstate == "literal" and atype == "hermes-local":
+            return True
+    return False
+
+
+def workflow_violations(script, local_first=True):
     tokens = scan_js(script)
+    local_in_script = _script_runs_local_agent(tokens)
     problems = []
     seen = {}
     calls = 0
@@ -411,19 +447,25 @@ def workflow_violations(script):
         label_text = label if lstate == "literal" else ""
         q_reason = quota_deny_reason(label_text)
         if q_reason:
-            problems.append("agent() #%d (%s) %s" % (calls, atype, q_reason))
+            problems.append(q_reason)
+            continue
+        if not local_first:
+            if marker_reason(label_text) == "local-busy":
+                busy_reason = quota_local_busy_deny_reason()
+                if busy_reason:
+                    problems.append(busy_reason)
             continue
         why = justification(label) if lstate == "literal" else None
         if why is None:
             problems.append("agent() #%d (%s) has no per-step local-skip justification in its own literal label" % (calls, atype))
             continue
         if marker_reason(label) == "local-busy":
-            if not hermes_busy():
+            if not local_in_script and not hermes_busy():
                 problems.append("agent() #%d (%s) claims local-busy but %s" % (calls, atype, BUSY_FREE_HELP))
                 continue
             busy_reason = quota_local_busy_deny_reason()
             if busy_reason:
-                problems.append("agent() #%d (%s) %s" % (calls, atype, busy_reason))
+                problems.append(busy_reason)
                 continue
         if why in seen:
             problems.append("agent() #%d (%s) reuses the justification of agent() #%d ('%s')" % (calls, atype, seen[why], why))
@@ -435,8 +477,9 @@ def workflow_violations(script):
         if sub_calls > cap:
             problems.append(
                 "this workflow spawns %d paid substitutable agent() calls, over the quota-aware "
-                "cap of %d (N claude=%d); trim the wave or send steps to hermes-local"
-                % (sub_calls, cap, n_claude))
+                "cap of %d (N claude=%d); trim the wave%s"
+                % (sub_calls, cap, n_claude,
+                   " or send steps to hermes-local" if local_first else ""))
     return problems
 
 
@@ -451,25 +494,31 @@ def refuse(reason):
 
 
 def main():
+    global _REQUEST_CONTEXT
     data = json.load(sys.stdin)
+    _REQUEST_CONTEXT = data
     if data.get("tool_name") == "Workflow":
-        if not local_tier_installed():
-            return
+        local_first = local_tier_installed()
         ti = data.get("tool_input")
         if not isinstance(ti, dict):
             refuse("agent_label_guard could not read the Workflow input; refusing rather than allowing it unchecked")
             return
         script = workflow_script(ti)
         if script is None:
-            refuse("hermes-local is installed (priority 0) and the workflow script at "
-                   "scriptPath could not be read for checking (missing, not a regular file, "
-                   "a symlink, over %d bytes, or not UTF-8); pass it inline or as a regular "
-                   "file" % WORKFLOW_SCRIPT_CAP_BYTES)
+            refuse("the workflow script at scriptPath could not be read for checking (missing, "
+                   "not a regular file, a symlink, over %d bytes, or not UTF-8); pass it inline "
+                   "or as a regular file" % WORKFLOW_SCRIPT_CAP_BYTES)
             return
-        problems = workflow_violations(script)
+        problems = workflow_violations(script, local_first)
         if problems:
-            refuse("hermes-local is installed (priority 0) and this workflow spawns paid "
-                   "substitutes without their own reason: %s; %s" % ("; ".join(problems), MARKER_HELP))
+            quota = next((p for p in problems if p.startswith("quota: B=")), None)
+            if quota:
+                refuse(quota)
+            elif local_first:
+                refuse("hermes-local is installed (priority 0) and this workflow spawns paid "
+                       "substitutes without their own reason: %s; %s" % ("; ".join(problems), MARKER_HELP))
+            else:
+                refuse("this workflow cannot be admitted: %s" % "; ".join(problems))
         return
     if data.get("tool_name") != "Agent":
         return
@@ -494,24 +543,25 @@ def main():
         return
     model = resolve_model(model)
     if atype in SUBSTITUTABLE:
-        if local_tier_installed():
-            q_reason = quota_deny_reason(desc)
-            if q_reason:
-                refuse(q_reason)
-                return
+        local_first = local_tier_installed()
+        q_reason = quota_deny_reason(desc)
+        if q_reason:
+            refuse(q_reason)
+            return
+        if local_first:
             why = justification(desc)
             if why is None:
                 refuse("hermes-local is installed (priority 0) and '%s' is a priority-5 paid substitute for it; "
                      "send the task to hermes-local first, or %s" % (atype, MARKER_HELP))
                 return
-            if marker_reason(desc) == "local-busy":
-                if not hermes_busy():
-                    refuse("'%s' claims local-busy but %s" % (atype, BUSY_FREE_HELP))
-                    return
-                busy_reason = quota_local_busy_deny_reason()
-                if busy_reason:
-                    refuse(busy_reason)
-                    return
+            if marker_reason(desc) == "local-busy" and not hermes_busy():
+                refuse("'%s' claims local-busy but %s" % (atype, BUSY_FREE_HELP))
+                return
+        if marker_reason(desc) == "local-busy":
+            busy_reason = quota_local_busy_deny_reason()
+            if busy_reason:
+                refuse(busy_reason)
+                return
     effort = meta.get("effort") or ""
     if effort:
         prefix = "%s (%s/%s): " % (atype, model, effort)
@@ -535,13 +585,11 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        if os.environ.get("CBOX_AGENT_MODEL_DENY") or os.environ.get("CBOX_AGENT_MODEL_BAN") \
-                or local_tier_installed():
-            print(json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": "agent_label_guard could not evaluate the spawn (%s); a model policy or the local-first gate is active, so the spawn is refused rather than allowed unchecked - fix the agent definition or payload and retry" % exc,
-                }
-            }))
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": "agent_label_guard could not evaluate the spawn (%s); the quota and model gates are active, so the spawn is refused rather than allowed unchecked - fix the agent definition or payload and retry" % exc,
+            }
+        }))
         sys.exit(0)

@@ -90,11 +90,15 @@
     },
     "etc/hooks/cbox_budget.py": {
       "layer": "template-generating-container-content",
-      "purpose": "copied into generated/hooks, staged into container claude hooks; reads ~/.claude/cbox-usage/{claude,codex}.json and reports per-window usage metrics (used_percentage, resets_at, elapsed_fraction, pace, age, stale) via `metrics` CLI subcommand"
+      "purpose": "copied into generated/hooks, staged into container claude hooks; reads ~/.claude/cbox-usage/{claude,codex}.json and reports per-window usage metrics (used_percentage, resets_at, elapsed_fraction, pace, age, stale, per-window captured_at falling back to the top-level stamp) via `metrics` CLI subcommand; hosts the shared claude.json merge (combine_window, update_claude_snapshot under claude.json.lock) used by the statusline and the poller; local_tier_present() reports whether a hermes-local MCP server is configured in $CLAUDE_CONFIG_DIR/.claude.json (or ~/.claude.json), shared by the label guard, the statusline and the session-start loader"
+    },
+    "etc/hooks/claude_usage_refresh.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "one-shot background poller spawned by usage_statusline.py when ~/.claude/cbox-usage/claude.json is older than CBOX_CLAUDE_USAGE_REFRESH_SEC (default 300, minimum 60; opt-out CBOX_CLAUDE_USAGE_REFRESH=off); GETs the oauth usage endpoint with the access token from $CLAUDE_SECURESTORAGE_CONFIG_DIR/.credentials.json (fallback ~/.claude/.credentials.json) without ever refreshing or writing credentials, skips when the token expires within 60s, single-flights via claude_refresh.lock under a ~10s wall cap, refuses redirects (bearer sent as an unredirected header), honors 429 Retry-After (default 15 min) and stops on 401/403 until expiresAt changes via claude_refresh_attempt.json, and writes claude.json (per-window captured_at, monotonic within a window, serialized by claude.json.lock) with source claude-api"
     },
     "etc/hooks/codex_usage_refresh.py": {
       "layer": "template-generating-container-content",
-      "purpose": "one-shot background refresher spawned by usage_statusline.py when ~/.claude/cbox-usage/codex.json is missing or older than 60 minutes; skips silently when codex is not installed or has no auth.json, single-flights via a lock file (codex_refresh.lock, stale after 30s), spawns `codex app-server` under a ~20s wall-clock cap, does the initialize/account/rateLimits/read handshake, and writes codex.json through codex_mcp_shim.py's write_codex_usage_snapshot; NOT YET WIRED into generators.sh's _cbox_write list (needs a line alongside usage_statusline.py/cbox_budget.py to ship into generated/hooks)"
+      "purpose": "one-shot background refresher spawned by usage_statusline.py when ~/.claude/cbox-usage/codex.json is missing or older than 60 minutes; skips silently when codex is not installed or has no auth.json, single-flights via a lock file (codex_refresh.lock, stale after 30s), spawns `codex app-server` under a ~20s wall-clock cap, does the initialize/account/rateLimits/read handshake, and writes codex.json through codex_mcp_shim.py's write_codex_usage_snapshot, loading the shim from beside itself (flat generated/hooks deploy) before ../mcp (repo layout)"
     },
     "etc/hooks/commit_guard.py": {
       "layer": "template-generating-container-content",
@@ -150,7 +154,7 @@
     },
     "etc/hooks/usage_statusline.py": {
       "layer": "template-generating-container-content",
-      "purpose": "copied into generated/hooks, staged into container claude hooks; wired as statusLine command, renders `[profile] claude: r5h%/r7d% | codex: r5h%/r7d% | hermes: state | pace: b` (all remaining-quota percentages, each segment omitted when its data is missing, narrow terminals drop pace then hermes then the 7d numbers using a columns/terminal_width stdin field or $COLUMNS); reads CC's rate_limits stdin JSON and atomically writes ~/.claude/cbox-usage/claude.json; codex segment reads ~/.claude/cbox-usage/codex.json (stale marker past 60min) and fire-and-forget spawns codex_usage_refresh.py (single-flight, cooldown via codex_refresh_attempt.json, opt-out CBOX_CODEX_USAGE_REFRESH=off) when that snapshot is missing or stale; hermes segment is a non-blocking flock probe of CBOX_HERMES_DELEGATE_LOCK_DIR slot files plus a bounded tail scan of CBOX_HERMES_DELEGATE_RUNS_DIR run records (start time from the run id's own timestamp prefix, duration from summary.json started/ended) for a median-based ~Nmin estimate, independent of the hermes.json reachability cache cbox_budget.hermes_state()/agent_label_guard.py consume; pace segment is cbox_budget.budget_for_family(\"claude\")'s b value, rendering only, math untouched"
+      "purpose": "copied into generated/hooks, staged into container claude hooks; wired as statusLine command, renders `[profile] claude: r5h%/r7d% | codex: r5h%/r7d% | hermes: state | pace: b` (all remaining-quota percentages, each segment omitted when its data is missing, narrow terminals drop pace then hermes then the 7d numbers using a columns/terminal_width stdin field or $COLUMNS); reads CC's rate_limits stdin JSON and atomically writes ~/.claude/cbox-usage/claude.json only when this session's stdin window values changed (per-session state statusline-session.<hash>.json, bounded and pruned; a null window never overwrites a known one), then shows the newest data per window between that session and claude.json before rolling expired windows to 100%; fire-and-forget spawns claude_usage_refresh.py when claude.json is older than CBOX_CLAUDE_USAGE_REFRESH_SEC (default 300, opt-out CBOX_CLAUDE_USAGE_REFRESH=off, attempt stamp claude_refresh_attempt.json); codex segment reads ~/.claude/cbox-usage/codex.json (stale marker past 60min) and fire-and-forget spawns codex_usage_refresh.py (single-flight, cooldown via codex_refresh_attempt.json, opt-out CBOX_CODEX_USAGE_REFRESH=off) when that snapshot is missing or stale; hermes segment is omitted when no hermes-local MCP server is configured, shows `down` when the fresh hermes.json snapshot says unreachable and no slot is busy, and otherwise is a non-blocking flock probe of CBOX_HERMES_DELEGATE_LOCK_DIR slot files plus a bounded tail scan of CBOX_HERMES_DELEGATE_RUNS_DIR run records (start time from the run id's own timestamp prefix, duration from summary.json started/ended) for a median-based ~Nmin estimate, independent of the hermes.json reachability cache cbox_budget.hermes_state()/agent_label_guard.py consume; pace segment is cbox_budget.budget_for_family(\"claude\")'s b value, rendering only, math untouched"
     },
     "etc/host/90-cbox-net-refresh": {
       "layer": "host",
@@ -274,7 +278,7 @@
     },
     "lib/test_agent_label_guard.py": {
       "layer": "test",
-      "purpose": "agent-label guard unit tests: label rewrite from the agent definition, the model deny (safety-fallback) and ban patterns, the fable alias pin, and the local-first P0 over P5 gate keyed to hermes-local or CBOX_HERMES_DELEGATE"
+      "purpose": "agent-label guard unit tests: label rewrite from the agent definition, the model deny (safety-fallback) and ban patterns, the fable alias pin, and the local-first P0 over P5 gate keyed to a hermes-local MCP server being configured in the Claude config (top-level or project-scoped, honouring disabledMcpServers), plus the workflow local-busy acceptance when the same script runs a hermes-local agent()"
     },
     "lib/test_apply_change_lifecycle.sh": {
       "layer": "test",
@@ -286,7 +290,7 @@
     },
     "lib/test_gen_hooks_dir_deploy.sh": {
       "layer": "test",
-      "purpose": "asserts gen_hooks_dir deploys etc/hooks/codex_usage_refresh.py (and keeps deploying usage_statusline.py) into generated/hooks"
+      "purpose": "asserts gen_hooks_dir deploys etc/hooks/codex_usage_refresh.py and etc/hooks/claude_usage_refresh.py (and keeps deploying usage_statusline.py) into generated/hooks, with codex_mcp_shim.py and codex_mode_guard.py beside the codex refresher"
     },
     "lib/test_run_egress_lockdown_gate.sh": {
       "layer": "test",
@@ -408,6 +412,10 @@
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite; also covers codex.json rate-limit capture: snapshot shape vs cbox_budget's schema, atomic write, symlink-safe replace, post-call single-flight read, account/rateLimits/updated notification capture, capture failures never breaking the delegate call"
     },
+    "lib/test_claude_usage_refresh.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite; claude_usage_refresh.py token gating (missing, expired, malformed, symlinked, never refreshed or modified), request shape, 200 parse and validation, oversize/garbage bodies, 429/403 backoff and Retry-After, 401 stop, token never in output or files, single-flight lock and wall cap, all with urlopen mocked"
+    },
     "lib/test_codex_usage_refresh.py": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite; codex_usage_refresh.py auth/install gating, successful/failed/exception-raising probe capture via codex_mcp_shim.py's writer, single-flight lock file acquire/release/contention"
@@ -506,15 +514,19 @@
     },
     "lib/test_settings_merge_statusline.sh": {
       "layer": "test",
-      "purpose": "host-side test harness under the lib/test_* suite; asserts merge_settings_json only installs cbox's statusLine when the target has none, and leaves an existing user statusLine untouched"
+      "purpose": "host-side test harness under the lib/test_* suite; asserts merge_settings_json only installs cbox's statusLine when the target has none, and leaves an existing user statusLine untouched; an older cbox-owned statusLine gains refreshInterval 60 unless the user set one, and the shipped statusLine pins refreshInterval 60"
     },
     "lib/test_usage_statusline.py": {
       "layer": "test",
-      "purpose": "host-side test harness under the lib/test_* suite; usage_statusline.py stdin handling, atomic claude.json write and permissions, ISO/epoch resets_at, the claude/codex/hermes/pace/profile segment renderer (fresh, stale, partial, missing), narrow-width drop order (pace, then hermes, then 7d), hermes idle/estimate/no-history/overdue via lock-file and run-record fixtures, and the codex_usage_refresh.py spawn trigger (disabled, no-binary, fresh-skip, cooldown)"
+      "purpose": "host-side test harness under the lib/test_* suite; usage_statusline.py stdin handling, atomic claude.json write and permissions, ISO/epoch resets_at, the claude/codex/hermes/pace/profile segment renderer (fresh, stale, partial, missing), narrow-width drop order (pace, then hermes, then 7d), hermes idle/estimate/no-history/overdue via lock-file and run-record fixtures, the codex_usage_refresh.py spawn trigger (disabled, no-binary, fresh-skip, cooldown), snapshot freshness (stale rerun never overwrites a newer snapshot, null window never over a known one, newest-wins between stdin and polled snapshot, reset shows 100%), per-session state bounds, and the claude_usage_refresh.py spawn gating (interval, floor, attempt stamp, backoff)"
     },
     "lib/test_cbox_budget.py": {
       "layer": "test",
-      "purpose": "host-side test harness under the lib/test_* suite; cbox_budget.py pace math, elapsed-fraction floor, stale flag, missing/malformed sources, metrics CLI"
+      "purpose": "host-side test harness under the lib/test_* suite; cbox_budget.py pace math, elapsed-fraction floor, stale flag, missing/malformed sources, metrics CLI, per-window staleness, combine_window rules, claude.json merge lock, deep-nesting reads"
+    },
+    "lib/test_limit_watchdog.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite; regulator marker lifecycle, cancel checks, due-time scheduling, idle injection, daily cap, log rotation and dedupe"
     },
     "lib/test_settings_menu.sh": {
       "layer": "test",

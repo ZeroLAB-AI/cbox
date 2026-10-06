@@ -1803,6 +1803,23 @@
       "validator": null
     },
     {
+      "key": "CBOX_REGULATOR_AUTORESUME",
+      "section": "autoresume",
+      "type": {
+        "kind": "enum-or-empty",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on",
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Resume a session automatically at the reset of the window that caused a quota-regulator deny; needs the limit watchdog.",
+      "validator": null
+    },
+    {
       "key": "CBOX_SESSION_MULTIPLEX",
       "section": "autoresume",
       "type": {
@@ -1887,11 +1904,11 @@
       "type": {
         "kind": "uint"
       },
-      "default": 300,
+      "default": 10,
       "role": "setting",
       "export": false,
       "prompt": null,
-      "help": "Seconds to wait after a detected reset before typing the resume prompt (default 300s).",
+      "help": "Seconds to wait after a detected reset before typing the resume prompt (default 10s).",
       "validator": null
     },
     {
@@ -1913,11 +1930,11 @@
       "type": {
         "kind": "uint"
       },
-      "default": 30,
+      "default": 3,
       "role": "setting",
       "export": false,
       "prompt": null,
-      "help": "Stagger seconds between multiple auto-resumes (default 30s).",
+      "help": "Stagger seconds between multiple auto-resumes (default 3s).",
       "validator": null
     },
     {

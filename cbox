@@ -5240,7 +5240,7 @@ logs() {
 install_hooks() {
   require_global_conf
   [ -t 0 ] || { echo "cbox: install-hooks requires a TTY"; return 1; }
-  local files=(codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py orchestrator-global.txt conduct-kernel.txt session-core.txt codex_scope.container.json ask_claude_mcp.py codex_notify.py codex_bump_probe.sh codex_mcp_shim.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py continuity_session_start.py session_scope_farm.py limit_watchdog.py session_pane_map.py usage_statusline.py cbox_budget.py)
+  local files=(codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py orchestrator-global.txt conduct-kernel.txt session-core.txt codex_scope.container.json ask_claude_mcp.py codex_notify.py codex_bump_probe.sh codex_mcp_shim.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py continuity_session_start.py session_scope_farm.py limit_watchdog.py session_pane_map.py usage_statusline.py codex_usage_refresh.py claude_usage_refresh.py cbox_budget.py)
   local srcs=(
     "$INSTALL_DIR/etc/hooks/codex_mode_guard.py"
     "$INSTALL_DIR/etc/hooks/agent_label_guard.py"
@@ -5262,6 +5262,8 @@ install_hooks() {
     "$INSTALL_DIR/etc/hooks/limit_watchdog.py"
     "$INSTALL_DIR/etc/hooks/session_pane_map.py"
     "$INSTALL_DIR/etc/hooks/usage_statusline.py"
+    "$INSTALL_DIR/etc/hooks/codex_usage_refresh.py"
+    "$INSTALL_DIR/etc/hooks/claude_usage_refresh.py"
     "$INSTALL_DIR/etc/hooks/cbox_budget.py"
   )
   local s f i stage target ans changed=0

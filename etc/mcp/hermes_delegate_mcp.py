@@ -6,6 +6,7 @@ import os
 import queue
 import re
 import select
+import shlex
 import shutil
 import signal
 import sqlite3
@@ -61,6 +62,7 @@ AUDIT_LINE_MAX = 2048
 CONFIG_APPLY_TIMEOUT_SEC = 20
 KILL_GRACE_SEC = 5
 PROGRESS_MIN_GAP_SEC = 10
+PROGRESS_HEARTBEAT_SEC = 60
 QUEUE_PROGRESS_GAP_SEC = 60
 CANCELLED_MESSAGE = "cancelled by the client"
 CANCEL_MEMORY = 256
@@ -75,10 +77,10 @@ MODE_QA = "qa"
 MODE_AGENT = "agent"
 VALID_MODES = (MODE_QA, MODE_AGENT)
 DEFAULT_MODE = MODE_QA
-DEFAULT_DISABLED_TOOLSETS = "terminal,file,web,code_execution,delegation,browser,computer_use"
+DEFAULT_DISABLED_TOOLSETS = "terminal,file,web,code_execution,delegation,browser,computer_use,tts"
 MANDATORY_DISABLED_TOOLSETS_ORDER = tuple(DEFAULT_DISABLED_TOOLSETS.split(","))
 MANDATORY_DISABLED_TOOLSETS = frozenset(MANDATORY_DISABLED_TOOLSETS_ORDER)
-AGENT_DISABLED_TOOLSETS = "code_execution,web,delegation,browser,computer_use,cronjob"
+AGENT_DISABLED_TOOLSETS = "code_execution,web,delegation,browser,computer_use,cronjob,tts"
 AGENT_MANDATORY_DISABLED_TOOLSETS_ORDER = tuple(AGENT_DISABLED_TOOLSETS.split(","))
 AGENT_MANDATORY_DISABLED_TOOLSETS = frozenset(AGENT_MANDATORY_DISABLED_TOOLSETS_ORDER)
 HOOKS_FILE_VAR = "CBOX_HERMES_DELEGATE_HOOKS_FILE"
@@ -124,10 +126,22 @@ DISABLED_TOOLSETS_WRITER = (
     "    agent = {}\n"
     "    cfg['agent'] = agent\n"
     "agent['disabled_toolsets'] = [str(t) for t in items]\n"
+    "security = cfg.get('security')\n"
+    "if not isinstance(security, dict):\n"
+    "    security = {}\n"
+    "    cfg['security'] = security\n"
+    "security['allow_lazy_installs'] = False\n"
     "tmp = path + '.cbox-tmp'\n"
     "with open(tmp, 'w', encoding='utf-8') as fh:\n"
     "    yaml.safe_dump(cfg, fh, sort_keys=False, allow_unicode=True)\n"
     "os.replace(tmp, path)\n"
+)
+LAZY_INSTALLS_READER = (
+    "import json, sys, yaml\n"
+    "with open(sys.argv[1], encoding='utf-8') as fh:\n"
+    "    cfg = yaml.safe_load(fh) or {}\n"
+    "sec = cfg.get('security', {}) if isinstance(cfg, dict) else {}\n"
+    "sys.stdout.write(json.dumps(sec.get('allow_lazy_installs') if isinstance(sec, dict) else None))\n"
 )
 PROXY_PASSTHROUGH_VARS = (
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
@@ -153,8 +167,6 @@ DB_READ_TIMEOUT_SEC = 0.5
 DB_BACKUP_TIMEOUT_SEC = 1.0
 MAX_PROCESSED_RUNS = 50
 OUTPUT_LOG_MAX_BYTES = 16 * 1024 * 1024
-SWEEP_GRACE_SEC = 2.0
-SIGNAL_GROUP_GRACE_SEC = 1.5
 
 
 def depth_reached():
@@ -354,6 +366,7 @@ _SHUTDOWN = [False]
 _IN_CALL = [False]
 _LIVE_PROC = [None]
 _LIVE_HOME = [None]
+_QUEUED_CALLS = [0]
 
 
 def valid_id(value):
@@ -525,14 +538,14 @@ def tool_description():
                 + "In agent mode the hermes child is an autonomous agent in "
                 "the project workspace: it can read/edit files and run "
                 "terminal commands under the cbox PreToolUse guard hooks; "
-                "code_execution, web, delegation, browser, computer_use "
-                "and cronjob stay off. Its delegation-depth marker is "
+                "code_execution, web, delegation, browser, computer_use, "
+                "cronjob and tts stay off. Its delegation-depth marker is "
                 "advisory only, so give it a self-contained task and "
                 "verify the result. "
                 + tail)
     return (head
             + "In qa mode the agent's terminal, file, web, code_execution, "
-            "delegation, browser, and computer_use toolsets are pinned off "
+            "delegation, browser, computer_use, and tts toolsets are pinned off "
             "and verified before the prompt runs, so it can only answer "
             "from what you send it. "
             + tail)
@@ -761,6 +774,18 @@ def _write_disabled_toolsets(ephemeral_home, env_base, toolsets):
     return None
 
 
+def _verify_lazy_installs_disabled(ephemeral_home, env_base):
+    env = dict(env_base)
+    env["HERMES_HOME"] = ephemeral_home
+    out, err = _run_short(
+        [_venv_python(), "-c", LAZY_INSTALLS_READER,
+         os.path.join(ephemeral_home, "config.yaml")],
+        env, ephemeral_home, CONFIG_APPLY_TIMEOUT_SEC)
+    if err is not None or out.strip() != b"false":
+        return "refusing to run: security.allow_lazy_installs=false could not be verified"
+    return None
+
+
 def _verify_disabled_toolsets(ephemeral_home, env_base, toolsets):
     argv = [hermes_bin(), "config", "get", "agent.disabled_toolsets",
             "--json"]
@@ -906,31 +931,16 @@ def _kill_group(proc):
         pass
 
 
-def _signal_kill_group(proc):
-    pgid = proc.pid
-    try:
-        os.killpg(pgid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        return
-    deadline = time.monotonic() + SIGNAL_GROUP_GRACE_SEC
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            break
-        time.sleep(0.05)
-    try:
-        os.killpg(pgid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
-
-
 def _pid_alive(pid):
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        with open("/proc/%d/stat" % pid, encoding="ascii") as fh:
+            stat_line = fh.read()
+        return stat_line[stat_line.rfind(")") + 2] != "Z"
+    except OSError:
         return False
-    except PermissionError:
-        return True
-    return True
+
+
+_PIDFD_GONE = "gone"
 
 
 def _pidfd_open(pid):
@@ -939,11 +949,15 @@ def _pidfd_open(pid):
         return None
     try:
         return opener(pid, 0)
+    except ProcessLookupError:
+        return _PIDFD_GONE
     except OSError:
         return None
 
 
 def _signal_target(pid, pidfd, sig):
+    if pidfd is _PIDFD_GONE:
+        return
     sender = getattr(signal, "pidfd_send_signal", None)
     if pidfd is not None and sender is not None:
         try:
@@ -958,54 +972,123 @@ def _signal_target(pid, pidfd, sig):
 
 
 def _target_alive(pid, pidfd):
-    if pidfd is not None:
+    if pidfd is _PIDFD_GONE:
+        return False
+    if pidfd is not None and _pid_alive(pid):
         try:
             ready, _, _ = select.select([pidfd], [], [], 0)
             return not ready
         except OSError:
             return False
-    return _pid_alive(pid)
+    return _pid_alive(pid) if pidfd is None else False
 
 
-def _sweep_hermes_home(hermes_home, grace_sec=SWEEP_GRACE_SEC):
-    if not hermes_home:
-        return
+def _process_snapshot(root_pid, hermes_home):
     target = ("HERMES_HOME=" + hermes_home).encode("utf-8", "surrogateescape")
     uid = os.getuid()
-    targets = []
-    try:
-        entries = os.listdir("/proc")
-    except OSError:
-        return
-    for name in entries:
+    records = {}
+    groups = {}
+    for name in os.listdir("/proc"):
         if not name.isdigit():
             continue
         pid = int(name)
         try:
-            st = os.stat("/proc/%s" % name)
-            if st.st_uid != uid:
+            if os.stat("/proc/%s" % name).st_uid != uid:
                 continue
-            with open("/proc/%s/environ" % name, "rb") as fh:
-                environ = fh.read()
-        except (OSError, ValueError):
+            with open("/proc/%s/stat" % name, encoding="ascii") as fh:
+                line = fh.read()
+            fields = line[line.rfind(")") + 2:].split()
+            if fields[0] == "Z":
+                continue
+            records[pid] = int(fields[1])
+            groups[pid] = int(fields[2])
+        except (OSError, ValueError, IndexError):
             continue
-        if target in environ.split(b"\x00"):
-            targets.append((pid, _pidfd_open(pid)))
-    if not targets:
+    found = {pid for pid, group in groups.items() if group == root_pid}
+    if root_pid in records:
+        found.add(root_pid)
+    changed = True
+    while changed:
+        changed = False
+        for pid, ppid in records.items():
+            if ppid in found and pid not in found:
+                found.add(pid)
+                changed = True
+    for pid in records:
+        try:
+            with open("/proc/%d/environ" % pid, "rb") as fh:
+                if target in fh.read().split(b"\x00"):
+                    found.add(pid)
+        except OSError:
+            continue
+    found.discard(os.getpid())
+    return found
+
+
+def _kill_call_tree(proc, hermes_home, reason):
+    if not hermes_home:
         return
+
+    def pgid_pid():
+        return proc.pid if proc is not None and proc.poll() is None else -1
+
     try:
-        for pid, pidfd in targets:
-            _signal_target(pid, pidfd, signal.SIGTERM)
-        deadline = time.monotonic() + grace_sec
+        targets = _process_snapshot(pgid_pid(), hermes_home)
+    except OSError:
+        live_pid = pgid_pid()
+        targets = {live_pid} if live_pid != -1 else set()
+    handles = {pid: _pidfd_open(pid) for pid in targets}
+    try:
+        if targets:
+            if proc is not None and proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            for pid, pidfd in handles.items():
+                _signal_target(pid, pidfd, signal.SIGTERM)
+        deadline = time.monotonic() + 1.5
         while time.monotonic() < deadline:
-            if not any(_target_alive(pid, pidfd) for pid, pidfd in targets):
-                return
-            time.sleep(0.1)
-        for pid, pidfd in targets:
-            _signal_target(pid, pidfd, signal.SIGKILL)
+            try:
+                added = _process_snapshot(pgid_pid(), hermes_home) - handles.keys()
+            except OSError:
+                added = set()
+            for pid in added:
+                handles[pid] = _pidfd_open(pid)
+                _signal_target(pid, handles[pid], signal.SIGTERM)
+            if not any(_target_alive(pid, fd) for pid, fd in handles.items()):
+                break
+            time.sleep(0.05)
+        if proc is not None and proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        for pid, pidfd in handles.items():
+            if _target_alive(pid, pidfd):
+                _signal_target(pid, pidfd, signal.SIGKILL)
+        if proc is not None:
+            try:
+                proc.wait(timeout=0.4)
+            except subprocess.TimeoutExpired:
+                pass
+        try:
+            added = _process_snapshot(pgid_pid(), hermes_home) - handles.keys()
+        except OSError:
+            added = set()
+        for pid in added:
+            handles[pid] = _pidfd_open(pid)
+            _signal_target(pid, handles[pid], signal.SIGKILL)
+        if added:
+            time.sleep(0.05)
+        survivors = [pid for pid, fd in handles.items()
+                     if _target_alive(pid, fd)]
+        for pid in sorted(handles):
+            audit("kill", "%s pid=%d" % (reason, pid), None, None, None,
+                  outcome="survivor" if pid in survivors else "killed")
     finally:
-        for _pid, pidfd in targets:
-            if pidfd is not None:
+        for pidfd in handles.values():
+            if isinstance(pidfd, int):
                 try:
                     os.close(pidfd)
                 except OSError:
@@ -1013,11 +1096,7 @@ def _sweep_hermes_home(hermes_home, grace_sec=SWEEP_GRACE_SEC):
 
 
 def _kill_and_sweep(proc, hermes_home):
-    _reap(proc)
-    try:
-        _sweep_hermes_home(hermes_home)
-    except Exception:
-        pass
+    _kill_call_tree(proc, hermes_home, "call cleanup")
 
 
 def _openai_base_url(url):
@@ -1103,6 +1182,9 @@ def _apply_config(ephemeral_home, env_base, effort_override=None):
                                        disabled_toolsets)
         if err is not None:
             return err
+        err = _verify_lazy_installs_disabled(ephemeral_home, env_base)
+        if err is not None:
+            return err
         err = _verify_disabled_toolsets(ephemeral_home, env_base,
                                         disabled_toolsets)
         if err is not None:
@@ -1128,40 +1210,63 @@ def _hooks_file_writable(path):
 
 def _apply_guard_hooks(ephemeral_home, env_base):
     src = hooks_file()
-    if not os.path.isfile(src) or os.path.islink(src):
-        return ("refusing agent mode: the hermes guard hooks block is missing at "
-                + src + " - agent mode gives the hermes child terminal and file "
-                "tools, so it runs only with the same PreToolUse guards the hermes "
-                "console gets; turn on CBOX_HERMES_HOOKS=on on the host "
-                "(cbox config set CBOX_HERMES_HOOKS=on, then cbox down && cbox run)"
-                " or fall back to qa mode")
-    if _hooks_file_writable(src):
-        return ("refusing agent mode: the hermes guard hooks block at " + src
-                + " is writable by this user - it must come from the read-only "
-                "host render, not from something the container can edit")
     python = _venv_python()
     if not os.access(python, os.X_OK):
         return ("refusing agent mode: %s is not executable - the hermes venv "
                 "python is required to copy the guard hooks block into the "
                 "ephemeral config.yaml" % python)
+    bridge = os.path.normpath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "hermes_guard_bridge.py" if os.path.isfile(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "hermes_guard_bridge.py")) else "../hooks/hermes_guard_bridge.py"))
+    if not os.path.isfile(bridge) or os.path.islink(bridge):
+        return "refusing agent mode: mandatory package guard is missing at " + bridge
+    if _hooks_file_writable(bridge):
+        return ("refusing agent mode: mandatory package guard %s is writable by "
+                 "this user - it must come from the read-only host render" % bridge)
     env = dict(env_base)
     env["HERMES_HOME"] = ephemeral_home
-    out, err = _run_short([python, "-c", HOOKS_READER, src], env,
-                          ephemeral_home, CONFIG_APPLY_TIMEOUT_SEC)
-    if err is not None:
-        return "reading the guard hooks block failed: " + err
-    try:
-        hooks = json.loads(out.decode("utf-8", "replace") if isinstance(out, bytes) else out)
-    except ValueError:
-        return "refusing agent mode: the guard hooks block did not parse"
-    err = _validate_guard_hooks(hooks)
-    if err is not None:
-        return err
+    hooks = {}
+    if os.path.isfile(src):
+        if os.path.islink(src) or _hooks_file_writable(src):
+            return "refusing agent mode: guard hooks block is not read-only: " + src
+        out, err = _run_short([python, "-c", HOOKS_READER, src], env,
+                              ephemeral_home, CONFIG_APPLY_TIMEOUT_SEC)
+        if err is not None:
+            return "reading the guard hooks block failed: " + err
+        try:
+            hooks = json.loads(out.decode("utf-8", "replace"))
+        except ValueError:
+            return "refusing agent mode: the guard hooks block did not parse"
+        err = _validate_guard_hooks(hooks)
+        if err is not None:
+            return err
+    elif os.environ.get(HOOKS_FILE_VAR):
+        return "refusing agent mode: configured guard hooks block is missing: " + src
+    mandatory = {"matcher": "terminal|process",
+                 "command": shlex.quote(python) + " " + shlex.quote(bridge),
+                 "timeout": 10}
+    hooks = dict(hooks)
+    existing = list(hooks.get(GUARD_EVENT) or [])
+    if _guard_hooks_already_registered(existing, bridge):
+        hooks[GUARD_EVENT] = existing
+    else:
+        hooks[GUARD_EVENT] = [mandatory] + existing
     argv = [python, "-c", HOOKS_WRITER,
             os.path.join(ephemeral_home, "config.yaml"), json.dumps(hooks)]
     out, err = _run_short(argv, env, ephemeral_home, CONFIG_APPLY_TIMEOUT_SEC)
     if err is not None:
         return "writing the guard hooks block into the ephemeral home failed: " + err
+    out, err = _run_short([python, "-c", HOOKS_READER,
+                           os.path.join(ephemeral_home, "config.yaml")], env,
+                          ephemeral_home, CONFIG_APPLY_TIMEOUT_SEC)
+    try:
+        verified = json.loads(out.decode("utf-8", "replace")) if err is None else None
+    except ValueError:
+        verified = None
+    if verified != hooks:
+        return "refusing agent mode: mandatory package guard could not be verified"
     env_base[ACCEPT_HOOKS_VAR] = "1"
     return None
 
@@ -1169,6 +1274,23 @@ def _apply_guard_hooks(ephemeral_home, env_base):
 def _guard_scripts(command):
     return [tok for tok in command.split()
             if tok.endswith(".py") and os.path.isabs(tok)]
+
+
+def _guard_hooks_already_registered(entries, bridge):
+    bridge_real = os.path.realpath(bridge)
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        command = entry.get("command")
+        if not isinstance(command, str):
+            continue
+        for script in _guard_scripts(command):
+            try:
+                if os.path.realpath(script) == bridge_real:
+                    return True
+            except OSError:
+                continue
+    return False
 
 
 def _validate_guard_hooks(hooks):
@@ -1817,6 +1939,15 @@ def spawn_hermes(prompt, system, effort=None):
             "LANG": "C.UTF-8",
             DEPTH_VAR: "1",
             LEGACY_DEPTH_VAR: "1",
+            "HERMES_DISABLE_LAZY_INSTALLS": "1",
+            "PIP_NO_INDEX": "1",
+            "PIP_INDEX_URL": "http://127.0.0.1:9/",
+            "UV_OFFLINE": "1",
+            "npm_config_offline": "true",
+            "npm_config_registry": "http://127.0.0.1:9/",
+            "YARN_ENABLE_NETWORK": "0",
+            "CARGO_NET_OFFLINE": "true",
+            "GOPROXY": "off",
         }
         env_base.update(_proxy_env())
         env_base.update(_scope_env())
@@ -1856,13 +1987,18 @@ def spawn_hermes(prompt, system, effort=None):
                     files_before = {}
             except Exception:
                 files_before = {}
+        if cancelled():
+            return None, CANCELLED_MESSAGE, _empty_run_meta()
+        _LIVE_HOME[0] = ephemeral_home
         proc = subprocess.Popen(
             argv, env=env, cwd=cwd,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
             start_new_session=True)
         _LIVE_PROC[0] = proc
-        _LIVE_HOME[0] = ephemeral_home
+        if cancelled():
+            _kill_call_tree(proc, ephemeral_home, "cancelled after spawn")
+            return None, CANCELLED_MESSAGE, _empty_run_meta()
         run_id = _new_run_id()
         started_wall = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         run_dir, log_fd, log_err = _create_run_for_writing(run_id)
@@ -1880,12 +2016,18 @@ def spawn_hermes(prompt, system, effort=None):
             HEARTBEAT_POLL_SEC, max(0.2, idle_timeout / 5.0)) if idle_timeout \
             else HEARTBEAT_POLL_SEC
         next_beat_poll = started + beat_poll_gap
+        next_progress = started + PROGRESS_HEARTBEAT_SEC
         open_fds = [proc.stdout, proc.stderr]
         while open_fds:
             if cancelled():
                 _kill_and_sweep(proc, ephemeral_home)
                 return finish(None, CANCELLED_MESSAGE)
             now = time.monotonic()
+            if now >= next_progress:
+                next_progress = now + PROGRESS_HEARTBEAT_SEC
+                emit_progress(_live_activity_text(
+                    "hermes running", ephemeral_home, int(now - started)),
+                    force=True)
             remaining = deadline - now
             if remaining <= 0:
                 _kill_and_sweep(proc, ephemeral_home)
@@ -1968,9 +2110,9 @@ def spawn_hermes(prompt, system, effort=None):
     except Exception as e:
         return finish(None, "spawn failed: %s" % type(e).__name__)
     finally:
+        if ephemeral_home is not None:
+            _kill_call_tree(proc, ephemeral_home, "call finished")
         release_slot(slot_fd)
-        if proc is not None:
-            _reap(proc)
         _LIVE_PROC[0] = None
         _LIVE_HOME[0] = None
         if runlog is not None:
@@ -1982,10 +2124,6 @@ def spawn_hermes(prompt, system, effort=None):
                 except Exception:
                     pass
         if ephemeral_home is not None:
-            try:
-                _sweep_hermes_home(ephemeral_home)
-            except Exception:
-                pass
             shutil.rmtree(ephemeral_home, ignore_errors=True)
 
 
@@ -2121,6 +2259,9 @@ def handle(msg):
             return
         reply(req_id, {"tools": [build_tool()]})
     elif method == "tools/call":
+        with _STATE_LOCK:
+            if _QUEUED_CALLS[0]:
+                _QUEUED_CALLS[0] -= 1
         params = msg.get("params") or {}
         if params.get("name") != TOOL_NAME:
             reply_error(req_id, -32602,
@@ -2193,9 +2334,19 @@ def _read_stdin(inbox):
             if method == "ping" and msg.get("id") is not None:
                 reply(msg.get("id"), {})
                 continue
+            if method == "tools/call" and msg.get("id") is not None:
+                with _STATE_LOCK:
+                    busy = _IN_CALL[0] or _QUEUED_CALLS[0] > 0
+                    if not busy:
+                        _QUEUED_CALLS[0] += 1
+                if busy:
+                    reply_error(msg.get("id"), -32000,
+                                "hermes-delegate busy: another call is active; retry with a fresh request")
+                    continue
             inbox.put(msg)
     except Exception:
         pass
+    _CLOSED.set()
     inbox.put(None)
 
 
@@ -2203,13 +2354,8 @@ def _on_signal(signum, frame):
     _SHUTDOWN[0] = True
     proc = _LIVE_PROC[0]
     home = _LIVE_HOME[0]
-    if proc is not None:
-        _signal_kill_group(proc)
     if home:
-        try:
-            _sweep_hermes_home(home)
-        except Exception:
-            pass
+        _kill_call_tree(proc, home, "server signal %d" % signum)
     if not _IN_CALL[0]:
         raise SystemExit(128 + signum)
 

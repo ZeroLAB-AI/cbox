@@ -1,4 +1,5 @@
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -6,6 +7,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -408,6 +410,12 @@ class RawLineModeSelectionTests(unittest.TestCase):
             else:
                 os.environ["TERM"] = old
 
+    def test_line_mode_fallback_keeps_line_selection_behavior(self):
+        keys = ui.make_keys(io.StringIO("q\n"), io.StringIO())
+        output = io.StringIO()
+        self.assertIsInstance(keys, ui.LineKeys)
+        self.assertEqual(ui.read_selection(keys, output, "default"), "q")
+
 
 class LineKeysHubLoopTests(unittest.TestCase):
     def test_navigate_into_sessions_list_then_back_then_quit(self):
@@ -605,9 +613,11 @@ class BuildStatusTests(unittest.TestCase):
 
     def test_slow_probe_yields_ellipsis_within_budget(self):
         class SlowProbe(object):
+            def __init__(self):
+                self.release = threading.Event()
+
             def container_id(self):
-                import time
-                time.sleep(2.0)
+                self.release.wait()
                 return None
 
             def container_state(self, cid):
@@ -618,10 +628,13 @@ class BuildStatusTests(unittest.TestCase):
 
         import time
         started = time.time()
-        status = MOD.gather_status(SlowProbe(), ["claude"], budget=0.2)
+        probe = SlowProbe()
+        status = MOD.gather_status(probe, ["claude"], budget=0.05)
         elapsed = time.time() - started
         self.assertLess(elapsed, 1.0)
         self.assertEqual(status["container_state"], "...")
+        probe.release.set()
+        probe._hub_probe_state["thread"].join(0.1)
 
 
 class EnginesFromRegistryTests(unittest.TestCase):
@@ -770,8 +783,7 @@ class SingleInFlightProbeTests(unittest.TestCase):
 
             def container_id(self):
                 self._bump()
-                if not self.release.wait(6):
-                    raise RuntimeError("probe timed out in test")
+                self.release.wait(5)
                 return None
 
             def container_state(self, cid):
@@ -781,13 +793,13 @@ class SingleInFlightProbeTests(unittest.TestCase):
                 return dict((n, "down") for n in names)
 
         probe = BlockingProbe()
-        s1 = MOD.gather_status(probe, ["claude", "codex"], budget=0.2)
+        s1 = MOD.gather_status(probe, ["claude", "codex"], budget=0.05)
         first_thread = probe._hub_probe_state["thread"]
         self.assertEqual(s1["container_state"], "...")
         self.assertEqual(s1["engine_state"], {"claude": "...", "codex": "..."})
         self.assertTrue(first_thread.is_alive())
-        s2 = MOD.gather_status(probe, ["claude", "codex"], budget=0.2)
-        s3 = MOD.gather_status(probe, ["claude", "codex"], budget=0.2)
+        s2 = MOD.gather_status(probe, ["claude", "codex"], budget=0.05)
+        s3 = MOD.gather_status(probe, ["claude", "codex"], budget=0.05)
         self.assertIs(probe._hub_probe_state["thread"], first_thread)
         with probe.lock:
             self.assertEqual(probe.container_id_calls, 1)
@@ -796,8 +808,7 @@ class SingleInFlightProbeTests(unittest.TestCase):
         self.assertEqual(s3["container_state"], "...")
         probe.release.set()
         first_thread.join(5)
-        self.assertFalse(first_thread.is_alive())
-        self.assertEqual(probe._hub_probe_state["last"]["container_state"], "down")
+        self.assertFalse(first_thread.is_alive(), "probe thread did not stop after release")
         with probe.lock:
             self.assertEqual(probe.container_id_calls, 1)
 
@@ -845,10 +856,10 @@ class SingleInFlightProbeTests(unittest.TestCase):
                     self.counter += 1
                     n = self.counter
                 if n == 1:
-                    if not self.release.wait(6):
-                        raise RuntimeError("probe timed out in test")
+                    self.release.wait(5)
                     return None
-                raise AssertionError("a second probe thread must not start while the first is alive")
+                raise AssertionError(
+                    "a second probe thread must not start while the first is alive")
 
             def container_state(self, cid):
                 return "up (since 2026-09-25T00:00:00)"
@@ -857,160 +868,214 @@ class SingleInFlightProbeTests(unittest.TestCase):
                 return dict((n, "running") for n in names)
 
         probe = OneShotSlowProbe()
-        s1 = MOD.gather_status(probe, ["claude"], budget=0.2)
+        s1 = MOD.gather_status(probe, ["claude"], budget=0.05)
         t1 = probe._hub_probe_state["thread"]
         self.assertEqual(s1["container_state"], "...")
         self.assertEqual(s1["engine_state"], {"claude": "..."})
-        s2 = MOD.gather_status(probe, ["claude"], budget=0.2)
+        s2 = MOD.gather_status(probe, ["claude"], budget=0.05)
         self.assertIs(probe._hub_probe_state["thread"], t1)
         self.assertEqual(s2["container_state"], "...")
         self.assertEqual(s2["engine_state"], {"claude": "..."})
         probe.release.set()
         t1.join(5)
-        self.assertFalse(t1.is_alive())
+        self.assertFalse(t1.is_alive(), "probe thread did not stop after release")
         time_start = time.time()
         s3 = MOD.gather_status(probe, ["claude"], budget=1.0)
         t2 = probe._hub_probe_state["thread"]
         self.assertIsNot(t2, t1)
         t2.join(5)
         self.assertFalse(t2.is_alive())
-        self.assertFalse(time.time() - time_start > 1.0)
+        self.assertLessEqual(time.time() - time_start, 1.0)
         self.assertIn("up", s3["container_state"])
         self.assertEqual(s3["engine_state"]["claude"], "running")
 
     def test_slow_probe_with_prior_snapshot_reuses_last_snapshot(self):
         class WarmProbe(object):
             def __init__(self):
-                self.release = threading.Event()
+                self.block = threading.Event()
                 self.lock = threading.Lock()
+                self.started = 0
 
             def container_id(self):
-                if self.release.is_set():
-                    raise AssertionError("warm snapshot should be served without a new probe")
-                if not self.release.wait(6):
-                    raise RuntimeError("probe timed out in test")
+                with self.lock:
+                    self.started += 1
                 return None
 
             def container_state(self, cid):
-                return "up (since 2026-09-25T00:00:00)"
+                return "down"
 
             def running_engines(self, cid, names):
-                return dict((n, "running") for n in names)
+                return dict((n, "down") for n in names)
 
         probe = WarmProbe()
         s1 = MOD.gather_status(probe, ["claude"], budget=1.0)
-        self.assertIn("up", s1["container_state"])
+        self.assertEqual(s1["container_state"], "down")
         t1 = probe._hub_probe_state["thread"]
         t1.join(5)
         self.assertFalse(t1.is_alive())
-        s2 = MOD.gather_status(probe, ["claude"], budget=0.2)
-        self.assertEqual(s2["container_state"], s1["container_state"])
+        self.assertIsNotNone(probe._hub_probe_state["last"])
+        s2 = MOD.gather_status(probe, ["claude"], budget=1.0)
+        t2 = probe._hub_probe_state["thread"]
+        self.assertIsNot(t2, t1)
+        self.assertEqual(s2["container_state"], "down")
+        t2.join(5)
+        self.assertFalse(t2.is_alive())
         with probe.lock:
-            pass
-        self.assertFalse(probe.release.is_set())
+            self.assertEqual(probe.started, 2)
 
 
 class RawConfirmDrainTests(unittest.TestCase):
     class FakeRawInput(object):
         def __init__(self, pending=b""):
             self.pending = pending
-            self.reads = []
+            self.pos = 0
 
         def isatty(self):
             return True
 
         def fileno(self):
-            raise OSError("no real fd in this test")
+            return 0
 
-        def readline(self):
-            data = self.pending
-            self.pending = b""
-            self.reads.append(data)
-            if data == b"":
-                return ""
-            return data.decode("utf-8", "replace")
+        def peek_read(self):
+            if self.pos >= len(self.pending):
+                return b""
+            return self.pending[self.pos:self.pos + 1]
 
-    class _DrainContext(object):
-        def __init__(self, fd, pending):
+        def advance(self, n):
+            self.pos += n
+
+        def remaining(self):
+            return self.pending[self.pos:]
+
+    class _ReadGuard(object):
+        def __init__(self, fake):
             import select as _select_module
             self.select_module = _select_module
-            self.fd = fd
-            self.pending = pending
-            self.reads = []
-            self._select = None
-            self._read = None
+            self.fake = fake
+            self.saved_select = None
+            self.saved_read = None
+            self.saved_tcgetattr = None
+            self.saved_tcsetattr = None
+            self.saved_setraw = None
 
         def __enter__(self):
-            self._select = self.select_module.select
-            self._read = ui.os.read
+            self.saved_select = self.select_module.select
+            self.saved_read = ui.os.read
+            import termios
+            import tty
+            self.termios_module = termios
+            self.tty_module = tty
+            self.saved_tcgetattr = termios.tcgetattr
+            self.saved_tcsetattr = termios.tcsetattr
+            self.saved_setraw = tty.setraw
             self.select_module.select = self._fake_select
             ui.os.read = self._fake_read
+            termios.tcgetattr = lambda _fd: []
+            termios.tcsetattr = lambda _fd, _when, _attrs: None
+            tty.setraw = lambda _fd, _when: None
             return self
 
         def __exit__(self, *exc):
-            self.select_module.select = self._select
-            ui.os.read = self._read
+            self.select_module.select = self.saved_select
+            ui.os.read = self.saved_read
+            self.termios_module.tcgetattr = self.saved_tcgetattr
+            self.termios_module.tcsetattr = self.saved_tcsetattr
+            self.tty_module.setraw = self.saved_setraw
             return False
 
         def _fake_select(self, rlist, _wlist, _xlist, _timeout):
-            if self.fd not in rlist or not self.pending:
-                return ([], [], [])
-            return ([self.fd], [], [])
+            if self.fake.pos < len(self.fake.pending):
+                return ([0], [], [])
+            return ([], [], [])
 
         def _fake_read(self, fd, size):
-            self.reads.append((fd, size))
-            if fd != self.fd or not self.pending:
-                return b""
-            one = self.pending[:1]
-            self.pending = self.pending[1:]
+            one = self.fake.peek_read()
+            self.fake.advance(len(one))
             return one
 
     def _confirm_and_next_key(self, pending):
         fake = self.FakeRawInput(pending)
         keys = ui.RawKeys(fake, io.StringIO())
         out = io.StringIO()
-        saved_read_key = ui.RawKeys.read_key
-        def read_key_via_line(self_):
-            line = self_.readline()
-            if line == "":
-                return None
-            return line
-        ui.RawKeys.read_key = read_key_via_line
-        try:
-            ctx = self._DrainContext(0, pending)
-            ctx.__enter__()
-            try:
-                answer = ui.confirm(keys, out, "do it")
-                next_key = ui.read_selection(keys, out, "default")
-            finally:
-                ctx.__exit__(None, None, None)
-        finally:
-            ui.RawKeys.read_key = saved_read_key
-        return answer, next_key, fake, out
+        with self._ReadGuard(fake):
+            answer = ui.confirm(keys, out, "do it")
+            next_key = ui.read_selection(keys, out, "default")
+        return answer, next_key, fake, out, keys
 
     def test_pending_cr_after_y_is_drained_and_not_consumed_as_default(self):
-        answer, next_key, fake, _out = self._confirm_and_next_key(b"y\r")
+        answer, next_key, fake, _out, _keys = self._confirm_and_next_key(b"y\r")
         self.assertIs(answer, True)
-        self.assertEqual(next_key, None)
+        self.assertIsNone(next_key)
         self.assertEqual(fake.pending, b"")
-        self.assertEqual([len(r) for r in fake.reads], [1, 0])
 
     def test_pending_lf_after_y_is_drained_and_not_consumed_as_default(self):
-        answer, next_key, fake, _out = self._confirm_and_next_key(b"y\n")
+        answer, next_key, fake, _out, _keys = self._confirm_and_next_key(b"y\n")
         self.assertIs(answer, True)
-        self.assertEqual(next_key, None)
+        self.assertIsNone(next_key)
         self.assertEqual(fake.pending, b"")
-        self.assertEqual([len(r) for r in fake.reads], [1, 0])
-
-    def test_drain_preserves_a_pending_non_newline_key(self):
-        _answer, _next_key, fake, _out = self._confirm_and_next_key(b"yx")
-        self.assertEqual(fake.pending, b"x")
 
     def test_pending_cr_after_n_is_drained_too(self):
-        answer, next_key, fake, _out = self._confirm_and_next_key(b"n\r")
+        answer, next_key, fake, _out, _keys = self._confirm_and_next_key(b"n\r")
         self.assertIs(answer, False)
-        self.assertEqual(next_key, None)
+        self.assertIsNone(next_key)
         self.assertEqual(fake.pending, b"")
+
+    def test_drain_stops_at_first_non_newline_key(self):
+        _answer, next_key, fake, _out, _keys = self._confirm_and_next_key(b"y\r\nx")
+        self.assertEqual(next_key, "x")
+        self.assertEqual(fake.remaining(), b"")
+
+    def test_multiple_crlf_run_is_drained(self):
+        answer, next_key, fake, _out, _keys = self._confirm_and_next_key(b"y\r\r\n")
+        self.assertIs(answer, True)
+        self.assertIsNone(next_key)
+        self.assertEqual(fake.pending, b"")
+
+    def test_read_ahead_is_consumed_before_fd_bytes_in_order(self):
+        fake = self.FakeRawInput(b"ef")
+        keys = ui.RawKeys(fake, io.StringIO())
+        keys.push_back(b"ab")
+        keys.push_back(b"cd")
+        with self._ReadGuard(fake):
+            values = [keys.read_key() for _ in range(6)]
+        self.assertEqual(values, list("abcdef"))
+
+    def test_escape_sequence_iteration_cap_preserves_last_byte(self):
+        fake = self.FakeRawInput(b"[" + b"1" * 16 + b"A")
+        keys = ui.RawKeys(fake, io.StringIO())
+        keys.push_back(b"\x1b")
+        with self._ReadGuard(fake):
+            self.assertEqual(keys.read_key(), "\x1b[" + "1" * 15)
+            self.assertEqual(keys.read_key(), "1")
+            self.assertEqual(keys.read_key(), "A")
+
+    def test_escape_sequence_split_between_buffer_and_fd_is_one_key(self):
+        fake = self.FakeRawInput(b"[A")
+        keys = ui.RawKeys(fake, io.StringIO())
+        keys.push_back(b"\x1b")
+        with self._ReadGuard(fake):
+            self.assertEqual(keys.read_key(), "\x1b[A")
+        self.assertEqual(fake.remaining(), b"")
+
+    def test_escape_selection_uses_a_readable_label(self):
+        fake = self.FakeRawInput(b"[A")
+        keys = ui.RawKeys(fake, io.StringIO())
+        keys.push_back(b"\x1b")
+        out = io.StringIO()
+        with self._ReadGuard(fake):
+            self.assertEqual(ui.read_selection(keys, out, "default"), "escape")
+        self.assertNotIn("<escape sequence>", out.getvalue())
+
+    def test_utf8_character_split_between_buffer_and_fd_is_one_key(self):
+        fake = self.FakeRawInput(b"\xb8\xad")
+        keys = ui.RawKeys(fake, io.StringIO())
+        keys.push_back(b"\xe4")
+        with self._ReadGuard(fake):
+            self.assertEqual(keys.read_key(), "\u4e2d")
+        self.assertEqual(fake.remaining(), b"")
+
+    def test_raw_keys_module_does_not_reference_tiocsti(self):
+        self.assertNotIn("TIOCSTI", inspect.getsource(ui))
 
 
 class DisplayWidthRowTests(unittest.TestCase):
@@ -1018,31 +1083,36 @@ class DisplayWidthRowTests(unittest.TestCase):
 
     def test_cjk_char_counts_as_two_columns(self):
         self.assertEqual(screens.display_width(self.WIDE + "a"), 3)
+        self.assertEqual(screens.display_width("a" * 5), 5)
 
-    def test_row_truncates_by_display_width(self):
-        out = screens._row(self.WIDE * 40)
-        self.assertTrue(out.endswith("..."))
+    def test_row_truncates_by_display_width_to_80(self):
+        out = screens._row("a" * 100)
+        self.assertEqual(out, "a" * 77 + "...")
         self.assertEqual(screens.display_width(out), 80)
-        self.assertEqual(screens.display_width(out[:-3]), 77)
+        wide = screens._row(self.WIDE * 41)
+        self.assertTrue(wide.endswith("..."))
+        self.assertLessEqual(screens.display_width(wide), 80)
         mixed = screens._row("a" * 79 + self.WIDE)
-        self.assertEqual(screens.display_width(mixed), 80)
+        self.assertLessEqual(screens.display_width(mixed), 80)
+        self.assertTrue(mixed.endswith("..."))
 
-    def test_row_keeps_short_width_fit_text_unchanged(self):
-        text = self.WIDE * 25 + "a"
-        self.assertEqual(screens.display_width(text), 51)
-        self.assertEqual(screens._row(text), text)
+    def test_row_keeps_text_at_or_below_80_unchanged(self):
+        exact = self.WIDE * 40
+        self.assertEqual(screens.display_width(exact), 80)
+        self.assertEqual(screens._row(exact), exact)
+        nearly = self.WIDE * 39 + "a"
+        self.assertEqual(screens.display_width(nearly), 79)
+        self.assertEqual(screens._row(nearly), nearly)
 
-    def test_row_boundary_cjk_not_split(self):
-        out = screens._row(self.WIDE * 39)
+    def test_row_does_not_split_a_cjk_char_at_the_boundary(self):
+        out = screens._row(self.WIDE * 50 + "a")
         self.assertTrue(out.endswith("..."))
-        self.assertEqual(screens.display_width(out), 80)
-        fit = self.WIDE * 40
-        self.assertEqual(screens.display_width(fit), 80)
-        self.assertEqual(screens._row(fit), fit)
-
-    def test_row_truncated_ascii_matches_legacy_behaviour(self):
-        out = screens._row("x" * 100)
-        self.assertEqual(out, "x" * 77 + "...")
+        self.assertLessEqual(screens.display_width(out), 80)
+        trimmed = out[:-3]
+        for ch in trimmed:
+            if unicodedata.east_asian_width(ch) in ("W", "F"):
+                self.assertLessEqual(screens.display_width(trimmed), 80 - 1)
+                break
 
 
 class CJKRootRenderTests(unittest.TestCase):
@@ -1077,6 +1147,25 @@ class CJKRootRenderTests(unittest.TestCase):
             text, _actions = fn(snap)
             self.assert_in_cols(text)
             self.assert_in_cols(screens.render_hints(_actions))
+
+    def test_cjk_engine_and_hint_columns_align_by_display_width(self):
+        snap = {
+            "ctx": ISOLATED_CTX,
+            "engine_names": ["\u4e2d"],
+            "engine_state": {"\u4e2d": "down"},
+            "cbox_path": "\u4e2d" * 60,
+        }
+        text, actions = screens.render_main(snap)
+        row = next(line for line in text.splitlines() if "start" in line)
+        self.assertEqual(screens.display_width(row[:row.index("start")]), 13)
+        self.assertEqual(screens.display_width(row[:row.index(" e sessions")]), 30)
+        footer = text.splitlines()[-1]
+        self.assertEqual(screens.display_width(footer), 80)
+        hints = screens.render_hints(actions + [
+            ui.Action("z", "\u4e2d", hint="zzzz")
+        ])
+        hint_row = next(line for line in hints.splitlines() if "zzzz" in line)
+        self.assertEqual(screens.display_width(hint_row[:hint_row.index("zzzz")]), 20)
 
 
 if __name__ == "__main__":

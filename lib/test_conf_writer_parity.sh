@@ -202,12 +202,15 @@ _normalize_ollama_image_default() {
   local src="$1" out="$2"
   sed -e 's/^CBOX_OLLAMA_IMAGE=ollama\/ollama:0\.32\.5$/CBOX_OLLAMA_IMAGE=ollama\/ollama:0.33.3/' \
       -e "s/^CBOX_CODEX_PROGRESS_MODE=off\$/CBOX_CODEX_PROGRESS_MODE=shim/" \
+      -e 's/^CBOX_LIMIT_RESUME_DELAY=300$/CBOX_LIMIT_RESUME_DELAY=10/' \
+      -e 's/^CBOX_LIMIT_RESUME_STAGGER=30$/CBOX_LIMIT_RESUME_STAGGER=3/' \
       "$src" > "$out"
 }
 
 _strip_container_exec_tool_line() {
   local src="$1" out="$2"
   grep -v '^CBOX_CONTAINER_EXEC_TOOL=' "$src" \
+    | grep -v '^CBOX_REGULATOR_AUTORESUME=' \
     | grep -v "^CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG=" \
     | grep -v '^CBOX_SESSION_MULTIPLEX=' \
     | grep -v '^CBOX_SAFEGUARD_AUTOCONFIRM=' \

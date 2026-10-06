@@ -8,6 +8,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "etc" / "hooks" / "cbox_budget.py"
@@ -65,6 +66,11 @@ class PaceMathTests(unittest.TestCase):
         self.assertAlmostEqual(z_epoch, 1700000000.0, delta=1)
         self.assertIsNone(cbox_budget.parse_resets_at("not-a-date"))
         self.assertIsNone(cbox_budget.parse_resets_at(None))
+
+    def test_roll_window_exact_and_multiple_periods(self):
+        self.assertEqual(cbox_budget.roll_window(95, 1000, 1000, 18000), (0.0, 19000))
+        self.assertEqual(cbox_budget.roll_window(95, 1000, 37000, 18000), (0.0, 55000))
+        self.assertEqual(cbox_budget.roll_window(95, None, 37000, 18000), (95, None))
 
 
 class MetricsTests(unittest.TestCase):
@@ -285,6 +291,7 @@ class FixtureBudgetTests(unittest.TestCase):
               % (val5, val7, expected, result["b"]))
         self.assertAlmostEqual(result["b"], expected, places=6)
         self.assertAlmostEqual(result["b"], val5, places=6, msg="the five-hour window should be the binding one")
+        self.assertEqual(result["resets_at"], five_resets)
 
     def test_last_24h_with_20_percent_left(self):
         resets = _epoch(2026, 10, 4, 0, 0)
@@ -300,7 +307,7 @@ class FixtureBudgetTests(unittest.TestCase):
         print("fixture last_24h_20pct_left: H=%.3f expected=%.3f got=%.3f" % (h, expected, result["b"]))
         self.assertAlmostEqual(result["b"], expected, places=6)
 
-    def test_taper_reduces_b_when_the_five_hour_reset_is_imminent(self):
+    def test_near_reset_has_no_taper(self):
         now = _epoch(2026, 10, 1, 12, 0)
         resets = now + 600
         write_source(self.usage_dir, "claude", {
@@ -308,10 +315,9 @@ class FixtureBudgetTests(unittest.TestCase):
             "five_hour": {"used_percentage": 10, "resets_at": resets},
         })
         result = cbox_budget.budget_for_family("claude", now=now)
-        taper = min(1.0, 600.0 / (0.10 * cbox_budget.WINDOW_SECONDS["five_hour"]))
-        print("fixture taper_five_hour_10min_left: taper=%.4f got=%.3f" % (taper, result["b"]))
-        self.assertAlmostEqual(result["b"], 1.0, places=3)
-        self.assertLess(taper, 1.0)
+        self.assertAlmostEqual(result["b"], cbox_budget.CONCURRENCY_CAP_P, places=3)
+        self.assertEqual(cbox_budget._driver_reserve("claude", 90, 0, "five_hour"), 0)
+        self.assertAlmostEqual(cbox_budget._driver_reserve("claude", 90, 0.25, "five_hour"), 2)
 
     def test_taper_is_not_binding_far_from_reset(self):
         now = _epoch(2026, 10, 1, 12, 0)
@@ -653,14 +659,16 @@ class ResetsAtClampTests(unittest.TestCase):
         m = cbox_budget.metrics(now=now)
         self.assertAlmostEqual(m["claude"]["five_hour"]["resets_at"], now + 5 * 3600)
 
-    def test_resets_at_in_the_past_is_clamped_to_now(self):
+    def test_resets_at_in_the_past_rolls_forward(self):
         now = 1000000000.0
         write_source(self.usage_dir, "claude", {
             "captured_at": now - 10,
             "five_hour": {"used_percentage": 10, "resets_at": now - 1000},
         })
         m = cbox_budget.metrics(now=now)
-        self.assertAlmostEqual(m["claude"]["five_hour"]["resets_at"], now)
+        self.assertAlmostEqual(m["claude"]["five_hour"]["resets_at"], now + 17000)
+        self.assertEqual(m["claude"]["five_hour"]["used_percentage"], 0)
+        self.assertGreater(cbox_budget.budget_for_family("claude", now=now)["b"], 0)
 
 
 class StateNValidationTests(unittest.TestCase):
@@ -773,6 +781,277 @@ class SafeReadTests(unittest.TestCase):
         self.assertEqual(len(raw), 65536)
 
 
+class ClaudeSnapshotHarness(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.usage_dir = os.path.join(self._tmp.name, "usage")
+        os.makedirs(self.usage_dir)
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name in list(os.environ):
+            if name.startswith("CBOX_") or name in ("CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"):
+                os.environ.pop(name)
+        os.environ["CBOX_USAGE_DIR"] = self.usage_dir
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def snap_path(self):
+        return os.path.join(self.usage_dir, "claude.json")
+
+    def snap(self):
+        with open(self.snap_path(), "r", encoding="utf-8") as f:
+            return json.load(f)
+
+
+def win(used, resets, captured):
+    return {"used_percentage": used, "resets_at": resets, "captured_at": captured}
+
+
+NOW_T = 1800000000.0
+
+
+class PerWindowStalenessTests(ClaudeSnapshotHarness):
+    def test_each_window_is_judged_by_its_own_captured_at(self):
+        write_source(self.usage_dir, "claude", {
+            "captured_at": NOW_T,
+            "five_hour": win(10, NOW_T + 3600, NOW_T - 2000),
+            "seven_day": win(10, NOW_T + 6 * 24 * 3600, NOW_T),
+        })
+        m = cbox_budget.source_metrics("claude", NOW_T)
+        self.assertEqual(m["five_hour"]["captured_at"], NOW_T - 2000)
+        self.assertAlmostEqual(m["five_hour"]["age_seconds"], 2000)
+        self.assertAlmostEqual(m["seven_day"]["age_seconds"], 0)
+        result = cbox_budget.budget_for_family("claude", now=NOW_T)
+        self.assertEqual(result["status"], "ok")
+
+    def test_old_five_hour_stamp_excludes_only_that_window(self):
+        write_source(self.usage_dir, "claude", {
+            "captured_at": NOW_T,
+            "five_hour": win(99, NOW_T + 3600, NOW_T - 901),
+            "seven_day": win(10, NOW_T + 6 * 24 * 3600, NOW_T),
+        })
+        fresh_only = cbox_budget.budget_for_family("claude", now=NOW_T)
+        write_source(self.usage_dir, "claude", {
+            "captured_at": NOW_T,
+            "seven_day": win(10, NOW_T + 6 * 24 * 3600, NOW_T),
+        })
+        seven_only = cbox_budget.budget_for_family("claude", now=NOW_T)
+        self.assertEqual(fresh_only["b"], seven_only["b"])
+
+    def test_all_windows_old_is_unknown_despite_a_fresh_top_level_stamp(self):
+        write_source(self.usage_dir, "claude", {
+            "captured_at": NOW_T,
+            "five_hour": win(10, NOW_T + 3600, NOW_T - 7300),
+            "seven_day": win(10, NOW_T + 6 * 24 * 3600, NOW_T - 7300),
+        })
+        self.assertEqual(cbox_budget.budget_for_family("claude", now=NOW_T)["status"], "unknown")
+
+    def test_future_window_stamp_excludes_that_window(self):
+        write_source(self.usage_dir, "claude", {
+            "captured_at": NOW_T,
+            "seven_day": win(10, NOW_T + 6 * 24 * 3600, NOW_T + 100000),
+        })
+        self.assertEqual(cbox_budget.budget_for_family("claude", now=NOW_T)["status"], "unknown")
+
+    def test_files_without_window_stamps_fall_back_to_the_top_level_stamp(self):
+        write_source(self.usage_dir, "claude", {
+            "captured_at": NOW_T - 7300,
+            "seven_day": {"used_percentage": 10, "resets_at": NOW_T + 6 * 24 * 3600},
+        })
+        m = cbox_budget.source_metrics("claude", NOW_T)
+        self.assertEqual(m["seven_day"]["captured_at"], NOW_T - 7300)
+        self.assertEqual(cbox_budget.budget_for_family("claude", now=NOW_T)["status"], "unknown")
+
+    def test_needs_refresh_is_per_window(self):
+        write_source(self.usage_dir, "claude", {
+            "captured_at": NOW_T,
+            "five_hour": win(10, NOW_T + 3600, NOW_T - 400),
+            "seven_day": win(10, NOW_T + 6 * 24 * 3600, NOW_T),
+        })
+        self.assertTrue(cbox_budget.claude_snapshot_needs_refresh(NOW_T, 300))
+        self.assertFalse(cbox_budget.claude_snapshot_needs_refresh(NOW_T, 500))
+
+    def test_needs_refresh_for_missing_empty_or_future_snapshots(self):
+        self.assertTrue(cbox_budget.claude_snapshot_needs_refresh(NOW_T, 300))
+        write_source(self.usage_dir, "claude", {"captured_at": NOW_T, "five_hour": None, "seven_day": None})
+        self.assertTrue(cbox_budget.claude_snapshot_needs_refresh(NOW_T, 300))
+        write_source(self.usage_dir, "claude", {
+            "captured_at": NOW_T + 1000,
+            "five_hour": win(10, NOW_T + 3600, NOW_T + 1000),
+        })
+        self.assertTrue(cbox_budget.claude_snapshot_needs_refresh(NOW_T, 300))
+
+    def test_future_window_is_not_a_known_window(self):
+        write_source(self.usage_dir, "claude", {
+            "captured_at": NOW_T,
+            "five_hour": win(10, NOW_T + 3600, NOW_T + 1000),
+            "seven_day": win(20, NOW_T + 6 * 24 * 3600, NOW_T),
+        })
+        w = cbox_budget.read_claude_windows(NOW_T)
+        self.assertIsNone(w["five_hour"])
+        self.assertEqual(w["seven_day"]["used_percentage"], 20.0)
+
+
+class CombineWindowTests(unittest.TestCase):
+    def test_higher_usage_in_the_same_window_wins(self):
+        old = win(10, 5000.0, 1.0)
+        new = win(12, 5030.0, 2.0)
+        self.assertIs(cbox_budget.combine_window(new, old), new)
+
+    def test_lower_usage_in_the_same_window_never_replaces(self):
+        old = win(40, 5000.0, 1.0)
+        new = win(10, 5030.0, 2.0)
+        self.assertIs(cbox_budget.combine_window(new, old), old)
+
+    def test_a_real_roll_replaces_with_lower_usage(self):
+        old = win(90, 5000.0, 1.0)
+        new = win(2, 5000.0 + 5 * 3600, 2.0)
+        self.assertIs(cbox_budget.combine_window(new, old), new)
+
+    def test_an_older_window_never_replaces(self):
+        old = win(2, 5000.0 + 5 * 3600, 1.0)
+        new = win(90, 5000.0, 2.0)
+        self.assertIs(cbox_budget.combine_window(new, old), old)
+
+    def test_unknown_resets_never_replaces_a_known_resets(self):
+        old = win(10, 5000.0, 1.0)
+        new = win(50, None, 2.0)
+        self.assertIs(cbox_budget.combine_window(new, old), old)
+
+    def test_known_resets_replaces_an_unknown_one(self):
+        old = win(10, None, 1.0)
+        new = win(5, 5000.0, 2.0)
+        self.assertIs(cbox_budget.combine_window(new, old), new)
+
+    def test_missing_sides(self):
+        w = win(1, 1.0, 1.0)
+        self.assertIs(cbox_budget.combine_window(None, w), w)
+        self.assertIs(cbox_budget.combine_window(w, None), w)
+        self.assertIsNone(cbox_budget.combine_window(None, None))
+
+
+class ResetsPlausibilityTests(unittest.TestCase):
+    def test_bounds_per_window(self):
+        self.assertTrue(cbox_budget.resets_plausible(NOW_T + 5 * 3600 + 60, NOW_T, "five_hour"))
+        self.assertFalse(cbox_budget.resets_plausible(NOW_T + 5 * 3600 + 61, NOW_T, "five_hour"))
+        self.assertTrue(cbox_budget.resets_plausible(NOW_T + 7 * 86400 + 60, NOW_T, "seven_day"))
+        self.assertFalse(cbox_budget.resets_plausible(NOW_T + 7 * 86400 + 61, NOW_T, "seven_day"))
+        self.assertTrue(cbox_budget.resets_plausible(None, NOW_T, "five_hour"))
+        self.assertTrue(cbox_budget.resets_plausible(NOW_T - 10 ** 6, NOW_T, "five_hour"))
+
+    def test_clean_window_rejects_implausible_or_unusable_entries(self):
+        good = {"used_percentage": 10, "resets_at": NOW_T + 100}
+        self.assertIsNotNone(cbox_budget.clean_window(good, "five_hour", NOW_T))
+        far = {"used_percentage": 10, "resets_at": NOW_T + 10 ** 7}
+        self.assertIsNone(cbox_budget.clean_window(far, "five_hour", NOW_T))
+        self.assertIsNone(cbox_budget.clean_window({"used_percentage": None}, "five_hour", NOW_T))
+        self.assertIsNone(cbox_budget.clean_window({"used_percentage": float("nan")}, "five_hour", NOW_T))
+        self.assertIsNone(cbox_budget.clean_window("x", "five_hour", NOW_T))
+
+
+class UpdateClaudeSnapshotTests(ClaudeSnapshotHarness):
+    def test_carried_over_window_keeps_its_own_stamp_and_top_level_is_the_max(self):
+        write_source(self.usage_dir, "claude", {
+            "source": "claude", "captured_at": NOW_T - 500,
+            "five_hour": win(10, NOW_T + 3000, NOW_T - 500),
+            "seven_day": win(20, NOW_T + 400000, NOW_T - 900),
+        })
+        chosen, wrote = cbox_budget.update_claude_snapshot(
+            {"five_hour": win(15, NOW_T + 3000, NOW_T)}, NOW_T, "claude")
+        self.assertTrue(wrote)
+        snap = self.snap()
+        self.assertEqual(snap["captured_at"], NOW_T)
+        self.assertEqual(snap["five_hour"]["captured_at"], NOW_T)
+        self.assertEqual(snap["seven_day"], win(20.0, NOW_T + 400000, NOW_T - 900))
+
+    def test_legacy_file_windows_inherit_the_top_level_stamp_when_carried(self):
+        write_source(self.usage_dir, "claude", {
+            "source": "claude", "captured_at": NOW_T - 500,
+            "five_hour": {"used_percentage": 10, "resets_at": NOW_T + 3000},
+            "seven_day": {"used_percentage": 20, "resets_at": NOW_T + 400000},
+        })
+        cbox_budget.update_claude_snapshot({"five_hour": win(15, NOW_T + 3000, NOW_T)}, NOW_T, "claude")
+        snap = self.snap()
+        self.assertEqual(snap["seven_day"]["captured_at"], NOW_T - 500)
+
+    def test_nothing_accepted_means_no_write(self):
+        write_source(self.usage_dir, "claude", {
+            "source": "claude", "captured_at": NOW_T - 500,
+            "five_hour": win(40, NOW_T + 3000, NOW_T - 500),
+            "seven_day": None,
+        })
+        before = os.stat(self.snap_path()).st_mtime_ns
+        chosen, wrote = cbox_budget.update_claude_snapshot(
+            {"five_hour": win(10, NOW_T + 3000, NOW_T), "seven_day": None}, NOW_T, "claude")
+        self.assertFalse(wrote)
+        self.assertEqual(os.stat(self.snap_path()).st_mtime_ns, before)
+        self.assertEqual(self.snap()["five_hour"]["used_percentage"], 40)
+
+    def test_future_stamped_existing_window_is_not_trusted(self):
+        write_source(self.usage_dir, "claude", {
+            "source": "claude", "captured_at": NOW_T + 10 ** 6,
+            "five_hour": win(90, NOW_T + 3000, NOW_T + 10 ** 6),
+        })
+        chosen, wrote = cbox_budget.update_claude_snapshot(
+            {"five_hour": win(10, NOW_T + 3000, NOW_T)}, NOW_T, "claude")
+        self.assertTrue(wrote)
+        self.assertEqual(self.snap()["five_hour"]["used_percentage"], 10)
+        self.assertEqual(self.snap()["captured_at"], NOW_T)
+
+    def test_held_lock_skips_the_write_without_hanging(self):
+        import fcntl
+        import time
+        fd = os.open(os.path.join(self.usage_dir, "claude.json.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            started = time.monotonic()
+            chosen, wrote = cbox_budget.update_claude_snapshot(
+                {"five_hour": win(10, NOW_T + 3000, NOW_T)}, NOW_T, "claude")
+            elapsed = time.monotonic() - started
+        finally:
+            os.close(fd)
+        self.assertFalse(wrote)
+        self.assertLess(elapsed, 1.5)
+        self.assertFalse(os.path.exists(self.snap_path()))
+
+    def test_lock_released_after_a_write(self):
+        import fcntl
+        cbox_budget.update_claude_snapshot({"five_hour": win(10, NOW_T + 3000, NOW_T)}, NOW_T, "claude")
+        fd = os.open(os.path.join(self.usage_dir, "claude.json.lock"), os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+
+    def test_fifo_lock_path_does_not_hang(self):
+        import threading
+        os.mkfifo(os.path.join(self.usage_dir, "claude.json.lock"))
+        out = []
+        t = threading.Thread(target=lambda: out.append(cbox_budget.update_claude_snapshot(
+            {"five_hour": win(10, NOW_T + 3000, NOW_T)}, NOW_T, "claude")), daemon=True)
+        t.start()
+        t.join(3)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(out[0][1], False)
+
+    def test_snapshot_file_is_private(self):
+        cbox_budget.update_claude_snapshot({"five_hour": win(10, NOW_T + 3000, NOW_T)}, NOW_T, "claude")
+        self.assertEqual(stat.S_IMODE(os.stat(self.snap_path()).st_mode), 0o600)
+
+
+class DeepNestingTests(ClaudeSnapshotHarness):
+    def test_deeply_nested_json_is_unreadable_not_fatal(self):
+        path = os.path.join(self.usage_dir, "claude.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("[" * 60000)
+        self.assertIsNone(cbox_budget.safe_read_json(path))
+        self.assertIsNone(cbox_budget.source_metrics("claude", NOW_T))
+        self.assertEqual(cbox_budget.budget_for_family("claude", now=NOW_T)["status"], "unknown")
+        self.assertTrue(cbox_budget.claude_snapshot_needs_refresh(NOW_T, 300))
+
+
 class SafeChmodDirTests(unittest.TestCase):
     def test_symlinked_directory_is_skipped(self):
         d = tempfile.mkdtemp()
@@ -790,6 +1069,131 @@ class SafeChmodDirTests(unittest.TestCase):
         cbox_budget.safe_chmod_dir(d, 0o700)
         mode = stat.S_IMODE(os.stat(d).st_mode)
         self.assertEqual(mode, 0o700)
+
+
+class LocalTierPresenceTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.cfg = os.path.join(self._tmp.name, "cfg")
+        os.makedirs(self.cfg)
+        self._saved = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = self.cfg
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = self._saved
+        self._tmp.cleanup()
+
+    def _write(self, doc):
+        with open(os.path.join(self.cfg, ".claude.json"), "w", encoding="utf-8") as f:
+            json.dump(doc, f)
+
+    def test_top_level_server_is_present(self):
+        self._write({"mcpServers": {"hermes-local": {}}})
+        self.assertTrue(cbox_budget.local_tier_present("/nowhere"))
+
+    def test_other_servers_do_not_count(self):
+        self._write({"mcpServers": {"codex-sol": {}}, "projects": {"/p": {"mcpServers": {"local-qwen": {}}}}})
+        self.assertFalse(cbox_budget.local_tier_present("/p"))
+
+    def test_project_scope_matches_the_exact_key_only(self):
+        self._write({"projects": {"/p": {"mcpServers": {"hermes-local": {}}}}})
+        self.assertTrue(cbox_budget.local_tier_present("/p"))
+        self.assertFalse(cbox_budget.local_tier_present("/p/a/b"))
+        self.assertFalse(cbox_budget.local_tier_present("/q"))
+        self.assertFalse(cbox_budget.local_tier_present("/pp"))
+
+    def test_disabled_list_removes_the_server_for_the_exact_key_only(self):
+        self._write({"mcpServers": {"hermes-local": {}},
+                     "projects": {"/p": {"disabledMcpServers": ["hermes-local"]}}})
+        self.assertFalse(cbox_budget.local_tier_present("/p"))
+        self.assertTrue(cbox_budget.local_tier_present("/p/x"))
+        self.assertTrue(cbox_budget.local_tier_present("/other"))
+
+    def test_realpath_variant_of_the_cwd_matches(self):
+        real = os.path.join(self._tmp.name, "realdir")
+        link = os.path.join(self._tmp.name, "linkdir")
+        os.makedirs(real)
+        os.symlink(real, link)
+        self._write({"projects": {os.path.realpath(real): {"mcpServers": {"hermes-local": {}}}}})
+        self.assertTrue(cbox_budget.local_tier_present(link))
+
+    def test_missing_config_is_absent_and_well_formed_without_the_server_is_absent(self):
+        self.assertFalse(cbox_budget.local_tier_present("/p"))
+        self._write({"mcpServers": ["hermes-local"], "projects": {"/p": "x"}})
+        self.assertFalse(cbox_budget.local_tier_present("/p"))
+        self._write({})
+        self.assertFalse(cbox_budget.local_tier_present("/p"))
+
+    def test_unreadable_or_odd_configs_are_present(self):
+        path = os.path.join(self.cfg, ".claude.json")
+        cases = {
+            "invalid": b"{oops",
+            "partial": b'{"mcpServers": {"x": ',
+            "non-object": b"[1, 2]",
+            "deep": b"[" * 100000,
+            "not-utf8": b"\xff\xfe{}",
+        }
+        for name, raw in cases.items():
+            with self.subTest(case=name):
+                with open(path, "wb") as f:
+                    f.write(raw)
+                self.assertTrue(cbox_budget.local_tier_present("/p"))
+
+    def test_oversize_config_is_present(self):
+        path = os.path.join(self.cfg, ".claude.json")
+        with open(path, "wb") as f:
+            f.write(b'{"h": "' + b"x" * cbox_budget.CLAUDE_JSON_READ_CAP_BYTES + b'"}')
+        self.assertTrue(cbox_budget.local_tier_present("/p"))
+
+    def test_non_regular_config_is_present(self):
+        os.mkdir(os.path.join(self.cfg, ".claude.json"))
+        self.assertTrue(cbox_budget.local_tier_present("/p"))
+
+    def test_symlinked_config_is_present(self):
+        real = os.path.join(self._tmp.name, "real.json")
+        with open(real, "w", encoding="utf-8") as f:
+            json.dump({"mcpServers": {"codex-sol": {}}}, f)
+        os.symlink(real, os.path.join(self.cfg, ".claude.json"))
+        self.assertTrue(cbox_budget.local_tier_present("/p"))
+
+    def test_unreadable_directory_component_is_present(self):
+        blocker = os.path.join(self._tmp.name, "blocker")
+        with open(blocker, "w", encoding="utf-8") as f:
+            f.write("x")
+        os.environ["CLAUDE_CONFIG_DIR"] = blocker
+        self.assertTrue(cbox_budget.local_tier_present("/p"))
+
+    def test_deleted_working_directory_without_a_cwd_is_present(self):
+        self._write({"projects": {"/p": {"mcpServers": {}}}})
+        gone = os.path.join(self._tmp.name, "gone")
+        os.makedirs(gone)
+        saved = os.getcwd()
+        os.chdir(gone)
+        os.rmdir(gone)
+        try:
+            self.assertTrue(cbox_budget.local_tier_present())
+            self.assertFalse(cbox_budget.local_tier_present("/p/sub"))
+        finally:
+            os.chdir(saved)
+
+    def test_unset_config_dir_falls_back_to_home(self):
+        home = os.path.join(self._tmp.name, "home")
+        os.makedirs(home)
+        with open(os.path.join(home, ".claude.json"), "w", encoding="utf-8") as f:
+            json.dump({"mcpServers": {"hermes-local": {}}}, f)
+        del os.environ["CLAUDE_CONFIG_DIR"]
+        saved_home = os.environ.get("HOME")
+        os.environ["HOME"] = home
+        try:
+            self.assertTrue(cbox_budget.local_tier_present("/p"))
+        finally:
+            if saved_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = saved_home
 
 
 if __name__ == "__main__":

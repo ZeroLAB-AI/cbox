@@ -11,6 +11,7 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 REFRESH_SCRIPT = ROOT / "etc" / "hooks" / "codex_usage_refresh.py"
 SHIM_SCRIPT = ROOT / "etc" / "mcp" / "codex_mcp_shim.py"
+GUARD_SCRIPT = ROOT / "etc" / "hooks" / "codex_mode_guard.py"
 
 
 def load_module(path, name):
@@ -72,6 +73,42 @@ class AuthAndInstallGateTests(RefreshHarness):
             rc = self.mod.main()
         self.assertEqual(rc, 0)
         self.assertFalse(os.path.exists(os.path.join(self.usage_dir, "codex.json")))
+
+
+class ShimLocationTests(RefreshHarness):
+    def _deploy(self, layout):
+        root = os.path.join(self._tmp.name, "deploy-" + layout)
+        hooks = os.path.join(root, "hooks")
+        os.makedirs(hooks)
+        shim_dir = hooks if layout == "flat" else os.path.join(root, "mcp")
+        os.makedirs(shim_dir, exist_ok=True)
+        with open(REFRESH_SCRIPT, "rb") as src, open(os.path.join(hooks, "codex_usage_refresh.py"), "wb") as dst:
+            dst.write(src.read())
+        with open(SHIM_SCRIPT, "rb") as src, open(os.path.join(shim_dir, "codex_mcp_shim.py"), "wb") as dst:
+            dst.write(src.read())
+        with open(GUARD_SCRIPT, "rb") as src, open(os.path.join(hooks, "codex_mode_guard.py"), "wb") as dst:
+            dst.write(src.read())
+        return load_module(os.path.join(hooks, "codex_usage_refresh.py"), "codex_usage_refresh_%s_%s" % (layout, id(self)))
+
+    def test_flat_deployed_layout_finds_sibling_shim(self):
+        mod = self._deploy("flat")
+        shim = mod._load_shim()
+        self.assertTrue(callable(shim.write_codex_usage_snapshot))
+
+    def test_repo_layout_finds_mcp_shim(self):
+        mod = self._deploy("repo")
+        shim = mod._load_shim()
+        self.assertTrue(callable(shim.write_codex_usage_snapshot))
+
+    def test_flat_layout_main_writes_snapshot(self):
+        mod = self._deploy("flat")
+        self._write_auth()
+        probe = {"rateLimits": {"primary": {"usedPercent": 4, "windowDurationMins": 300, "resetsAt": int(time.time()) + 3600}}, "ordinaryUsageAllowed": True}
+        with mock.patch.object(mod.shutil, "which", return_value="/usr/bin/codex"), \
+                mock.patch.object(mod, "_run_probe", return_value=probe):
+            rc = mod.main()
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._codex_json()["five_hour"]["used_percentage"], 4)
 
 
 class ProbeCaptureTests(RefreshHarness):

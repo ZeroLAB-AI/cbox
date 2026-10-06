@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import importlib.util
+import fcntl
 import io
 import json
 import os
 import pathlib
 import re
+import select
 import signal
 import shlex
 import shutil
@@ -737,7 +739,7 @@ class HermesDelegateUnitTests(unittest.TestCase):
         self.assertEqual(
             MOD.DEFAULT_DISABLED_TOOLSETS,
             "terminal,file,web,code_execution,delegation,browser,"
-            "computer_use")
+            "computer_use,tts")
 
     def test_tool_description_names_all_mandatory_toolsets(self):
         desc = MOD.tool_description()
@@ -1217,10 +1219,10 @@ class HermesDelegateUnitTests(unittest.TestCase):
     def test_sweep_runs_in_finally_on_normal_completion(self):
         called = []
 
-        def fake_sweep(home, grace_sec=MOD.SWEEP_GRACE_SEC):
+        def fake_sweep(proc, home, reason):
             called.append(home)
 
-        with mock.patch.object(MOD, "_sweep_hermes_home", side_effect=fake_sweep):
+        with mock.patch.object(MOD, "_kill_call_tree", side_effect=fake_sweep):
             result = MOD.run_hermes_delegate({"prompt": "hi"})
         self.assertFalse(result["isError"], result)
         self.assertEqual(len(called), 1)
@@ -1228,15 +1230,30 @@ class HermesDelegateUnitTests(unittest.TestCase):
     def test_sweep_runs_in_finally_on_the_generic_exception_path(self):
         called = []
 
-        def fake_sweep(home, grace_sec=MOD.SWEEP_GRACE_SEC):
+        def fake_sweep(proc, home, reason):
             called.append(home)
 
-        with mock.patch.object(MOD, "_sweep_hermes_home", side_effect=fake_sweep), \
+        with mock.patch.object(MOD, "_kill_call_tree", side_effect=fake_sweep), \
                 mock.patch.object(
                     MOD.subprocess, "Popen", side_effect=RuntimeError("boom")):
             result = MOD.run_hermes_delegate({"prompt": "hi"})
         self.assertTrue(result["isError"], result)
         self.assertEqual(len(called), 1)
+
+    def test_kill_call_tree_runs_before_slot_release(self):
+        order = []
+
+        def fake_kill(proc, home, reason):
+            order.append("kill")
+
+        def fake_release(fd):
+            order.append("release")
+
+        with mock.patch.object(MOD, "_kill_call_tree", side_effect=fake_kill), \
+                mock.patch.object(MOD, "release_slot", side_effect=fake_release):
+            result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(order, ["kill", "release"])
 
     def test_create_run_for_writing_refuses_an_existing_dir(self):
         root, err = MOD._prepare_runs_dir()
@@ -1426,16 +1443,38 @@ class HermesDelegateStdioTests(unittest.TestCase):
         self.env.pop("CBOX_MCP_DEPTH", None)
 
     def _run(self, messages, env=None):
-        proc = subprocess.run(
-            [sys.executable, str(ROOT / "etc" / "mcp" /
-                                  "hermes_delegate_mcp.py")],
-            input="".join(json.dumps(m) + "\n" for m in messages).encode(),
-            capture_output=True,
-            env=env if env is not None else self.env,
-            timeout=15,
-        )
-        lines = [l for l in proc.stdout.decode().splitlines() if l.strip()]
-        return proc, [json.loads(l) for l in lines]
+        argv = [sys.executable, str(ROOT / "etc" / "mcp" /
+                                   "hermes_delegate_mcp.py")]
+        if not messages:
+            proc = subprocess.run(argv, input=b"", capture_output=True,
+                                  env=env if env is not None else self.env,
+                                  timeout=15)
+            return proc, []
+        proc = subprocess.Popen(argv, stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                bufsize=0,
+                                env=env if env is not None else self.env)
+        for msg in messages:
+            proc.stdin.write((json.dumps(msg) + "\n").encode())
+        proc.stdin.flush()
+        replies = []
+        deadline = time.monotonic() + 15
+        while len(replies) < len(messages) and time.monotonic() < deadline:
+            ready, _, _ = select.select([proc.stdout], [], [], 0.2)
+            if ready:
+                line = proc.stdout.readline()
+                if line:
+                    doc = json.loads(line)
+                    if doc.get("id") is not None:
+                        replies.append(doc)
+        proc.stdin.close()
+        proc.wait(timeout=15)
+        proc.stdout.close()
+        stderr = proc.stderr.read()
+        proc.stderr.close()
+        result = subprocess.CompletedProcess(
+            argv, proc.returncode, b"", stderr)
+        return result, replies
 
     def test_initialize_tools_list_and_call(self):
         messages = [
@@ -1757,8 +1796,10 @@ class ConcurrencySlotTests(unittest.TestCase):
                  for _ in range(2)]
         for p in procs:
             p.stdin.write(payload)
-            p.stdin.close()
+            p.stdin.flush()
         for p in procs:
+            self.assertTrue(p.stdout.readline())
+            p.stdin.close()
             p.wait(timeout=30)
         spans = []
         cur = None
@@ -1881,6 +1922,11 @@ class AgentModeTests(unittest.TestCase):
                                  "command": "python3 " + self.guard_script,
                                  "timeout": 10}])
         os.environ["CBOX_HERMES_DELEGATE_HOOKS_FILE"] = self.hooks_file
+        self._real_bridge_original_mode = None
+        real_bridge = self._real_bridge_path()
+        if os.path.isfile(real_bridge):
+            self._real_bridge_original_mode = os.stat(real_bridge).st_mode
+            os.chmod(real_bridge, 0o444)
 
     def _write_hooks_file(self, entries):
         if os.path.exists(self.hooks_file):
@@ -1893,6 +1939,10 @@ class AgentModeTests(unittest.TestCase):
         os.environ.clear()
         os.environ.update(self.env_backup)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+        if self._real_bridge_original_mode is not None:
+            real_bridge = self._real_bridge_path()
+            if os.path.isfile(real_bridge):
+                os.chmod(real_bridge, self._real_bridge_original_mode)
 
     def _run_and_record_pin(self, tag):
         marker = os.path.join(self.tmpdir, "marker_%s.txt" % tag)
@@ -1913,12 +1963,17 @@ class AgentModeTests(unittest.TestCase):
 
     def test_agent_floor_keeps_terminal_and_file_but_pins_fanout_off(self):
         floor = MOD.mandatory_disabled_toolsets("agent")
-        for name in ("code_execution", "web", "delegation", "browser", "computer_use", "cronjob"):
+        for name in ("code_execution", "web", "delegation", "browser", "computer_use", "cronjob", "tts"):
             self.assertIn(name, floor)
         for name in ("terminal", "file"):
             self.assertNotIn(name, floor)
         self.assertEqual(MOD.mandatory_disabled_toolsets("qa"),
                          MOD.MANDATORY_DISABLED_TOOLSETS_ORDER)
+
+    def test_agent_disabled_toolsets_pinned_literal(self):
+        self.assertEqual(
+            MOD.AGENT_DISABLED_TOOLSETS,
+            "code_execution,web,delegation,browser,computer_use,cronjob,tts")
 
     def test_agent_mode_pins_its_floor_and_runs_with_hooks_present(self):
         result, stored = self._run_and_record_pin("agent")
@@ -1936,14 +1991,29 @@ class AgentModeTests(unittest.TestCase):
         result, stored = self._run_and_record_pin("agent_nohooks")
         self.assertTrue(result["isError"], result)
         text = result["content"][0]["text"]
-        self.assertIn("CBOX_HERMES_HOOKS=on", text)
+        self.assertIn("configured guard hooks block is missing", text)
         self.assertIn("agent mode", text)
+
+    def test_agent_mode_installs_mandatory_guard_without_optional_hooks(self):
+        os.environ.pop("CBOX_HERMES_DELEGATE_HOOKS_FILE", None)
+        with mock.patch.object(MOD, "DEFAULT_HOOKS_FILE",
+                               os.path.join(self.tmpdir, "missing-default.yaml")):
+            result, stored = self._run_and_record_pin("agent_mandatory")
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(stored, list(MOD.AGENT_MANDATORY_DISABLED_TOOLSETS_ORDER))
+
+    def test_agent_mode_refuses_when_mandatory_guard_is_missing(self):
+        with mock.patch.object(MOD, "__file__", "/missing/hermes_delegate_mcp.py"):
+            result, stored = self._run_and_record_pin("agent_missing_mandatory")
+        self.assertTrue(result["isError"], result)
+        self.assertIn("mandatory package guard is missing",
+                      result["content"][0]["text"])
 
     def test_agent_mode_refuses_a_writable_hooks_block(self):
         os.chmod(self.hooks_file, 0o666)
         result, stored = self._run_and_record_pin("agent_writable")
         self.assertTrue(result["isError"], result)
-        self.assertIn("writable", result["content"][0]["text"])
+        self.assertIn("not read-only", result["content"][0]["text"])
 
     def test_qa_mode_ignores_the_hooks_file_entirely(self):
         os.environ["CBOX_HERMES_DELEGATE_MODE"] = "qa"
@@ -1971,6 +2041,48 @@ class AgentModeTests(unittest.TestCase):
         self.assertIn("hooks_auto_accept", text)
         self.assertIn("provider", text)
         self.assertEqual(env_base.get("HERMES_ACCEPT_HOOKS"), "1")
+
+    def _real_bridge_path(self):
+        mcp_dir = os.path.dirname(os.path.abspath(MOD.__file__))
+        local = os.path.join(mcp_dir, "hermes_guard_bridge.py")
+        if os.path.isfile(local):
+            return local
+        return os.path.normpath(os.path.join(mcp_dir, "..", "hooks",
+                                             "hermes_guard_bridge.py"))
+
+    def test_agent_mode_refuses_a_writable_mandatory_guard(self):
+        bridge = self._real_bridge_path()
+        original_mode = os.stat(bridge).st_mode
+        os.chmod(bridge, original_mode | stat.S_IWOTH)
+        try:
+            home = self._fresh_home("eph_writable_bridge")
+            env_base = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": home}
+            err = MOD._apply_guard_hooks(home, env_base)
+        finally:
+            os.chmod(bridge, original_mode)
+        self.assertIsNotNone(err)
+        self.assertIn("mandatory package guard", err)
+        self.assertIn("writable", err)
+
+    def test_agent_mode_registers_mandatory_guard_once_when_hooks_file_already_has_it(self):
+        bridge = self._real_bridge_path()
+        original_mode = os.stat(bridge).st_mode
+        os.chmod(bridge, 0o444)
+        try:
+            self._write_hooks_file([{"matcher": "terminal",
+                                     "command": "python3 " + bridge,
+                                     "timeout": 10}])
+            home = self._fresh_home("eph_dedup")
+            env_base = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": home}
+            err = MOD._apply_guard_hooks(home, env_base)
+            self.assertIsNone(err, err)
+            with open(os.path.join(home, "config.yaml")) as fh:
+                cfg = json.loads(fh.read())
+            entries = cfg["hooks"]["pre_tool_call"]
+            hits = [e for e in entries if bridge in e.get("command", "")]
+            self.assertEqual(len(hits), 1, entries)
+        finally:
+            os.chmod(bridge, original_mode)
 
     def test_qa_mode_never_sets_hook_acceptance(self):
         os.environ["CBOX_HERMES_DELEGATE_MODE"] = "qa"
@@ -2071,6 +2183,35 @@ def make_pid_stub(tmpdir, pid_file, sleep_sec):
     return stub_path
 
 
+def make_tree_stub(tmpdir, parent_file, child_file, config_stub):
+    stub_path = os.path.join(tmpdir, "tree-stub.py")
+    source = '''#!/usr/bin/env python3
+import os
+import signal
+import subprocess
+import sys
+import time
+
+if "-z" not in sys.argv:
+    os.execv(%(config_stub)r, [%(config_stub)r] + sys.argv[1:])
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child = subprocess.Popen(
+    [sys.executable, "-c", "import os,signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);open(%(child_file)r,'w').write(str(os.getpid()));time.sleep(60)"],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL, start_new_session=True,
+    env={key: value for key, value in os.environ.items() if key != "HERMES_HOME"})
+with open(%(parent_file)r, "w") as fh:
+    fh.write(str(os.getpid()))
+while True:
+    time.sleep(0.1)
+''' % {"config_stub": config_stub, "parent_file": parent_file,
+       "child_file": child_file}
+    with open(stub_path, "w") as fh:
+        fh.write(source)
+    os.chmod(stub_path, os.stat(stub_path).st_mode | stat.S_IEXEC)
+    return stub_path
+
+
 def wait_for_pid_file(path, timeout):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -2085,17 +2226,17 @@ def wait_for_pid_file(path, timeout):
 
 def process_is_alive(pid):
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        with open("/proc/%d/stat" % pid, encoding="ascii") as fh:
+            line = fh.read()
+        return line[line.rfind(")") + 2] != "Z"
+    except OSError:
         return False
-    except PermissionError:
-        return True
-    return True
 
 
 class HermesDelegateCancelProgressTests(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
+        self.tree_files = []
         self.control_file = os.path.join(self.tmpdir, "control.json")
         write_control(self.control_file)
         self.stub = make_stub(self.tmpdir, self.control_file)
@@ -2129,6 +2270,10 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
                 pass
 
     def tearDown(self):
+        for path in self.tree_files:
+            pid = wait_for_pid_file(path, 0.1)
+            if pid is not None and process_is_alive(pid):
+                os.kill(pid, signal.SIGKILL)
         for reset in (lambda: MOD._CANCEL.clear(),
                       lambda: MOD._CLOSED.clear(),
                       MOD.end_call,
@@ -2153,6 +2298,148 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
         write_control(self.control_file, mode="heartbeat", beats=beats,
                       beat_gap_sec=beat_gap_sec)
         os.environ["HERMES_BIN"] = self.stub
+
+    def _tree_stub(self, tag):
+        parent = os.path.join(self.tmpdir, "tree-parent-" + tag)
+        child = os.path.join(self.tmpdir, "tree-child-" + tag)
+        self.tree_files.extend((parent, child))
+        os.environ["HERMES_BIN"] = make_tree_stub(
+            self.tmpdir, parent, child, self.stub)
+        return parent, child
+
+    def _assert_tree_gone(self, parent, child):
+        pids = [wait_for_pid_file(path, 5) for path in (parent, child)]
+        self.assertTrue(all(pid is not None for pid in pids), pids)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and any(process_is_alive(pid) for pid in pids):
+            time.sleep(0.05)
+        self.assertFalse(any(process_is_alive(pid) for pid in pids), pids)
+
+    def test_cancel_kills_detached_grandchild_ignoring_sigterm(self):
+        parent, child = self._tree_stub("cancel")
+        outcome = {}
+        self.assertTrue(MOD.begin_call(101, None))
+        thread = threading.Thread(
+            target=lambda: outcome.setdefault("result", MOD.spawn_hermes("x", None)))
+        thread.start()
+        self.assertIsNotNone(wait_for_pid_file(child, 5))
+        MOD.cancel_request(101)
+        thread.join(timeout=6)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(outcome["result"][1], MOD.CANCELLED_MESSAGE)
+        self._assert_tree_gone(parent, child)
+
+    def test_stdin_eof_kills_detached_grandchild(self):
+        parent, child = self._tree_stub("eof")
+        proc, out_thread, _, _ = self._stdio_server()
+        proc.stdin.write((json.dumps({
+            "jsonrpc": "2.0", "id": 101, "method": "tools/call",
+            "params": {"name": "hermes-delegate", "arguments": {"prompt": "x"}}
+        }) + "\n").encode())
+        proc.stdin.flush()
+        self.assertIsNotNone(wait_for_pid_file(child, 5))
+        proc.stdin.close()
+        proc.wait(timeout=8)
+        out_thread.join(timeout=2)
+        self._assert_tree_gone(parent, child)
+
+    def test_server_sigterm_kills_detached_grandchild(self):
+        parent, child = self._tree_stub("signal")
+        proc, out_thread, _, _ = self._stdio_server()
+        proc.stdin.write((json.dumps({
+            "jsonrpc": "2.0", "id": 102, "method": "tools/call",
+            "params": {"name": "hermes-delegate", "arguments": {"prompt": "x"}}
+        }) + "\n").encode())
+        proc.stdin.flush()
+        self.assertIsNotNone(wait_for_pid_file(child, 5))
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=8)
+        proc.stdin.close()
+        out_thread.join(timeout=2)
+        self._assert_tree_gone(parent, child)
+
+    def test_queued_cancel_never_spawns(self):
+        marker = os.path.join(self.tmpdir, "queue-marker")
+        write_control(self.control_file, marker=marker)
+        lock_dir = os.environ[MOD.LOCK_DIR_VAR]
+        os.makedirs(lock_dir)
+        fd = os.open(os.path.join(lock_dir, "slot.0"), os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        outcome = {}
+        self.assertTrue(MOD.begin_call(103, None))
+        thread = threading.Thread(
+            target=lambda: outcome.setdefault("result", MOD.spawn_hermes("x", None)))
+        thread.start()
+        time.sleep(0.3)
+        MOD.cancel_request(103)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(outcome["result"][1], MOD.CANCELLED_MESSAGE)
+        self.assertFalse(os.path.exists(marker))
+
+    def test_queued_client_eof_never_spawns(self):
+        marker = os.path.join(self.tmpdir, "queue-marker-eof")
+        write_control(self.control_file, marker=marker)
+        lock_dir = os.environ[MOD.LOCK_DIR_VAR]
+        os.makedirs(lock_dir)
+        fd = os.open(os.path.join(lock_dir, "slot.0"), os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        outcome = {}
+        self.assertTrue(MOD.begin_call(105, None))
+        thread = threading.Thread(
+            target=lambda: outcome.setdefault("result", MOD.spawn_hermes("x", None)))
+        thread.start()
+        time.sleep(0.3)
+        MOD._CLOSED.set()
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(outcome["result"][1], MOD.CANCELLED_MESSAGE)
+        self.assertFalse(os.path.exists(marker))
+
+    def test_cleanup_finds_detached_process_by_exact_home(self):
+        home = os.path.join(self.tmpdir, "own-home")
+        os.makedirs(home)
+        env = dict(os.environ)
+        env["HERMES_HOME"] = home
+        proc = subprocess.Popen(
+            [sys.executable, "-c",
+             "import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(60)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True, env=env)
+        try:
+            time.sleep(0.1)
+            MOD._kill_call_tree(None, home, "test detached home")
+            proc.wait(timeout=3)
+            self.assertFalse(process_is_alive(proc.pid))
+        finally:
+            if process_is_alive(proc.pid):
+                proc.kill()
+                proc.wait(timeout=3)
+
+    def test_quiet_live_call_emits_periodic_progress(self):
+        pid_file = self._pid_stub("quiet-progress", 60)
+        recorded = []
+        outcome = {}
+        self.assertTrue(MOD.begin_call(104, "quiet-token"))
+        with mock.patch.object(MOD, "PROGRESS_HEARTBEAT_SEC", 0.2), \
+                mock.patch.object(MOD, "HEARTBEAT_POLL_SEC", 0.1), \
+                mock.patch.object(MOD, "send", side_effect=recorded.append):
+            thread = threading.Thread(
+                target=lambda: outcome.setdefault("result", MOD.spawn_hermes("x", None)))
+            thread.start()
+            self.assertIsNotNone(wait_for_pid_file(pid_file, 5))
+            time.sleep(0.8)
+            MOD.cancel_request(104)
+            thread.join(timeout=6)
+        self.assertFalse(thread.is_alive())
+        pings = [m for m in recorded
+                 if m.get("method") == "notifications/progress"]
+        self.assertGreaterEqual(len(pings), 3, pings)
+        self.assertEqual(outcome["result"][1], MOD.CANCELLED_MESSAGE)
 
     def test_progress_notifies_while_running(self):
         self._heartbeat_stub(beats=8, beat_gap_sec=0.3)
@@ -2319,7 +2606,7 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
             process_is_alive(pid),
             "the stub pid %d survived a client cancellation" % pid)
 
-    def test_eof_alone_does_not_cancel_a_piped_call(self):
+    def test_eof_cancels_a_piped_call(self):
         write_control(self.control_file)
         os.environ["HERMES_BIN"] = self.stub
         env = dict(os.environ)
@@ -2341,10 +2628,7 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
             for l in proc.stdout.decode().splitlines() if l.strip()
         ]
         by_id = {m["id"]: m for m in replies if m.get("id") is not None}
-        self.assertIn(2, by_id, replies)
-        self.assertFalse(by_id[2]["result"]["isError"])
-        self.assertIn(
-            "stub-canned-answer", by_id[2]["result"]["content"][0]["text"])
+        self.assertNotIn(2, by_id, replies)
 
     def test_cancel_request_ignores_invalid_ids_and_begin_call_accepts_any(self):
         for bad in ({}, [], True):
@@ -2411,6 +2695,7 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
                  "params": {"name": "hermes-delegate",
                             "arguments": {"prompt": "hi"}}})
             write_msg({"jsonrpc": "2.0", "id": 3, "method": "ping"})
+            time.sleep(1)
             proc.stdin.close()
         except Exception:
             try:
@@ -2493,6 +2778,7 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
                             "arguments": {"prompt": "hi"},
                             "_meta": {"progressToken": "x" * 300}}})
             write_msg({"jsonrpc": "2.0", "id": 3, "method": "ping"})
+            time.sleep(2)
             proc.stdin.close()
         except Exception:
             try:
@@ -2679,7 +2965,7 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
         self.assertEqual(summary["outcome"], "cancelled")
 
 
-class SweepHermesHomeTests(unittest.TestCase):
+class KillCallTreeHomeMatchTests(unittest.TestCase):
     GRANDCHILD_SCRIPT = (
         "import os, sys, time\n"
         "with open(sys.argv[1], 'w') as fh:\n"
@@ -2704,7 +2990,7 @@ class SweepHermesHomeTests(unittest.TestCase):
             [sys.executable, script, pid_file], env=env,
             start_new_session=True)
 
-    def test_sweep_kills_matching_process_and_spares_unrelated_one(self):
+    def test_kill_call_tree_kills_matching_process_and_spares_unrelated_one(self):
         home = os.path.join(self.tmpdir, "eph-home")
         os.makedirs(home)
         other_home = os.path.join(self.tmpdir, "eph-home-other")
@@ -2721,17 +3007,17 @@ class SweepHermesHomeTests(unittest.TestCase):
             pid_other = wait_for_pid_file(pid_file_other, 5)
             self.assertIsNotNone(pid_match)
             self.assertIsNotNone(pid_other)
-            MOD._sweep_hermes_home(home, grace_sec=1)
+            MOD._kill_call_tree(None, home, "test kill matching")
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline \
                     and proc_match.poll() is None:
                 time.sleep(0.1)
             self.assertIsNotNone(
                 proc_match.poll(),
-                "matching process survived the sweep")
+                "matching process survived _kill_call_tree")
             self.assertIsNone(
                 proc_other.poll(),
-                "unrelated process was killed by the sweep")
+                "unrelated process was killed by _kill_call_tree")
         finally:
             for p in (proc_match, proc_other):
                 try:
@@ -2743,9 +3029,36 @@ class SweepHermesHomeTests(unittest.TestCase):
                 except Exception:
                     pass
 
-    def test_sweep_with_no_hermes_home_is_a_noop(self):
-        MOD._sweep_hermes_home(None)
-        MOD._sweep_hermes_home("")
+    def test_kill_call_tree_with_no_hermes_home_is_a_noop(self):
+        MOD._kill_call_tree(None, None, "noop")
+        MOD._kill_call_tree(None, "", "noop")
+
+    def test_kill_call_tree_stops_matching_by_pid_once_reaped(self):
+        calls = []
+
+        class FakeProc:
+            pid = 424242
+
+            def __init__(self):
+                self._polls = 0
+
+            def poll(self):
+                self._polls += 1
+                return None if self._polls <= 2 else 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        fake = FakeProc()
+
+        def fake_snapshot(root_pid, home):
+            calls.append(root_pid)
+            return set()
+
+        with mock.patch.object(MOD, "_process_snapshot", side_effect=fake_snapshot):
+            MOD._kill_call_tree(fake, "/tmp/does-not-need-to-exist", "test reap")
+        self.assertIn(fake.pid, calls)
+        self.assertEqual(calls[-1], -1)
 
 
 class PidfdSignalTests(unittest.TestCase):
@@ -2769,6 +3082,24 @@ class PidfdSignalTests(unittest.TestCase):
         with mock.patch.object(MOD, "_pid_alive", return_value=True) as m_alive:
             self.assertTrue(MOD._target_alive(999999, None))
         m_alive.assert_called_once_with(999999)
+
+    def test_pidfd_open_returns_gone_sentinel_on_esrch(self):
+        def raise_esrch(pid, flags):
+            raise ProcessLookupError()
+
+        with mock.patch.object(MOD.os, "pidfd_open", side_effect=raise_esrch,
+                                create=True):
+            self.assertEqual(MOD._pidfd_open(999999), MOD._PIDFD_GONE)
+
+    def test_signal_target_never_falls_back_to_raw_kill_when_pidfd_reports_gone(self):
+        with mock.patch("os.kill") as m_kill:
+            MOD._signal_target(999999, MOD._PIDFD_GONE, signal.SIGTERM)
+        m_kill.assert_not_called()
+
+    def test_target_alive_is_false_when_pidfd_reports_gone(self):
+        with mock.patch.object(MOD, "_pid_alive") as m_alive:
+            self.assertFalse(MOD._target_alive(999999, MOD._PIDFD_GONE))
+        m_alive.assert_not_called()
 
 
 if __name__ == "__main__":

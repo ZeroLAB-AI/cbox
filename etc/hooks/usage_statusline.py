@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import datetime
 import fcntl
+import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -25,6 +27,17 @@ SAMPLES_READ_CAP_BYTES = SAMPLES_MAX_LINES * 256
 CODEX_STALE_AFTER_SECONDS = 60 * 60
 CODEX_REFRESH_AFTER_SECONDS = 10 * 60
 CODEX_REFRESH_SPAWN_COOLDOWN_SEC = 30
+
+CLAUDE_WINDOWS = ("five_hour", "seven_day")
+CLAUDE_REFRESH_DEFAULT_SEC = 300
+CLAUDE_REFRESH_MIN_SEC = 60
+CLAUDE_REFRESH_MAX_BACKOFF_SEC = 6 * 3600
+SESSION_STATE_PREFIX = "statusline-session."
+SESSION_STATE_SUFFIX = ".json"
+SESSION_STATE_MAX_FILES = 32
+SESSION_STATE_MAX_AGE_SECONDS = 7 * 24 * 3600
+SESSION_STATE_TOUCH_SECONDS = 3600
+CAPTURED_AT_FUTURE_TOLERANCE_SECONDS = 60
 
 HERMES_RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$")
 HERMES_RUN_SCAN_CAP = 30
@@ -54,7 +67,7 @@ def _read_json_file(path):
         return None
     try:
         data = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         return None
     return data if isinstance(data, dict) else None
 
@@ -80,7 +93,8 @@ def _num(val):
     if isinstance(val, bool):
         return None
     if isinstance(val, (int, float)):
-        return float(val)
+        f = float(val)
+        return f if math.isfinite(f) else None
     return None
 
 
@@ -169,6 +183,8 @@ SEVEN_DAY_COUNTDOWN_THRESHOLD_SECONDS = 2 * 24 * 3600
 def _reset_countdown(resets_at, now, window_key):
     if resets_at is None:
         return ""
+    _, resets_at = _cbox_budget_mod().roll_window(
+        None, resets_at, now, _cbox_budget_mod().WINDOW_SECONDS[window_key])
     diff = resets_at - now
     if diff < 0:
         diff = 0.0
@@ -323,6 +339,169 @@ def _append_sample(family, five_used, seven_used, now):
                 pass
 
 
+def _known_window(entry, window_key, now):
+    return _cbox_budget_mod().clean_window(entry, window_key, now)
+
+
+def _session_key(data):
+    sid = data.get("session_id")
+    if not isinstance(sid, str) or not sid:
+        sid = "default"
+    return hashlib.sha256(sid.encode("utf-8", "replace")).hexdigest()[:24]
+
+
+def _session_state_path(key):
+    return os.path.join(_usage_dir(), SESSION_STATE_PREFIX + key + SESSION_STATE_SUFFIX)
+
+
+def _read_session_state(key, now):
+    data = _read_json_file(_session_state_path(key))
+    if data is None:
+        return None
+    out = {}
+    for w in CLAUDE_WINDOWS:
+        entry = data.get(w)
+        known = _known_window(entry, w, now)
+        at = _num(entry.get("at")) if isinstance(entry, dict) else None
+        if known is None or at is None or at > now + CAPTURED_AT_FUTURE_TOLERANCE_SECONDS:
+            out[w] = None
+        else:
+            known["at"] = at
+            known["captured_at"] = at
+            out[w] = known
+    return out
+
+
+def _write_session_state(key, state):
+    payload = {}
+    for w in CLAUDE_WINDOWS:
+        payload[w] = state.get(w)
+    _atomic_write(_session_state_path(key), payload)
+
+
+def _session_state_age(key, now):
+    try:
+        st = os.lstat(_session_state_path(key))
+    except OSError:
+        return None
+    return now - st.st_mtime
+
+
+def _prune_session_states(now, keep_key):
+    d = _usage_dir()
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return
+    keep_name = SESSION_STATE_PREFIX + keep_key + SESSION_STATE_SUFFIX
+    entries = []
+    for name in names:
+        if not (name.startswith(SESSION_STATE_PREFIX) and name.endswith(SESSION_STATE_SUFFIX)):
+            continue
+        if name == keep_name:
+            continue
+        path = os.path.join(d, name)
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        if now - st.st_mtime > SESSION_STATE_MAX_AGE_SECONDS:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            continue
+        entries.append((st.st_mtime, path))
+    entries.sort()
+    excess = len(entries) - (SESSION_STATE_MAX_FILES - 1)
+    for _, path in entries[:max(0, excess)]:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def _same_window(a, b):
+    if a is None or b is None:
+        return False
+    return (a.get("used_percentage") == b.get("used_percentage")
+            and a.get("resets_at") == b.get("resets_at"))
+
+
+def _observe_stdin(data, now):
+    rl = data.get("rate_limits")
+    key = _session_key(data)
+    prev = _read_session_state(key, now)
+    state = dict(prev) if prev is not None else {w: None for w in CLAUDE_WINDOWS}
+    if not isinstance(rl, dict):
+        return state
+    changed = {}
+    for w in CLAUDE_WINDOWS:
+        cur = _known_window(rl.get(w), w, now)
+        if cur is None:
+            continue
+        before = state.get(w)
+        if before is not None and _same_window(cur, before):
+            continue
+        cur["at"] = now
+        cur["captured_at"] = now
+        state[w] = cur
+        changed[w] = cur
+    if not changed:
+        age = _session_state_age(key, now)
+        if prev is not None and age is not None and age > SESSION_STATE_TOUCH_SECONDS:
+            try:
+                _write_session_state(key, state)
+            except Exception:
+                pass
+        return state
+    try:
+        chosen, wrote = _cbox_budget_mod().update_claude_snapshot(changed, now, "claude")
+    except Exception:
+        chosen, wrote = None, False
+    if wrote:
+        try:
+            _append_sample(
+                "claude",
+                chosen["five_hour"]["used_percentage"] if chosen["five_hour"] else None,
+                chosen["seven_day"]["used_percentage"] if chosen["seven_day"] else None,
+                now,
+            )
+        except Exception:
+            pass
+    try:
+        _write_session_state(key, state)
+        _prune_session_states(now, key)
+    except Exception:
+        pass
+    return state
+
+
+def _display_window(window_key, now, session, snapshot_windows, stdin_entry):
+    candidates = []
+    sn = snapshot_windows.get(window_key) if isinstance(snapshot_windows, dict) else None
+    if sn is not None:
+        candidates.append((sn["captured_at"], 0, sn))
+    sess = session.get(window_key) if isinstance(session, dict) else None
+    if sess is not None:
+        candidates.append((sess["at"], 1, sess))
+    chosen = None
+    if candidates:
+        candidates.sort(key=lambda c: (c[0], c[1]))
+        for _, _, window in candidates:
+            chosen = _cbox_budget_mod().combine_window(window, chosen)
+    if chosen is not None:
+        used, resets = chosen["used_percentage"], chosen["resets_at"]
+    else:
+        raw = _window_entry(stdin_entry)
+        used = raw["used_percentage"] if raw else None
+        resets = raw["resets_at"] if raw else None
+    return _cbox_budget_mod().roll_window(
+        used, resets, now, _cbox_budget_mod().WINDOW_SECONDS[window_key])
+
+
 def _agents_value():
     info = _cbox_budget_mod().budget_for_family("claude")
     return info.get("n")
@@ -350,10 +529,15 @@ def _codex_remaining(now):
     seven_used = _num(seven.get("used_percentage")) if isinstance(seven, dict) else None
     five_resets = _parse_resets_at(five.get("resets_at")) if isinstance(five, dict) else None
     seven_resets = _parse_resets_at(seven.get("resets_at")) if isinstance(seven, dict) else None
+    rolled = (five_resets is not None and now >= five_resets) or (seven_resets is not None and now >= seven_resets)
+    five_used, five_resets = _cbox_budget_mod().roll_window(
+        five_used, five_resets, now, _cbox_budget_mod().WINDOW_SECONDS["five_hour"])
+    seven_used, seven_resets = _cbox_budget_mod().roll_window(
+        seven_used, seven_resets, now, _cbox_budget_mod().WINDOW_SECONDS["seven_day"])
     five_r = _remaining(five_used)
     seven_r = _remaining(seven_used)
     ordinary_usage_allowed = data.get("ordinary_usage_allowed")
-    if ordinary_usage_allowed is False:
+    if ordinary_usage_allowed is False and not rolled:
         five_r, seven_r = _force_reached_zero(five_r, seven_r)
     stale = (five_r is not None or seven_r is not None) and age > CODEX_STALE_AFTER_SECONDS
     return five_r, seven_r, five_resets, seven_resets, stale
@@ -395,6 +579,66 @@ def _maybe_spawn_codex_refresh(now):
     hooks_dir = os.path.dirname(os.path.abspath(__file__))
     script = os.path.join(hooks_dir, "codex_usage_refresh.py")
     if not os.path.isfile(script):
+        return
+    try:
+        subprocess.Popen(
+            [sys.executable, script],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+    except Exception:
+        pass
+
+
+def _claude_refresh_disabled():
+    return os.environ.get("CBOX_CLAUDE_USAGE_REFRESH", "").strip().lower() == "off"
+
+
+def _claude_refresh_interval():
+    raw = os.environ.get("CBOX_CLAUDE_USAGE_REFRESH_SEC", "").strip()
+    try:
+        val = float(raw)
+    except ValueError:
+        return CLAUDE_REFRESH_DEFAULT_SEC
+    if not math.isfinite(val):
+        return CLAUDE_REFRESH_DEFAULT_SEC
+    return max(CLAUDE_REFRESH_MIN_SEC, val)
+
+
+def _claude_refresh_needed(now, interval):
+    return _cbox_budget_mod().claude_snapshot_needs_refresh(now, interval)
+
+
+def _claude_refresh_attempt_path():
+    return os.path.join(_usage_dir(), "claude_refresh_attempt.json")
+
+
+def _claude_refresh_spawn_allowed(now, interval):
+    path = _claude_refresh_attempt_path()
+    data = _read_json_file(path)
+    stamp = dict(data) if isinstance(data, dict) else {}
+    last = _num(stamp.get("ts"))
+    if last is not None and 0 <= (now - last) < interval:
+        return False
+    backoff = _num(stamp.get("backoff_until"))
+    if backoff is not None and now < backoff <= now + CLAUDE_REFRESH_MAX_BACKOFF_SEC:
+        return False
+    stamp["ts"] = now
+    _atomic_write(path, stamp)
+    return True
+
+
+def _maybe_spawn_claude_refresh(now):
+    if _claude_refresh_disabled():
+        return
+    interval = _claude_refresh_interval()
+    if not _claude_refresh_needed(now, interval):
+        return
+    hooks_dir = os.path.dirname(os.path.abspath(__file__))
+    script = os.path.join(hooks_dir, "claude_usage_refresh.py")
+    if not os.path.isfile(script):
+        return
+    if not _claude_refresh_spawn_allowed(now, interval):
         return
     try:
         subprocess.Popen(
@@ -501,8 +745,17 @@ def _hermes_run_scan():
     return latest_unfinished, durations
 
 
-def _hermes_segment(now):
+def _hermes_unreachable(now):
+    state = _cbox_budget_mod().hermes_state(now)
+    return state.get("state") == "unavailable" and state.get("reachable") is False
+
+
+def _hermes_segment(now, cwd=None):
+    if not _cbox_budget_mod().local_tier_present(cwd):
+        return None
     if not _hermes_any_slot_busy():
+        if _hermes_unreachable(now):
+            return "hermes: down"
         return "hermes: idle"
     latest_unfinished, durations = _hermes_run_scan()
     if latest_unfinished is None:
@@ -554,23 +807,10 @@ def _run(data, now):
     five = rl.get("five_hour") if isinstance(rl, dict) else None
     seven = rl.get("seven_day") if isinstance(rl, dict) else None
 
-    if isinstance(rl, dict):
-        snapshot = {
-            "source": "claude",
-            "captured_at": now,
-            "five_hour": _window_entry(five),
-            "seven_day": _window_entry(seven),
-        }
-        _atomic_write(os.path.join(_usage_dir(), "claude.json"), snapshot)
-        try:
-            _append_sample(
-                "claude",
-                _num(five.get("used_percentage")) if isinstance(five, dict) else None,
-                _num(seven.get("used_percentage")) if isinstance(seven, dict) else None,
-                now,
-            )
-        except Exception:
-            pass
+    try:
+        session = _observe_stdin(data, now)
+    except Exception:
+        session = {}
 
     try:
         _update_hermes_cache(now)
@@ -582,13 +822,20 @@ def _run(data, now):
     except Exception:
         pass
 
+    try:
+        _maybe_spawn_claude_refresh(now)
+    except Exception:
+        pass
+
     profile = os.environ.get("CBOX_PROFILE", "").strip()
     prefix = "[%s] " % profile if profile else ""
 
-    claude_five_used = _num(five.get("used_percentage")) if isinstance(five, dict) else None
-    claude_seven_used = _num(seven.get("used_percentage")) if isinstance(seven, dict) else None
-    claude_five_resets = _parse_resets_at(five.get("resets_at")) if isinstance(five, dict) else None
-    claude_seven_resets = _parse_resets_at(seven.get("resets_at")) if isinstance(seven, dict) else None
+    try:
+        snapshot_windows = _cbox_budget_mod().read_claude_windows(now)
+    except Exception:
+        snapshot_windows = {}
+    claude_five_used, claude_five_resets = _display_window("five_hour", now, session, snapshot_windows, five)
+    claude_seven_used, claude_seven_resets = _display_window("seven_day", now, session, snapshot_windows, seven)
     claude_five_pct = _pct_str(_remaining(claude_five_used))
     claude_seven_pct = _pct_str(_remaining(claude_seven_used))
     claude_five_cd = _reset_countdown(claude_five_resets, now, "five_hour")
@@ -604,7 +851,11 @@ def _run(data, now):
     codex_seven_cd = _reset_countdown(codex_seven_resets, now, "seven_day")
 
     try:
-        hermes_text = _hermes_segment(now)
+        ws = data.get("workspace")
+        status_cwd = data.get("cwd") if isinstance(data.get("cwd"), str) else None
+        if status_cwd is None and isinstance(ws, dict) and isinstance(ws.get("current_dir"), str):
+            status_cwd = ws.get("current_dir")
+        hermes_text = _hermes_segment(now, status_cwd)
     except Exception:
         hermes_text = None
 

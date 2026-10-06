@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import datetime
+import fcntl
 import json
 import math
 import os
@@ -41,9 +42,84 @@ def safe_read_json(path):
         return None
     try:
         data = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         return None
     return data
+
+
+LOCAL_TIER_SERVER = "hermes-local"
+CLAUDE_JSON_READ_CAP_BYTES = 8 * 1024 * 1024
+
+
+def _claude_json_path():
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if cfg:
+        return os.path.join(os.path.expanduser(cfg), ".claude.json")
+    return os.path.expanduser("~/.claude.json")
+
+
+def _read_claude_json():
+    path = _claude_json_path()
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError("not a regular file")
+        chunks = []
+        total = 0
+        while total < CLAUDE_JSON_READ_CAP_BYTES:
+            chunk = os.read(fd, min(65536, CLAUDE_JSON_READ_CAP_BYTES - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+    finally:
+        os.close(fd)
+    if total >= CLAUDE_JSON_READ_CAP_BYTES:
+        raise ValueError("oversize")
+    return json.loads(b"".join(chunks).decode("utf-8"))
+
+
+def _project_keys(cwd):
+    base = cwd if isinstance(cwd, str) and cwd else os.getcwd()
+    keys = []
+    for form in (os.path.abspath(base), os.path.realpath(base)):
+        if form not in keys:
+            keys.append(form)
+    return keys
+
+
+def local_tier_present(cwd=None):
+    try:
+        data = _read_claude_json()
+        if data is None:
+            return False
+        if not isinstance(data, dict):
+            return True
+        keys = _project_keys(cwd)
+        present = False
+        top = data.get("mcpServers")
+        if isinstance(top, dict) and LOCAL_TIER_SERVER in top:
+            present = True
+        projects = data.get("projects")
+        if not isinstance(projects, dict):
+            projects = {}
+        for key in keys:
+            entry = projects.get(key)
+            if not isinstance(entry, dict):
+                continue
+            disabled = entry.get("disabledMcpServers")
+            if isinstance(disabled, list) and LOCAL_TIER_SERVER in disabled:
+                return False
+            servers = entry.get("mcpServers")
+            if isinstance(servers, dict) and LOCAL_TIER_SERVER in servers:
+                present = True
+        return present
+    except Exception:
+        return True
 
 
 SOURCES = ("claude", "codex")
@@ -69,7 +145,7 @@ DRIVER_RESERVE_FLOOR = 8.0
 DRIVER_RESERVE_FRACTION = 0.35
 CONCURRENCY_CAP_P = 3.0
 H_FLOOR_HOURS = 0.25
-TAPER_FRACTION = 0.10
+DRIVER_RESERVE_RATE = {"five_hour": 8.0, "seven_day": 1.0}
 HYSTERESIS_MARGIN = 0.2
 HERMES_UNKNOWN_AFTER_SECONDS = 120
 
@@ -114,6 +190,13 @@ def parse_resets_at(val):
     return None
 
 
+def roll_window(used, resets_at, now, window_seconds):
+    if resets_at is not None and now >= resets_at and window_seconds > 0:
+        periods = math.floor((now - resets_at) / window_seconds) + 1
+        return 0.0, resets_at + periods * window_seconds
+    return used, resets_at
+
+
 def elapsed_fraction(resets_epoch, window_seconds, now):
     if resets_epoch is None or not window_seconds:
         return None
@@ -138,20 +221,26 @@ def _load_source_file(name):
     return data
 
 
-def _window_metrics(entry, window_key, now):
+def _window_metrics(entry, window_key, now, default_captured=None):
     if not isinstance(entry, dict):
         return None
+    captured = _num(entry.get("captured_at"))
+    if captured is None:
+        captured = default_captured
     used = _num(entry.get("used_percentage"))
     resets = parse_resets_at(entry.get("resets_at"))
     if resets is not None:
         window_seconds = WINDOW_SECONDS[window_key]
-        resets = max(now, min(resets, now + window_seconds))
+        used, resets = roll_window(used, resets, now, window_seconds)
+        resets = min(resets, now + window_seconds)
     frac = elapsed_fraction(resets, WINDOW_SECONDS[window_key], now)
     return {
         "used_percentage": used,
         "resets_at": resets,
         "elapsed_fraction": frac,
         "pace": pace(used, frac),
+        "captured_at": captured,
+        "age_seconds": (now - captured) if captured is not None else None,
     }
 
 
@@ -169,8 +258,8 @@ def source_metrics(name, now=None):
         "captured_at": captured_at,
         "age_seconds": age,
         "stale": future_stale or age > STALE_AFTER_SECONDS,
-        "five_hour": _window_metrics(raw.get("five_hour"), "five_hour", now),
-        "seven_day": _window_metrics(raw.get("seven_day"), "seven_day", now),
+        "five_hour": _window_metrics(raw.get("five_hour"), "five_hour", now, captured_at),
+        "seven_day": _window_metrics(raw.get("seven_day"), "seven_day", now, captured_at),
     }
 
 
@@ -226,6 +315,177 @@ def atomic_write_json(path, payload):
                 pass
 
 
+CLAUDE_WINDOWS = ("five_hour", "seven_day")
+CLAUDE_SNAPSHOT_NAME = "claude.json"
+CLAUDE_SNAPSHOT_LOCK_NAME = "claude.json.lock"
+SNAPSHOT_LOCK_WAIT_SECONDS = 0.4
+SNAPSHOT_LOCK_POLL_SECONDS = 0.02
+SAME_WINDOW_TOLERANCE_SECONDS = 60
+RESETS_PLAUSIBLE_SLACK_SECONDS = 60
+
+
+def resets_plausible(resets_at, now, window_key):
+    if resets_at is None:
+        return True
+    return resets_at <= now + WINDOW_SECONDS[window_key] + RESETS_PLAUSIBLE_SLACK_SECONDS
+
+
+def clean_window(entry, window_key, now, default_captured=None):
+    if not isinstance(entry, dict):
+        return None
+    used = _num(entry.get("used_percentage"))
+    if used is None:
+        return None
+    resets = parse_resets_at(entry.get("resets_at"))
+    if resets is not None and not math.isfinite(resets):
+        resets = None
+    if not resets_plausible(resets, now, window_key):
+        return None
+    captured = _num(entry.get("captured_at"))
+    if captured is None:
+        captured = default_captured
+    return {"used_percentage": used, "resets_at": resets, "captured_at": captured}
+
+
+def combine_window(candidate, existing):
+    if candidate is None:
+        return existing
+    if existing is None:
+        return candidate
+    c_resets = candidate.get("resets_at")
+    e_resets = existing.get("resets_at")
+    if c_resets is None and e_resets is not None:
+        return existing
+    if c_resets is not None and e_resets is not None:
+        if e_resets > c_resets + SAME_WINDOW_TOLERANCE_SECONDS:
+            return existing
+        if abs(e_resets - c_resets) <= SAME_WINDOW_TOLERANCE_SECONDS:
+            if candidate["used_percentage"] < existing["used_percentage"]:
+                return existing
+    return candidate
+
+
+def read_claude_windows(now, raw=None):
+    if raw is None:
+        raw = safe_read_json(os.path.join(usage_dir(), CLAUDE_SNAPSHOT_NAME))
+    out = {wk: None for wk in CLAUDE_WINDOWS}
+    if not isinstance(raw, dict):
+        return out
+    top = _num(raw.get("captured_at"))
+    for wk in CLAUDE_WINDOWS:
+        w = clean_window(raw.get(wk), wk, now, top)
+        if w is None or w["captured_at"] is None:
+            continue
+        if w["captured_at"] > now + CAPTURED_AT_FUTURE_TOLERANCE_SECONDS:
+            continue
+        out[wk] = w
+    return out
+
+
+def claude_snapshot_needs_refresh(now, interval):
+    raw = safe_read_json(os.path.join(usage_dir(), CLAUDE_SNAPSHOT_NAME))
+    if not isinstance(raw, dict):
+        return True
+    top = _num(raw.get("captured_at"))
+    seen = False
+    for wk in CLAUDE_WINDOWS:
+        w = clean_window(raw.get(wk), wk, now, top)
+        if w is None:
+            continue
+        cap = w["captured_at"]
+        if cap is None:
+            return True
+        seen = True
+        if cap > now + CAPTURED_AT_FUTURE_TOLERANCE_SECONDS or now - cap > interval:
+            return True
+    return not seen
+
+
+def _open_snapshot_lock():
+    d = usage_dir()
+    try:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        safe_chmod_dir(d, 0o700)
+        fd = os.open(os.path.join(d, CLAUDE_SNAPSHOT_LOCK_NAME),
+                     os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
+    except OSError:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return None
+    return fd
+
+
+def _lock_snapshot():
+    fd = _open_snapshot_lock()
+    if fd is None:
+        return None
+    deadline = time.monotonic() + SNAPSHOT_LOCK_WAIT_SECONDS
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except OSError:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(SNAPSHOT_LOCK_POLL_SECONDS)
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    return None
+
+
+def _unlock_snapshot(fd):
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def update_claude_snapshot(candidates, now, source):
+    fd = _lock_snapshot()
+    if fd is None:
+        return None, False
+    try:
+        path = os.path.join(usage_dir(), CLAUDE_SNAPSHOT_NAME)
+        existing = read_claude_windows(now)
+        chosen = {}
+        changed = False
+        for wk in CLAUDE_WINDOWS:
+            chosen[wk] = combine_window(candidates.get(wk), existing[wk])
+            if chosen[wk] != existing[wk]:
+                changed = True
+        if not changed:
+            return chosen, False
+        stamps = [w["captured_at"] for w in chosen.values() if w is not None]
+        if not stamps:
+            return chosen, False
+        payload = {"source": source, "captured_at": max(stamps)}
+        for wk in CLAUDE_WINDOWS:
+            w = chosen[wk]
+            payload[wk] = None if w is None else {
+                "used_percentage": w["used_percentage"],
+                "resets_at": w["resets_at"],
+                "captured_at": w["captured_at"],
+            }
+        atomic_write_json(path, payload)
+        return chosen, True
+    finally:
+        _unlock_snapshot(fd)
+
+
 def _day_active_hours(date_obj):
     return ACTIVE_HOURS_PROFILE[date_obj.weekday()]
 
@@ -264,10 +524,13 @@ def active_hours_between(start_epoch, end_epoch):
     return total
 
 
-def _driver_reserve(family, q):
+def _driver_reserve(family, q, time_hours=None, window_key=None):
     if family != "claude":
         return 0.0
-    return max(DRIVER_RESERVE_FLOOR, DRIVER_RESERVE_FRACTION * q)
+    reserve0 = max(DRIVER_RESERVE_FLOOR, DRIVER_RESERVE_FRACTION * q)
+    if time_hours is None or window_key is None:
+        return reserve0
+    return min(reserve0, DRIVER_RESERVE_RATE[window_key] * max(0.0, time_hours))
 
 
 def _cost_prior(family, window_key):
@@ -407,8 +670,6 @@ def budget_for_family(family, now=None):
     if sm is None:
         return _unknown_result()
 
-    age = sm["age_seconds"]
-    captured_future = sm["captured_at"] > now + CAPTURED_AT_FUTURE_TOLERANCE_SECONDS
     used_windows = {}
     for wk in ("five_hour", "seven_day"):
         w = sm.get(wk)
@@ -418,7 +679,11 @@ def budget_for_family(family, now=None):
         resets_at = w.get("resets_at")
         if used is None or resets_at is None:
             continue
-        if captured_future or _window_stale(wk, age):
+        w_captured = w.get("captured_at")
+        w_age = w.get("age_seconds")
+        if w_captured is None or w_age is None:
+            continue
+        if w_captured > now + CAPTURED_AT_FUTURE_TOLERANCE_SECONDS or _window_stale(wk, w_age):
             continue
         used_windows[wk] = (used, resets_at)
 
@@ -428,7 +693,8 @@ def budget_for_family(family, now=None):
     vals = []
     for wk, (used, resets_at) in used_windows.items():
         q = max(0.0, 100.0 - used)
-        reserve = _driver_reserve(family, q)
+        time_to_reset = max(resets_at - now, 0.0)
+        reserve = _driver_reserve(family, q, time_to_reset / 3600.0, wk)
         cost = _cost_prior(family, wk)
         if wk == "five_hour":
             h_hours = max((resets_at - now) / 3600.0, 0.0)
@@ -437,15 +703,11 @@ def budget_for_family(family, now=None):
         h_eff = max(h_hours, H_FLOOR_HOURS)
         raw = (q - reserve) / (cost * h_eff)
         capped = min(CONCURRENCY_CAP_P, raw)
-        window_len = WINDOW_SECONDS[wk]
-        time_to_reset = max(resets_at - now, 0.0)
-        taper_denominator = TAPER_FRACTION * window_len
-        taper = min(1.0, time_to_reset / taper_denominator) if taper_denominator > 0 else 1.0
-        vals.append(capped * taper)
+        vals.append((capped, resets_at))
 
-    b = max(0.0, min(vals))
+    b, resets_at = min(vals, key=lambda item: item[0])
+    b = max(0.0, b)
     n = apply_hysteresis(family, b, now)
-    resets_at = min(r for (_, r) in used_windows.values())
     return {
         "status": "ok",
         "b": b,

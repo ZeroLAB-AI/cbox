@@ -468,6 +468,11 @@ _new_case CBOX_SESSION_MULTIPLEX off accept
 _new_case CBOX_SESSION_MULTIPLEX on accept
 _new_case CBOX_SESSION_MULTIPLEX bogus reject
 
+_new_case CBOX_REGULATOR_AUTORESUME on accept
+_new_case CBOX_REGULATOR_AUTORESUME off accept
+_new_case CBOX_REGULATOR_AUTORESUME "" accept
+_new_case CBOX_REGULATOR_AUTORESUME bogus reject
+
 _new_case CBOX_SAFEGUARD_AUTOCONFIRM off accept
 _new_case CBOX_SAFEGUARD_AUTOCONFIRM on accept
 _new_case CBOX_SAFEGUARD_AUTOCONFIRM bogus reject

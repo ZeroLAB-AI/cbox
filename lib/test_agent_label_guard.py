@@ -30,7 +30,21 @@ def release_slots(fds):
         os.close(fd)
 
 
+def write_local_tier(cfg_dir, project=None, disabled=None, top_level=True):
+    os.makedirs(cfg_dir, exist_ok=True)
+    doc = {}
+    if top_level:
+        doc["mcpServers"] = {"hermes-local": {"command": "x"}}
+    if project:
+        doc["projects"] = {project: {"mcpServers": {} if top_level else {"hermes-local": {"command": "x"}},
+                                     "disabledMcpServers": disabled or []}}
+    with open(os.path.join(cfg_dir, ".claude.json"), "w", encoding="ascii") as fh:
+        json.dump(doc, fh)
+
+
 def write_agent(home, name, model="sonnet", effort="high"):
+    if name == "hermes-local":
+        write_local_tier(os.path.join(home, ".claude-cfg"))
     d = os.path.join(home, ".claude", "agents")
     os.makedirs(d, exist_ok=True)
     body = "---\nname: %s\ndescription: x\nmodel: %s\n" % (name, model)
@@ -62,10 +76,11 @@ def _run_payload(home, payload, env=None):
     e = {
         k: v for k, v in os.environ.items()
         if k not in ("CBOX_AGENT_MODEL_DENY", "CBOX_AGENT_MODEL_BAN", "CBOX_HERMES_DELEGATE",
-                     "CBOX_USAGE_DIR", "CBOX_BUDGET_MODE")
+                     "CBOX_USAGE_DIR", "CBOX_BUDGET_MODE", "CLAUDE_CONFIG_DIR")
         and not (k.startswith("ANTHROPIC_DEFAULT_") and k.endswith("_MODEL"))
     }
     e["HOME"] = home
+    e["CLAUDE_CONFIG_DIR"] = os.path.join(home, ".claude-cfg")
     if env:
         e.update(env)
     proc = subprocess.run(
@@ -154,26 +169,160 @@ class LocalFirstGateTests(unittest.TestCase):
         self.assertEqual(out["permissionDecision"], "allow")
         self.assertTrue(out["updatedInput"]["description"].startswith("worker (sonnet/high): "))
 
-    def test_delegate_on_env_forces_the_gate_even_when_the_agent_file_is_absent(self):
-        self.assertFalse(os.path.exists(os.path.join(self.home, ".claude", "agents", "hermes-local.md")))
+    def test_agent_file_alone_does_not_force_the_gate(self):
+        write_agent(self.home, "hermes-local", model="haiku", effort="low")
+        os.unlink(os.path.join(self.home, ".claude-cfg", ".claude.json"))
         for atype in ("worker", "debugger", "verifier"):
             with self.subTest(atype=atype):
-                out = run(self.home, atype, "review the diff",
-                          env={"CBOX_HERMES_DELEGATE": "on"})
-                self.assertEqual(out["permissionDecision"], "deny")
-                self.assertIn("local-skip:", out["permissionDecisionReason"])
-        # a closed-list reason still passes under the env gate
-        out = run(self.home, "worker", "local-skip: cross-cutting - touches render, gate and probe together",
-                  env={"CBOX_HERMES_DELEGATE": "on"})
-        self.assertEqual(out["permissionDecision"], "allow")
+                out = run(self.home, atype, "review the diff")
+                self.assertEqual(out["permissionDecision"], "allow")
 
-    def test_delegate_off_env_does_not_reactivate_the_gate(self):
-        self.assertFalse(os.path.exists(os.path.join(self.home, ".claude", "agents", "hermes-local.md")))
-        for val in ("off", "0", "false", "no", ""):
+    def test_delegate_env_alone_does_not_force_the_gate(self):
+        for val in ("on", "1", "off", ""):
             with self.subTest(val=val):
                 out = run(self.home, "worker", "review the diff",
                           env={"CBOX_HERMES_DELEGATE": val})
                 self.assertEqual(out["permissionDecision"], "allow")
+
+    def test_a_top_level_server_in_the_config_forces_the_gate(self):
+        write_local_tier(os.path.join(self.home, ".claude-cfg"))
+        out = run(self.home, "worker", "review the diff")
+        self.assertEqual(out["permissionDecision"], "deny")
+        out = run(self.home, "worker", "local-skip: cross-cutting - touches render, gate and probe together")
+        self.assertEqual(out["permissionDecision"], "allow")
+
+    def test_config_dir_unset_falls_back_to_the_home_claude_json(self):
+        write_local_tier(self.home)
+        e = {k: v for k, v in os.environ.items()
+             if k not in ("CBOX_AGENT_MODEL_DENY", "CBOX_AGENT_MODEL_BAN", "CBOX_HERMES_DELEGATE",
+                          "CBOX_USAGE_DIR", "CBOX_BUDGET_MODE", "CLAUDE_CONFIG_DIR")
+             and not (k.startswith("ANTHROPIC_DEFAULT_") and k.endswith("_MODEL"))}
+        e["HOME"] = self.home
+        payload = {"tool_name": "Agent",
+                   "tool_input": {"subagent_type": "worker", "description": "review the diff",
+                                  "prompt": "do it"}}
+        proc = subprocess.run(["python3", str(GUARD)], input=json.dumps(payload),
+                              capture_output=True, text=True, timeout=30, env=e)
+        out = json.loads(proc.stdout.strip())["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_a_project_scoped_server_matches_the_exact_project_key_only(self):
+        cfg = os.path.join(self.home, ".claude-cfg")
+        proj = os.path.join(self.home, "proj")
+        os.makedirs(os.path.join(proj, "sub"))
+        elsewhere = os.path.join(self.home, "elsewhere")
+        os.makedirs(elsewhere)
+        write_local_tier(cfg, project=proj, top_level=False)
+        for cwd, expected in ((proj, "deny"), (os.path.join(proj, "sub"), "allow"), (elsewhere, "allow")):
+            with self.subTest(cwd=cwd):
+                payload = {"tool_name": "Agent", "cwd": cwd,
+                           "tool_input": {"subagent_type": "worker", "description": "review the diff",
+                                          "prompt": "do it"}}
+                out = _run_payload(self.home, payload)
+                self.assertEqual(out["permissionDecision"], expected)
+
+    def test_an_ancestor_disable_does_not_apply_to_a_child_directory(self):
+        cfg = os.path.join(self.home, ".claude-cfg")
+        proj = os.path.join(self.home, "proj")
+        os.makedirs(os.path.join(proj, "sub"))
+        write_local_tier(cfg, project=proj, disabled=["hermes-local"], top_level=True)
+        payload = {"tool_name": "Agent", "cwd": os.path.join(proj, "sub"),
+                   "tool_input": {"subagent_type": "worker", "description": "review the diff", "prompt": "x"}}
+        self.assertEqual(_run_payload(self.home, payload)["permissionDecision"], "deny")
+        payload["cwd"] = proj
+        self.assertEqual(_run_payload(self.home, payload)["permissionDecision"], "allow")
+
+    def test_a_server_listed_in_disabled_mcp_servers_is_absent(self):
+        cfg = os.path.join(self.home, ".claude-cfg")
+        proj = os.path.join(self.home, "proj")
+        os.makedirs(proj)
+        write_local_tier(cfg, project=proj, disabled=["hermes-local"], top_level=False)
+        payload = {"tool_name": "Agent", "cwd": proj,
+                   "tool_input": {"subagent_type": "worker", "description": "review the diff", "prompt": "x"}}
+        self.assertEqual(_run_payload(self.home, payload)["permissionDecision"], "allow")
+        write_local_tier(cfg, project=proj, disabled=["hermes-local"], top_level=True)
+        self.assertEqual(_run_payload(self.home, payload)["permissionDecision"], "allow")
+
+    def test_a_missing_config_file_means_absent(self):
+        self.assertEqual(run(self.home, "worker", "review the diff")["permissionDecision"], "allow")
+
+    def test_an_unreadable_or_odd_config_means_present(self):
+        cfg = os.path.join(self.home, ".claude-cfg")
+        path = os.path.join(cfg, ".claude.json")
+        os.makedirs(cfg, exist_ok=True)
+        with self.subTest(kind="invalid json"):
+            with open(path, "w", encoding="ascii") as fh:
+                fh.write("{not json")
+            self.assertEqual(run(self.home, "worker", "review the diff")["permissionDecision"], "deny")
+        with self.subTest(kind="partial json"):
+            with open(path, "w", encoding="ascii") as fh:
+                fh.write('{"mcpServers": {"codex-sol": ')
+            self.assertEqual(run(self.home, "worker", "review the diff")["permissionDecision"], "deny")
+        with self.subTest(kind="non-object json"):
+            with open(path, "w", encoding="ascii") as fh:
+                fh.write("[1, 2]")
+            self.assertEqual(run(self.home, "worker", "review the diff")["permissionDecision"], "deny")
+        with self.subTest(kind="deep nesting"):
+            with open(path, "w", encoding="ascii") as fh:
+                fh.write("[" * 100000)
+            self.assertEqual(run(self.home, "worker", "review the diff")["permissionDecision"], "deny")
+        with self.subTest(kind="not utf-8"):
+            with open(path, "wb") as fh:
+                fh.write(b"\xff\xfe{}")
+            self.assertEqual(run(self.home, "worker", "review the diff")["permissionDecision"], "deny")
+        with self.subTest(kind="directory"):
+            os.unlink(path)
+            os.mkdir(path)
+            self.assertEqual(run(self.home, "worker", "review the diff")["permissionDecision"], "deny")
+            os.rmdir(path)
+        with self.subTest(kind="well-formed without the server"):
+            write_local_tier(cfg, top_level=False)
+            self.assertEqual(run(self.home, "worker", "review the diff")["permissionDecision"], "allow")
+
+    def test_a_symlinked_config_means_present(self):
+        cfg = os.path.join(self.home, ".claude-cfg")
+        real = os.path.join(self.home, "real.json")
+        with open(real, "w", encoding="ascii") as fh:
+            json.dump({"mcpServers": {"codex-sol": {}}}, fh)
+        os.makedirs(cfg, exist_ok=True)
+        os.symlink(real, os.path.join(cfg, ".claude.json"))
+        self.assertEqual(run(self.home, "worker", "review the diff")["permissionDecision"], "deny")
+
+    def test_an_oversize_config_means_present(self):
+        cfg = os.path.join(self.home, ".claude-cfg")
+        os.makedirs(cfg, exist_ok=True)
+        with open(os.path.join(cfg, ".claude.json"), "w", encoding="ascii") as fh:
+            fh.write('{"history": "' + "x" * (8 * 1024 * 1024) + '"}')
+        self.assertEqual(run(self.home, "worker", "review the diff")["permissionDecision"], "deny")
+
+    def test_a_deleted_working_directory_does_not_crash_the_check(self):
+        write_local_tier(os.path.join(self.home, ".claude-cfg"), top_level=False)
+        gone = os.path.join(self.home, "gone")
+        os.makedirs(gone)
+        e = {k: v for k, v in os.environ.items()
+             if k not in ("CBOX_AGENT_MODEL_DENY", "CBOX_AGENT_MODEL_BAN", "CBOX_HERMES_DELEGATE",
+                          "CBOX_USAGE_DIR", "CBOX_BUDGET_MODE", "CLAUDE_CONFIG_DIR")
+             and not (k.startswith("ANTHROPIC_DEFAULT_") and k.endswith("_MODEL"))}
+        e["HOME"] = self.home
+        e["CLAUDE_CONFIG_DIR"] = os.path.join(self.home, ".claude-cfg")
+        payload = {"tool_name": "Agent",
+                   "tool_input": {"subagent_type": "worker", "description": "review the diff",
+                                  "prompt": "do it"}}
+        code = ("import os, subprocess, sys\n"
+                "os.chdir(%r); os.rmdir(%r)\n"
+                "p = subprocess.run(['python3', %r], input=sys.stdin.read(), capture_output=True, text=True, env=os.environ)\n"
+                "sys.stdout.write(p.stdout)\n") % (gone, gone, str(GUARD))
+        proc = subprocess.run(["python3", "-c", code], input=json.dumps(payload),
+                              capture_output=True, text=True, timeout=30, env=e, cwd=self.home)
+        out = json.loads(proc.stdout.strip())["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_a_large_config_is_still_read(self):
+        cfg = os.path.join(self.home, ".claude-cfg")
+        os.makedirs(cfg, exist_ok=True)
+        with open(os.path.join(cfg, ".claude.json"), "w", encoding="ascii") as fh:
+            json.dump({"history": "x" * 300000, "mcpServers": {"hermes-local": {}}}, fh)
+        self.assertEqual(run(self.home, "worker", "review the diff")["permissionDecision"], "deny")
 
     def test_escalation_and_relay_agents_are_not_gated(self):
         write_agent(self.home, "hermes-local", model="haiku", effort="low")
@@ -358,6 +507,80 @@ class WorkflowLocalFirstTests(unittest.TestCase):
         self.assertEqual(out["permissionDecision"], "deny")
         self.assertIn("free", out["permissionDecisionReason"])
 
+    def test_local_busy_step_is_accepted_when_the_script_runs_hermes_local_too(self):
+        lock_dir = tempfile.mkdtemp()
+        env = {"CBOX_HERMES_DELEGATE_LOCK_DIR": lock_dir}
+        busy = "await agent(P, {label: 'worker: local-skip: local-busy - hermes runs the extraction branch', agentType: 'worker'})\n"
+        local = "await agent(R, {label: 'hermes-local (haiku/low): extract fields', agentType: 'hermes-local'})\n"
+        for name, body in (("local-first", local + busy), ("local-last", busy + local)):
+            with self.subTest(order=name):
+                self.assertIsNone(run_workflow(self.home, WF_HEAD + body, env=env))
+
+    def test_parallel_hermes_local_and_local_busy_sibling_are_accepted(self):
+        lock_dir = tempfile.mkdtemp()
+        script = WF_HEAD + (
+            "await Promise.all([\n"
+            "  agent(P, {label: 'worker: local-skip: local-busy - hermes runs the extraction branch', agentType: 'worker'}),\n"
+            "  agent(R, {label: 'hermes-local (haiku/low): extract fields', agentType: 'hermes-local'}),\n"
+            "])\n")
+        self.assertIsNone(run_workflow(self.home, script, env={"CBOX_HERMES_DELEGATE_LOCK_DIR": lock_dir}))
+
+    def test_a_duplicate_agent_type_key_is_non_literal_and_unlocks_nothing(self):
+        lock_dir = tempfile.mkdtemp()
+        busy = "await agent(P, {label: 'worker: local-skip: local-busy - hermes runs the extraction branch', agentType: 'worker'})\n"
+        dup = "await agent(R, {label: 'x', agentType: 'hermes-local', agentType: 'worker'})\n"
+        out = run_workflow(self.home, WF_HEAD + dup + busy, env={"CBOX_HERMES_DELEGATE_LOCK_DIR": lock_dir})
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("dynamic agentType", out["permissionDecisionReason"])
+        out = run_workflow(self.home, WF_HEAD + dup, env={"CBOX_HERMES_DELEGATE_LOCK_DIR": lock_dir})
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("dynamic agentType", out["permissionDecisionReason"])
+
+    def test_local_busy_sibling_still_needs_its_own_justification(self):
+        lock_dir = tempfile.mkdtemp()
+        env = {"CBOX_HERMES_DELEGATE_LOCK_DIR": lock_dir}
+        local = "await agent(R, {label: 'hermes-local: extract', agentType: 'hermes-local'})\n"
+        out = run_workflow(self.home, WF_HEAD + local + (
+            "await agent(P, {label: 'worker: local-skip: local-busy', agentType: 'worker'})\n"), env=env)
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("per-step local-skip justification", out["permissionDecisionReason"])
+        same = "await agent(%s, {label: 'worker: local-skip: local-busy - hermes runs the extraction branch', agentType: 'worker'})\n"
+        out = run_workflow(self.home, WF_HEAD + local + same % "P" + same % "Q", env=env)
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("reuses the justification", out["permissionDecisionReason"])
+
+    def test_local_busy_is_refused_when_the_script_only_runs_other_agents(self):
+        lock_dir = tempfile.mkdtemp()
+        script = WF_HEAD + (
+            "await agent(R, {label: 'alien: design', agentType: 'alien'})\n"
+            "await agent(P, {label: 'worker: local-skip: local-busy - hermes runs the extraction branch', agentType: 'worker'})\n")
+        out = run_workflow(self.home, script, env={"CBOX_HERMES_DELEGATE_LOCK_DIR": lock_dir})
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("free", out["permissionDecisionReason"])
+
+    def test_a_dynamic_or_aliased_hermes_local_type_does_not_unlock_local_busy(self):
+        lock_dir = tempfile.mkdtemp()
+        busy = "await agent(P, {label: 'worker: local-skip: local-busy - hermes runs the extraction branch', agentType: 'worker'})\n"
+        for local in ("await agent(R, {label: 'x', agentType: T})\n",
+                      "await obj.agent(R, {label: 'x', agentType: 'hermes-local'})\n",
+                      "// agent(R, {agentType: 'hermes-local'})\n"):
+            with self.subTest(local=local):
+                out = run_workflow(self.home, WF_HEAD + local + busy,
+                                   env={"CBOX_HERMES_DELEGATE_LOCK_DIR": lock_dir})
+                self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_the_single_agent_path_keeps_the_live_slot_check(self):
+        lock_dir = tempfile.mkdtemp()
+        out = run(self.home, "worker", "local-skip: local-busy - hermes runs the extraction branch",
+                  env={"CBOX_HERMES_DELEGATE_LOCK_DIR": lock_dir})
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("free", out["permissionDecisionReason"])
+
+    def test_a_workflow_is_not_gated_when_the_config_lacks_the_server(self):
+        os.unlink(os.path.join(self.home, ".claude-cfg", ".claude.json"))
+        script = WF_HEAD + "await agent(P, {label: 'worker: x', agentType: 'worker'})\n"
+        self.assertIsNone(run_workflow(self.home, script))
+
     def test_malformed_workflow_input_is_refused_not_allowed(self):
         out = _run_payload(self.home, {"tool_name": "Workflow", "tool_input": [1, 2]})
         self.assertEqual(out["permissionDecision"], "deny")
@@ -411,11 +634,91 @@ class QuotaGuardTests(unittest.TestCase):
         self.assertIn("quota:", out["permissionDecisionReason"])
         self.assertIn("B=0.0", out["permissionDecisionReason"])
 
-    def test_low_budget_without_local_tier_installed_is_allowed(self):
+    def test_exact_deny_text_and_marker_on_agent_and_workflow(self):
+        write_agent(self.home, "hermes-local")
+        now = int(time.time())
+        reset = now + 7 * 24 * 3600
+        write_claude_usage(self.usage_dir, seven_day_used=99, now=now)
+        write_hermes_state(self.usage_dir, reachable=True)
+        cfg = os.path.join(self.home, ".claude-cbox")
+        write_local_tier(cfg)
+        sid = "s-123"
+        transcript = os.path.join(cfg, "projects", "project", sid + ".jsonl")
+        os.makedirs(os.path.dirname(transcript))
+        with open(transcript, "w") as fh:
+            fh.write('{"type":"user","message":{"content":"first"}}\n')
+        env = {"CBOX_USAGE_DIR": self.usage_dir, "CLAUDE_CONFIG_DIR": cfg}
+        payload = {"tool_name": "Agent", "session_id": sid, "transcript_path": transcript,
+                   "tool_input": {"subagent_type": "worker", "description": "review"}}
+        out = _run_payload(self.home, payload, env)
+        expected = ("quota: B=0.00 below 0.5 (5h ?%%, 7d 99%%); blocked until %s - "
+                    "end your turn, cbox resumes this session then" %
+                    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(reset)))
+        self.assertEqual(out["permissionDecisionReason"], expected)
+        marker_path = os.path.join(cfg, "limit-watch", "markers", sid + ".regulator.json")
+        with open(marker_path) as fh:
+            marker = json.load(fh)
+        self.assertEqual(marker["transcript_offset"], os.path.getsize(transcript))
+        self.assertEqual(marker["due"], reset + 2)
+        payload = {"tool_name": "Workflow", "session_id": sid, "transcript_path": transcript,
+                   "tool_input": {"script": WF_HEAD + "await agent(P, {label: 'review', agentType: 'worker'})\n"}}
+        out = _run_payload(self.home, payload, env)
+        self.assertEqual(out["permissionDecisionReason"], expected)
+        self.assertEqual(len(os.listdir(os.path.dirname(marker_path))), 1)
+        bad = dict(payload)
+        bad["session_id"] = "../bad"
+        out = _run_payload(self.home, bad, env)
+        self.assertEqual(out["permissionDecisionReason"], expected)
+        self.assertEqual(len(os.listdir(os.path.dirname(marker_path))), 1)
+        write_override(self.usage_dir, b=2.0)
+        os.unlink(marker_path)
+        out = _run_payload(self.home, {"tool_name": "Agent", "session_id": sid,
+                                      "transcript_path": transcript,
+                                      "tool_input": {"subagent_type": "worker", "description": "local-verify: review the completed result carefully"}}, env)
+        self.assertEqual(out["permissionDecision"], "allow")
+        self.assertFalse(os.path.exists(marker_path))
+
+    def test_low_budget_without_local_tier_is_still_denied_on_the_agent_path(self):
         write_claude_usage(self.usage_dir, seven_day_used=99)
         write_hermes_state(self.usage_dir, reachable=True)
         out = self._run("worker", "review the diff")
-        self.assertEqual(out["permissionDecision"], "allow")
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertTrue(out["permissionDecisionReason"].startswith("quota: B="))
+        self.assertNotIn("hermes", out["permissionDecisionReason"].lower())
+
+    def test_low_budget_without_local_tier_is_still_denied_on_the_workflow_path(self):
+        write_claude_usage(self.usage_dir, seven_day_used=99)
+        write_hermes_state(self.usage_dir, reachable=True)
+        script = WF_HEAD + "await agent(P, {label: 'review', agentType: 'worker'})\n"
+        out = run_workflow(self.home, script, env={"CBOX_USAGE_DIR": self.usage_dir})
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertTrue(out["permissionDecisionReason"].startswith("quota: B="))
+        self.assertNotIn("hermes", out["permissionDecisionReason"].lower())
+
+    def test_healthy_budget_without_local_tier_passes_unmarked_on_both_paths(self):
+        write_claude_usage(self.usage_dir, seven_day_used=10)
+        write_hermes_state(self.usage_dir, reachable=True)
+        self.assertEqual(self._run("worker", "review the diff")["permissionDecision"], "allow")
+        script = WF_HEAD + "await agent(P, {label: 'review', agentType: 'worker'})\n"
+        self.assertIsNone(run_workflow(self.home, script, env={"CBOX_USAGE_DIR": self.usage_dir}))
+
+    def test_local_busy_claim_without_local_tier_still_hits_the_busy_quota_floor(self):
+        write_claude_usage(self.usage_dir, seven_day_used=59)
+        write_hermes_state(self.usage_dir, reachable=True)
+        out = self._run("worker", "local-skip: local-busy - hermes is running the extraction step")
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("below 1.0", out["permissionDecisionReason"])
+
+    def test_workflow_cap_without_local_tier_does_not_mention_hermes(self):
+        write_override(self.usage_dir, b=0.6)
+        calls = "".join("await agent(P%d, {label: 'step %d', agentType: 'worker'})\n" % (i, i) for i in range(4))
+        out = run_workflow(self.home, WF_HEAD + calls, env={"CBOX_USAGE_DIR": self.usage_dir})
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertNotIn("hermes", out["permissionDecisionReason"].lower())
+
+    def test_a_guard_crash_is_refused_not_allowed_even_without_the_local_tier(self):
+        out = _run_payload(self.home, {"tool_name": "Agent", "tool_input": "worker"})
+        self.assertEqual(out["permissionDecision"], "deny")
 
     def test_security_gate_reason_is_exempt_from_the_quota_deny(self):
         write_agent(self.home, "hermes-local", model="haiku", effort="low")
@@ -442,7 +745,7 @@ class QuotaGuardTests(unittest.TestCase):
         out = self._run("worker", "review the diff")
         self.assertEqual(out["permissionDecision"], "allow")
 
-    def test_local_busy_is_refused_below_1_0_even_when_hermes_is_actually_busy(self):
+    def test_local_busy_between_quota_floor_and_one_is_denied(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location("cbox_budget_probe", str(BUDGET_MODULE))
         mod = importlib.util.module_from_spec(spec)
@@ -459,7 +762,6 @@ class QuotaGuardTests(unittest.TestCase):
                 os.environ["CBOX_USAGE_DIR"] = old_env
         self.assertGreaterEqual(result["b"], 0.5)
         self.assertLess(result["b"], 1.0)
-        print("local-busy fixture B=%.3f" % result["b"])
 
         write_agent(self.home, "hermes-local", model="haiku", effort="low")
         write_hermes_state(self.usage_dir, reachable=True)
@@ -471,10 +773,45 @@ class QuotaGuardTests(unittest.TestCase):
                              env={"CBOX_HERMES_DELEGATE_LOCK_DIR": lock_dir,
                                   "CBOX_HERMES_DELEGATE_MAX_CONCURRENCY": "1"})
             self.assertEqual(out["permissionDecision"], "deny")
-            self.assertIn("quota:", out["permissionDecisionReason"])
-            self.assertIn("below 1.0", out["permissionDecisionReason"])
+            self.assertTrue(out["permissionDecisionReason"].startswith(
+                "quota: B=%.2f below 1.0" % result["b"]))
         finally:
             release_slots(fds)
+
+    def test_workflow_local_busy_deny_has_unprefixed_quota_text(self):
+        write_agent(self.home, "hermes-local", model="haiku", effort="low")
+        write_claude_usage(self.usage_dir, seven_day_used=59)
+        write_hermes_state(self.usage_dir, reachable=True)
+        lock_dir = tempfile.mkdtemp()
+        fds = hold_all_slots(lock_dir, 1)
+        script = WF_HEAD + (
+            "await agent(P, {label: 'worker: local-skip: local-busy - hermes is running the extraction step', agentType: 'worker'})\n")
+        try:
+            out = run_workflow(self.home, script, env={
+                "CBOX_USAGE_DIR": self.usage_dir,
+                "CBOX_HERMES_DELEGATE_LOCK_DIR": lock_dir,
+                "CBOX_HERMES_DELEGATE_MAX_CONCURRENCY": "1"})
+            self.assertEqual(out["permissionDecision"], "deny")
+            self.assertTrue(out["permissionDecisionReason"].startswith("quota: B="))
+            self.assertIn("below 1.0", out["permissionDecisionReason"])
+            self.assertNotIn("agent() #", out["permissionDecisionReason"])
+        finally:
+            release_slots(fds)
+
+    def test_workflow_local_busy_with_hermes_local_in_script_still_hits_the_quota_floor(self):
+        write_agent(self.home, "hermes-local", model="haiku", effort="low")
+        write_claude_usage(self.usage_dir, seven_day_used=59)
+        write_hermes_state(self.usage_dir, reachable=True)
+        lock_dir = tempfile.mkdtemp()
+        script = WF_HEAD + (
+            "await agent(R, {label: 'hermes-local: extract', agentType: 'hermes-local'})\n"
+            "await agent(P, {label: 'worker: local-skip: local-busy - hermes is running the extraction step', agentType: 'worker'})\n")
+        out = run_workflow(self.home, script, env={
+            "CBOX_USAGE_DIR": self.usage_dir,
+            "CBOX_HERMES_DELEGATE_LOCK_DIR": lock_dir})
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertTrue(out["permissionDecisionReason"].startswith("quota: B="))
+        self.assertIn("below 1.0", out["permissionDecisionReason"])
 
     def test_local_busy_allowed_above_1_0_when_hermes_is_actually_busy(self):
         write_agent(self.home, "hermes-local", model="haiku", effort="low")
@@ -526,14 +863,16 @@ class QuotaGuardTests(unittest.TestCase):
         shutil.copy(str(GUARD), guard_copy)
         e = {k: v for k, v in os.environ.items()
              if k not in ("CBOX_AGENT_MODEL_DENY", "CBOX_AGENT_MODEL_BAN", "CBOX_HERMES_DELEGATE",
-                          "CBOX_USAGE_DIR", "CBOX_BUDGET_MODE")
+                          "CBOX_USAGE_DIR", "CBOX_BUDGET_MODE", "CLAUDE_CONFIG_DIR")
              and not (k.startswith("ANTHROPIC_DEFAULT_") and k.endswith("_MODEL"))}
         e["HOME"] = self.home
+        e["CLAUDE_CONFIG_DIR"] = os.path.join(self.home, ".claude-cfg")
         e["CBOX_USAGE_DIR"] = self.usage_dir
         write_claude_usage(self.usage_dir, seven_day_used=99)
         write_hermes_state(self.usage_dir, reachable=True)
         payload = {"tool_name": "Agent",
-                   "tool_input": {"subagent_type": "worker", "description": "review the diff",
+                   "tool_input": {"subagent_type": "worker",
+                                  "description": "local-skip: cross-cutting - touches render, gate and probe together",
                                   "prompt": "do it"}}
         proc = subprocess.run(["python3", guard_copy], input=json.dumps(payload),
                                capture_output=True, text=True, timeout=30, env=e)

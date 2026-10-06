@@ -81,6 +81,14 @@ diff -u "$VAL_DISPATCH" "$GEN_VAL_OUT" >"$TMPBASE/gen_val_diff.txt" 2>&1 \
 $(cat "$TMPBASE/gen_val_diff.txt")"
 _ok "templates/validator_dispatch.sh is current (regenerating produces no diff)"
 
+grep -Fq 'CBOX_REGULATOR_AUTORESUME=%s' "$INSTALL_DIR/templates/generators.sh" \
+  || _fail "isolated compose omits CBOX_REGULATOR_AUTORESUME"
+grep -Fq 'CBOX_REGULATOR_AUTORESUME-on' "$INSTALL_DIR/templates/generators.sh" \
+  || _fail "isolated compose loses the regulator default"
+grep -Fq 'CBOX_REGULATOR_AUTORESUME-on' "$INSTALL_DIR/entrypoint.sh" \
+  || _fail "claude session wrapping does not include regulator auto-resume"
+_ok "regulator auto-resume reaches isolated compose and the session wrapper"
+
 DUMP_HARNESS="$TMPBASE/dump.sh"
 cat > "$DUMP_HARNESS" << 'EOF'
 #!/usr/bin/env bash
@@ -244,7 +252,7 @@ MODIFIED = {
     "SEC_VARS": {
         "netaccess": "CBOX_NETACCESS_MODE CBOX_NETACCESS_APPLIED CBOX_NETACCESS_SCOPE CBOX_NETACCESS_NETWORKS CBOX_NETACCESS_CIDRS CBOX_NETACCESS_SOCKS_PORT CBOX_NETACCESS_EXEC_MODE CBOX_NETACCESS_EXEC_WORKSPACE_GUARD CBOX_NETACCESS_EXEC_TIMEOUT CBOX_NETACCESS_EXEC_MAX_BYTES CBOX_CONTAINER_EXEC_TOOL",
         "mounts": "CBOX_CLAUDE_MODE CBOX_CLAUDE_PATH CBOX_CLAUDE_BACKUP CBOX_CODEX_MODE CBOX_CODEX_PATH CBOX_CODEX_BACKUP CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG",
-        "autoresume": "CBOX_LIMIT_AUTORESUME CBOX_SESSION_MULTIPLEX CBOX_SAFEGUARD_AUTOCONFIRM CBOX_SESSION_BROKER_MODE CBOX_SSHD_LISTEN_ADDR CBOX_SSHD_PORT CBOX_LIMIT_RESUME_DELAY CBOX_LIMIT_RESUME_PROMPT CBOX_LIMIT_RESUME_STAGGER CBOX_LIMIT_RESUME_MAX_PER_DAY",
+        "autoresume": "CBOX_LIMIT_AUTORESUME CBOX_REGULATOR_AUTORESUME CBOX_SESSION_MULTIPLEX CBOX_SAFEGUARD_AUTOCONFIRM CBOX_SESSION_BROKER_MODE CBOX_SSHD_LISTEN_ADDR CBOX_SSHD_PORT CBOX_LIMIT_RESUME_DELAY CBOX_LIMIT_RESUME_PROMPT CBOX_LIMIT_RESUME_STAGGER CBOX_LIMIT_RESUME_MAX_PER_DAY",
         "wireguard": "CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE CBOX_WG_FORWARDS CBOX_WG_CLIENT_ATTACH",
         "bashrc": "CBOX_BASHRC CBOX_BASHRC_COMMANDS",
         "hermes": "CBOX_HERMES CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_EFFORT CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME CBOX_HERMES_HOOKS",
@@ -323,8 +331,8 @@ _ok "sections command lists section ids"
 VARS="$(python3 "$PY" vars "$REG")"
 [ -n "$VARS" ] || _fail "vars command returned nothing"
 VAR_COUNT="$(printf '%s\n' "$VARS" | grep -c .)"
-[ "$VAR_COUNT" -eq 125 ] || _fail "expected 125 variables in the registry, got $VAR_COUNT"
-_ok "vars command lists all 125 variables"
+[ "$VAR_COUNT" -eq 126 ] || _fail "expected 126 variables in the registry, got $VAR_COUNT"
+_ok "vars command lists all 126 variables"
 
 W="$TMPBASE/reg"
 mkdir -p "$W"
@@ -487,24 +495,33 @@ _ok "a section with two dependencies generates one space-joined SEC_DEPS entry"
 (
   CBOX_SSH_AGENT_DIR=/tmp/agent-dir-preset
   CBOX_USER_DIR=""
+  CBOX_REGULATOR_AUTORESUME=""
+  CBOX_LIMIT_RESUME_DELAY=300
+  CBOX_LIMIT_RESUME_STAGGER=30
   CBOX_KERNEL_LANG_REASONING=""
   CBOX_CLAUDE_PATH=""
   . "$INSTALL_DIR/templates/conf_lib.sh"
   _cbox_reg_conf_defaults
   [ -z "$CBOX_USER_DIR" ] || { echo "CBOX_USER_DIR reset to [$CBOX_USER_DIR]" >&2; exit 1; }
+  [ -z "$CBOX_REGULATOR_AUTORESUME" ] || { echo "CBOX_REGULATOR_AUTORESUME reset to [$CBOX_REGULATOR_AUTORESUME]" >&2; exit 1; }
+  [ "$CBOX_LIMIT_RESUME_DELAY" = 300 ] || { echo "stored resume delay changed to [$CBOX_LIMIT_RESUME_DELAY]" >&2; exit 1; }
+  [ "$CBOX_LIMIT_RESUME_STAGGER" = 30 ] || { echo "stored resume stagger changed to [$CBOX_LIMIT_RESUME_STAGGER]" >&2; exit 1; }
   [ -z "$CBOX_KERNEL_LANG_REASONING" ] || { echo "CBOX_KERNEL_LANG_REASONING reset to [$CBOX_KERNEL_LANG_REASONING]" >&2; exit 1; }
   [ -z "$CBOX_CLAUDE_PATH" ] || { echo "CBOX_CLAUDE_PATH reset to [$CBOX_CLAUDE_PATH]" >&2; exit 1; }
 ) || _fail "conf defaults clobber explicitly-empty values - an empty (disabled) setting does not survive conf_load (colon-equals regression)"
 _ok "conf defaults preserve explicitly-empty values (empty CBOX_USER_DIR stays disabled across save/load)"
 
 (
-  unset CBOX_USER_DIR CBOX_KERNEL_LANG_REASONING CBOX_MODE 2>/dev/null || true
+  unset CBOX_USER_DIR CBOX_KERNEL_LANG_REASONING CBOX_MODE CBOX_REGULATOR_AUTORESUME CBOX_LIMIT_RESUME_DELAY CBOX_LIMIT_RESUME_STAGGER 2>/dev/null || true
   CBOX_SSH_AGENT_DIR=/tmp/agent-dir-preset
   . "$INSTALL_DIR/templates/conf_lib.sh"
   _cbox_reg_conf_defaults
   [ "$CBOX_USER_DIR" = "$HOME/.config/cbox/user" ] || { echo "unset CBOX_USER_DIR default broken: [$CBOX_USER_DIR]" >&2; exit 1; }
   [ "$CBOX_KERNEL_LANG_REASONING" = "slovencina bez diakritiky" ] || { echo "unset CBOX_KERNEL_LANG_REASONING default broken: [$CBOX_KERNEL_LANG_REASONING]" >&2; exit 1; }
   [ "$CBOX_MODE" = "global" ] || { echo "unset CBOX_MODE default broken: [$CBOX_MODE]" >&2; exit 1; }
+  [ "$CBOX_REGULATOR_AUTORESUME" = "on" ] || { echo "unset CBOX_REGULATOR_AUTORESUME default broken: [$CBOX_REGULATOR_AUTORESUME]" >&2; exit 1; }
+  [ "$CBOX_LIMIT_RESUME_DELAY" = 10 ] || { echo "unset resume delay default broken: [$CBOX_LIMIT_RESUME_DELAY]" >&2; exit 1; }
+  [ "$CBOX_LIMIT_RESUME_STAGGER" = 3 ] || { echo "unset resume stagger default broken: [$CBOX_LIMIT_RESUME_STAGGER]" >&2; exit 1; }
 ) || _fail "conf defaults no longer apply to unset variables"
 _ok "conf defaults still apply to unset variables (unset CBOX_USER_DIR gets the shipped default)"
 

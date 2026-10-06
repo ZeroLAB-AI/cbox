@@ -278,6 +278,9 @@ _cbox_reg_validate_var_dispatch() {
     CBOX_LIMIT_AUTORESUME)
       _cbox_val_kind_enum "$val" 'off' 'on' || return 1
       ;;
+    CBOX_REGULATOR_AUTORESUME)
+      _cbox_val_kind_enum_or_empty "$val" 'off' 'on' || return 1
+      ;;
     CBOX_SESSION_MULTIPLEX)
       _cbox_val_kind_enum "$val" 'off' 'on' || return 1
       ;;

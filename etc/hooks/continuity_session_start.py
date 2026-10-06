@@ -271,6 +271,26 @@ def _hooks_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+LOCAL_FIRST_PREFIX = "LOCAL FIRST (P0 before P5)"
+
+
+def _local_tier_present(cwd):
+    try:
+        hooks_dir = _hooks_dir()
+        if hooks_dir not in sys.path:
+            sys.path.insert(0, hooks_dir)
+        import cbox_budget
+        return bool(cbox_budget.local_tier_present(cwd))
+    except Exception:
+        return True
+
+
+def _strip_local_first(text):
+    kept = [ln for ln in text.splitlines(keepends=True)
+            if not ln.startswith(LOCAL_FIRST_PREFIX)]
+    return "".join(kept)
+
+
 def _profile():
     v = os.environ.get("CBOX_CONTEXT_PROFILE", "full").strip().lower()
     if v not in ("full", "light"):
@@ -398,6 +418,8 @@ def main():
     hooks_dir = _hooks_dir()
 
     if "core" in sections:
+        payload_cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+        local_present = _local_tier_present(payload_cwd)
         if profile == "light":
             core_label = "SESSION CORE"
             core_version = "%s light" % SESSION_CORE_VERSION
@@ -412,6 +434,9 @@ def main():
             core_label = "SESSION CORE"
             core_version = "%s resume" % SESSION_CORE_VERSION
             core_body = RESUME_KERNEL
+
+        if not local_present:
+            core_body = _strip_local_first(core_body)
 
         _write_payload("core", core_label, core_version, core_body)
 

@@ -1492,10 +1492,11 @@ EOF
     printf '      - CBOX_SCOPE_ROOT=%s\n' "$root" >> "$tmp"
     printf '      - CBOX_SCOPE_SLUG=%s\n' "$slug" >> "$tmp"
     printf '      - CBOX_LIMIT_AUTORESUME=%s\n' "${CBOX_LIMIT_AUTORESUME:-off}" >> "$tmp"
+    printf '      - CBOX_REGULATOR_AUTORESUME=%s\n' "${CBOX_REGULATOR_AUTORESUME-on}" >> "$tmp"
     printf '      - CBOX_SAFEGUARD_AUTOCONFIRM=%s\n' "${CBOX_SAFEGUARD_AUTOCONFIRM:-off}" >> "$tmp"
-    printf '      - CBOX_LIMIT_RESUME_DELAY=%s\n' "${CBOX_LIMIT_RESUME_DELAY:-300}" >> "$tmp"
+    printf '      - CBOX_LIMIT_RESUME_DELAY=%s\n' "${CBOX_LIMIT_RESUME_DELAY:-10}" >> "$tmp"
     printf '      - CBOX_LIMIT_RESUME_PROMPT=%s\n' "$resume_prompt" >> "$tmp"
-    printf '      - CBOX_LIMIT_RESUME_STAGGER=%s\n' "${CBOX_LIMIT_RESUME_STAGGER:-30}" >> "$tmp"
+    printf '      - CBOX_LIMIT_RESUME_STAGGER=%s\n' "${CBOX_LIMIT_RESUME_STAGGER:-3}" >> "$tmp"
     printf '      - CBOX_LIMIT_RESUME_MAX_PER_DAY=%s\n' "${CBOX_LIMIT_RESUME_MAX_PER_DAY:-10}" >> "$tmp"
   fi
   _cbox_clip_env_into "$tmp"
@@ -2925,6 +2926,7 @@ gen_hooks_dir() {
   _cbox_write "$INSTALL_DIR/generated/hooks/session_pane_map.py" < "$INSTALL_DIR/etc/hooks/session_pane_map.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/usage_statusline.py" < "$INSTALL_DIR/etc/hooks/usage_statusline.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/codex_usage_refresh.py" < "$INSTALL_DIR/etc/hooks/codex_usage_refresh.py"
+  _cbox_write "$INSTALL_DIR/generated/hooks/claude_usage_refresh.py" < "$INSTALL_DIR/etc/hooks/claude_usage_refresh.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/cbox_budget.py" < "$INSTALL_DIR/etc/hooks/cbox_budget.py"
   gen_scope_json
 }

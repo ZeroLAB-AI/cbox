@@ -10,7 +10,10 @@ import threading
 import time
 
 HOOKS_DIR = os.path.dirname(os.path.abspath(__file__))
-SHIM_PATH = os.path.join(os.path.dirname(HOOKS_DIR), "mcp", "codex_mcp_shim.py")
+SHIM_CANDIDATES = (
+    os.path.join(HOOKS_DIR, "codex_mcp_shim.py"),
+    os.path.join(os.path.dirname(HOOKS_DIR), "mcp", "codex_mcp_shim.py"),
+)
 
 LOCK_STALE_SECONDS = 30
 OVERALL_TIMEOUT_SEC = 20
@@ -18,8 +21,15 @@ INIT_TIMEOUT_SEC = 5
 RATE_LIMIT_READ_TIMEOUT_SEC = 10
 
 
+def _shim_path():
+    for path in SHIM_CANDIDATES:
+        if os.path.isfile(path):
+            return path
+    return SHIM_CANDIDATES[0]
+
+
 def _load_shim(shim_path=None):
-    path = shim_path or SHIM_PATH
+    path = shim_path or _shim_path()
     spec = importlib.util.spec_from_file_location(
         "codex_mcp_shim_for_usage_refresh", path
     )

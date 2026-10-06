@@ -8,6 +8,13 @@ trap 'rm -rf "$TMPBASE"' EXIT
 
 : > "$TMPBASE/mountinfo_hermetic"
 export CBOX_MOUNTINFO="$TMPBASE/mountinfo_hermetic"
+unset CBOX_CONTEXT_PROFILE CBOX_HERMES_DELEGATE
+CFG_PRESENT="$TMPBASE/cfg_present"
+CFG_ABSENT="$TMPBASE/cfg_absent"
+mkdir -p "$CFG_PRESENT" "$CFG_ABSENT"
+printf '%s\n' '{"mcpServers":{"hermes-local":{"command":"x"}}}' > "$CFG_PRESENT/.claude.json"
+printf '%s\n' '{"mcpServers":{"codex-sol":{"command":"x"}}}' > "$CFG_ABSENT/.claude.json"
+export CLAUDE_CONFIG_DIR="$CFG_PRESENT"
 
 _fail() {
   echo "FAIL: $1" >&2
@@ -626,6 +633,148 @@ JSON
   echo "PASS: stale bind probe reports, stays silent when clean, and never costs the payload"
 }
 
+test_local_first_follows_the_rendered_server() {
+  local d="$TMPBASE/lf_presence" payload src cfg
+  _make_repo "$d"
+  for src in startup resume; do
+    payload="$(CLAUDE_CONFIG_DIR="$CFG_PRESENT" python3 "$HOOK" --section core <<JSON
+{"source":"$src","cwd":"$d"}
+JSON
+)"
+    case "$payload" in
+      *"LOCAL FIRST (P0 before P5)"*) : ;;
+      *) _fail "$src core lacks LOCAL FIRST while the hermes-local server is configured" ;;
+    esac
+    payload="$(CLAUDE_CONFIG_DIR="$CFG_ABSENT" python3 "$HOOK" --section core <<JSON
+{"source":"$src","cwd":"$d"}
+JSON
+)"
+    case "$payload" in
+      *"LOCAL FIRST"*|*"hermes-local"*) _fail "$src core still carries LOCAL FIRST with no hermes-local server" ;;
+    esac
+    case "$payload" in
+      *"PROCEED, DO NOT BLOCK"*|*"SECURITY FLOOR"*) : ;;
+      *) _fail "$src core lost its remaining rules when LOCAL FIRST was dropped" ;;
+    esac
+  done
+  payload="$(CLAUDE_CONFIG_DIR="$CFG_ABSENT" CBOX_CONTEXT_PROFILE=light python3 "$HOOK" --section core <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+  case "$payload" in
+    *"LOCAL FIRST (P0 before P5)"*) _fail "light core still carries LOCAL FIRST with no hermes-local server" ;;
+    *"DELEGATE WRITE BOUNDARY"*) : ;;
+    *) _fail "light core lost DELEGATE WRITE BOUNDARY when LOCAL FIRST was dropped" ;;
+  esac
+  payload="$(CLAUDE_CONFIG_DIR="$TMPBASE/no_such_cfg" python3 "$HOOK" --section core <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+  case "$payload" in
+    *"LOCAL FIRST (P0 before P5)"*) _fail "missing config file must count as absent" ;;
+  esac
+  echo "PASS: LOCAL FIRST is emitted only when the hermes-local server is configured"
+}
+
+test_project_scoped_server_and_disabled_list() {
+  local d="$TMPBASE/lf_project" cfg="$TMPBASE/cfg_project" payload
+  _make_repo "$d"
+  mkdir -p "$cfg"
+  printf '{"projects":{"%s":{"mcpServers":{"hermes-local":{}},"disabledMcpServers":[]}}}\n' "$d" > "$cfg/.claude.json"
+  payload="$(CLAUDE_CONFIG_DIR="$cfg" python3 "$HOOK" --section core <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+  case "$payload" in
+    *"LOCAL FIRST (P0 before P5)"*) : ;;
+    *) _fail "project-scoped hermes-local server was not recognised" ;;
+  esac
+  printf '{"projects":{"%s":{"mcpServers":{"hermes-local":{}},"disabledMcpServers":["hermes-local"]}}}\n' "$d" > "$cfg/.claude.json"
+  payload="$(CLAUDE_CONFIG_DIR="$cfg" python3 "$HOOK" --section core <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+  case "$payload" in
+    *"LOCAL FIRST (P0 before P5)"*) _fail "a disabled hermes-local server must count as absent" ;;
+  esac
+  echo "PASS: project-scoped hermes-local counts, disabledMcpServers removes it"
+}
+
+test_loader_keeps_the_paragraph_on_every_failure_path() {
+  local d="$TMPBASE/lf_failsafe" payload hookdir="$TMPBASE/lf_failsafe_hooks"
+  local cfg_bad="$TMPBASE/cfg_failsafe_bad" cfg_link="$TMPBASE/cfg_failsafe_link"
+  _make_repo "$d"
+  mkdir -p "$cfg_bad" "$cfg_link"
+  printf '{oops' > "$cfg_bad/.claude.json"
+  payload="$(CLAUDE_CONFIG_DIR="$cfg_bad" python3 "$HOOK" --section core <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+  case "$payload" in
+    *"LOCAL FIRST (P0 before P5)"*) : ;;
+    *) _fail "an invalid config must keep the LOCAL FIRST paragraph" ;;
+  esac
+  printf '{"mcpServers":{}}\n' > "$TMPBASE/lf_real.json"
+  ln -s "$TMPBASE/lf_real.json" "$cfg_link/.claude.json"
+  payload="$(CLAUDE_CONFIG_DIR="$cfg_link" python3 "$HOOK" --section core <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+  case "$payload" in
+    *"LOCAL FIRST (P0 before P5)"*) : ;;
+    *) _fail "a symlinked config must keep the LOCAL FIRST paragraph" ;;
+  esac
+  mkdir -p "$hookdir"
+  cp "$HOOK" "$hookdir/continuity_session_start.py"
+  cp "$INSTALL_DIR/etc/hooks/session-core.txt" "$hookdir/session-core.txt"
+  payload="$(CLAUDE_CONFIG_DIR="$CFG_ABSENT" python3 "$hookdir/continuity_session_start.py" --section core <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+  case "$payload" in
+    *"LOCAL FIRST (P0 before P5)"*) : ;;
+    *) _fail "a loader without cbox_budget beside it must keep the LOCAL FIRST paragraph" ;;
+  esac
+  echo "PASS: every loader failure path keeps the LOCAL FIRST paragraph"
+}
+
+test_ancestor_project_entries_do_not_apply() {
+  local d="$TMPBASE/lf_anc" cfg="$TMPBASE/cfg_anc" payload
+  _make_repo "$d"
+  mkdir -p "$d/sub" "$cfg"
+  printf '{"mcpServers":{"hermes-local":{}},"projects":{"%s":{"disabledMcpServers":["hermes-local"]}}}\n' "$d" > "$cfg/.claude.json"
+  payload="$(CLAUDE_CONFIG_DIR="$cfg" python3 "$HOOK" --section core <<JSON
+{"source":"startup","cwd":"$d/sub"}
+JSON
+)"
+  case "$payload" in
+    *"LOCAL FIRST (P0 before P5)"*) : ;;
+    *) _fail "an ancestor project's disable must not apply to a child cwd" ;;
+  esac
+  echo "PASS: project matching is exact, ancestors do not apply"
+}
+
+test_core_digest_matches_the_filtered_body() {
+  local d="$TMPBASE/lf_digest" payload
+  _make_repo "$d"
+  payload="$(CLAUDE_CONFIG_DIR="$CFG_ABSENT" python3 "$HOOK" --section core <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+  printf '%s' "$payload" | python3 -c '
+import hashlib, re, sys
+text = sys.stdin.read()
+m = re.search(r"BEGIN ---\n[^\n]*\n(.*)\n--- CBOX CONTINUITY PAYLOAD core END \(digest ([0-9a-f]+)\)", text, re.S)
+if not m:
+    raise SystemExit("payload shape not recognised")
+body = m.group(1) + "\n"
+want = hashlib.sha256(body.encode()).hexdigest()[:16]
+if want != m.group(2):
+    raise SystemExit("digest %s does not match filtered body %s" % (m.group(2), want))
+' || _fail "core digest does not cover the filtered body"
+  echo "PASS: core digest covers the filtered body"
+}
+
 test_reference_payload_cap
 test_core_payload_cap
 test_core_payload_not_truncated
@@ -645,4 +794,9 @@ test_unreadable_ledger_degrades_not_discards
 test_unreadable_progress_degrades_not_discards
 test_distillate_fence_forgery_neutralized
 test_stale_binds_detection
+test_local_first_follows_the_rendered_server
+test_project_scoped_server_and_disabled_list
+test_loader_keeps_the_paragraph_on_every_failure_path
+test_ancestor_project_entries_do_not_apply
+test_core_digest_matches_the_filtered_body
 echo "all continuity_session_start tests passed"

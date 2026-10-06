@@ -2,15 +2,19 @@
 import calendar
 import fcntl
 import json
+import math
 import os
 import re
 import socket
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import session_scope_farm as farm
+import cbox_budget
 
 CFG = farm.CFG
 WATCH = os.path.join(CFG, "limit-watch") if CFG else ""
@@ -24,9 +28,16 @@ def int_env(name, default):
 
 
 AUTORESUME = os.environ.get("CBOX_LIMIT_AUTORESUME", "off") == "on"
-DELAY = int_env("CBOX_LIMIT_RESUME_DELAY", 300)
+
+
+def regulator_autoresume_enabled(value):
+    return value.strip().lower() not in ("", "off", "0", "false", "no")
+
+
+REGULATOR_AUTORESUME = regulator_autoresume_enabled(os.environ.get("CBOX_REGULATOR_AUTORESUME", "on"))
+DELAY = int_env("CBOX_LIMIT_RESUME_DELAY", 10)
 PROMPT = os.environ.get("CBOX_LIMIT_RESUME_PROMPT", "pokracuj") or "pokracuj"
-STAGGER = int_env("CBOX_LIMIT_RESUME_STAGGER", 30)
+STAGGER = int_env("CBOX_LIMIT_RESUME_STAGGER", 3)
 MAX_PER_DAY = int_env("CBOX_LIMIT_RESUME_MAX_PER_DAY", 10)
 
 SAFEGUARD = os.environ.get("CBOX_SAFEGUARD_AUTOCONFIRM", "off") == "on"
@@ -49,6 +60,8 @@ SAFEGUARD_FOREIGN_RE = re.compile(
 HOSTNAME = socket.gethostname()
 PANE_RE = re.compile(r"^%\d+$")
 POLL = 15
+LOG_LIMIT = 1024 * 1024
+REGULATOR_EXPIRY = 6 * 3600
 FRESH_WINDOW = 48 * 3600
 MARKER_TTL = 8 * 24 * 3600
 EPOCH_RE = re.compile(r"limit reached\|(\d{10,13})")
@@ -58,12 +71,43 @@ STALE_GRACE = 300
 STALE_STATES = ("working", "running", "blocked")
 
 
+_LOG_SEEN = {}
+
+
 def log(msg):
+    dedupe = msg.startswith(("reconciled stale job:", "loop error (", "safeguard pane pass error:",
+                             "inject failed before typing:", "regulator inject failed:",
+                             "regulator budget read failed:", "regulator marker pass error:"))
+    key = msg.split(" prevState=", 1)[0] if msg.startswith("reconciled stale job:") else msg.split(" ", 5)[:5] if msg.startswith("regulator marker pass error:") else msg.split(":", 1)[0]
+    if isinstance(key, list):
+        key = " ".join(key)
+    if dedupe and _LOG_SEEN.get(key) == msg:
+        return
     try:
         os.makedirs(WATCH, exist_ok=True)
-        with open(os.path.join(WATCH, "watchdog.log"), "a") as fh:
-            fh.write("%s [%s] %s\n" % (
-                time.strftime("%Y-%m-%d %H:%M:%S"), HOSTNAME, msg))
+        path = os.path.join(WATCH, "watchdog.log")
+        line = "%s [%s] %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), HOSTNAME, msg)
+        lockfd = os.open(path + ".lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(lockfd, fcntl.LOCK_EX)
+            try:
+                info = os.lstat(path)
+                if not stat.S_ISREG(info.st_mode):
+                    raise OSError("invalid watchdog log")
+                size = info.st_size
+            except FileNotFoundError:
+                size = 0
+            if size + len(line.encode("utf-8")) > LOG_LIMIT:
+                os.replace(path, path + ".1")
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            try:
+                os.write(fd, line.encode("utf-8"))
+            finally:
+                os.close(fd)
+        finally:
+            os.close(lockfd)
+        if dedupe:
+            _LOG_SEEN[key] = msg
     except OSError:
         pass
 
@@ -112,8 +156,43 @@ def extract_event(raw):
     return {"resetAt": reset_at, "cwd": cwd[:512]}
 
 
-def marker_path(sid, reset_at):
+def marker_path(sid, reset_at, kind="limit"):
+    if kind == "regulator":
+        return os.path.join(MARKERS, "%s.regulator.json" % sid)
     return os.path.join(MARKERS, "%s.%d.json" % (sid, reset_at or 0))
+
+
+def write_regulator_marker(sid, transcript, due, created_at=None):
+    if not isinstance(sid, str) or not farm.SID_RE.fullmatch(sid):
+        return False
+    if not isinstance(transcript, str) or not marker_owns_transcript({"transcript": transcript}, sid):
+        return False
+    try:
+        size = os.stat(transcript, follow_symlinks=False).st_size
+        if not stat.S_ISREG(os.lstat(transcript).st_mode):
+            return False
+        os.makedirs(MARKERS, mode=0o700, exist_ok=True)
+        if not stat.S_ISDIR(os.lstat(MARKERS).st_mode):
+            return False
+        path = marker_path(sid, None, "regulator")
+        if os.path.islink(path):
+            return False
+        created = time.time() if created_at is None else created_at
+        rec = {"kind": "regulator", "session_id": sid,
+               "transcript_path": transcript, "transcript_offset": size,
+               "due": due, "first_due": due, "created_at": created}
+        fd, tmp = tempfile.mkstemp(prefix=".regulator.", dir=MARKERS)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                json.dump(rec, fh)
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
 
 
 def write_marker(sid, event, transcript, size):
@@ -229,6 +308,74 @@ def activity_after_event(marker):
     return False
 
 
+def _transcript_bytes(path, offset, limit):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or not isinstance(offset, int) or offset < 0 or offset > info.st_size:
+            raise ValueError("invalid transcript")
+        os.lseek(fd, offset, os.SEEK_SET)
+        data = os.read(fd, limit + 1)
+        if len(data) > limit:
+            raise ValueError("transcript read limit")
+        return data
+    finally:
+        os.close(fd)
+
+
+def human_prompt_after_event(marker):
+    try:
+        raw_data = _transcript_bytes(marker["transcript_path"], marker["transcript_offset"], 4 * 1024 * 1024)
+        for raw in raw_data.splitlines():
+            if len(raw) > 1024 * 1024:
+                return True
+            try:
+                entry = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict) or entry.get("type") != "user":
+                continue
+            if any(entry.get(key) for key in ("isMeta", "isSynthetic", "synthetic", "meta")):
+                continue
+            if entry.get("source") in ("meta", "synthetic") or entry.get("userType") == "synthetic":
+                continue
+            message = entry.get("message")
+            if not isinstance(message, dict) or any(message.get(key) for key in ("isMeta", "isSynthetic")):
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                return True
+            if isinstance(content, list) and content and all(isinstance(item, dict) for item in content):
+                if not any(item.get("type") == "tool_result" for item in content):
+                    return True
+    except (OSError, KeyError, ValueError, TypeError):
+        return True
+    return False
+
+
+def pane_idle(marker):
+    try:
+        path = marker["transcript_path"]
+        size = os.stat(path, follow_symlinks=False).st_size
+        lines = _transcript_bytes(path, max(0, size - 65536), 65536).splitlines()
+        for raw in reversed(lines):
+            try:
+                entry = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict) or any(entry.get(key) for key in ("isMeta", "isSynthetic", "synthetic", "meta")):
+                continue
+            if entry.get("type") == "user":
+                return False
+            if entry.get("type") != "assistant":
+                continue
+            message = entry.get("message")
+            return isinstance(message, dict) and message.get("stop_reason") == "end_turn"
+    except (OSError, KeyError, ValueError, TypeError):
+        return False
+    return False
+
+
 def resumed_last_day(sid):
     count = 0
     cutoff = time.time() - 24 * 3600
@@ -262,10 +409,11 @@ def update_locked(path, expect_state, **fields):
         return rec
 
 
-def inject(pane):
+def inject(pane, prompt=None):
+    text = PROMPT if prompt is None else prompt
     typed = False
     try:
-        subprocess.run(["tmux", "send-keys", "-t", pane, "-l", PROMPT],
+        subprocess.run(["tmux", "send-keys", "-t", pane, "-l", text],
                        check=True, timeout=10)
         typed = True
         subprocess.run(["tmux", "send-keys", "-t", pane, "Enter"],
@@ -404,10 +552,156 @@ def _safeguard_pane_pass(sid, pane_id, now, today):
 
 
 def marker_owns_transcript(marker, sid):
-    transcript = marker.get("transcript") or ""
-    if os.path.basename(transcript) != sid + ".jsonl":
+    transcript = marker.get("transcript_path") or marker.get("transcript") or ""
+    if not isinstance(transcript, str) or os.path.basename(transcript) != sid + ".jsonl":
         return False
-    return transcript.startswith(os.path.join(CFG, "projects") + os.sep)
+    projects = os.path.realpath(os.path.join(CFG, "projects"))
+    return os.path.realpath(transcript).startswith(projects + os.sep)
+
+
+def _regulator_count_path(sid):
+    return os.path.join(WATCH, "regulator-counts", sid + ".json")
+
+
+def _regulator_times(sid, now):
+    data = load_json(_regulator_count_path(sid))
+    times = data.get("times") if isinstance(data, dict) else None
+    if not isinstance(times, list):
+        return []
+    return [value for value in times if isinstance(value, (int, float)) and math.isfinite(value) and now - 24 * 3600 <= value <= now]
+
+
+def _regulator_record_count(sid, now):
+    path = _regulator_count_path(sid)
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".count.", dir=os.path.dirname(path))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump({"times": _regulator_times(sid, now) + [now]}, fh)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def _marker_signature(path):
+    info = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("invalid marker")
+    return info.st_ino, info.st_mtime_ns, info.st_size
+
+
+def _remove_marker(path, signature):
+    try:
+        if _marker_signature(path) != signature:
+            return False
+        os.unlink(path)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _replace_marker(path, signature, marker):
+    fd, tmp = tempfile.mkstemp(prefix=".regulator.", dir=MARKERS)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump(marker, fh)
+        if _marker_signature(path) != signature:
+            return False
+        os.replace(tmp, path)
+        return True
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def _regulator_marker_pass(path, name, now):
+    signature = _marker_signature(path)
+    marker = load_json(path)
+    if not isinstance(marker, dict) or marker.get("kind") != "regulator":
+        return
+    if _marker_signature(path) != signature:
+        return
+    sid = marker.get("session_id")
+    due = marker.get("due")
+    first_due = marker.get("first_due", due)
+    valid_sid = isinstance(sid, str) and farm.SID_RE.fullmatch(sid)
+    valid_time = (isinstance(due, (int, float)) and math.isfinite(due) and
+                  isinstance(first_due, (int, float)) and math.isfinite(first_due) and
+                  now - REGULATOR_EXPIRY - 60 <= first_due <= due <= now + MARKER_TTL)
+    if not valid_sid or path != marker_path(sid, None, "regulator") or not marker_owns_transcript(marker, sid) or not valid_time:
+        _remove_marker(path, signature)
+        log("invalid regulator marker rejected: %s" % name)
+        return
+    if now - first_due >= REGULATOR_EXPIRY:
+        _remove_marker(path, signature)
+        log("regulator marker expired: session=%s" % sid)
+        return
+    if now < due:
+        return
+    if human_prompt_after_event(marker):
+        _remove_marker(path, signature)
+        log("regulator marker cancelled by human prompt: session=%s" % sid)
+        return
+    try:
+        budget = cbox_budget.budget_for_family("claude", now=now)
+    except Exception as exc:
+        log("regulator budget read failed: session=%s err=%r" % (sid, exc))
+        return
+    b = budget.get("b")
+    if b is not None and b < 0.5 and budget.get("status") in ("ok", "override"):
+        next_reset = budget.get("resets_at")
+        if isinstance(next_reset, (int, float)) and math.isfinite(next_reset) and next_reset > now:
+            marker["due"] = next_reset + 2
+            _replace_marker(path, signature, marker)
+        return
+    if len(_regulator_times(sid, now)) >= MAX_PER_DAY:
+        _remove_marker(path, signature)
+        log("regulator resume suppressed (daily cap): session=%s" % sid)
+        return
+    pane = pane_for(sid)
+    if not pane or pane.get("container") != HOSTNAME:
+        return
+    pane_id = pane.get("pane")
+    if not pane_id or not PANE_RE.fullmatch(pane_id) or not pane_alive(pane_id):
+        return
+    if human_prompt_after_event(marker) or not pane_idle(marker):
+        return
+    if _marker_signature(path) != signature:
+        return
+    reset_text = time.strftime("%H:%M:%SZ", time.gmtime(int(due) - 2))
+    n = budget.get("n")
+    if not isinstance(n, int):
+        n = 0
+    prompt = "cbox: quota reset at %s, agents: %d; continue the blocked step" % (reset_text, n)
+    try:
+        partial = inject(pane_id, prompt)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log("regulator inject failed: session=%s err=%r" % (sid, exc))
+        return
+    if partial:
+        log("regulator inject partial: session=%s err=%s" % (sid, partial))
+    try:
+        _regulator_record_count(sid, now)
+    except OSError as exc:
+        log("regulator count write failed: session=%s err=%r" % (sid, exc))
+    _remove_marker(path, signature)
+    log("regulator resumed: session=%s pane=%s" % (sid, pane_id))
+
+
+def regulator_pass():
+    if not REGULATOR_AUTORESUME:
+        return
+    now = time.time()
+    for name in sorted(farm.entries(MARKERS)):
+        if not name.endswith(".regulator.json"):
+            continue
+        try:
+            _regulator_marker_pass(os.path.join(MARKERS, name), name, now)
+        except (OSError, ValueError, TypeError, OverflowError) as exc:
+            log("regulator marker pass error: %s %r" % (name, exc))
 
 
 def resume_pass():
@@ -615,15 +909,68 @@ def reconcile_stale_jobs():
 
 
 def prune():
-    cutoff = time.time() - MARKER_TTL
+    now = time.time()
+    cutoff = now - MARKER_TTL
     for name in farm.entries(MARKERS):
         path = os.path.join(MARKERS, name)
         rec = load_json(path)
-        if rec is None or rec.get("detectedAt", 0) < cutoff:
+        created = rec.get("created_at", 0) if isinstance(rec, dict) and rec.get("kind") == "regulator" else rec.get("detectedAt", 0) if isinstance(rec, dict) else 0
+        if rec is None or created < cutoff:
             try:
                 os.unlink(path)
             except OSError:
                 pass
+    count_dir = os.path.join(WATCH, "regulator-counts")
+    for name in farm.entries(count_dir):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(count_dir, name)
+        data = load_json(path)
+        times = data.get("times") if isinstance(data, dict) else None
+        if not isinstance(times, list) or not any(isinstance(value, (int, float)) and math.isfinite(value) and now - 24 * 3600 <= value <= now for value in times):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    for directory, prefixes in ((MARKERS, (".regulator.",)), (count_dir, (".count.",))):
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            continue
+        for name in names:
+            if not name.startswith(prefixes):
+                continue
+            path = os.path.join(directory, name)
+            try:
+                if os.lstat(path).st_mtime < now - 3600:
+                    os.unlink(path)
+            except OSError:
+                pass
+
+
+def next_sleep(now=None):
+    now = time.time() if now is None else now
+    due_times = []
+    for name in farm.entries(MARKERS):
+        if not name.endswith(".json"):
+            continue
+        rec = load_json(os.path.join(MARKERS, name))
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("kind") == "regulator":
+            if REGULATOR_AUTORESUME:
+                due_times.append(rec.get("due"))
+                first_due = rec.get("first_due", rec.get("due"))
+                if isinstance(first_due, (int, float)) and math.isfinite(first_due):
+                    due_times.append(first_due + REGULATOR_EXPIRY)
+        elif AUTORESUME and rec.get("state") == "pending":
+            reset = rec.get("resetAt")
+            if isinstance(reset, (int, float)):
+                due_times.append(reset + DELAY)
+    due_times = [value for value in due_times if isinstance(value, (int, float)) and math.isfinite(value) and value > now]
+    if not due_times:
+        return float(POLL)
+    return max(0.5, min(float(POLL), min(due_times) - now))
 
 
 def daemon():
@@ -634,8 +981,8 @@ def daemon():
         return 0
     os.makedirs(MARKERS, exist_ok=True)
     os.makedirs(PANES, exist_ok=True)
-    log("watchdog started (autoresume=%s safeguard=%s delay=%ss stagger=%ss cap=%s/day)" % (
-        "on" if AUTORESUME else "off", "on" if SAFEGUARD else "off",
+    log("watchdog started (autoresume=%s regulator=%s safeguard=%s delay=%ss stagger=%ss cap=%s/day)" % (
+        "on" if AUTORESUME else "off", "on" if REGULATOR_AUTORESUME else "off", "on" if SAFEGUARD else "off",
         DELAY, STAGGER, MAX_PER_DAY))
     offsets = {}
     while True:
@@ -651,15 +998,20 @@ def daemon():
             scan_transcripts(offsets)
             if AUTORESUME:
                 resume_pass()
+            if REGULATOR_AUTORESUME:
+                regulator_pass()
+        except Exception as exc:
+            log("loop error (scan/resume): %r" % exc)
+        try:
             prune()
         except Exception as exc:
-            log("loop error (scan/resume/prune): %r" % exc)
+            log("loop error (prune): %r" % exc)
         if SAFEGUARD:
             try:
                 safeguard_pass()
             except Exception as exc:
                 log("loop error (safeguard): %r" % exc)
-        time.sleep(POLL)
+        time.sleep(next_sleep())
 
 
 def main(argv):

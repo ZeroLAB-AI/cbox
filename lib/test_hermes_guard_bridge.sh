@@ -89,10 +89,75 @@ MAL_OUT="$(python3 "$BRIDGE" < "$MALFORMED_FX" 2>"$TMPBASE/mal.stderr")"
 MAL_RC=$?
 [ "$MAL_RC" -eq 0 ] || _fail "bridge crashed (non-zero exit) on malformed input instead of degrading to allow (rc=$MAL_RC)"
 case "$MAL_OUT" in
-  *'"decision": "block"'*) _fail "malformed input somehow produced a block decision" ;;
+  *'"decision": "block"'*) ;;
+  *) _fail "malformed input must be blocked: $MAL_OUT" ;;
 esac
-[ -s "$TMPBASE/mal.stderr" ] || _fail "malformed input did not log anything to stderr"
-_ok "malformed/non-JSON input degrades to allow (exit 0, no block, stderr note) - bridge never crashes (fail-open armor proven)"
+case "$MAL_OUT" in
+  *"internal guard error"*) ;;
+  *) _fail "malformed-input block must say internal guard error, not package install: $MAL_OUT" ;;
+esac
+_ok "malformed/non-JSON input is blocked as an internal guard error, not mislabeled as a package install"
+
+python3 - "$BRIDGE" <<'PY'
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("bridge", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+denied = [
+    "pip install x", "pip3 download x", "/usr/bin/pip install x",
+    "python3 -m pip install x", "/usr/bin/python3.12 -m pip download x",
+    "uv pip install x", "uv add x", "uv tool install x",
+    "pipx install x", "poetry add x", "poetry install",
+    "conda install x", "mamba install x", "micromamba install x",
+    "npm install x", "npm i x", "pnpm add x", "yarn install x",
+    "apt install x", "apt-get install x", "dnf install x",
+    "yum install x", "apk add x", "zypper install x",
+    "gem install x", "cargo install x", "go install x", "go get x",
+    "env X=1 /usr/bin/pip install x", "command pip install x",
+    "nice -n 2 pip install x", "timeout 3 pip install x",
+    "sudo pip install x", "exec pip install x",
+    "sh -c 'pip install x'", "bash -lc 'uv pip install x'",
+    "true && pip install x", "false; pip install x", "false || pip install x",
+    "echo x | pip install x", "echo $(pip install x)",
+    "echo `pip install x`", "echo x\npip install x",
+    "npx cowsay hi", "uvx ruff check .", "pipx run black .",
+    "npm ci", "npm exec cowsay", "uv sync", "uv run --with requests script.py",
+    "bun add left-pad", "bun install", "bun x cowsay", "bunx cowsay",
+    "yarn", "yarn --silent",
+    "conda create -n x", "conda env create -f env.yml",
+    "pip wheel x", "go mod download",
+    "pip3.11 install x", "python -mpip install x",
+]
+allowed = [
+    "pip list", "pip show x", "npm test", "python3 -m pytest",
+    "grep 'pip install' README.md", "cat requirements.txt",
+    "yarn build", "yarn test", "go mod tidy", "uv run script.py",
+    "conda env list",
+]
+for command in denied:
+    assert module.forbidden_install(command), command
+for command in allowed:
+    assert not module.forbidden_install(command), command
+
+unparseable_allowed = [
+    "echo it's",
+    "echo it's fine, nothing to install",
+    "cat > f <<'EOF'\nhello world\nEOF",
+    "cat > f <<'EOF'\nit's just a note\nEOF",
+]
+for command in unparseable_allowed:
+    assert not module.forbidden_install(command), command
+
+unparseable_denied = [
+    "cat > f <<'EOF'\npip install it's-package\nEOF",
+]
+for command in unparseable_denied:
+    assert module.forbidden_install(command), command
+PY
+_ok "package installation matrix blocks network installs and permits inspection commands"
+_ok "unparseable commands (heredocs, apostrophes) are not denied unless they clearly contain an install invocation"
 
 GEN_SH="$INSTALL_DIR/templates/generators.sh"
 ORACLE_OUT="$(bash "$INSTALL_DIR/lib/test_m3_oracle.sh" verify 2>&1)" && ORACLE_RC=0 || ORACLE_RC=$?

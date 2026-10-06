@@ -847,11 +847,12 @@ case "${1:-}" in
     if [ -t 0 ] && [ -t 1 ] \
         && { [ "${CBOX_SESSION_MULTIPLEX:-off}" = on ] \
              || { [ "$_verb" = claude ] && [ "${CBOX_LIMIT_AUTORESUME:-off}" = on ]; } \
+             || { [ "$_verb" = claude ] && [ "${CBOX_REGULATOR_AUTORESUME-on}" = on ]; } \
              || { [ "$_verb" = claude ] && [ "${CBOX_SAFEGUARD_AUTOCONFIRM:-off}" = on ]; }; }; then
       if command -v tmux >/dev/null 2>&1; then
         _multiplex_run "$_verb" "$_resolved" "$@"
       fi
-      echo "entrypoint: session multiplexing wanted (CBOX_SESSION_MULTIPLEX=${CBOX_SESSION_MULTIPLEX:-off}, CBOX_LIMIT_AUTORESUME=${CBOX_LIMIT_AUTORESUME:-off}, CBOX_SAFEGUARD_AUTOCONFIRM=${CBOX_SAFEGUARD_AUTOCONFIRM:-off}) but tmux is missing in this image - rebuild on the host (next 'cbox run' after re-bless); running without a session wrapper" >&2
+      echo "entrypoint: session multiplexing wanted (CBOX_SESSION_MULTIPLEX=${CBOX_SESSION_MULTIPLEX:-off}, CBOX_LIMIT_AUTORESUME=${CBOX_LIMIT_AUTORESUME:-off}, CBOX_REGULATOR_AUTORESUME=${CBOX_REGULATOR_AUTORESUME-on}, CBOX_SAFEGUARD_AUTOCONFIRM=${CBOX_SAFEGUARD_AUTOCONFIRM:-off}) but tmux is missing in this image - rebuild on the host (next 'cbox run' after re-bless); running without a session wrapper" >&2
     fi
     _run_as_user "$_resolved" "$@"
     ;;

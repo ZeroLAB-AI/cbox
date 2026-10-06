@@ -6,7 +6,8 @@
   "remoteControlAtStartup": false,
   "statusLine": {
     "type": "command",
-    "command": "python3 @HOME@/.claude/hooks/usage_statusline.py"
+    "command": "python3 @HOME@/.claude/hooks/usage_statusline.py",
+    "refreshInterval": 60
   },
   "permissions": {
     "defaultMode": "bypassPermissions"

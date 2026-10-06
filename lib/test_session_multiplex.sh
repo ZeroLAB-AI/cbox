@@ -119,7 +119,7 @@ awk '
 [ -s "$WRAP_DIR/hermes_block.sh" ] || _fail "could not extract the hermes wrap-decision block from entrypoint.sh"
 
 _run_wrap_decision() {
-  local block="$1" verb="$2" multiplex="$3" autoresume="$4" tmux_present="$5" tty="$6"
+  local block="$1" verb="$2" multiplex="$3" autoresume="$4" tmux_present="$5" tty="$6" regulator="${7-on}"
   local out="$TMPBASE/decision_out_$$_$RANDOM"
   local script_body
   script_body="$(cat <<INNER
@@ -127,6 +127,7 @@ set -eu
 _verb='$verb'
 CBOX_SESSION_MULTIPLEX='$multiplex'
 CBOX_LIMIT_AUTORESUME='$autoresume'
+CBOX_REGULATOR_AUTORESUME='$regulator'
 CBOX_SAFEGUARD_AUTOCONFIRM='off'
 _resolved=/fake/bin
 HERMES_HOME=/fake/home
@@ -186,8 +187,14 @@ esac
 
 R6="$(_run_wrap_decision "$WRAP_DIR/claude_codex_block.sh" claude off off 1 1)"
 case "$R6" in
-  FELL_THROUGH_NO_WRAP) _ok "claude does not wrap when both CBOX_SESSION_MULTIPLEX and CBOX_LIMIT_AUTORESUME are off" ;;
-  *) _fail "claude unexpectedly wrapped with both variables off (got: $R6)" ;;
+  MULTIPLEX_RUN_CALLED*) _ok "claude wraps by default for regulator auto-resume" ;;
+  *) _fail "claude did not wrap for default regulator auto-resume (got: $R6)" ;;
+esac
+
+R6_OFF="$(_run_wrap_decision "$WRAP_DIR/claude_codex_block.sh" claude off off 1 1 off)"
+case "$R6_OFF" in
+  FELL_THROUGH_NO_WRAP) _ok "claude does not wrap when all three wrap switches are off" ;;
+  *) _fail "claude unexpectedly wrapped with all three switches off (got: $R6_OFF)" ;;
 esac
 
 R7="$(_run_wrap_decision "$WRAP_DIR/claude_codex_block.sh" claude on off 1 0)"

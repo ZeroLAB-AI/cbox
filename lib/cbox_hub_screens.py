@@ -32,18 +32,31 @@ def display_width(text):
     return sum(_char_width(ch) for ch in text)
 
 
-def _row(text):
-    if display_width(text) <= COLS:
+def _truncate(text, width, suffix="..."):
+    if display_width(text) <= width:
         return text
     out = ""
-    width = 0
+    suffix_width = display_width(suffix)
+    if suffix_width > width:
+        suffix = ""
+        suffix_width = 0
+    limit = width - suffix_width
+    used = 0
     for ch in text:
         cw = _char_width(ch)
-        if width + cw > COLS - 3:
+        if used + cw > limit:
             break
         out += ch
-        width += cw
-    return out + "..."
+        used += cw
+    return out + suffix
+
+
+def _row(text):
+    return _truncate(text, COLS)
+
+
+def _key_column(key):
+    return " " + key + (" " * max(0, 3 - display_width(key))) + " "
 
 
 def render_main(snapshot):
@@ -77,7 +90,8 @@ def render_main(snapshot):
         verb = "attach" if state == "running" else "start"
         argv = [cbox_path, "run", name]
         actions.append(Action(str(i), name, kind="run", argv=argv))
-        engine_rows.append(" %d %-9s %s" % (i, name, verb))
+        engine_rows.append(" %d " % i + name +
+                           (" " * max(0, 9 - display_width(name))) + " " + verb)
 
     area_rows = []
     for key, label, submenu in MAIN_AREAS:
@@ -98,7 +112,8 @@ def render_main(snapshot):
     for idx in range(n):
         left = engine_rows[idx] if idx < len(engine_rows) else ""
         right = area_rows[idx] if idx < len(area_rows) else ""
-        lines.append(_row(("%-30s%s" % (left, right)).rstrip()))
+        padding = " " * max(0, 30 - display_width(left))
+        lines.append(_row((left + padding + right).rstrip()))
     lines.append("")
 
     actions.append(Action("r", "refresh", kind="refresh", hint="refresh status"))
@@ -107,14 +122,13 @@ def render_main(snapshot):
     default = actions[0] if actions else None
     footer_left = "Enter=%s   ?=commands" % (default.key if default else "")
     cmd_hint = "cmd: %s" % (default.hint if default else "")
-    budget = COLS - len(footer_left) - 1
+    budget = COLS - display_width(footer_left) - 1
     if budget < 4:
         budget = 4
-    if len(cmd_hint) > budget:
-        cmd_hint = cmd_hint[:budget - 3] + "..."
-    pad = max(1, COLS - len(footer_left) - len(cmd_hint))
+    cmd_hint = _truncate(cmd_hint, budget)
+    pad = max(1, COLS - display_width(footer_left) - display_width(cmd_hint))
     footer_line = footer_left + (" " * pad) + cmd_hint
-    lines.append(_row(footer_line[:COLS]))
+    lines.append(_row(footer_line))
 
     text = "\n".join(lines) + "\n"
     return text, actions
@@ -123,7 +137,8 @@ def render_main(snapshot):
 def render_hints(actions):
     lines = ["command hints", "-" * COLS]
     for a in actions:
-        lines.append(_row(" %-3s %-14s %s" % (a.key, a.label, a.hint)))
+        label_padding = " " * max(0, 14 - display_width(a.label))
+        lines.append(_row(_key_column(a.key) + a.label + label_padding + " " + a.hint))
     lines.append("")
     lines.append("press any key to go back")
     return "\n".join(lines) + "\n"
@@ -159,7 +174,7 @@ def render_sessions(snapshot):
         Action("b", "back", kind="back"),
     ]
     for a in actions:
-        lines.append(" %-3s %s" % (a.key, a.label))
+        lines.append(_key_column(a.key) + a.label)
     return "\n".join(lines) + "\n", actions
 
 
@@ -188,7 +203,7 @@ def render_network(snapshot):
         Action("b", "back", kind="back"),
     ]
     for a in actions:
-        lines.append(" %-3s %s" % (a.key, a.label))
+        lines.append(_key_column(a.key) + a.label)
     return "\n".join(lines) + "\n", actions
 
 
@@ -210,7 +225,7 @@ def render_ollama(snapshot):
         Action("b", "back", kind="back"),
     ]
     for a in actions:
-        lines.append(" %-3s %s" % (a.key, a.label))
+        lines.append(_key_column(a.key) + a.label)
     return "\n".join(lines) + "\n", actions
 
 
@@ -244,7 +259,7 @@ def render_wireguard(snapshot):
         Action("b", "back", kind="back"),
     ]
     for a in actions:
-        lines.append(" %-3s %s" % (a.key, a.label))
+        lines.append(_key_column(a.key) + a.label)
     return "\n".join(lines) + "\n", actions
 
 
@@ -284,7 +299,7 @@ def render_maintenance(snapshot):
         Action("b", "back", kind="back"),
     ]
     for a in actions:
-        lines.append(" %-3s %s" % (a.key, a.label))
+        lines.append(_key_column(a.key) + a.label)
     return "\n".join(lines) + "\n", actions
 
 
