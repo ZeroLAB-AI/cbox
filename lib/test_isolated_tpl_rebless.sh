@@ -164,14 +164,35 @@ src_ovr_line="$(printf '%s\n' "$run_local_block" | grep -n '^    \. "\$eff/cbox.
   || _fail "[HIGH] run_local must verify the layered config is not drifted before sourcing cbox.override"
 _ok "[HIGH] run_local gates the layered status before sourcing cbox.override"
 
-force_set_line="$(printf '%s\n' "$run_local_block" | grep -n '^    CBOX_WORKSPACES="\$root"$' | tail -1 | cut -d: -f1)"
-[ -n "$src_ovr_line" ] && [ -n "$force_set_line" ] && [ "$force_set_line" -gt "$src_ovr_line" ] \
-  || _fail "[MEDIUM] run_local must re-assert CBOX_MODE/CBOX_WORKSPACES/CBOX_WORKDIR after sourcing cbox.override, so an override cannot widen the container mounts"
-_ok "[MEDIUM] run_local re-asserts the excluded mount keys after sourcing cbox.override"
+ws_set_line="$(printf '%s\n' "$run_local_block" | grep -n '^    CBOX_WORKSPACES="\$(_cbox_project_workspaces_from_file "\$eff/cbox.override" "\$root")"$' | tail -1 | cut -d: -f1)"
+mode_set_line="$(printf '%s\n' "$run_local_block" | grep -n '^    CBOX_MODE=isolated$' | tail -1 | cut -d: -f1)"
+wd_set_line="$(printf '%s\n' "$run_local_block" | grep -n '^    CBOX_WORKDIR="\$root"$' | tail -1 | cut -d: -f1)"
+[ -n "$src_ovr_line" ] && [ -n "$ws_set_line" ] && [ -n "$mode_set_line" ] && [ -n "$wd_set_line" ] \
+  && [ "$ws_set_line" -gt "$src_ovr_line" ] && [ "$mode_set_line" -gt "$src_ovr_line" ] && [ "$wd_set_line" -gt "$src_ovr_line" ] \
+  || _fail "[MEDIUM] run_local must re-assert CBOX_MODE/CBOX_WORKDIR and rebuild CBOX_WORKSPACES (root plus the project's own extras from cbox.override, never the global list) after sourcing cbox.override"
+_ok "[MEDIUM] run_local re-asserts the pinned mount keys and rebuilds the project workspaces after sourcing cbox.override"
 
 config_set_block="$(awk '/^_cbox_config_set_isolated\(\) \{/,/^}$/' "$INSTALL_DIR/cbox")"
 printf '%s\n' "$config_set_block" | grep -q '_cbox_layered_require_ok "\$eff"' \
   || _fail "[HIGH] cbox config set (isolated) must gate on _cbox_layered_require_ok before writing overrides"
 _ok "[HIGH] cbox config set (isolated) is wired to the layered status gate"
+
+XTRA="$TMPBASE/xtra"
+mkdir -p "$XTRA"
+mv "$EFF/cbox.base" "$TMPBASE/stale.base"
+mv "$EFF/cbox.override" "$TMPBASE/stale.override"
+_write_conf
+printf 'CBOX_WORKSPACES=%q\n' "$ROOT $XTRA" >> "$EFF/cbox.conf"
+_cbox_manifest_write "$EFF" "$ROOT" "$EFF/cbox.conf"
+sed -i 's/^generators=.*/generators=deadbeef/' "$EFF/manifest.sha256"
+_cbox_rebless_local_templates "$ROOT" "$EFF" >/dev/null 2>&1 || _fail "workspaces: re-bless of a project holding extra workspaces failed"
+grep -qxF "$(printf 'CBOX_WORKSPACES=%q' "$ROOT $XTRA")" "$EFF/cbox.override" \
+  || _fail "workspaces: adopt-on-first-touch must keep the project's extra workspaces as an override, got: $(cat "$EFF/cbox.override")"
+grep -qxF "$(printf 'CBOX_WORKSPACES=%q' "$ROOT $XTRA")" "$EFF/cbox.conf" || _fail "workspaces: re-bless dropped the extra workspaces from the conf"
+sed -i 's/^generators=.*/generators=deadbeef/' "$EFF/manifest.sha256"
+_cbox_rebless_local_templates "$ROOT" "$EFF" >/dev/null 2>&1 || _fail "workspaces: second re-bless failed"
+grep -qxF "$(printf 'CBOX_WORKSPACES=%q' "$ROOT $XTRA")" "$EFF/cbox.override" || _fail "workspaces: a template re-bless with a stored base dropped the extras"
+grep -qxF "$(printf 'CBOX_WORKSPACES=%q' "$ROOT $XTRA")" "$EFF/cbox.conf" || _fail "workspaces: a template re-bless with a stored base dropped the extras from the conf"
+_ok "re-bless keeps a project's extra workspaces (adopted into the override, then untouched by later template re-blesses)"
 
 echo "PASS: isolated template re-bless keeps project settings"

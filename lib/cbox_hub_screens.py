@@ -65,7 +65,13 @@ def render_main(snapshot):
     root = ctx.get("root") or "."
     mode = ctx.get("mode", "none")
     lines = []
-    lines.append(_row("cbox  %s  %s" % (root, mode)))
+    head = "cbox  %s  %s" % (root, mode)
+    profile = ctx.get("profile")
+    if profile and profile != "default":
+        head += "  profile %s" % profile
+    elif ctx.get("profile_error"):
+        head += "  profile ?"
+    lines.append(_row(head))
     lines.append("-" * COLS)
 
     status = []

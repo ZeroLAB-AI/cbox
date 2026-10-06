@@ -11,9 +11,8 @@ Descending from P0 to P5 needs one reason from this closed list, written into th
 Every P0 result is verified empirically by the driver (test, grep, diff) - the check decides, not the task type. When hermes-local is absent or answers with a connection error, route classically at once with `local-skip: unavailable`; never wait on it or retry it in a loop.
 
 - For delegating work to agents in workflows, use worker for what P0 does not cover, except cases below.
-- After writing or modifying code, proactively run the code-reviewer subagent on the diff.
-- Before committing changes that touch auth, API endpoints, or input handling, run the security-reviewer subagent. Blocking: CRITICAL and HIGH findings must be fixed first.
-- Failing tests: use the verifier subagent to check (read-only, no fixes); hand any fix to worker or, for an unclear cause, to debugger.
+- Reviews follow the review mode (CBOX_REVIEW, default ask). ask: code-reviewer and security-reviewer never run automatically; where a review would have run (after code changes; before committing changes that touch auth, API endpoints, or input handling) ask the owner one short non-blocking question, keep working, run the reviewer only on a yes, and note a declined review in PROGRESS. auto: run code-reviewer on the diff after code changes and security-reviewer before auth/API/input commits. Blocking in both modes once security-reviewer has run: CRITICAL and HIGH findings must be fixed first.
+- Tests are run as a plain command (Bash) by whoever made the change, driver or worker; never spawn the verifier or a test-runner subagent just to run tests. The verifier runs only on the owner's explicit request. Hand a fix to worker or, for an unclear cause, to debugger.
 - Documentation tasks (README, docstrings, changelog): use the doc-writer subagent.
 - Codebase exploration and search: use the built-in Explore agent; do not spawn custom agents for search.
 - The alien subagent has two escalation paths: go directly to it when the task is clearly beyond weaker agents up front (architecture decisions, cross-cutting refactors, known-hard problems) or when explicitly requested; otherwise escalate to it only after a weaker agent has failed. Never use it for routine work.

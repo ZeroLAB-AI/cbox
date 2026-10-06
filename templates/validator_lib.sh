@@ -343,6 +343,20 @@ _cbox_val_named_kernel_lang() {
   return 0
 }
 
+_cbox_val_named_profile_name() {
+  local val="$1"
+  [ -n "$val" ] || { printf 'must not be empty'; return 1; }
+  [ "${#val}" -le 16 ] || { printf 'must be at most 16 characters'; return 1; }
+  case "$val" in
+    [abcdefghijklmnopqrstuvwxyz]*) ;;
+    *) printf 'must start with a lowercase letter'; return 1 ;;
+  esac
+  case "$val" in
+    *[!abcdefghijklmnopqrstuvwxyz0123456789-]*) printf 'may contain only lowercase letters, digits and hyphens'; return 1 ;;
+  esac
+  return 0
+}
+
 _cbox_val_named_codex_model_slug() {
   local val="$1"
   [ -n "$val" ] || { printf 'must not be empty'; return 1; }

@@ -8,7 +8,7 @@ trap 'rm -rf "$TMPBASE"' EXIT
 
 : > "$TMPBASE/mountinfo_hermetic"
 export CBOX_MOUNTINFO="$TMPBASE/mountinfo_hermetic"
-unset CBOX_CONTEXT_PROFILE CBOX_HERMES_DELEGATE
+unset CBOX_CONTEXT_PROFILE CBOX_HERMES_DELEGATE CBOX_REVIEW
 CFG_PRESENT="$TMPBASE/cfg_present"
 CFG_ABSENT="$TMPBASE/cfg_absent"
 mkdir -p "$CFG_PRESENT" "$CFG_ABSENT"
@@ -136,7 +136,7 @@ import sys
 with open(sys.argv[1], "w", encoding="utf-8") as f:
     f.write("SESSION CORE (oversized synthetic fixture)\n\n")
     f.write(("filler line to exceed the core byte cap\n") * 500)
-    f.write("\nVersion: session-core v7\n")
+    f.write("\nVersion: session-core v8\n")
 PY
   local d="$TMPBASE/oversized-core-repo"
   _make_repo "$d"
@@ -149,7 +149,7 @@ JSON
     *) _fail "oversized core: expected truncation marker, cap did not engage" ;;
   esac
   case "$payload" in
-    *"Version: session-core v7"*) _fail "oversized core: full body present, fixture did not exceed the cap" ;;
+    *"Version: session-core v8"*) _fail "oversized core: full body present, fixture did not exceed the cap" ;;
     *) ;;
   esac
   echo "PASS: a core file larger than the cap still truncates with the marker"
@@ -216,8 +216,8 @@ JSON
     *) _fail "resume profile core payload does not open with the LOCAL FIRST rule" ;;
   esac
   case "$payload" in
-    *"session-core v7 resume"*) : ;;
-    *) _fail "resume profile core version is not session-core v7" ;;
+    *"session-core v8 resume"*) : ;;
+    *) _fail "resume profile core version is not session-core v8" ;;
   esac
   echo "PASS: resume profile opens with the LOCAL FIRST rule"
 }
@@ -775,6 +775,149 @@ if want != m.group(2):
   echo "PASS: core digest covers the filtered body"
 }
 
+_core_for() {
+  local mode="$1" source="$2" profile="$3" d="$4"
+  if [ -n "$mode" ]; then
+    CBOX_REVIEW="$mode" CBOX_CONTEXT_PROFILE="${profile:-full}" python3 "$HOOK" --section core <<JSON
+{"source":"$source","cwd":"$d"}
+JSON
+  else
+    CBOX_CONTEXT_PROFILE="${profile:-full}" python3 "$HOOK" --section core <<JSON
+{"source":"$source","cwd":"$d"}
+JSON
+  fi
+}
+
+test_review_mode_full_core() {
+  local d="$TMPBASE/review_full" ask auto dflt bogus
+  _make_repo "$d"
+  ask="$(_core_for ask startup full "$d")"
+  auto="$(_core_for auto startup full "$d")"
+  dflt="$(_core_for "" startup full "$d")"
+  bogus="$(_core_for bogus startup full "$d")"
+  case "$ask" in
+    *"Reviews are on request (CBOX_REVIEW=ask): never run code-reviewer or security-reviewer automatically"*"ask the owner one short non-blocking question"*"note a declined review in PROGRESS"*) : ;;
+    *) _fail "ask mode full core lacks the ask-mode review text" ;;
+  esac
+  case "$ask" in
+    *"run code-reviewer on the diff"*|*"{{REVIEW}}"*) _fail "ask mode full core still carries the automatic review text or a raw placeholder" ;;
+  esac
+  case "$auto" in
+    *"After code changes, run code-reviewer on the diff. Before committing auth, API, or input-handling changes, run security-reviewer; CRITICAL/HIGH findings block commit."*) : ;;
+    *) _fail "auto mode full core lacks the automatic review text" ;;
+  esac
+  case "$auto" in
+    *"CBOX_REVIEW=ask"*|*"{{REVIEW}}"*) _fail "auto mode full core carries the ask-mode text or a raw placeholder" ;;
+  esac
+  [ "$dflt" = "$ask" ] || _fail "unset CBOX_REVIEW must behave as ask"
+  [ "$bogus" = "$ask" ] || _fail "an invalid CBOX_REVIEW value must behave as ask"
+  echo "PASS: full core carries the ask text by default and for invalid values, the automatic text only for auto"
+}
+
+test_tests_run_as_commands_in_core() {
+  local d="$TMPBASE/tests_cmd" mode payload
+  _make_repo "$d"
+  for mode in ask auto; do
+    payload="$(_core_for "$mode" startup full "$d")"
+    case "$payload" in
+      *"Run tests yourself with the test command in Bash (workers too); never spawn verifier or a test-runner for that; verifier only on the owner's explicit request."*) : ;;
+      *) _fail "$mode core lacks the tests-as-commands rule" ;;
+    esac
+    case "$payload" in
+      *"Use verifier to check failures"*) _fail "$mode core still routes failing tests to verifier" ;;
+    esac
+  done
+  echo "PASS: both review modes tell the driver to run tests as a command, verifier on request only"
+}
+
+test_review_mode_core_size_and_tail() {
+  local d="$TMPBASE/review_size" mode payload bytes last_line
+  _make_repo "$d"
+  last_line="$(grep -v '^[[:space:]]*$' "$INSTALL_DIR/etc/hooks/session-core.txt" | tail -n 1)"
+  for mode in ask auto; do
+    payload="$(_core_for "$mode" startup full "$d")"
+    bytes="$(_body_bytes core "$payload")" || _fail "$mode: missing core payload"
+    [ "$bytes" -le 7923 ] || _fail "$mode core body is $bytes B, above the 7923 B delivered by the previous core"
+    case "$payload" in
+      *"(remainder on disk, not injected)"*) _fail "$mode core carries a truncation marker" ;;
+    esac
+    case "$payload" in
+      *"ONE-ACTIVE-WRITER: Exactly one human-driven engine writes the shared brain at a time."*"This is an invariant, not a lock: do not add file locking."*"Version: session-core v8"*) : ;;
+      *) _fail "$mode core lost its tail (ONE-ACTIVE-WRITER paragraph or version line)" ;;
+    esac
+    case "$payload" in
+      *"$last_line"*) : ;;
+      *) _fail "$mode core lacks the last non-empty line of session-core.txt" ;;
+    esac
+    case "$payload" in
+      *"(session-core v8)"*) : ;;
+      *) _fail "$mode core label does not carry session-core v8" ;;
+    esac
+  done
+  echo "PASS: ask and auto full core stay within 7923 B and deliver the ONE-ACTIVE-WRITER tail intact"
+}
+
+test_review_mode_light_and_resume() {
+  local d="$TMPBASE/review_kernels" mode payload
+  _make_repo "$d"
+  for mode in ask auto; do
+    for variant in light resume; do
+      if [ "$variant" = light ]; then
+        payload="$(_core_for "$mode" startup light "$d")"
+      else
+        payload="$(_core_for "$mode" resume full "$d")"
+      fi
+      case "$payload" in
+        *"{{REVIEW}}"*) _fail "$mode/$variant leaks the raw review placeholder" ;;
+      esac
+      case "$mode" in
+        ask)
+          case "$payload" in
+            *"SECURITY FLOOR (CBOX_REVIEW=ask): never run security-reviewer or code-reviewer automatically."*"ask the owner one short non-blocking question"*"note a declined review in PROGRESS."*) : ;;
+            *) _fail "ask/$variant security floor text missing" ;;
+          esac
+          case "$payload" in
+            *"run the security-reviewer subagent; CRITICAL/HIGH findings block the commit."*) _fail "ask/$variant still carries the automatic security floor" ;;
+          esac
+          ;;
+        auto)
+          case "$payload" in
+            *"SECURITY FLOOR: before committing changes that touch auth, API endpoints, or input handling, run the security-reviewer subagent; CRITICAL/HIGH findings block the commit."*) : ;;
+            *) _fail "auto/$variant automatic security floor missing" ;;
+          esac
+          case "$payload" in
+            *"CBOX_REVIEW=ask"*) _fail "auto/$variant carries the ask text" ;;
+          esac
+          ;;
+      esac
+    done
+  done
+  echo "PASS: light and resume kernels render the security floor per review mode"
+}
+
+test_review_placeholder_never_leaks_on_degraded_core() {
+  local hookdir="$TMPBASE/degraded-core" d="$TMPBASE/degraded-core-repo" payload
+  mkdir -p "$hookdir"
+  cp "$INSTALL_DIR/etc/hooks/continuity_session_start.py" "$hookdir/continuity_session_start.py"
+  _make_repo "$d"
+  payload="$(CBOX_REVIEW=auto python3 "$hookdir/continuity_session_start.py" --section core <<JSON
+{"source":"startup","cwd":"$d"}
+JSON
+)"
+  case "$payload" in
+    *"session-core.txt missing - degraded core"*) : ;;
+    *) _fail "degraded core warning missing" ;;
+  esac
+  case "$payload" in
+    *"{{REVIEW}}"*) _fail "degraded core leaks the raw review placeholder" ;;
+  esac
+  case "$payload" in
+    *"SECURITY FLOOR: before committing changes that touch auth"*) : ;;
+    *) _fail "degraded core in auto mode lacks the automatic security floor" ;;
+  esac
+  echo "PASS: a missing session-core.txt degrades to the light kernel with the review text rendered"
+}
+
 test_reference_payload_cap
 test_core_payload_cap
 test_core_payload_not_truncated
@@ -799,4 +942,9 @@ test_project_scoped_server_and_disabled_list
 test_loader_keeps_the_paragraph_on_every_failure_path
 test_ancestor_project_entries_do_not_apply
 test_core_digest_matches_the_filtered_body
+test_review_mode_full_core
+test_tests_run_as_commands_in_core
+test_review_mode_core_size_and_tail
+test_review_mode_light_and_resume
+test_review_placeholder_never_leaks_on_degraded_core
 echo "all continuity_session_start tests passed"

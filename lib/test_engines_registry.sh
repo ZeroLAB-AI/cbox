@@ -50,7 +50,7 @@ W="$TMPBASE/reg"
 mkdir -p "$W"
 
 cat > "$W/unknown_top.json" <<'EOF'
-{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none"}}, "extra": 1}
+{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "credentials": {"kind": "volume", "volume": "v"}}}, "extra": 1}
 EOF
 if python3 "$PY" validate "$W/unknown_top.json" >/dev/null 2>&1; then
   _fail "unknown top-level key was accepted"
@@ -58,7 +58,7 @@ fi
 _ok "unknown top-level key rejected"
 
 cat > "$W/unknown_engine_key.json" <<'EOF'
-{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "extra": 1}}}
+{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "credentials": {"kind": "volume", "volume": "v"}, "extra": 1}}}
 EOF
 if python3 "$PY" validate "$W/unknown_engine_key.json" >/dev/null 2>&1; then
   _fail "unknown per-engine key was accepted"
@@ -74,7 +74,7 @@ fi
 _ok "missing per-engine key rejected"
 
 cat > "$W/wrong_probe_kind.json" <<'EOF'
-{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "made-up", "stamp": "x"}, "version_vars": ["V"], "enabled_var": null, "login": "none"}}}
+{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "made-up", "stamp": "x"}, "version_vars": ["V"], "enabled_var": null, "login": "none", "credentials": {"kind": "volume", "volume": "v"}}}}
 EOF
 if python3 "$PY" validate "$W/wrong_probe_kind.json" >/dev/null 2>&1; then
   _fail "unknown probe.kind was accepted"
@@ -82,7 +82,7 @@ fi
 _ok "unknown probe.kind rejected"
 
 cat > "$W/exe_stamp_missing_field.json" <<'EOF'
-{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x"}, "version_vars": ["V"], "enabled_var": null, "login": "none"}}}
+{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x"}, "version_vars": ["V"], "enabled_var": null, "login": "none", "credentials": {"kind": "volume", "volume": "v"}}}}
 EOF
 if python3 "$PY" validate "$W/exe_stamp_missing_field.json" >/dev/null 2>&1; then
   _fail "exe-stamp probe missing infra_filter_argv1 was accepted"
@@ -90,7 +90,7 @@ fi
 _ok "exe-stamp probe missing infra_filter_argv1 rejected"
 
 cat > "$W/exe_stamp_extra_field.json" <<'EOF'
-{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": [], "argv0_prefix": "y"}, "version_vars": ["V"], "enabled_var": null, "login": "none"}}}
+{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": [], "argv0_prefix": "y"}, "version_vars": ["V"], "enabled_var": null, "login": "none", "credentials": {"kind": "volume", "volume": "v"}}}}
 EOF
 if python3 "$PY" validate "$W/exe_stamp_extra_field.json" >/dev/null 2>&1; then
   _fail "exe-stamp probe with canonical-paths field was accepted"
@@ -98,7 +98,7 @@ fi
 _ok "exe-stamp probe with foreign field (argv0_prefix) rejected"
 
 cat > "$W/canonical_missing_field.json" <<'EOF'
-{"schema": 1, "engines": {"hermes": {"bin": "hermes", "install": "image", "probe": {"kind": "canonical-paths", "exe_realpath_prefix": "/usr/bin/python3", "argv0_prefix": "/opt/hermes/bin/"}, "version_vars": ["V"], "enabled_var": "CBOX_HERMES", "login": "none"}}}
+{"schema": 1, "engines": {"hermes": {"bin": "hermes", "install": "image", "probe": {"kind": "canonical-paths", "exe_realpath_prefix": "/usr/bin/python3", "argv0_prefix": "/opt/hermes/bin/"}, "version_vars": ["V"], "enabled_var": "CBOX_HERMES", "login": "none", "credentials": {"kind": "volume", "volume": "v"}}}}
 EOF
 if python3 "$PY" validate "$W/canonical_missing_field.json" >/dev/null 2>&1; then
   _fail "canonical-paths probe missing argv1 was accepted"
@@ -106,7 +106,7 @@ fi
 _ok "canonical-paths probe missing argv1 rejected"
 
 cat > "$W/bad_install.json" <<'EOF'
-{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "usb-stick", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none"}}}
+{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "usb-stick", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "credentials": {"kind": "volume", "volume": "v"}}}}
 EOF
 if python3 "$PY" validate "$W/bad_install.json" >/dev/null 2>&1; then
   _fail "unknown install value was accepted"
@@ -114,7 +114,7 @@ fi
 _ok "unknown install value rejected"
 
 cat > "$W/bad_login.json" <<'EOF'
-{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "carrier-pigeon"}}}
+{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "carrier-pigeon", "credentials": {"kind": "volume", "volume": "v"}}}}
 EOF
 if python3 "$PY" validate "$W/bad_login.json" >/dev/null 2>&1; then
   _fail "unknown login value was accepted"
@@ -122,7 +122,7 @@ fi
 _ok "unknown login value rejected"
 
 cat > "$W/wrong_type.json" <<'EOF'
-{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": "V", "enabled_var": null, "login": "none"}}}
+{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": "V", "enabled_var": null, "login": "none", "credentials": {"kind": "volume", "volume": "v"}}}}
 EOF
 if python3 "$PY" validate "$W/wrong_type.json" >/dev/null 2>&1; then
   _fail "version_vars as a string instead of a list was accepted"
@@ -130,7 +130,7 @@ fi
 _ok "version_vars wrong type rejected"
 
 cat > "$W/bad_schema.json" <<'EOF'
-{"schema": 2, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none"}}}
+{"schema": 2, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "credentials": {"kind": "volume", "volume": "v"}}}}
 EOF
 if python3 "$PY" validate "$W/bad_schema.json" >/dev/null 2>&1; then
   _fail "schema != 1 was accepted"
@@ -138,7 +138,7 @@ fi
 _ok "schema version mismatch rejected"
 
 cat > "$W/whitespace_name.json" <<'EOF'
-{"schema": 1, "engines": {" claude ": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none"}}}
+{"schema": 1, "engines": {" claude ": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "credentials": {"kind": "volume", "volume": "v"}}}}
 EOF
 if python3 "$PY" validate "$W/whitespace_name.json" >/dev/null 2>&1; then
   _fail "engine name with surrounding whitespace was accepted"
@@ -146,7 +146,7 @@ fi
 _ok "engine name with surrounding whitespace rejected"
 
 cat > "$W/uppercase_name.json" <<'EOF'
-{"schema": 1, "engines": {"Claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none"}}}
+{"schema": 1, "engines": {"Claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "credentials": {"kind": "volume", "volume": "v"}}}}
 EOF
 if python3 "$PY" validate "$W/uppercase_name.json" >/dev/null 2>&1; then
   _fail "engine name with uppercase letters was accepted"
@@ -154,7 +154,7 @@ fi
 _ok "engine name with uppercase letters rejected"
 
 cat > "$W/schema_bool.json" <<'EOF'
-{"schema": true, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none"}}}
+{"schema": true, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "credentials": {"kind": "volume", "volume": "v"}}}}
 EOF
 if python3 "$PY" validate "$W/schema_bool.json" >/dev/null 2>&1; then
   _fail "schema: true (boolean) was accepted as schema 1"
@@ -162,7 +162,7 @@ fi
 _ok "schema boolean true rejected (not the integer 1)"
 
 cat > "$W/schema_float.json" <<'EOF'
-{"schema": 1.0, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none"}}}
+{"schema": 1.0, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "credentials": {"kind": "volume", "volume": "v"}}}}
 EOF
 if python3 "$PY" validate "$W/schema_float.json" >/dev/null 2>&1; then
   _fail "schema: 1.0 (float) was accepted as schema 1"
@@ -358,14 +358,14 @@ done
 _ok "all engines publish resume, seed, and history capabilities"
 
 cat > "$W/optional_fields_absent.json" <<'EOF'
-{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none"}}}
+{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "credentials": {"kind": "volume", "volume": "v"}}}}
 EOF
 python3 "$PY" validate "$W/optional_fields_absent.json" >/dev/null 2>&1 \
   || _fail "registry entry without the optional capability fields at all should still validate (backward compatible)"
 _ok "engine entries with no capability fields at all still validate (fields are optional)"
 
 cat > "$W/bad_preassign_type.json" <<'EOF'
-{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "preassign_id": "yes"}}}
+{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "credentials": {"kind": "volume", "volume": "v"}, "preassign_id": "yes"}}}
 EOF
 if python3 "$PY" validate "$W/bad_preassign_type.json" >/dev/null 2>&1; then
   _fail "preassign_id as a string instead of a boolean was accepted"
@@ -373,7 +373,7 @@ fi
 _ok "preassign_id wrong type (string instead of boolean) rejected"
 
 cat > "$W/bad_seed_channel.json" <<'EOF'
-{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "seed_channel": "carrier-pigeon"}}}
+{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "credentials": {"kind": "volume", "volume": "v"}, "seed_channel": "carrier-pigeon"}}}
 EOF
 if python3 "$PY" validate "$W/bad_seed_channel.json" >/dev/null 2>&1; then
   _fail "unrecognized seed_channel value was accepted"
@@ -381,7 +381,7 @@ fi
 _ok "unrecognized seed_channel value rejected"
 
 cat > "$W/bad_history_read.json" <<'EOF'
-{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "history_read": "codex-history"}}}
+{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "credentials": {"kind": "volume", "volume": "v"}, "history_read": "codex-history"}}}
 EOF
 if python3 "$PY" validate "$W/bad_history_read.json" >/dev/null 2>&1; then
   _fail "unrecognized history_read value was accepted"
@@ -389,7 +389,7 @@ fi
 _ok "unrecognized history_read value rejected"
 
 cat > "$W/null_capability_fields.json" <<'EOF'
-{"schema": 1, "engines": {"codex": {"bin": "codex", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "preassign_id": false, "resume_argv": null, "seed_channel": null, "history_read": null}}}
+{"schema": 1, "engines": {"codex": {"bin": "codex", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "credentials": {"kind": "volume", "volume": "v"}, "preassign_id": false, "resume_argv": null, "seed_channel": null, "history_read": null}}}
 EOF
 python3 "$PY" validate "$W/null_capability_fields.json" >/dev/null 2>&1 \
   || _fail "codex-style null capability fields (preassign_id false, rest null) should validate"
@@ -447,7 +447,7 @@ done
 _ok "claude and hermes health.kind == version"
 
 cat > "$W/health_bad_kind.json" <<'EOF'
-{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "health": {"kind": "made-up"}}}}
+{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "credentials": {"kind": "volume", "volume": "v"}, "health": {"kind": "made-up"}}}}
 EOF
 if python3 "$PY" validate "$W/health_bad_kind.json" >/dev/null 2>&1; then
   _fail "unknown health.kind was accepted"
@@ -455,7 +455,7 @@ fi
 _ok "unknown health.kind rejected"
 
 cat > "$W/health_handshake_missing_expect.json" <<'EOF'
-{"schema": 1, "engines": {"codex": {"bin": "codex", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "health": {"kind": "subcommand-handshake"}}}}
+{"schema": 1, "engines": {"codex": {"bin": "codex", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "credentials": {"kind": "volume", "volume": "v"}, "health": {"kind": "subcommand-handshake"}}}}
 EOF
 if python3 "$PY" validate "$W/health_handshake_missing_expect.json" >/dev/null 2>&1; then
   _fail "subcommand-handshake health missing expect was accepted"
@@ -463,7 +463,7 @@ fi
 _ok "subcommand-handshake health missing expect rejected"
 
 cat > "$W/health_version_extra_field.json" <<'EOF'
-{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "health": {"kind": "version", "expect": "y"}}}}
+{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "credentials": {"kind": "volume", "volume": "v"}, "health": {"kind": "version", "expect": "y"}}}}
 EOF
 if python3 "$PY" validate "$W/health_version_extra_field.json" >/dev/null 2>&1; then
   _fail "version health with a foreign expect field was accepted"
@@ -471,7 +471,7 @@ fi
 _ok "version health with foreign field (expect) rejected"
 
 cat > "$W/health_absent.json" <<'EOF'
-{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none"}}}
+{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none", "credentials": {"kind": "volume", "volume": "v"}}}}
 EOF
 python3 "$PY" validate "$W/health_absent.json" >/dev/null 2>&1 \
   || _fail "registry entry with no health field at all should still validate (backward compatible)"
@@ -511,5 +511,66 @@ grep -qE 'verify-check v_fail:.*infra_filter_argv1 literals absent.*codex.infra_
   || _fail "an engines.json infra_filter_argv1 literal absent from the cbox _CBOX_PROBE_SH heredoc was not flagged:
 $(cat "$TMPBASE/drifted_argv1_check.out")"
 _ok "exe-stamp infra_filter_argv1 literal not present in _CBOX_PROBE_SH is flagged (registry/probe-heredoc drift guard)"
+
+_cred_fixture() {
+  local name="$1" cred="$2"
+  printf '{"schema": 1, "engines": {"claude": {"bin": "claude", "install": "bins-volume", "probe": {"kind": "exe-stamp", "stamp": "x", "infra_filter_argv1": []}, "version_vars": ["V"], "enabled_var": null, "login": "none"%s}}}\n' "$cred" > "$W/$name.json"
+}
+
+_cred_fixture cred_missing ''
+if python3 "$PY" validate "$W/cred_missing.json" >/dev/null 2>&1; then
+  _fail "engine without a credentials descriptor was accepted"
+fi
+_ok "missing credentials descriptor rejected (required)"
+
+_cred_fixture cred_ok ', "credentials": {"kind": "statedir-symlink", "file": ".credentials.json", "mask": "~/.claude/.credentials.json"}'
+python3 "$PY" validate "$W/cred_ok.json" >/dev/null 2>&1 || _fail "valid statedir-symlink descriptor rejected"
+_ok "valid statedir-symlink descriptor accepted"
+
+_cred_fixture cred_kind ', "credentials": {"kind": "keyring", "file": "x"}'
+if python3 "$PY" validate "$W/cred_kind.json" >/dev/null 2>&1; then
+  _fail "unknown credentials kind was accepted"
+fi
+_ok "unknown credentials kind rejected (closed set)"
+
+_cred_fixture cred_extra ', "credentials": {"kind": "volume", "volume": "v", "file": "x"}'
+if python3 "$PY" validate "$W/cred_extra.json" >/dev/null 2>&1; then
+  _fail "credentials descriptor with a foreign key was accepted"
+fi
+_ok "credentials descriptor with a foreign key rejected"
+
+_cred_fixture cred_short ', "credentials": {"kind": "engine-home-file", "file": "auth.json"}'
+if python3 "$PY" validate "$W/cred_short.json" >/dev/null 2>&1; then
+  _fail "engine-home-file descriptor without home was accepted"
+fi
+_ok "credentials descriptor missing a required key rejected"
+
+_cred_fixture cred_slash ', "credentials": {"kind": "engine-home-file", "file": "sub/auth.json", "home": "~/.codex"}'
+if python3 "$PY" validate "$W/cred_slash.json" >/dev/null 2>&1; then
+  _fail "credentials file with a path separator was accepted"
+fi
+_ok "credentials file with a path separator rejected"
+
+_cred_fixture cred_abs ', "credentials": {"kind": "statedir-symlink", "file": ".credentials.json", "mask": "/etc/passwd"}'
+if python3 "$PY" validate "$W/cred_abs.json" >/dev/null 2>&1; then
+  _fail "credentials mask outside ~/ was accepted"
+fi
+_ok "credentials mask not under ~/ rejected"
+
+_cred_fixture cred_dotdot ', "credentials": {"kind": "engine-home-file", "file": "auth.json", "home": "~/../x"}'
+if python3 "$PY" validate "$W/cred_dotdot.json" >/dev/null 2>&1; then
+  _fail "credentials home with a .. segment was accepted"
+fi
+_ok "credentials home with a .. segment rejected"
+
+_cred_fixture cred_vol ', "credentials": {"kind": "volume", "volume": "Bad Name"}'
+if python3 "$PY" validate "$W/cred_vol.json" >/dev/null 2>&1; then
+  _fail "credentials volume with an invalid name was accepted"
+fi
+_ok "credentials volume with an invalid name rejected"
+
+REAL_KINDS="$(python3 "$PY" get "$REG" claude credentials.kind),$(python3 "$PY" get "$REG" codex credentials.kind),$(python3 "$PY" get "$REG" hermes credentials.kind)"
+[ "$REAL_KINDS" = "statedir-symlink,engine-home-file,volume" ] || _fail "real registry credentials kinds drifted: $REAL_KINDS"
+_ok "real registry carries the claude, codex, hermes credentials descriptors"
 
 echo "PASS: all engines_registry checks"

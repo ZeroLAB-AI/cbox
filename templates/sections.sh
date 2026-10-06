@@ -223,7 +223,7 @@ sec_get() {
     SEC_VARS)
       case "$2" in
         mode)
-          printf '%s\n' 'CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL'
+          printf '%s\n' 'CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL CBOX_PROFILE'
           ;;
         mounts)
           printf '%s\n' 'CBOX_CLAUDE_MODE CBOX_CLAUDE_PATH CBOX_CLAUDE_BACKUP CBOX_CODEX_MODE CBOX_CODEX_PATH CBOX_CODEX_BACKUP CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG'
@@ -286,7 +286,7 @@ sec_get() {
           printf '%s\n' 'CBOX_CODEX_MCP CBOX_CODEX_HOOKS CBOX_CODEX_MODEL CBOX_CODEX_EFFORT'
           ;;
         continuity)
-          printf '%s\n' 'CBOX_HISTORY CBOX_GIT CBOX_DIARY CBOX_OPEN_QUESTIONS CBOX_CONTEXT_PROFILE'
+          printf '%s\n' 'CBOX_HISTORY CBOX_GIT CBOX_DIARY CBOX_OPEN_QUESTIONS CBOX_CONTEXT_PROFILE CBOX_REVIEW'
           ;;
         claude-md)
           printf '%s\n' ''
@@ -915,4 +915,4 @@ sec_keys() {
   esac
 }
 
-DOCTOR_EXTRA_ROWS='codex-profile context-manifest local-model local-model-egress managed-dirs config-pending sessions capabilities stale-binds'
+DOCTOR_EXTRA_ROWS='codex-profile context-manifest local-model local-model-egress managed-dirs config-pending sessions capabilities stale-binds profile'

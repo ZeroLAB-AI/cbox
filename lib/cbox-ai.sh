@@ -205,7 +205,12 @@ _cbox_ai_fingerprint_roots() {
   printf '%s\n' "$root"
   seen="$seen$root:"
   local -a ws=()
-  read -r -a ws <<< "${CBOX_WORKSPACES:-}"
+  if [ "$(_cbox_effective_mode 2>/dev/null)" = isolated ]; then
+    local ws_eff="${CBOX_AI_EFF:-$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")}"
+    read -r -a ws <<< "$(_cbox_project_workspaces_from_file "$ws_eff/cbox.conf" "$root")"
+  else
+    read -r -a ws <<< "${CBOX_WORKSPACES:-}"
+  fi
   for w in "${ws[@]}"; do
     [ -n "$w" ] || continue
     case "$seen" in
@@ -327,6 +332,7 @@ _cbox_ai_exec_container() {
       _cbox_ai_run_or_print "${runcmd[@]}"
       return 0
     fi
+    _cbox_bind_guard "${runcmd[@]}" || return 1
     before="$(_cbox_ai_fingerprint_all "$root")"
     "${runcmd[@]}"
     local rc=$?

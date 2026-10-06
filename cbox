@@ -19,6 +19,7 @@ CONF="$INSTALL_DIR/cbox.conf"
 [ -f "$INSTALL_DIR/templates/validator_dispatch.sh" ] && . "$INSTALL_DIR/templates/validator_dispatch.sh"
 [ -f "$INSTALL_DIR/lib/cbox-ai.sh" ] && . "$INSTALL_DIR/lib/cbox-ai.sh"
 [ -f "$INSTALL_DIR/lib/cbox-session.sh" ] && . "$INSTALL_DIR/lib/cbox-session.sh"
+[ -f "$INSTALL_DIR/lib/cbox-profile.sh" ] && . "$INSTALL_DIR/lib/cbox-profile.sh"
 
 HAVE_GLOBAL_CONF=0
 if [ -f "$CONF" ]; then
@@ -99,7 +100,7 @@ _cbox_load_machine_scoped_vars() {
 _cbox_root_in_global_scope() {
   local root="$1" w
   local -a ws=()
-  read -r -a ws <<< "${CBOX_WORKSPACES:-}"
+  read -r -a ws <<< "$(_cbox_global_workspaces)"
   for w in "${ws[@]}"; do
     [ -n "$w" ] || continue
     case "$root" in
@@ -179,9 +180,35 @@ _cbox_compose_up_wait_removed() {
   return 1
 }
 
+_cbox_bind_guard() {
+  local arg expect_f=0 first="" roots="-" guard="$INSTALL_DIR/lib/cbox_bind_guard.py"
+  local -a files=()
+  for arg in "$@"; do
+    if [ "$expect_f" = 1 ]; then
+      expect_f=0
+      files+=("$arg")
+      [ -n "$first" ] || first="$arg"
+      continue
+    fi
+    case "$arg" in
+      -f|--file) expect_f=1 ;;
+    esac
+  done
+  [ "${#files[@]}" -gt 0 ] || return 0
+  if [ ! -f "$guard" ] || ! command -v python3 >/dev/null 2>&1; then
+    echo "cbox: refusing to start the container - the bind source guard ($guard) cannot run" >&2
+    return 1
+  fi
+  if [ -f "$(_cbox_bind_roots_file "$(dirname "$first")")" ]; then
+    roots="$(_cbox_bind_roots_file "$(dirname "$first")")"
+  fi
+  python3 -I "$guard" check "$HOME" "$(_cbox_xdg_runtime_dir)" "$roots" "${files[@]}"
+}
+
 _cbox_compose_up() {
   local stamp="$1"; shift
   local new old="" force=0 rc=0 have="" try
+  _cbox_bind_guard "$@" || return 1
   new="$(_cbox_compose_files_digest "$@")"
   [ -n "$stamp" ] && [ -f "$stamp" ] && old="$(cat "$stamp" 2>/dev/null || true)"
   have="$("$@" ps -q cbox 2>/dev/null | head -n1)" || have=""
@@ -2711,10 +2738,12 @@ _cbox_run_lockdown_snapshot() {
 }
 
 _cbox_engine_ready() {
-  local bin="$1" scope="$2" hash="$3" engine_mode="$4" engine_path="$5"
+  local bin="$1" scope="$2" hash="$3" engine_mode="$4" engine_path="$5" creds_dir="${6:-}"
   local file ready=1
   if file="$(_cbox_engine_creds_file "$bin" 2>/dev/null)"; then
-    if [ "$engine_mode" = volume ]; then
+    if [ -n "$creds_dir" ]; then
+      [ -s "$creds_dir/$file" ] || ready=0
+    elif [ "$engine_mode" = volume ]; then
       local eff img_tag
       eff="$(_cbox_lockdown_eff_dir "$scope" "$hash")"
       img_tag="$(_cbox_lockdown_probe_image_tag "$eff" 2>/dev/null)" || img_tag=""
@@ -2732,15 +2761,21 @@ _cbox_engine_ready() {
 }
 
 _cbox_scope_creds_ready() {
-  local scope="$1" hash="$2" claude_mode="$3" claude_path="$4" codex_mode="$5" codex_path="$6"
-  _cbox_engine_ready claude "$scope" "$hash" "$claude_mode" "$claude_path" && return 0
-  _cbox_engine_ready codex "$scope" "$hash" "$codex_mode" "$codex_path" && return 0
+  local scope="$1" hash="$2" claude_mode="$3" claude_path="$4" codex_mode="$5" codex_path="$6" profile="${7:-}"
+  local claude_creds="" codex_creds="" store
+  if [ -n "$profile" ]; then
+    store="$(_cbox_profile_store_dir "$profile")" || return 1
+    claude_creds="$store/claude"
+    codex_creds="$store/codex"
+  fi
+  _cbox_engine_ready claude "$scope" "$hash" "$claude_mode" "$claude_path" "$claude_creds" && return 0
+  _cbox_engine_ready codex "$scope" "$hash" "$codex_mode" "$codex_path" "$codex_creds" && return 0
   return 1
 }
 
 _cbox_run_egress_lockdown_gate() {
-  local bin="$1" scope="$2" conf="${3:-}" hash="${4:-}"
-  local egress_mode egress_applied netaccess_mode netaccess_applied claude_mode claude_path codex_mode codex_path
+  local bin="$1" scope="$2" conf="${3:-}" hash="${4:-}" profile="${5:-}"
+  local egress_mode egress_applied netaccess_mode netaccess_applied claude_mode claude_path codex_mode codex_path eff_p=""
   if [ "$scope" = global ]; then
     egress_mode="${CBOX_EGRESS_MODE:-off}"
     egress_applied="${CBOX_EGRESS_APPLIED:-0}"
@@ -2756,13 +2791,18 @@ _cbox_run_egress_lockdown_gate() {
     snap="$(_cbox_run_lockdown_snapshot "$conf")" || return 0
     IFS="$(printf '\t')" read -r egress_mode egress_applied netaccess_mode netaccess_applied \
       claude_mode claude_path codex_mode codex_path <<< "$snap"
+    if [ -n "$profile" ]; then
+      eff_p="$(_cbox_profile_eff_dir "$profile" "$HOME/.config/cbox/projects/$hash")" || return 1
+      egress_applied="$(_cbox_profile_applied_get "$eff_p" CBOX_EGRESS_APPLIED)"
+      netaccess_applied="$(_cbox_profile_applied_get "$eff_p" CBOX_NETACCESS_APPLIED)"
+    fi
   fi
   { [ "$egress_mode" != off ] && [ "$egress_applied" != 1 ]; } \
     || { [ "$netaccess_mode" != off ] && [ "$netaccess_applied" != 1 ]; } \
     || return 0
 
   local ready=1
-  _cbox_scope_creds_ready "$scope" "$hash" "$claude_mode" "$claude_path" "$codex_mode" "$codex_path" || ready=0
+  _cbox_scope_creds_ready "$scope" "$hash" "$claude_mode" "$claude_path" "$codex_mode" "$codex_path" "$profile" || ready=0
 
   if [ "$ready" != 1 ]; then
     echo "cbox: network lockdown (egress=$egress_mode, netaccess=$netaccess_mode) is configured; it applies once you have logged in to $bin" >&2
@@ -2773,7 +2813,7 @@ _cbox_run_egress_lockdown_gate() {
     local -a override_pairs=()
     [ "$egress_mode" != off ] && [ "$egress_applied" != 1 ] && override_pairs+=("CBOX_EGRESS_APPLIED=1")
     [ "$netaccess_mode" != off ] && [ "$netaccess_applied" != 1 ] && override_pairs+=("CBOX_NETACCESS_APPLIED=1")
-    if [ "${#override_pairs[@]}" -gt 0 ]; then
+    if [ "${#override_pairs[@]}" -gt 0 ] && [ -z "$profile" ]; then
       echo "cbox: already authenticated a way cbox cannot see (for example an API key)? override once verified: $0 config set ${override_pairs[*]}" >&2
     fi
     return 0
@@ -2786,6 +2826,8 @@ _cbox_run_egress_lockdown_gate() {
     local set_ok=1
     if [ "$scope" = global ]; then
       _cbox_config_set_force_global "${pairs[@]}" >/dev/null || set_ok=0
+    elif [ -n "$profile" ]; then
+      _cbox_profile_applied_set "$eff_p" "${pairs[@]}" || set_ok=0
     else
       _cbox_config_set "${pairs[@]}" >/dev/null || set_ok=0
     fi
@@ -2816,7 +2858,7 @@ _run_global() {
   if [ "${#workspaces[@]}" -gt 0 ] && [ "$inscope" != 1 ]; then
     if [ -t 0 ] && [ -t 1 ]; then
       local ans
-      printf 'cbox: global container does not mount this folder - switch to an isolated per-project container? [y/N] '
+      printf 'cbox: the global container does not mount this folder.\n  To mount it there: cbox setup update workspaces (or cbox config --global set CBOX_WORKSPACES="<paths>"), then cbox restart.\n  Or answer y to create an isolated project for it (its own container, settings derived from the global config; extra folders: cbox config set CBOX_WORKSPACES=... inside the project).\nSwitch to an isolated per-project container? [y/N] '
       read -r ans
       case "$ans" in
         y|Y)
@@ -2829,7 +2871,7 @@ _run_global() {
           ;;
       esac
     else
-      echo "cbox: global container does not mount $PWD and no TTY to confirm switching to isolated mode" >&2
+      echo "cbox: the global container does not mount $PWD and there is no TTY to confirm creating an isolated project; mount it globally with cbox setup update workspaces (or cbox config --global set CBOX_WORKSPACES=\"<paths>\") and cbox restart, or run interactively to create an isolated project" >&2
       return 1
     fi
   fi
@@ -2886,7 +2928,7 @@ _first_run_init() {
     exec 7>&-
     return 0
   fi
-  printf 'cbox: new project %s\n  [n] configure from scratch\n  [d] derive from global config\n  [m] derive and open settings\n  [z] cancel\n> ' "$root"
+  printf 'cbox: new project %s\n  [n] configure from scratch\n  [d] derive settings from global config (isolated project)\n  [m] derive settings from global config (isolated project) and open settings\n  [z] cancel\n> ' "$root"
   read -r ans
   rc=0
   case "$ans" in
@@ -2918,7 +2960,7 @@ _gen_effective() {
   gen_dockerfile_into "$eff" "$digest"
   gen_env_file_into "$eff"
   gen_compose_isolated "$eff" "$root" "$IMG_TAG" "$IMG_HASH"
-  gen_compose_readonly_into "$eff/docker-compose.readonly.yml" "$root"
+  gen_compose_readonly_isolated_into "$eff/docker-compose.readonly.yml" "$root"
   gen_codex_profile_into "$eff/codex" isolated "$root"
   gen_codex_agents_into "$eff/codex"
   gen_codex_hooks_json_into "$eff/codex"
@@ -4350,7 +4392,11 @@ _probe() {
 }
 
 _reap() {
-  local eff="$1" cid n
+  local eff="$1" cid n d
+  for d in "$eff"/profiles/*; do
+    [ -d "$d" ] && [ ! -L "$d" ] || continue
+    _reap "$d"
+  done
   exec 9> "$eff/session.lock"
   if ! _cbox_flock -n -x 9; then
     exec 9>&-
@@ -4412,6 +4458,10 @@ _container_exec_bridge_start() {
     else
       [ -n "$workspace_root" ] || workspace_root="$(_cbox_workspace_root 2>/dev/null)" || return 1
       guard_roots=("$workspace_root")
+      local _extra_root
+      while IFS= read -r _extra_root; do
+        [ -n "$_extra_root" ] && guard_roots+=("$_extra_root")
+      done < <(_cbox_project_extra_workspaces "$(_cbox_local_effdir_for "$workspace_root")/cbox.conf" "$workspace_root")
     fi
     [ "${#guard_roots[@]}" -gt 0 ] || return 1
     for root in "${guard_roots[@]}"; do
@@ -4509,8 +4559,8 @@ _session_run() {
   trap '_session_sig INT' INT
   trap '_session_sig TERM' TERM
   trap '_session_sig HUP' HUP
-  _clip_bridge_start "$(_cbox_clip_dir "p$(basename "$eff")")"
-  _container_exec_bridge_start "$(_cbox_container_exec_dir "p$(basename "$eff")")" "$root" || {
+  _clip_bridge_start "$(_cbox_clip_dir "$(_cbox_eff_bridge_key "$eff")")"
+  _container_exec_bridge_start "$(_cbox_container_exec_dir "$(_cbox_eff_bridge_key "$eff")")" "$root" || {
     trap - INT TERM HUP
     _clip_bridge_stop
     exec 8>&-
@@ -4612,7 +4662,7 @@ _cbox_global_drift_check_interactive() {
   while IFS= read -r k; do
     [ -n "$k" ] || continue
     changed+=("$k")
-  done < <(_cbox_conf_changed_keys "$eff/cbox.base" "$now_tmp")
+  done < <(_cbox_conf_changed_inherited_keys "$eff/cbox.base" "$now_tmp")
   local decl_file
   decl_file="$(_cbox_global_drift_declined_file "$eff")"
   if [ "${#changed[@]}" -eq 0 ]; then
@@ -4699,9 +4749,59 @@ _cbox_manifest_verify_conf_interactive() {
   _cbox_manifest_verify_conf "$eff" "$root"
 }
 
+_cbox_profile_require_mount_modes() {
+  local conf="${1:-}" profile="${2:-}" snap e1 e2 e3 e4 cmode cpath xmode xpath
+  [ -n "$profile" ] && [ -f "$conf" ] || return 0
+  snap="$(_cbox_run_lockdown_snapshot "$conf")" || return 0
+  IFS="$(printf '\t')" read -r e1 e2 e3 e4 cmode cpath xmode xpath <<< "$snap"
+  if [ "$cmode" = volume ] || [ "$xmode" = volume ]; then
+    printf 'cbox: profile %s is not supported with CBOX_CLAUDE_MODE or CBOX_CODEX_MODE=volume - the credentials live in a volume without a host source to switch; use mount mode or --profile default\n' "$profile" >&2
+    return 1
+  fi
+  if [ -n "${HOST_HOME:-}" ] && [ "$HOST_HOME" != "$HOME" ]; then
+    printf 'cbox: profile %s needs the container home to equal the host home (HOST_HOME=%s, HOME=%s)\n' "$profile" "$HOST_HOME" "$HOME" >&2
+    return 1
+  fi
+  return 0
+}
+
+_run_isolated_profile() {
+  local bin="$1" root="$2" P="$3" eff="$4" profile="$5"; shift 5
+  local eff_p store
+  store="$(_cbox_profile_store_dir "$profile")" || return 1
+  eff_p="$(_cbox_profile_prepare_eff "$eff" "$root" "$profile")" || return 1
+  (
+    set -e
+    unset CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL CBOX_CODEX_TARGET
+    local lockfile="$eff_p/.regen.lock"
+    exec 6> "$lockfile"
+    _cbox_flock -x 6 || { echo "cbox: cannot lock $lockfile" >&2; exit 1; }
+    . "$eff/cbox.conf"
+    _cbox_reg_conf_defaults
+    _cbox_reg_export_vars
+    _cbox_load_machine_scoped_vars
+    _cbox_profile_apply_env "$eff_p"
+    export CBOX_RENDER_PROFILE="$profile"
+    _gen_effective "$eff_p" "$root"
+    local slug rc=0
+    slug="$(_cbox_slug "$root")"
+    mkdir -p "$HOME/.claude/projects/$slug"
+    _write_mirror "$root" "$eff"
+    _cbox_manifest_write_generated "$eff_p"
+    exec 6>&-
+    _cbox_profile_harvest "$eff_p" "$store"
+    _ensure_image "$eff_p"
+    _bins_soft "$IMG_TAG"
+    _ensure_volumes "$eff_p"
+    _session_run "$eff_p" "$bin" "$@" || rc=$?
+    _cbox_profile_harvest "$eff_p" "$store"
+    exit "$rc"
+  )
+}
+
 _run_isolated() {
   local bin="$1"; shift
-  local root P eff
+  local root P eff profile="${_CBOX_RUN_PROFILE:-}"
   root="$(_cbox_workspace_root)" || die "refusing to run in $PWD (home, /, or a mount root)"
   _cbox_check_workspace_overlap "$root"
   P="$(_cbox_path_hash "$root")"
@@ -4709,9 +4809,14 @@ _run_isolated() {
   if [ ! -f "$eff/cbox.conf" ]; then
     _first_run_init "$root" "$eff" || return 1
   fi
+  _cbox_profile_require_mount_modes "$eff/cbox.conf" "$profile" || return 1
   _cbox_manifest_verify_conf_interactive "$eff" "$root"
   _cbox_global_drift_check_interactive "$eff" "$root"
-  _cbox_run_egress_lockdown_gate "$bin" isolated "$eff/cbox.conf" "$P" || return 1
+  _cbox_run_egress_lockdown_gate "$bin" isolated "$eff/cbox.conf" "$P" "$profile" || return 1
+  if [ -n "$profile" ]; then
+    _run_isolated_profile "$bin" "$root" "$P" "$eff" "$profile" "$@"
+    return
+  fi
   (
     set -e
     unset CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL CBOX_CODEX_TARGET
@@ -4744,17 +4849,8 @@ _gc_bg() {
   disown 2>/dev/null || true
 }
 
-run() {
-  local session_id=""
-  if [ "${1:-}" = "--session" ]; then
-    session_id="${2:-}"
-    [ -n "$session_id" ] || { echo "cbox: usage: $0 run --session <id> <bin> [args...]" >&2; return 1; }
-    _cbox_session_id_valid "$session_id" || { echo "cbox: refusing - invalid session id '$session_id'" >&2; return 1; }
-    shift 2
-  fi
-  local bin="${1:-}"
-  [ -n "$bin" ] || { echo "cbox: usage: $0 run <bin> [args...]" >&2; return 1; }
-  shift
+_cbox_run_dispatch() {
+  local session_id="$1" bin="$2"; shift 2
   if [ -n "$session_id" ]; then
     if [ "$(_cbox_effective_mode)" = global ]; then
       echo "cbox: sessions unsupported in global mode v1 - falling back to plain run" >&2
@@ -4769,6 +4865,50 @@ run() {
     return
   fi
   _run_isolated "$bin" "$@"
+}
+
+run() {
+  local session_id="" prc=0 rrc=0
+  _CBOX_RUN_PROFILE=""
+  _CBOX_RUN_PROFILE_SET=0
+  _cbox_profile_flags_reset
+  while [ $# -gt 0 ]; do
+    if [ "$1" = "--session" ]; then
+      session_id="${2:-}"
+      [ -n "$session_id" ] || { echo "cbox: usage: $0 run [--session <id>] [--profile <name>|--new-profile <name>] <bin> [args...]" >&2; return 1; }
+      _cbox_session_id_valid "$session_id" || { echo "cbox: refusing - invalid session id '$session_id'" >&2; return 1; }
+      shift 2
+      continue
+    fi
+    _cbox_profile_flag_take 1 "$@" && prc=0 || prc=$?
+    case "$prc" in
+      0) shift "$_CBOX_PF_SHIFT" ;;
+      1) break ;;
+      *) return 1 ;;
+    esac
+  done
+  local bin="${1:-}"
+  [ -n "$bin" ] || { echo "cbox: usage: $0 run [--session <id>] [--profile <name>|--new-profile <name>] <bin> [args...]" >&2; return 1; }
+  shift
+  while [ $# -gt 0 ]; do
+    _cbox_profile_flag_take 1 "$@" && prc=0 || prc=$?
+    case "$prc" in
+      0) shift "$_CBOX_PF_SHIFT" ;;
+      1) break ;;
+      *) return 1 ;;
+    esac
+  done
+  if [ "$_CBOX_PF_NEW" = 1 ]; then
+    _cbox_profile_precheck_new "$_CBOX_PF_NAME" || return 1
+    _cbox_profile_exists "$_CBOX_PF_NAME" || _cbox_profile_add "$_CBOX_PF_NAME" || return 1
+  fi
+  _cbox_profile_select "$_CBOX_PF_NAME" || return 1
+  _CBOX_RUN_PROFILE="$_CBOX_VERB_PROFILE"
+  _CBOX_RUN_PROFILE_SET=1
+  _cbox_run_dispatch "$session_id" "$bin" "$@" || rrc=$?
+  _CBOX_RUN_PROFILE=""
+  _CBOX_RUN_PROFILE_SET=0
+  return "$rrc"
 }
 
 _project_eff_from_cwd() {
@@ -4798,8 +4938,8 @@ _cbox_down_guard_decision() {
 }
 
 down_project() {
-  local force="${1:-0}" eff cid locked=0 n decision rc=0
-  eff="$(_project_eff_from_cwd)"
+  local force="${1:-0}" eff="${2:-}" cid locked=0 n decision rc=0
+  [ -n "$eff" ] || eff="$(_project_eff_from_cwd)"
   _cbox_manifest_verify_generated "$eff"
   exec 9> "$eff/session.lock"
   if _cbox_flock -n -x 9; then
@@ -4833,28 +4973,55 @@ down_project() {
   return "$rc"
 }
 
+down_project_all() {
+  local force="${1:-0}" profile="${2:-}" scope_eff d rc=0 have_profiles=0
+  scope_eff="$(_project_eff_from_cwd)"
+  if [ -n "$profile" ]; then
+    d="$(_cbox_profile_eff_dir "$profile" "$scope_eff")" || return 1
+    if [ ! -f "$d/docker-compose.yml" ]; then
+      echo "cbox: profile $profile has no container config in this project - nothing to stop"
+      return 0
+    fi
+    down_project "$force" "$d"
+    return
+  fi
+  for d in "$scope_eff"/profiles/*; do
+    [ -d "$d" ] && [ ! -L "$d" ] && [ -f "$d/docker-compose.yml" ] || continue
+    have_profiles=1
+  done
+  if [ "$have_profiles" = 0 ] || [ -f "$scope_eff/docker-compose.yml" ]; then
+    down_project "$force" "$scope_eff" || rc=$?
+  fi
+  for d in "$scope_eff"/profiles/*; do
+    [ -d "$d" ] && [ ! -L "$d" ] && [ -f "$d/docker-compose.yml" ] || continue
+    down_project "$force" "$d" || rc=$?
+  done
+  return "$rc"
+}
+
 shell_isolated() {
-  local eff root rc=0
-  eff="$(_project_eff_from_cwd)"
-  root="$(cat "$eff/workspace" 2>/dev/null)" || return 1
-  _cbox_global_drift_check_interactive "$eff" "$root"
-  . "$eff/cbox.conf"
+  local profile="${1:-}" eff scope_eff root rc=0
+  scope_eff="$(_project_eff_from_cwd)"
+  eff="$scope_eff"
+  root="$(cat "$scope_eff/workspace" 2>/dev/null)" || return 1
+  if [ -n "$profile" ]; then
+    eff="$(_cbox_profile_eff_dir "$profile" "$scope_eff")" || return 1
+    [ -f "$eff/docker-compose.yml" ] || die "profile $profile has no container config in this project yet - start it once with: cbox run --profile $profile <engine>"
+  fi
+  _cbox_global_drift_check_interactive "$scope_eff" "$root"
+  . "$scope_eff/cbox.conf"
   _cbox_load_machine_scoped_vars
+  [ -z "$profile" ] || _cbox_profile_apply_env "$eff"
+  _cbox_run_egress_lockdown_gate claude isolated "$scope_eff/cbox.conf" "$(basename "$scope_eff")" "$profile" || return 1
   exec 8> "$eff/session.lock"
   _cbox_flock -s 8 || { echo "cbox: cannot lock session for $eff" >&2; exec 8>&-; return 1; }
-  _clip_bridge_start "$(_cbox_clip_dir "p$(basename "$eff")")"
-  _container_exec_bridge_start "$(_cbox_container_exec_dir "p$(basename "$eff")")" "$root" || {
+  _clip_bridge_start "$(_cbox_clip_dir "$(_cbox_eff_bridge_key "$eff")")"
+  _container_exec_bridge_start "$(_cbox_container_exec_dir "$(_cbox_eff_bridge_key "$eff")")" "$root" || {
     _clip_bridge_stop
     exec 8>&-
     return 1
   }
   _cbox_ollama_owner_heal || true
-  _cbox_run_egress_lockdown_gate claude isolated "$eff/cbox.conf" "$(basename "$eff")" || {
-    _container_exec_bridge_stop
-    _clip_bridge_stop
-    exec 8>&-
-    return 1
-  }
   _cbox_compose_up "$eff/.compose.up.stamp" docker compose --project-directory "$eff" -f "$eff/docker-compose.yml" || {
     _container_exec_bridge_stop
     _clip_bridge_stop
@@ -4883,8 +5050,13 @@ shell_isolated() {
 }
 
 logs_isolated() {
-  local eff
+  local profile="${1:-}" eff
+  [ $# -eq 0 ] || shift
   eff="$(_project_eff_from_cwd)"
+  if [ -n "$profile" ]; then
+    eff="$(_cbox_profile_eff_dir "$profile" "$eff")" || return 1
+    [ -f "$eff/docker-compose.yml" ] || die "profile $profile has no container config in this project yet - start it once with: cbox run --profile $profile <engine>"
+  fi
   _compose_p "$eff" logs "$@"
 }
 
@@ -4892,7 +5064,7 @@ _cbox_stop_with_sidecars() {
   local cid="$1" project ids
   project="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$cid" 2>/dev/null)" || project=""
   if [ -n "$project" ] && [ "$project" != "<no value>" ] \
-    && printf '%s' "$project" | grep -Eq '^cbox(-p[0-9a-f]{12})?$'; then
+    && printf '%s' "$project" | grep -Eq '^cbox(-p[0-9a-f]{12}(-[a-z][a-z0-9-]{0,31})?)?$'; then
     ids="$(docker ps -q --filter "label=com.docker.compose.project=$project" --filter "label=cbox.kind" 2>/dev/null)" || ids=""
     if [ -n "$ids" ]; then
       printf '%s\n' "$ids" | xargs docker stop >/dev/null 2>&1 || true
@@ -4986,9 +5158,13 @@ _gc_legacy_bins_volumes() {
 
 ls_projects() {
   printf '%-14s %-14s %s\n' PHASH IMGHASH ROOT
-  docker ps --filter label=cbox.kind=isolated --format '{{.Label "cbox.phash"}}'$'\t''{{.Label "cbox.imghash"}}'$'\t''{{.Label "cbox.root"}}' \
-  | while IFS="$(printf '\t')" read -r p i r; do
-      printf '%-14s %-14s %s\n' "${p:0:12}" "${i:0:12}" "$r"
+  docker ps --filter label=cbox.kind=isolated --format '{{.Label "cbox.phash"}}'$'\t''{{.Label "cbox.imghash"}}'$'\t''{{.Label "cbox.root"}}'$'\t''{{.Label "cbox.profile"}}' \
+  | while IFS="$(printf '\t')" read -r p i r q; do
+      if [ -n "$q" ]; then
+        printf '%-14s %-14s %s [%s]\n' "${p:0:12}" "${i:0:12}" "$r" "$q"
+      else
+        printf '%-14s %-14s %s\n' "${p:0:12}" "${i:0:12}" "$r"
+      fi
     done
 }
 
@@ -5195,8 +5371,8 @@ restart_isolated() {
   root="$(_cbox_workspace_root)" || die "refusing to operate in $PWD (home, /, or a mount root)"
   eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
   [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run <engine>' or 'cbox setup --local $root' first"
-  down_project 1
-  echo "cbox: restart: the project container for $root is down; the next 'cbox run <engine>' recreates it with the current configuration" >&2
+  down_project_all 1
+  echo "cbox: restart: the project container for $root and every login-profile container of the project are down; the next 'cbox run <engine>' recreates them with the current configuration" >&2
 }
 
 _cbox_netaccess_shell_ensure() {
@@ -5204,7 +5380,7 @@ _cbox_netaccess_shell_ensure() {
   local container_id
   container_id="$("${COMPOSE[@]}" ps -q proxy 2>/dev/null | head -n1)" || container_id=""
   if [ -z "$container_id" ]; then
-    if "${COMPOSE[@]}" up -d proxy >/dev/null 2>&1; then
+    if _cbox_bind_guard "${COMPOSE[@]}" && "${COMPOSE[@]}" up -d proxy >/dev/null 2>&1; then
       _cbox_netaccess_apply_global || echo "cbox: netaccess: proxy started but applying the granted networks failed - check 'cbox logs proxy' and 'cbox netaccess status'" >&2
     else
       echo "cbox: netaccess: could not start the stopped proxy - network access inside this shell may be unavailable; try 'cbox run'" >&2
@@ -5433,7 +5609,21 @@ _socat_exec_addr() {
 }
 
 login_claude() {
-  local url="${1:-}"
+  local url="" prc=0 profile=""
+  _cbox_profile_flags_reset
+  while [ $# -gt 0 ]; do
+    _cbox_profile_flag_take 0 "$@" && prc=0 || prc=$?
+    case "$prc" in
+      0) shift "$_CBOX_PF_SHIFT" ;;
+      1)
+        [ -n "$url" ] || url="$1"
+        shift
+        ;;
+      *) return 1 ;;
+    esac
+  done
+  _cbox_profile_select "$_CBOX_PF_NAME" || return 1
+  profile="$_CBOX_VERB_PROFILE"
   if [ -z "$url" ]; then
     printf 'cbox: run /login in a claude session inside the container, then paste the printed URL here: '
     IFS= read -r url || return 1
@@ -5462,6 +5652,13 @@ login_claude() {
       ;;
     isolated)
       eff="$(_project_eff_from_cwd)"
+      if [ -n "$profile" ]; then
+        eff="$(_cbox_profile_eff_dir "$profile" "$eff")" || return 1
+        if [ ! -f "$eff/docker-compose.yml" ]; then
+          echo "cbox: profile $profile has no container config in this project - start it first: cbox run --profile $profile claude"
+          return 1
+        fi
+      fi
       cc=(docker compose --project-directory "$eff" -f "$eff/docker-compose.yml")
       svc=cbox
       ;;
@@ -6722,6 +6919,19 @@ doctor() {
     _cbox_doctor_row "mode" MISSING "CBOX_MODE not set and no scope env - cannot identify global/isolated"
   fi
 
+  local profile_detail
+  if [ "$in_container" = 1 ]; then
+    if [ -n "${CBOX_PROFILE:-}" ]; then
+      _cbox_doctor_row "profile" ACTIVE "CBOX_PROFILE=$CBOX_PROFILE (the login profile of this container)"
+    else
+      _cbox_doctor_row "profile" MISSING "CBOX_PROFILE not set - this container predates login profiles, re-render with cbox up"
+    fi
+  elif profile_detail="$(_cbox_profile_doctor_detail 2>/dev/null)"; then
+    _cbox_doctor_row "profile" ACTIVE "$profile_detail"
+  else
+    _cbox_doctor_row "profile" WARN "$profile_detail"
+  fi
+
   if [ -n "${CBOX_CONTEXT_PROFILE:-}" ]; then
     _cbox_doctor_row "context-profile" ACTIVE "CBOX_CONTEXT_PROFILE=$CBOX_CONTEXT_PROFILE"
   else
@@ -7302,10 +7512,12 @@ _cbox_config_is_whitelisted() {
     [A-Z]*) ;;
     *) return 1 ;;
   esac
-  local w
-  while IFS= read -r w; do
-    [ "$w" = "$key" ] && return 0
-  done < <(_cbox_config_whitelist)
+  if [ -z "${_CBOX_CONFIG_WL:-}" ]; then
+    _CBOX_CONFIG_WL=$'\n'"$(_cbox_config_whitelist)"$'\n'
+  fi
+  case "$_CBOX_CONFIG_WL" in
+    *$'\n'"$key"$'\n'*) return 0 ;;
+  esac
   return 1
 }
 
@@ -7376,13 +7588,27 @@ _cbox_config_get_conf_for_var() {
   fi
 }
 
+_cbox_config_mode() {
+  if [ "${_CBOX_CONFIG_SCOPE:-}" = global ]; then
+    [ "$HAVE_GLOBAL_CONF" = 1 ] || die_no_conf
+    printf 'global'
+    return 0
+  fi
+  _cbox_effective_mode
+}
+
+_cbox_config_global_hint() {
+  [ "$HAVE_GLOBAL_CONF" = 1 ] || return 0
+  printf '; the global profile is edited from anywhere with: cbox config --global set KEY=VALUE'
+}
+
 _cbox_config_get() {
   local mode eff conf
-  mode="$(_cbox_effective_mode)"
+  mode="$(_cbox_config_mode)"
   case "$mode" in
     isolated)
       local root
-      root="$(_cbox_workspace_root)" || die "refusing to operate in $PWD (home, /, or a mount root)"
+      root="$(_cbox_workspace_root)" || die "refusing to operate in $PWD (home, /, or a mount root)$(_cbox_config_global_hint)"
       eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
       conf="$eff/cbox.conf"
       ;;
@@ -7393,7 +7619,7 @@ _cbox_config_get() {
       die_no_conf
       ;;
   esac
-  [ -f "$conf" ] || { echo "cbox: no configuration at $conf yet - run 'cbox setup' first" >&2; return 1; }
+  [ -f "$conf" ] || { echo "cbox: no configuration at $conf yet - run 'cbox setup' first$(_cbox_config_global_hint)" >&2; return 1; }
 
   _cbox_config_load_sections
   local arg="${1:-}"
@@ -7563,7 +7789,7 @@ _cbox_config_set() {
   done
 
   local mode
-  mode="$(_cbox_effective_mode)"
+  mode="$(_cbox_config_mode)"
   if [ "$mode" = isolated ]; then
     local i key section n_machine=0 n_project=0 machine_keys="" project_keys=""
     for i in "${!CBOX_CONFIG_KEYS[@]}"; do
@@ -7588,6 +7814,16 @@ _cbox_config_set() {
     if [ "$n_machine" -gt 0 ]; then
       mode=global
       CBOX_CONFIG_MACHINE_ROUTED=1
+    else
+      for i in "${!CBOX_CONFIG_KEYS[@]}"; do
+        key="${CBOX_CONFIG_KEYS[$i]}"
+        case "$key" in
+          CBOX_MODE|CBOX_WORKDIR|CBOX_NAME)
+            echo "cbox: $key is pinned in an isolated project (the derive sets it from the project root) and cannot be set here; edit the global profile with: cbox config --global set $key=VALUE" >&2
+            return 1
+            ;;
+        esac
+      done
     fi
   fi
   case "$mode" in
@@ -7657,11 +7893,25 @@ _cbox_config_preserve_extra_lines() {
   done < "$conf"
 }
 
+_cbox_config_stage_project_workspaces() {
+  local root="$1" eff="$2" i val norm
+  for i in "${!CBOX_CONFIG_KEYS[@]}"; do
+    [ "${CBOX_CONFIG_KEYS[$i]}" = CBOX_WORKSPACES ] || continue
+    val="${CBOX_CONFIG_VALS[$i]}"
+    norm="$(
+      . "$eff/cbox.conf" >/dev/null 2>&1
+      _cbox_project_workspaces_normalize "$root" "$val"
+    )" || return 1
+    CBOX_CONFIG_VALS[$i]="$norm"
+  done
+  return 0
+}
+
 _cbox_config_set_isolated() {
   local root eff
-  root="$(_cbox_workspace_root)" || die "refusing to operate in $PWD (home, /, or a mount root)"
+  root="$(_cbox_workspace_root)" || die "refusing to operate in $PWD (home, /, or a mount root)$(_cbox_config_global_hint)"
   eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
-  [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run codex' or 'cbox setup --local $root' first"
+  [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run codex' or 'cbox setup --local $root' first$(_cbox_config_global_hint)"
 
   local status
   status="$(_cbox_manifest_status "$eff" "$root")"
@@ -7684,6 +7934,9 @@ _cbox_config_set_isolated() {
     || { echo "cbox: refusing - layered config for $root could not be adopted; see the message above" >&2; return 1; }
   _cbox_layered_require_ok "$eff" \
     || { echo "cbox: refusing - layered config (cbox.base/cbox.override) for $root drifted outside cbox; review what the project holds with 'cbox config diff', then $(_cbox_layered_recovery_hint "$root")" >&2; return 1; }
+
+  _cbox_config_stage_project_workspaces "$root" "$eff" \
+    || { echo "cbox: refusing - CBOX_WORKSPACES for $root is not valid (see the message above); nothing was changed" >&2; return 1; }
 
   mkdir -p "$eff"
   local lockfile="$eff/.regen.lock"
@@ -7716,10 +7969,20 @@ _cbox_config_set_isolated() {
     _cbox_reg_export_vars
     _cbox_load_machine_scoped_vars
     _cbox_config_regen_isolated "$eff" "$root" || exit 1
-    local _i _key _vline
+    local _i _key _vline _ws_final
     for _i in "${!CBOX_CONFIG_KEYS[@]}"; do
       _key="${CBOX_CONFIG_KEYS[$_i]}"
-      _cbox_layered_is_excluded "$_key" && continue
+      _cbox_layered_is_pinned "$_key" && continue
+      if _cbox_layered_is_project_owned "$_key"; then
+        _ws_final="$(_cbox_project_workspaces_from_file "$eff/cbox.conf" "$root")"
+        if [ "${CBOX_CONFIG_UNSET_MODE:-0}" = 1 ] || [ "$_ws_final" = "$root" ]; then
+          _cbox_override_del "$eff" "$_key"
+        else
+          _vline="$(grep -m1 "^${_key}=" "$eff/cbox.conf")"
+          _cbox_override_set "$eff" "$_key" "${_vline#*=}"
+        fi
+        continue
+      fi
       if [ "${CBOX_CONFIG_UNSET_MODE:-0}" = 1 ]; then
         _cbox_override_del "$eff" "$_key"
       else
@@ -7853,10 +8116,10 @@ _cbox_config_set_global() {
 
 _cbox_config_pending_file() {
   local mode root eff
-  mode="$(_cbox_effective_mode)"
+  mode="$(_cbox_config_mode)"
   case "$mode" in
     isolated)
-      root="$(_cbox_workspace_root)" || die "refusing to operate in $PWD (home, /, or a mount root)"
+      root="$(_cbox_workspace_root)" || die "refusing to operate in $PWD (home, /, or a mount root)$(_cbox_config_global_hint)"
       eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
       printf '%s/pending.apply' "$eff"
       ;;
@@ -7892,16 +8155,16 @@ _cbox_config_diff() {
     return 1
   fi
   local mode
-  mode="$(_cbox_effective_mode)"
+  mode="$(_cbox_config_mode)"
   if [ "$mode" != isolated ]; then
     echo "cbox: config diff only applies to an isolated per-project config - there is nothing to diff in the global config" >&2
     return 1
   fi
 
   local root eff
-  root="$(_cbox_workspace_root)" || die "refusing to operate in $PWD (home, /, or a mount root)"
+  root="$(_cbox_workspace_root)" || die "refusing to operate in $PWD (home, /, or a mount root)$(_cbox_config_global_hint)"
   eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
-  [ -f "$eff/cbox.conf" ] || { echo "cbox: no configuration at $eff/cbox.conf yet - run 'cbox setup --local $root' first" >&2; return 1; }
+  [ -f "$eff/cbox.conf" ] || { echo "cbox: no configuration at $eff/cbox.conf yet - run 'cbox setup --local $root' first$(_cbox_config_global_hint)" >&2; return 1; }
 
   _cbox_config_load_conf_lib
   _cbox_layered_require_ok "$eff" \
@@ -7922,6 +8185,10 @@ _cbox_config_diff() {
   while IFS= read -r k; do
     [ -n "$k" ] || continue
     ov="$(grep -m1 "^${k}=" "$eff/cbox.override" 2>/dev/null)"; ov="${ov#*=}"
+    if _cbox_layered_is_project_owned "$k"; then
+      printf '%s=%s  (project-owned, never inherited from global)\n' "$k" "$ov"
+      continue
+    fi
     bv="$(grep -m1 "^${k}=" "$eff/cbox.base" 2>/dev/null)"; bv="${bv#*=}"
     gv="$(grep -m1 "^${k}=" "$now_tmp" 2>/dev/null)"; gv="${gv#*=}"
     conflict=""
@@ -7937,7 +8204,11 @@ _cbox_config_diff() {
 }
 
 _cbox_config_unset_key_value() {
-  local eff="$1" key="$2" val
+  local eff="$1" key="$2" root="${3:-}" val
+  if _cbox_layered_is_project_owned "$key" && [ -n "$root" ]; then
+    printf '%s' "$root"
+    return 0
+  fi
   if [ -f "$eff/cbox.base" ] && grep -q "^${key}=" "$eff/cbox.base" 2>/dev/null; then
     val="$(unset "$key"; . "$eff/cbox.base" >/dev/null 2>&1; printf '%s' "${!key-}")"
   else
@@ -7958,16 +8229,16 @@ _cbox_config_unset() {
   [ "$#" -ge 1 ] || { echo "cbox: usage: $0 config unset KEY [KEY...]" >&2; return 1; }
 
   local mode
-  mode="$(_cbox_effective_mode)"
+  mode="$(_cbox_config_mode)"
   if [ "$mode" != isolated ]; then
-    echo "cbox: config unset only applies to an isolated per-project config - there is no override to remove in the global config" >&2
+    echo "cbox: config unset only applies to an isolated per-project config - there is no override to remove in the global config; change a global value with: cbox config --global set KEY=VALUE" >&2
     return 1
   fi
 
   local root eff
-  root="$(_cbox_workspace_root)" || die "refusing to operate in $PWD (home, /, or a mount root)"
+  root="$(_cbox_workspace_root)" || die "refusing to operate in $PWD (home, /, or a mount root)$(_cbox_config_global_hint)"
   eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$root")"
-  [ -f "$eff/cbox.conf" ] || { echo "cbox: no configuration at $eff/cbox.conf yet - run 'cbox setup --local $root' first" >&2; return 1; }
+  [ -f "$eff/cbox.conf" ] || { echo "cbox: no configuration at $eff/cbox.conf yet - run 'cbox setup --local $root' first$(_cbox_config_global_hint)" >&2; return 1; }
 
   _cbox_config_load_sections
   _cbox_config_load_conf_lib
@@ -8005,7 +8276,7 @@ _cbox_config_unset() {
 
   local -a pairs=()
   for k in $overridden_keys; do
-    pairs+=("$k=$(_cbox_config_unset_key_value "$eff" "$k")")
+    pairs+=("$k=$(_cbox_config_unset_key_value "$eff" "$k" "$root")")
   done
 
   local CBOX_CONFIG_UNSET_MODE=1
@@ -8013,6 +8284,11 @@ _cbox_config_unset() {
 }
 
 config_cmd() {
+  _CBOX_CONFIG_SCOPE=""
+  if [ "${1:-}" = "--global" ]; then
+    _CBOX_CONFIG_SCOPE=global
+    shift
+  fi
   local sub="${1:-}"
   case "$sub" in
     get)
@@ -8036,7 +8312,8 @@ config_cmd() {
       _cbox_config_pending "$@"
       ;;
     *)
-      echo "cbox: usage: $0 config {get [KEY|--section NAME|--all]|set KEY=VALUE...|unset KEY...|diff|pending [--clear]}" >&2
+      echo "cbox: usage: $0 config [--global] {get [KEY|--section NAME|--all]|set KEY=VALUE...|unset KEY...|diff|pending [--clear]}" >&2
+      echo "cbox: --global targets the global profile ($INSTALL_DIR/cbox.conf) from any directory, including inside a project" >&2
       return 1
       ;;
   esac
@@ -8275,7 +8552,10 @@ _hub_dispatch_shell() {
   local mode="$1" rc=0
   case "$mode" in
     global) shell || rc=$? ;;
-    *) shell_isolated || rc=$? ;;
+    *)
+      _cbox_profile_select "" || return 1
+      shell_isolated "$_CBOX_VERB_PROFILE" || rc=$?
+      ;;
   esac
   return "$rc"
 }
@@ -8284,7 +8564,10 @@ _hub_dispatch_logs() {
   local mode="$1" rc=0
   case "$mode" in
     global) logs || rc=$? ;;
-    *) logs_isolated || rc=$? ;;
+    *)
+      _cbox_profile_select "" || return 1
+      logs_isolated "$_CBOX_VERB_PROFILE" || rc=$?
+      ;;
   esac
   return "$rc"
 }
@@ -8612,7 +8895,7 @@ _hub_dispatch_down() {
   local mode="$1" rc=0
   case "$mode" in
     global) down 0 || rc=$? ;;
-    *) down_project 0 || rc=$? ;;
+    *) down_project_all 0 || rc=$? ;;
   esac
   if [ "$rc" -ne 0 ]; then
     printf 'cbox: down refused - type FORCE to stop anyway, anything else to cancel: ' >&2
@@ -8621,7 +8904,7 @@ _hub_dispatch_down() {
     if [ "$ans" = FORCE ]; then
       case "$mode" in
         global) down 1 || rc=$? ;;
-        *) down_project 1 || rc=$? ;;
+        *) down_project_all 1 || rc=$? ;;
       esac
     fi
   fi
@@ -8766,7 +9049,7 @@ hub() {
 _hub_context_json() {
   local mode root eff conf compose_argv
   mode="$(_cbox_effective_mode)"
-  local egress bins
+  local egress bins profile=default profile_error="" container_eff=""
   case "$mode" in
     global)
       root="$PWD"
@@ -8789,15 +9072,25 @@ _hub_context_json() {
         . "$eff/cbox.conf" >/dev/null 2>&1 || true
         _bins_hub_line
       )"
+      if _cbox_profile_resolve "" 1 2>/dev/null; then
+        profile="$CBOX_PROFILE_EFFECTIVE"
+        [ "$profile" = default ] || container_eff="$(_cbox_profile_eff_dir "$profile" "$eff")" || container_eff=""
+      else
+        profile_error="the configured profile cannot be resolved"
+      fi
       ;;
     *)
       printf '{"mode": "none"}\n'
       return 0
       ;;
   esac
+  [ -n "$container_eff" ] || container_eff="$eff"
   CBOX_HUB_CTX_MODE="$mode" \
   CBOX_HUB_CTX_ROOT="$root" \
   CBOX_HUB_CTX_EFF="$eff" \
+  CBOX_HUB_CTX_CEFF="$container_eff" \
+  CBOX_HUB_CTX_PROFILE="$profile" \
+  CBOX_HUB_CTX_PROFILE_ERROR="$profile_error" \
   CBOX_HUB_CTX_CONF="$conf" \
   CBOX_HUB_CTX_SERVICE="$SERVICE" \
   CBOX_HUB_CTX_EGRESS="$egress" \
@@ -8808,15 +9101,19 @@ import os
 
 mode = os.environ["CBOX_HUB_CTX_MODE"]
 eff = os.environ["CBOX_HUB_CTX_EFF"]
+ceff = os.environ["CBOX_HUB_CTX_CEFF"]
 if mode == "isolated":
-    compose = ["docker", "compose", "--project-directory", eff,
-               "-f", eff + "/docker-compose.yml"]
+    compose = ["docker", "compose", "--project-directory", ceff,
+               "-f", ceff + "/docker-compose.yml"]
 else:
     compose = ["docker", "compose", "-f", eff + "/docker-compose.yml"]
 print(json.dumps({
     "mode": mode,
     "root": os.environ["CBOX_HUB_CTX_ROOT"],
     "eff": eff,
+    "container_eff": ceff,
+    "profile": os.environ["CBOX_HUB_CTX_PROFILE"] or "default",
+    "profile_error": os.environ["CBOX_HUB_CTX_PROFILE_ERROR"],
     "conf": os.environ["CBOX_HUB_CTX_CONF"],
     "compose_argv": compose,
     "service": os.environ["CBOX_HUB_CTX_SERVICE"],
@@ -8827,7 +9124,7 @@ print(json.dumps({
 }
 
 usage() {
-  echo "usage: $0 {run [--session <id>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force]|restart [--gpu]|shell|logs [args]|update|reinstall-bins [--fresh|--force|--if-stale]|bins {status|history [tool]|rollback [tool]}|install-hooks|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|unset|diff|pending}|netaccess {status|allow|deny}|ollama {status|ps|up|down|pull <model>|reconcile|gpu-check}|wg {status|up [--yes]|down|keygen|peer {add|rm|list|config}|server add-client <name> [<pubkey>] [--endpoint host:port] [--plain] [--yes]|client join <token> [--yes]}|session-broker {status|access {disabled|viewer|full-attach}|window {off|<minutes>}|key {add <pubkey-file> [comment]|rm <fingerprint>|fingerprints}}|backup|login [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}"
+  echo "usage: $0 {run [--session <id>] [--profile <name>|--new-profile <name>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force] [--profile <name>]|restart [--gpu]|shell [--profile <name>]|logs [--profile <name>] [args]|update|reinstall-bins [--fresh|--force|--if-stale]|bins {status|history [tool]|rollback [tool]}|install-hooks|profile {add <name>|list|ls|rm <name> [--yes]}|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|unset|diff|pending}|netaccess {status|allow|deny}|ollama {status|ps|up|down|pull <model>|reconcile|gpu-check}|wg {status|up [--yes]|down|keygen|peer {add|rm|list|config}|server add-client <name> [<pubkey>] [--endpoint host:port] [--plain] [--yes]|client join <token> [--yes]}|session-broker {status|access {disabled|viewer|full-attach}|window {off|<minutes>}|key {add <pubkey-file> [comment]|rm <fingerprint>|fingerprints}}|backup|login [--profile <name>] [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}"
   echo "cbox: with zero arguments and a TTY on stdin+stdout, bare '$0' opens the interactive hub instead of this usage text"
   echo "cbox: 'cbox ls' lists RUNNING isolated projects only, not every configured project"
   exit 1
@@ -8836,15 +9133,44 @@ usage() {
 case "${1:-}" in
   run) shift; run "$@";;
   session) shift; _cbox_session_cmd "$@";;
+  profile) shift; _cbox_profile_cmd "$@";;
   ai) shift; ai "$@";;
   up) shift; up "$@";;
   down)
     shift
     _down_force=0
-    if [ "${1:-}" = "--force" ]; then _down_force=1; shift; fi
+    _down_rc=0
+    _cbox_profile_flags_reset
+    while [ $# -gt 0 ]; do
+      if [ "$1" = "--force" ]; then
+        _down_force=1
+        shift
+        continue
+      fi
+      _cbox_profile_flag_take 0 "$@" && _down_rc=0 || _down_rc=$?
+      case "$_down_rc" in
+        0) shift "$_CBOX_PF_SHIFT" ;;
+        1) usage ;;
+        *) exit 1 ;;
+      esac
+    done
     case "$(_cbox_effective_mode)" in
-      isolated) down_project "$_down_force";;
-      global) down "$_down_force";;
+      isolated)
+        case "$_CBOX_PF_NAME" in
+          "") down_project_all "$_down_force";;
+          default) down_project "$_down_force";;
+          *)
+            _cbox_profile_name_valid "$_CBOX_PF_NAME" || die "invalid profile name '$_CBOX_PF_NAME'"
+            down_project_all "$_down_force" "$_CBOX_PF_NAME"
+            ;;
+        esac
+        ;;
+      global)
+        case "$_CBOX_PF_NAME" in
+          ""|default) down "$_down_force";;
+          *) die "the global scope has no profiles - --profile $_CBOX_PF_NAME needs an isolated project";;
+        esac
+        ;;
       *) die_no_conf;;
     esac
     ;;
@@ -8857,17 +9183,51 @@ case "${1:-}" in
     esac
     ;;
   shell)
+    shift
+    _cbox_profile_flags_reset
+    _shell_rc=0
+    while [ $# -gt 0 ]; do
+      _cbox_profile_flag_take 0 "$@" && _shell_rc=0 || _shell_rc=$?
+      case "$_shell_rc" in
+        0) shift "$_CBOX_PF_SHIFT" ;;
+        1) usage ;;
+        *) exit 1 ;;
+      esac
+    done
     case "$(_cbox_effective_mode)" in
-      isolated) shell_isolated;;
-      global) shell;;
+      isolated)
+        _cbox_profile_select "$_CBOX_PF_NAME" || exit 1
+        shell_isolated "$_CBOX_VERB_PROFILE"
+        ;;
+      global)
+        _cbox_profile_select "$_CBOX_PF_NAME" || exit 1
+        shell
+        ;;
       *) die_no_conf;;
     esac
     ;;
   logs)
     shift
+    _cbox_profile_flags_reset
+    _logs_rc=0
+    _logs_args=()
+    while [ $# -gt 0 ]; do
+      _cbox_profile_flag_take 0 "$@" && _logs_rc=0 || _logs_rc=$?
+      case "$_logs_rc" in
+        0) shift "$_CBOX_PF_SHIFT" ;;
+        1) _logs_args+=("$1"); shift ;;
+        *) exit 1 ;;
+      esac
+    done
     case "$(_cbox_effective_mode)" in
-      isolated) logs_isolated "$@";;
-      global) logs "$@";;
+      isolated)
+        _cbox_profile_select "$_CBOX_PF_NAME" || exit 1
+        logs_isolated "$_CBOX_VERB_PROFILE" ${_logs_args[@]+"${_logs_args[@]}"}
+        ;;
+      global)
+        _cbox_profile_select "$_CBOX_PF_NAME" || exit 1
+        logs ${_logs_args[@]+"${_logs_args[@]}"}
+        ;;
       *) die_no_conf;;
     esac
     ;;

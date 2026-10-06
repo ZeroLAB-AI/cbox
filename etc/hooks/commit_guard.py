@@ -30,6 +30,11 @@ def staged_touches_auth(cwd):
     return False
 
 
+def review_mode():
+    v = os.environ.get("CBOX_REVIEW", "ask").strip().lower()
+    return v if v in ("ask", "auto") else "ask"
+
+
 def warn(msg):
     print(json.dumps({
         "hookSpecificOutput": {
@@ -54,7 +59,10 @@ def main():
     if br and br != "main" and not br.startswith("wave") and "worktree" not in br:
         notes.append("main-only policy: committing on branch '%s' (not main) - fold and delete temporary branches after merge" % br)
     if staged_touches_auth(cwd):
-        notes.append("routing policy: staged changes touch auth/API/input - run the security-reviewer subagent and fix CRITICAL/HIGH before this commit lands")
+        if review_mode() == "auto":
+            notes.append("routing policy: staged changes touch auth/API/input - run the security-reviewer subagent and fix CRITICAL/HIGH before this commit lands")
+        else:
+            notes.append("routing policy: staged changes touch auth/API/input - ask the owner whether to run security-reviewer (review mode ask); do not run it unprompted")
     if notes:
         warn(" | ".join(notes))
 

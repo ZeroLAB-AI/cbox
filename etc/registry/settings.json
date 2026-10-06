@@ -412,7 +412,8 @@
     "config-pending",
     "sessions",
     "capabilities",
-    "stale-binds"
+    "stale-binds",
+    "profile"
   ],
   "variables": [
     {
@@ -461,6 +462,20 @@
       "prompt": "setup: base image digest cache TTL in seconds (0 = re-check every launch): ",
       "help": "Base image digest cache TTL in seconds (0 = re-check every launch).",
       "validator": null
+    },
+    {
+      "key": "CBOX_PROFILE",
+      "section": "mode",
+      "type": {
+        "kind": "string",
+        "escape_hatch": "profile-name"
+      },
+      "default": "default",
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Login profile used by default (CBOX_PROFILE): the name of a profile created with cbox profile add, or default for the host login. The global value is the machine default, inherited by projects and overridable per project; a one-off --profile flag wins over both.",
+      "validator": "profile-name"
     },
     {
       "key": "CBOX_NAME",
@@ -2116,6 +2131,23 @@
       "export": false,
       "prompt": "setup: session context profile (full = complete driver core + progress history each startup; light = conduct kernel + one-writer + ledger RESUME + digest only, no orchestration detail, no progress)",
       "help": "full = complete driver core + progress history each startup. light = conduct kernel + one-writer + ledger RESUME + digest only.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_REVIEW",
+      "section": "continuity",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "ask",
+          "auto"
+        ]
+      },
+      "default": "ask",
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Reviewer policy for the session driver. ask = code-reviewer and security-reviewer never run automatically; the driver asks the owner one short non-blocking question where a review would have run and runs the reviewer only on a yes. auto = run code-reviewer after code changes and security-reviewer before auth/API/input commits (CRITICAL/HIGH block). Tests are always run as a plain command, never through a verifier or test-runner agent.",
       "validator": null
     },
     {

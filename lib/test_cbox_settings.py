@@ -274,6 +274,39 @@ class FetchFailureWarningTests(unittest.TestCase):
         self.assertNotIn("warning", screen)
 
 
+class LocalWorkspacesApplyTests(unittest.TestCase):
+    def test_argv_adds_local_only_for_workspaces_in_an_isolated_project(self):
+        self.assertEqual(MOD.local_setup_argv("/x/cbox", "workspaces", True), ["/x/cbox", "setup", "update", "workspaces", "--local"])
+        self.assertEqual(MOD.local_setup_argv("/x/cbox", "workspaces", False), ["/x/cbox", "setup", "update", "workspaces"])
+        self.assertEqual(MOD.local_setup_argv("/x/cbox", "mounts", True), ["/x/cbox", "setup", "update", "mounts"])
+
+    def test_screen_row_names_the_local_form(self):
+        section = {"id": "workspaces", "title": "Workspaces", "apply_class": "recreate", "scope": "project"}
+        screen, _rows = MOD.build_section_screen(section, [], {}, {}, set(), isolated=True)
+        self.assertIn("w) cbox setup update workspaces --local", screen)
+        screen, _rows = MOD.build_section_screen(section, [], {}, {}, set(), isolated=False)
+        self.assertIn("w) cbox setup update workspaces (apply", screen)
+        self.assertNotIn("--local", screen)
+
+    def test_w_key_runs_the_local_setup_inside_an_isolated_project(self):
+        calls = []
+        saved = (MOD.cbox_config_get_all, MOD.cbox_config_pending, MOD.cbox_config_diff, MOD.report_call_rc)
+        MOD.cbox_config_get_all = lambda cbox_path, cwd: ({}, True)
+        MOD.cbox_config_pending = lambda cbox_path, cwd: ({}, True)
+        MOD.cbox_config_diff = lambda cbox_path, cwd: (set(), True)
+        MOD.report_call_rc = lambda argv, cwd, out: calls.append((list(argv), cwd)) or 0
+        try:
+            section = {"id": "workspaces", "title": "Workspaces", "apply_class": "recreate", "scope": "project"}
+            out = []
+            result = MOD.run_section_loop("/x/cbox", "/proj", True, section, [], "/proj", io.StringIO("w\nb\n"), out.append)
+            self.assertEqual(result, "back")
+            result = MOD.run_section_loop("/x/cbox", None, False, section, [], "/proj", io.StringIO("w\nb\n"), out.append)
+        finally:
+            MOD.cbox_config_get_all, MOD.cbox_config_pending, MOD.cbox_config_diff, MOD.report_call_rc = saved
+        self.assertEqual(calls[0], (["/x/cbox", "setup", "update", "workspaces", "--local"], "/proj"))
+        self.assertEqual(calls[1], (["/x/cbox", "setup", "update", "workspaces"], "/proj"))
+
+
 class ReportCallRcTests(unittest.TestCase):
     def test_nonzero_rc_prints_failure_message(self):
         old = MOD.subprocess.call

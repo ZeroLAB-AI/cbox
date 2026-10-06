@@ -407,6 +407,7 @@ d['engines']['stub4'] = {
     'version_vars': ['CBOX_STUB4_VERSION'],
     'enabled_var': None,
     'login': 'none',
+    'credentials': {'kind': 'volume', 'volume': 'stub4-home'},
     'preassign_id': False,
     'resume_argv': None,
     'seed_channel': 'pointer-prompt',

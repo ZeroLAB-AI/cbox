@@ -531,6 +531,28 @@ _new_case CBOX_USER_DIR "" accept
 _new_case CBOX_USER_DIR "/home/user/.config/cbox/user" accept
 _new_case CBOX_USER_DIR "~/cbox-user" accept
 
+_new_case CBOX_REVIEW "ask" accept
+_new_case CBOX_REVIEW "auto" accept
+_new_case CBOX_REVIEW "" reject
+_new_case CBOX_REVIEW "bogus" reject
+_new_case CBOX_REVIEW "Ask" reject
+_new_case CBOX_REVIEW "on" reject
+
+_new_case CBOX_PROFILE "default" accept
+_new_case CBOX_PROFILE "work" accept
+_new_case CBOX_PROFILE "work-2" accept
+_new_case CBOX_PROFILE "a" accept
+_new_case CBOX_PROFILE "$(python3 -c "print('a' * 16)")" accept
+_new_case CBOX_PROFILE "$(python3 -c "print('a' * 17)")" reject
+_new_case CBOX_PROFILE "$(python3 -c "print('a' * 32)")" reject
+_new_case CBOX_PROFILE "" reject
+_new_case CBOX_PROFILE "Work" reject
+_new_case CBOX_PROFILE "1work" reject
+_new_case CBOX_PROFILE "-work" reject
+_new_case CBOX_PROFILE "wo_rk" reject
+_new_case CBOX_PROFILE "wo rk" reject
+_new_case CBOX_PROFILE "../work" reject
+
 _new_case CBOX_BASHRC_COMMANDS "all" accept
 _new_case CBOX_BASHRC_COMMANDS "claude codex" accept
 _new_case CBOX_BASHRC_COMMANDS "anything goes; no validator" accept

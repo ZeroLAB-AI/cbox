@@ -208,6 +208,10 @@
       "layer": "host",
       "purpose": "sourced by cbox on the host (cbox:13)"
     },
+    "lib/cbox-profile.sh": {
+      "layer": "host",
+      "purpose": "sourced by cbox on the host; the login profile store (add, list, rm), name validation, store and eff path helpers and the flag > project conf > global conf > default resolver"
+    },
     "lib/cbox-session.sh": {
       "layer": "host",
       "purpose": "sourced by cbox on the host (cbox:14)"
@@ -220,9 +224,17 @@
       "layer": "host",
       "purpose": "python3-stdlib implementation backing lib/portable.sh (the P1 waist skeleton, docs/MULTIPLATFORM_DESIGN.md section 3); sourced/invoked host-side only"
     },
+    "lib/cbox_bind_guard.py": {
+      "layer": "host",
+      "purpose": "stdlib bind source guard; 'roots-write' records the declared bind roots of a rendered compose (with their render-time real paths) in a sidecar, 'check' parses the compose files and refuses any bind source whose real path leaves its declared root, resolves into the XDG runtime dir, ~/.config/cbox, ~/.ssh, ~/.gnupg or ~/.docker outside a declared bridge/eff/store root, or exposes a protected credential path of a profile container; run host-side by cbox right before every compose up or run"
+    },
     "lib/cbox_hub.py": {
       "layer": "host",
       "purpose": "the hub core (docs/SETUP_HUB_DESIGN.md section 3, increment 1); invoked host-side by cbox bare-invocation dispatch when python3 is present and the file py_compiles, reads scope context from cbox __hub_context, orchestrates cbox_hub_ui (RawKeys/LineKeys input) and cbox_hub_screens (main + submenu renderers) and dispatches every action as an existing CLI verb subprocess; falls back to the bash hub() otherwise"
+    },
+    "lib/cbox_profile_seed.py": {
+      "layer": "host",
+      "purpose": "stdlib helper for the profile seed/harvest flow; 'seed' copies a claude.json minus account-bound keys into a fresh state dir, 'harvest' records the logged-in oauthAccount into a profile json; invoked host-side by cbox"
     },
     "lib/cbox_settings.py": {
       "layer": "host",
@@ -364,7 +376,15 @@
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
+    "lib/test_bind_guard.sh": {
+      "layer": "test",
+      "purpose": "bind source guard on rendered fixtures mirroring a real layout: default, profile and global renders pass, nested sources swapped to symlinks into the XDG runtime dir, other profile stores, ~/.ssh, ~/.gnupg, ~/.docker, backups or the credentials file are refused before docker up, a symlinked claude root keeps working, a legacy compose without a sidecar gets the protected-area rule only"
+    },
     "lib/test_cbox_settings.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_cbox_profile_seed.py": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
@@ -407,6 +427,10 @@
     "lib/test_code_hygiene_guard.sh": {
       "layer": "test",
       "purpose": "code_hygiene_guard: non-ASCII denied in code AND docs (.md/.txt), comment/model-name checks code-only, markdown headings allowed, malformed payload fails closed, U+2028/U+2029/U+0085 checked not treated as line breaks"
+    },
+    "lib/test_commit_guard.sh": {
+      "layer": "test",
+      "purpose": "commit_guard: the auth/API/input commit note follows CBOX_REVIEW (ask = ask the owner, auto = run security-reviewer), unset and invalid values behave as ask, unrelated commits and non-commit commands stay silent"
     },
     "lib/test_codex_mcp_shim.py": {
       "layer": "test",
@@ -620,9 +644,29 @@
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
+    "lib/test_profiles.sh": {
+      "layer": "test",
+      "purpose": "login profile store, name validation, precedence resolver, rm refusals and the compose CBOX_PROFILE env line, on a temp HOME with a stub docker"
+    },
+    "lib/test_profile_run.sh": {
+      "layer": "test",
+      "purpose": "login profile run path on a temp HOME with a stub docker: flag parsing before the engine and after the bin, precedence, unknown/global/volume refusals, eff_p preparation and render environment, harvest, bridge suffix, down/reap/gc/ls/login/logs/shell selection and profile rm volume cleanup"
+    },
+    "lib/test_profile_render.sh": {
+      "layer": "test",
+      "purpose": "non-default profile compose render fixture: project name, quoted labels, store binds, the explicit shared claude subpaths (no whole-dir bind, no credentials file, no backups), the store codex home, per-profile audit logs, seeds with host seed refresh, adopt-guard, refusals, default byte-identity against a3b1864 plus the review env line, and the engines credentials descriptor ratchet"
+    },
     "lib/test_probe_and_seed.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_project_workspaces_render.sh": {
+      "layer": "test",
+      "purpose": "isolated and profile compose render of project workspaces: root-first de-duplicated rw binds, validation and overlap refusals, guard roots parsed by the real guard, codex trust and readonly override coverage, and root-only byte-identity against the previous render"
+    },
+    "lib/test_project_workspaces_config.sh": {
+      "layer": "test",
+      "purpose": "isolated project workspaces end to end through the real cbox script in a symlink-farm install with a stub docker: config set/unset of CBOX_WORKSPACES (root-first normalisation, validation refusals, survival across derive, template re-bless and bootstrap adopt, --reset), the global list never copied into a project, pinned keys refused, config --global from home, a project and a non-project directory, and projects written by the previous release (lib/fixtures/legacy_layered.snapshot) staying usable without any drifted refusal"
     },
     "lib/test_retired_names.sh": {
       "layer": "test",
@@ -675,6 +719,10 @@
     "lib/test_setup_profiles.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_setup_update_local.sh": {
+      "layer": "test",
+      "purpose": "cbox setup update <section> --local: both argument orders, explicit and cwd root, missing-project and refused-section errors, changed keys only into cbox.override and cbox.conf with the global conf untouched, config-set apply staging, plain update note, existing --local forms"
     },
     "lib/test_socks_guard.sh": {
       "layer": "test",

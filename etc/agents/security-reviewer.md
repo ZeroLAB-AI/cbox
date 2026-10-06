@@ -1,6 +1,6 @@
 ---
 name: security-reviewer
-description: Security audit of changes touching authentication, authorization, API endpoints, or input handling. Use proactively before commits that modify auth or API code.
+description: Security audit of changes touching authentication, authorization, API endpoints, or input handling. Runs on the owner's yes under CBOX_REVIEW=ask, before commits that modify auth or API code under CBOX_REVIEW=auto.
 tools: Read, Grep, Glob, Bash
 model: claude-opus-5-5[1m]
 effort: high

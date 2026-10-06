@@ -139,6 +139,138 @@ _cbox_docker_bounded() {
   _cbox_timeout 5 docker "$@" 2>/dev/null
 }
 
+_cbox_render_profile_name() {
+  local p="${CBOX_RENDER_PROFILE:-default}"
+  case "$p" in
+    [abcdefghijklmnopqrstuvwxyz]*) ;;
+    *) echo "cbox: invalid CBOX_RENDER_PROFILE - a profile name starts with a lowercase letter" >&2; return 1 ;;
+  esac
+  case "$p" in
+    *[!abcdefghijklmnopqrstuvwxyz0123456789-]*) echo "cbox: invalid CBOX_RENDER_PROFILE - only lowercase letters, digits and hyphens" >&2; return 1 ;;
+  esac
+  [ "${#p}" -le 16 ] || { echo "cbox: invalid CBOX_RENDER_PROFILE - at most 16 characters" >&2; return 1; }
+  printf '%s' "$p"
+}
+
+_cbox_render_profile_store() {
+  declare -F _cbox_profile_store_dir >/dev/null 2>&1 || . "$INSTALL_DIR/lib/cbox-profile.sh"
+  _cbox_profile_store_dir "$1"
+}
+
+_cbox_render_profile_require_isolated_mount() {
+  local profile="$1" claude_mode="$2" codex_mode="$3"
+  [ "$profile" != default ] || return 0
+  if [ "$claude_mode" != mount ] || [ "$codex_mode" != mount ]; then
+    echo "cbox: profile $profile needs claude and codex mode mount - volume mode has no host credential source to switch" >&2
+    return 1
+  fi
+  if [ -n "${HOST_HOME:-}" ] && [ "$HOST_HOME" != "$HOME" ]; then
+    echo "cbox: profile $profile needs the container home to equal the host home (HOST_HOME=$HOST_HOME, HOME=$HOME)" >&2
+    return 1
+  fi
+}
+
+_cbox_render_profile_prepare_store() {
+  local store="$1" profile="$2" d
+  if [ -L "$store" ] || [ ! -d "$store" ]; then
+    echo "cbox: profile store for $profile is missing or a symlink: $store - create it with: cbox profile add $profile" >&2
+    return 1
+  fi
+  for d in claude codex usage; do
+    if [ -L "$store/$d" ] || { [ -e "$store/$d" ] && [ ! -d "$store/$d" ]; }; then
+      echo "cbox: refusing profile store entry that is not a plain directory: $store/$d" >&2
+      return 1
+    fi
+    ( umask 077; mkdir -p "$store/$d" ) || return 1
+  done
+  if [ -L "$store/codex/auth.json" ] || { [ -e "$store/codex/auth.json" ] && [ ! -f "$store/codex/auth.json" ]; }; then
+    echo "cbox: refusing profile codex auth entry that is not a regular file: $store/codex/auth.json" >&2
+    return 1
+  fi
+  if [ ! -e "$store/codex/auth.json" ]; then
+    ( umask 077; : > "$store/codex/auth.json" ) || return 1
+  fi
+  chmod 0600 "$store/codex/auth.json" 2>/dev/null || true
+}
+
+_cbox_render_profile_check_eff() {
+  local eff="$1" profile="$2"
+  if [ "$(basename "$eff")" != "$profile" ] || [ "$(basename "$(dirname "$eff")")" != profiles ]; then
+    echo "cbox: profile $profile must render into <scope>/profiles/$profile, got $eff" >&2
+    return 1
+  fi
+}
+
+_cbox_render_profile_seed_json() {
+  local src="$1" dst="$2" refresh="${3:-}"
+  mkdir -p "$(dirname "$dst")" || return 1
+  if [ "$refresh" = refresh ]; then
+    python3 "$INSTALL_DIR/lib/cbox_profile_seed.py" seed --refresh "$src" "$dst" >/dev/null || {
+      echo "cbox: cannot refresh the profile json $dst from $src" >&2
+      return 1
+    }
+    return 0
+  fi
+  python3 "$INSTALL_DIR/lib/cbox_profile_seed.py" seed "$src" "$dst" >/dev/null || {
+    echo "cbox: cannot seed the profile json $dst from $src" >&2
+    return 1
+  }
+}
+
+_cbox_yaml_dq() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '"%s"' "$s"
+}
+
+_cbox_mount_path_problem() {
+  local p="$1"
+  case "$p" in
+    /*) ;;
+    *) printf 'not an absolute path'; return 0 ;;
+  esac
+  case "$p" in
+    *$'\n'*|*$'\r'*) printf 'contains a newline'; return 0 ;;
+    *:*|*'$'*) printf 'contains a colon or dollar sign'; return 0 ;;
+    *'"'*|*\\*|*' #'*) printf 'contains a quote, a backslash or a space followed by a hash'; return 0 ;;
+  esac
+  return 1
+}
+
+_cbox_bind_roots_file() {
+  local dir="$1"
+  if [ "$dir" = "$INSTALL_DIR" ]; then
+    printf '%s/generated/bind-roots' "$INSTALL_DIR"
+  else
+    printf '%s/bind-roots' "$dir"
+  fi
+}
+
+_cbox_bind_roots_write() {
+  local dir="$1" target
+  shift
+  target="$(_cbox_bind_roots_file "$dir")"
+  [ -f "$INSTALL_DIR/lib/cbox_bind_guard.py" ] || return 0
+  mkdir -p "$(dirname "$target")" || return 1
+  python3 -I "$INSTALL_DIR/lib/cbox_bind_guard.py" roots-write "$target" "$@"
+}
+
+_cbox_profile_claude_shared_into() {
+  local tmp="$1" claude_path="$2" eff="$3" d
+  [ -e "$claude_path/history.jsonl" ] || ( umask 077; : >> "$claude_path/history.jsonl" ) || return 1
+  mkdir -p "$eff/audit" "$claude_path/jobs" || return 1
+  chmod 0700 "$eff/audit" || return 1
+  printf '      - %s/history.jsonl:${HOST_HOME}/.claude/history.jsonl:rw\n' "$claude_path" >> "$tmp"
+  for d in tasks jobs session-env plugins file-history plans shell-snapshots agent-memory; do
+    printf '      - %s/%s:${HOST_HOME}/.claude/%s:rw\n' "$claude_path" "$d" "$d" >> "$tmp"
+  done
+  for d in commands skills rules; do
+    printf '      - %s/%s:${HOST_HOME}/.claude/%s:ro\n' "$claude_path" "$d" "$d" >> "$tmp"
+  done
+  printf '      - %s/audit:${HOST_HOME}/.claude/cbox-audit:rw\n' "$eff" >> "$tmp"
+}
+
 _cbox_list_docker_networks() {
   _cbox_docker_bounded network ls --format '{{.Name}}'
 }
@@ -339,8 +471,12 @@ _cbox_path_within() {
 
 _cbox_check_workspace_overlap() {
   local -a ws=("$@")
-  local w reserved_label reserved_path w_real reserved_real cfg_root
+  local w reserved_label reserved_path w_real reserved_real cfg_root pair
   cfg_root="${HOME:-}/.config/cbox"
+  local -a extra_reserved=("the XDG runtime dir|$(_cbox_xdg_runtime_dir)")
+  if [ -n "${HOME:-}" ]; then
+    extra_reserved+=("~/.ssh|$HOME/.ssh" "~/.gnupg|$HOME/.gnupg" "~/.docker|$HOME/.docker")
+  fi
   for w in "${ws[@]}"; do
     [ -n "$w" ] || continue
     w_real="$(_cbox_realpath_m "$w")"
@@ -358,6 +494,12 @@ _cbox_check_workspace_overlap() {
         die "workspace path conflicts with the cbox config root ($reserved_real): $w_real"
       fi
     fi
+    for pair in "${extra_reserved[@]}"; do
+      reserved_real="$(_cbox_realpath_m "${pair#*|}")"
+      if _cbox_path_within "$w_real" "$reserved_real" || _cbox_path_within "$reserved_real" "$w_real"; then
+        die "workspace path conflicts with ${pair%%|*} ($reserved_real): $w_real"
+      fi
+    done
   done
 }
 
@@ -1045,6 +1187,12 @@ _cbox_user_policies_files() {
 }
 
 gen_compose() {
+  local render_profile
+  render_profile="$(_cbox_render_profile_name)" || return 1
+  if [ "$render_profile" != default ]; then
+    echo "cbox: profile $render_profile is not supported in the global scope - use an isolated project" >&2
+    return 1
+  fi
   local name="${CBOX_NAME:-cbox}"
   local policy="${CBOX_RESTART_POLICY:-no}"
   local claude_mode="${CBOX_CLAUDE_MODE:-mount}"
@@ -1060,6 +1208,14 @@ gen_compose() {
   managed="$(_cbox_managed_dirs)"
   local -a ws=()
   read -r -a ws <<< "${CBOX_WORKSPACES:-}"
+  local ws_why
+  for w in "${ws[@]-}"; do
+    [ -n "$w" ] || continue
+    if ws_why="$(_cbox_mount_path_problem "$w")"; then
+      echo "cbox: workspace cannot be mounted ($ws_why): $w" >&2
+      return 1
+    fi
+  done
   _cbox_check_workspace_overlap "${ws[@]-}"
   local guard_roots
   guard_roots="$(IFS=:; printf '%s' "${ws[*]-}")"
@@ -1090,8 +1246,10 @@ services:
       - CBOX_MANAGED_DIRS=$managed
       - CBOX_RUNTIME=container
       - CBOX_CONTEXT_PROFILE=${CBOX_CONTEXT_PROFILE:-full}
+      - CBOX_REVIEW=${CBOX_REVIEW:-ask}
       - DISABLE_AUTOUPDATER=1
       - CBOX_SESSION_MULTIPLEX=${CBOX_SESSION_MULTIPLEX:-off}
+      - CBOX_PROFILE=$render_profile
 EOF
   if [ "$claude_mode" = "mount" ]; then
     printf '      - CLAUDE_CONFIG_DIR=${HOST_HOME}/.claude-cbox\n' >> "$tmp"
@@ -1383,12 +1541,93 @@ networks:
       cbox.component: egress
 EOF
   fi
+  local tab=$'\t'
+  local -a broots=("root${tab}$claude_path" "root${tab}$codex_path" "zone${tab}$INSTALL_DIR")
+  for w in "${ws[@]-}"; do
+    [ -n "$w" ] && broots+=("root${tab}$w")
+  done
+  [ "$venv_mode" != host ] || broots+=("root${tab}$venv_path")
+  [ -z "$user_dir" ] || broots+=("zone${tab}$user_dir")
+  [ -z "$user_policies_upd" ] || broots+=("zone${tab}$user_policies_upd")
+  broots+=("zone${tab}$(_cbox_clip_dir "$name")" "zone${tab}$(_cbox_container_exec_dir "$name")" "zone${tab}$(_cbox_sshd_state_base_into "$INSTALL_DIR")")
+  case "$ssh_mode" in
+    host-agent|mixed) broots+=("zone${tab}$agent_dir") ;;
+  esac
+  _cbox_bind_roots_write "$INSTALL_DIR" "${broots[@]}" || return 1
   chmod 0644 "$tmp"
   mv "$tmp" "$INSTALL_DIR/docker-compose.yml"
 }
 
+_cbox_isolated_workspaces() {
+  local root="$1" w w_real root_real seen why
+  local -a ws=()
+  read -r -a ws <<< "${CBOX_WORKSPACES:-}"
+  root_real="$(_cbox_realpath_m "$root")"
+  if why="$(_cbox_mount_path_problem "$root")"; then
+    echo "cbox: project root cannot be mounted ($why): $root" >&2
+    return 1
+  fi
+  seen=$'\n'"$root_real"$'\n'
+  printf '%s\n' "$root"
+  for w in "${ws[@]-}"; do
+    [ -n "$w" ] || continue
+    case "$w" in
+      /*) ;;
+      *)
+        echo "cbox: project workspace is not an absolute path: $w" >&2
+        return 1
+        ;;
+    esac
+    if why="$(_cbox_mount_path_problem "$w")"; then
+      echo "cbox: project workspace cannot be mounted ($why): $w" >&2
+      return 1
+    fi
+    if [ ! -d "$w" ]; then
+      echo "cbox: project workspace does not exist or is not a directory: $w" >&2
+      return 1
+    fi
+    w_real="$(_cbox_realpath "$w")" || return 1
+    if why="$(_cbox_mount_path_problem "$w_real")"; then
+      echo "cbox: project workspace $w resolves to a path that cannot be mounted ($why): $w_real" >&2
+      return 1
+    fi
+    case "$w_real" in
+      *[[:space:]]*)
+        echo "cbox: project workspace $w resolves to a path with whitespace, which a workspace list cannot hold: $w_real" >&2
+        return 1
+        ;;
+    esac
+    if [ "$(_cbox_realpath_m "$w_real")" != "$w_real" ]; then
+      echo "cbox: project workspace $w does not resolve to a canonical absolute path: $w_real" >&2
+      return 1
+    fi
+    case "$seen" in
+      *$'\n'"$w_real"$'\n'*) continue ;;
+    esac
+    seen="$seen$w_real"$'\n'
+    printf '%s\n' "$w_real"
+  done
+}
+
+_cbox_check_workspace_pairs() {
+  local -a ws=("$@")
+  local i j a b
+  for ((i = 0; i < ${#ws[@]}; i++)); do
+    for ((j = i + 1; j < ${#ws[@]}; j++)); do
+      a="$(_cbox_realpath_m "${ws[i]}")"
+      b="$(_cbox_realpath_m "${ws[j]}")"
+      if _cbox_path_within "$a" "$b" || _cbox_path_within "$b" "$a"; then
+        echo "cbox: project workspaces overlap ($a and $b) - a workspace may not contain or sit inside another" >&2
+        return 1
+      fi
+    done
+  done
+}
+
 gen_compose_isolated() {
   local eff="$1" root="$2" img_tag="$3" img_hash="$4"
+  local render_profile
+  render_profile="$(_cbox_render_profile_name)" || return 1
   local policy="no"
   local p_hash slug session_scope
   local claude_mode="${CBOX_CLAUDE_MODE:-mount}"
@@ -1400,18 +1639,48 @@ gen_compose_isolated() {
   local ssh_mode="${CBOX_SSH_MODE:-none}"
   local agent_dir="${CBOX_SSH_AGENT_DIR:-$(_cbox_xdg_runtime_dir)/cbox-ssh}"
   local managed tmp i_short
+  local profile_active=0 store="" cred_target="$HOME/.claude/.credentials.json" scope_eff=""
+  local host_claude_json_src="$HOME/.claude.json" compose_name hermes_home_volume
+  local audit_base='${HOST_HOME}/.claude'
+
+  _cbox_render_profile_require_isolated_mount "$render_profile" "$claude_mode" "$codex_mode" || return 1
 
   p_hash="$(_cbox_path_hash "$root")"
+  compose_name="cbox-p$p_hash"
+  hermes_home_volume="cbox-p$p_hash-hermes-home"
+  if [ "$render_profile" != default ]; then
+    profile_active=1
+    _cbox_render_profile_check_eff "$eff" "$render_profile" || return 1
+    store="$(_cbox_render_profile_store "$render_profile")" || return 1
+    _cbox_render_profile_prepare_store "$store" "$render_profile" || return 1
+    scope_eff="$(dirname "$(dirname "$eff")")"
+    cred_target="$store/claude/.credentials.json"
+    host_claude_json_src="$eff/state/host-claude.json"
+    audit_base='${HOST_HOME}/.claude/cbox-audit'
+    compose_name="cbox-p$p_hash-$render_profile"
+    hermes_home_volume="cbox-p$p_hash-$render_profile-hermes-home"
+  fi
   slug="$(_cbox_slug "$root")"
   session_scope="${CBOX_SESSION_SCOPE:-isolated}"
   i_short="${img_hash:0:12}"
 
   managed="$(_cbox_managed_dirs)"
+  if [ "$profile_active" = 1 ]; then
+    managed="${managed:+$managed:}"'${HOST_HOME}/.claude'
+  fi
   if [ "$session_scope" = "isolated" ]; then
     managed="${managed:+$managed:}"'${HOST_HOME}/.claude/projects/'"$slug"
   fi
 
-  _cbox_check_workspace_overlap "$root"
+  local ws_out guard_roots w
+  local -a ws_all=()
+  ws_out="$(_cbox_isolated_workspaces "$root")" || return 1
+  while IFS= read -r w; do
+    [ -n "$w" ] && ws_all+=("$w")
+  done <<< "$ws_out"
+  _cbox_check_workspace_pairs "${ws_all[@]}" || return 1
+  _cbox_check_workspace_overlap "${ws_all[@]}"
+  guard_roots="$(IFS=:; printf '%s' "${ws_all[*]}")"
 
   gen_sshd_config_into "$eff" || return 1
 
@@ -1425,7 +1694,7 @@ gen_compose_isolated() {
 
   tmp="$(mktemp "$eff/.cbox.XXXXXX")"
   cat > "$tmp" <<EOF
-name: cbox-p$p_hash
+name: $compose_name
 services:
   cbox:
     image: $img_tag
@@ -1441,6 +1710,9 @@ services:
       cbox.phash: "$p_hash"
       cbox.imghash: "$img_hash"
 EOF
+  if [ "$profile_active" = 1 ]; then
+    printf '      cbox.profile: %s\n' "$(_cbox_yaml_dq "$render_profile")" >> "$tmp"
+  fi
   if [ "${CBOX_GPU:-0}" = "1" ]; then
     cat >> "$tmp" <<'EOF'
     deploy:
@@ -1461,17 +1733,27 @@ EOF
       - HOST_GID=\${HOST_GID}
       - HOST_HOME=\${HOST_HOME}
       - CODEX_GUARD_CONFIG=\${HOST_HOME}/.claude/hooks/codex_scope.container.json
-      - CODEX_GUARD_AUDIT=\${HOST_HOME}/.claude/codex_guard_audit.container.jsonl
-      - CODEX_GUARD_EXTRA_ROOTS=$root
+      - CODEX_GUARD_AUDIT=$audit_base/codex_guard_audit.container.jsonl
+      - CODEX_GUARD_EXTRA_ROOTS=$guard_roots
       - CBOX_MANAGED_DIRS=$managed
       - CBOX_RUNTIME=container
       - CBOX_CONTEXT_PROFILE=${CBOX_CONTEXT_PROFILE:-full}
+      - CBOX_REVIEW=${CBOX_REVIEW:-ask}
       - DISABLE_AUTOUPDATER=1
       - CBOX_SESSION_MULTIPLEX=${CBOX_SESSION_MULTIPLEX:-off}
+      - CBOX_PROFILE=$render_profile
 EOF
   if [ "$claude_mode" = "mount" ]; then
     printf '      - CLAUDE_CONFIG_DIR=${HOST_HOME}/.claude-cbox\n' >> "$tmp"
-    printf '      - CLAUDE_SECURESTORAGE_CONFIG_DIR=${HOST_HOME}/.claude\n' >> "$tmp"
+    if [ "$profile_active" = 1 ]; then
+      printf '      - CLAUDE_SECURESTORAGE_CONFIG_DIR=%s/claude\n' "$store" >> "$tmp"
+      printf '      - CBOX_USAGE_DIR=%s/usage\n' "$store" >> "$tmp"
+      printf '      - ASK_CLAUDE_AUDIT=%s/ask_claude_audit.container.jsonl\n' "$audit_base" >> "$tmp"
+      printf '      - CBOX_LOCAL_MODEL_AUDIT=%s/local_model_audit.container.jsonl\n' "$audit_base" >> "$tmp"
+      printf '      - CBOX_HERMES_DELEGATE_AUDIT=%s/hermes_delegate_audit.container.jsonl\n' "$audit_base" >> "$tmp"
+    else
+      printf '      - CLAUDE_SECURESTORAGE_CONFIG_DIR=${HOST_HOME}/.claude\n' >> "$tmp"
+    fi
   fi
   if [ "${CBOX_HERMES:-off}" = on ]; then
     _cbox_hermes_validate_compose_env
@@ -1528,26 +1810,40 @@ EOF
   _cbox_netaccess_sysctls_into "$tmp"
   printf '    volumes:\n' >> "$tmp"
   local user_policies_upd="${CBOX_USER_DIR-$HOME/.config/cbox/user}"
-  _cbox_clip_mounts_into "$tmp" "p$p_hash"
-  _cbox_container_exec_mounts_into "$tmp" "p$p_hash"
+  local runtime_suffix="p$p_hash"
+  [ "$profile_active" = 0 ] || runtime_suffix="p$p_hash-$render_profile"
+  _cbox_clip_mounts_into "$tmp" "$runtime_suffix"
+  _cbox_container_exec_mounts_into "$tmp" "$runtime_suffix"
   _cbox_sshd_mounts_into "$tmp" "$eff"
   _cbox_tz_mounts_into "$tmp"
-  printf '      - %s:%s:rw\n' "$root" "$root" >> "$tmp"
+  for w in "${ws_all[@]}"; do
+    printf '      - %s:%s:rw\n' "$w" "$w" >> "$tmp"
+  done
   printf '      - %s:/opt/cbox/cbox_session_bridge.py:ro\n' "$INSTALL_DIR/lib/cbox_session_bridge.py" >> "$tmp"
 
   if [ "$claude_mode" = "mount" ]; then
-    gen_claude_config_into "$eff/claude-config" "$claude_path"
+    gen_claude_config_into "$eff/claude-config" "$claude_path" "$cred_target"
     mkdir -p "$claude_path/hooks" "$claude_path/agents" "$claude_path/policies" "$claude_path/templates" "$claude_path/projects" "$claude_path/tasks" "$claude_path/session-env" "$claude_path/plugins" "$claude_path/file-history" "$claude_path/plans" "$claude_path/shell-snapshots" "$claude_path/agent-memory" "$claude_path/commands" "$claude_path/skills" "$claude_path/rules"
     [ -f "$claude_path/settings.json" ] || printf '{}\n' > "$claude_path/settings.json"
-    [ -f "$HOME/.claude.json" ] || printf '{}\n' > "$HOME/.claude.json"
+    if [ "$profile_active" = 1 ]; then
+      _cbox_render_profile_seed_json "$scope_eff/claude-config/.claude.json" "$eff/claude-config/.claude.json" || return 1
+      _cbox_render_profile_seed_json "$HOME/.claude.json" "$host_claude_json_src" refresh || return 1
+      rm -f -- "$eff/state/credentials-mask"
+    else
+      [ -f "$HOME/.claude.json" ] || printf '{}\n' > "$HOME/.claude.json"
+    fi
     [ -f "$claude_path/CLAUDE.md" ] || : > "$claude_path/CLAUDE.md"
     gen_claude_cbox_json_seed_into "$eff/claude-config/.claude.json" "$eff/state/claude-cbox.json"
+    if [ "$profile_active" = 1 ]; then
+      _cbox_profile_claude_shared_into "$tmp" "$claude_path" "$eff" || return 1
+    else
+      printf '      - %s:${HOST_HOME}/.claude:rw\n' "$claude_path" >> "$tmp"
+    fi
     cat >> "$tmp" <<EOF
-      - $claude_path:\${HOST_HOME}/.claude:rw
       - $claude_path/hooks:\${HOST_HOME}/.claude/hooks:ro
       - $claude_path/settings.json:\${HOST_HOME}/.claude/settings.json:rw
       - $INSTALL_DIR/generated/managed-settings.json:/etc/claude-code/managed-settings.json:ro
-      - $HOME/.claude.json:\${HOST_HOME}/.claude.json:ro
+      - $host_claude_json_src:\${HOST_HOME}/.claude.json:ro
       - $claude_path/CLAUDE.md:\${HOST_HOME}/.claude/CLAUDE.md:ro
       - $claude_path/agents:\${HOST_HOME}/.claude/agents:ro
       - $claude_path/policies:\${HOST_HOME}/.claude/policies:ro
@@ -1576,6 +1872,12 @@ EOF
       - $claude_path/policies:\${HOST_HOME}/.claude-cbox/policies:ro
       - $claude_path/templates:\${HOST_HOME}/.claude-cbox/templates:ro
 EOF
+    if [ "$profile_active" = 1 ]; then
+      cat >> "$tmp" <<EOF
+      - $store/claude:$store/claude:rw
+      - $store/usage:$store/usage:rw
+EOF
+    fi
   else
     cat >> "$tmp" <<EOF
       - claude:\${HOST_HOME}/.claude
@@ -1629,8 +1931,14 @@ EOF
 
   if [ "$codex_mode" = "mount" ]; then
     _cbox_codex_precreate_ro_pins "$codex_path"
+    if [ "$profile_active" = 1 ]; then
+      _cbox_codex_precreate_ro_pins "$store/codex"
+      mkdir -p "$store/codex/packages" || return 1
+      printf '      - %s/codex:${HOST_HOME}/.codex:rw\n' "$store" >> "$tmp"
+    else
+      printf '      - %s:${HOST_HOME}/.codex:rw\n' "$codex_path" >> "$tmp"
+    fi
     cat >> "$tmp" <<EOF
-      - $codex_path:\${HOST_HOME}/.codex:rw
       - $codex_path/config.toml:\${HOST_HOME}/.codex/config.toml:ro
       - $codex_path/AGENTS.md:\${HOST_HOME}/.codex/AGENTS.md:ro
       - $codex_path/cbox-host.config.toml:\${HOST_HOME}/.codex/cbox-host.config.toml:ro
@@ -1783,7 +2091,7 @@ EOF
     external: true
     name: $(_cbox_bins_volume hermes)
   hermes-home:
-    name: cbox-p$p_hash-hermes-home
+    name: $hermes_home_volume
 EOF
   fi
   if _cbox_proxy_active; then
@@ -1800,6 +2108,23 @@ networks:
       cbox.component: egress
 EOF
   fi
+  local tab=$'\t'
+  local -a broots=("root${tab}$claude_path" "root${tab}$codex_path" "zone${tab}$INSTALL_DIR" "zone${tab}$eff")
+  for w in "${ws_all[@]}"; do
+    broots+=("ws${tab}$w")
+  done
+  [ "$venv_mode" != host ] || broots+=("root${tab}$venv_path")
+  [ -z "$store" ] || broots+=("zone${tab}$store")
+  [ -z "$user_dir" ] || broots+=("zone${tab}$user_dir")
+  [ -z "$user_policies_upd" ] || broots+=("zone${tab}$user_policies_upd")
+  broots+=("zone${tab}$(_cbox_clip_dir "$runtime_suffix")" "zone${tab}$(_cbox_container_exec_dir "$runtime_suffix")")
+  case "$ssh_mode" in
+    host-agent|mixed) broots+=("zone${tab}$agent_dir") ;;
+  esac
+  if [ "$profile_active" = 1 ]; then
+    broots+=("deny${tab}$claude_path/.credentials.json" "deny${tab}$claude_path/backups" "deny${tab}$codex_path/auth.json")
+  fi
+  _cbox_bind_roots_write "$eff" "${broots[@]}" || return 1
   chmod 0644 "$tmp"
   mv "$tmp" "$eff/docker-compose.yml"
 }
@@ -1824,6 +2149,16 @@ gen_compose_readonly_into() {
   } > "$tmp"
   chmod 0644 "$tmp"
   mv "$tmp" "$target"
+}
+
+gen_compose_readonly_isolated_into() {
+  local target="$1" root="$2" ws_out w
+  local -a ws_all=()
+  ws_out="$(_cbox_isolated_workspaces "$root")" || return 1
+  while IFS= read -r w; do
+    [ -n "$w" ] && ws_all+=("$w")
+  done <<< "$ws_out"
+  gen_compose_readonly_into "$target" "${ws_all[@]}"
 }
 
 gen_dockerignore() {
@@ -2553,8 +2888,28 @@ _gen_claude_cbox_json_seed_render() {
   printf '%s\n' "$out" | _cbox_write "$target"
 }
 
+_cbox_adopt_credentials() {
+  local cred="$1" target="$2" tdir
+  [ -f "$cred" ] && [ ! -L "$cred" ] || return 0
+  tdir="$(dirname "$target")"
+  if [ -L "$target" ]; then
+    echo "cbox: not adopting $cred - credentials target is a symlink: $target" >&2
+    return 1
+  fi
+  if [ -e "$target" ] && [ ! -f "$target" ]; then
+    echo "cbox: not adopting $cred - credentials target is not a regular file: $target" >&2
+    return 1
+  fi
+  if [ -e "$target" ] && ! [ "$cred" -nt "$target" ]; then
+    return 0
+  fi
+  ( umask 077; mkdir -p "$tdir" ) || return 1
+  chmod 0600 "$cred" 2>/dev/null || true
+  mv -f -- "$cred" "$target" || return 1
+}
+
 gen_claude_config_into() {
-  local statedir="$1" claude_path="$2" j b
+  local statedir="$1" claude_path="$2" cred_target="${3:-$HOME/.claude/.credentials.json}" j b keep_cred=0
   mkdir -p "$statedir" "$claude_path/jobs"
   chmod 700 "$statedir"
   if [ -d "$statedir/jobs" ]; then
@@ -2582,10 +2937,13 @@ gen_claude_config_into() {
     rmdir "$statedir/jobs" 2>/dev/null || true
   fi
   mkdir -p "$statedir/projects" "$statedir/tasks" "$statedir/jobs" "$statedir/limit-watch"
-  rm -f "$statedir/.credentials.json.new" 2>/dev/null || true
-  ln -s "$HOME/.claude/.credentials.json" "$statedir/.credentials.json.new" 2>/dev/null || true
-  if [ -L "$statedir/.credentials.json.new" ]; then
-    mv -T "$statedir/.credentials.json.new" "$statedir/.credentials.json" 2>/dev/null || rm -f "$statedir/.credentials.json.new"
+  _cbox_adopt_credentials "$statedir/.credentials.json" "$cred_target" || keep_cred=1
+  if [ "$keep_cred" = 0 ]; then
+    rm -f "$statedir/.credentials.json.new" 2>/dev/null || true
+    ln -s "$cred_target" "$statedir/.credentials.json.new" 2>/dev/null || true
+    if [ -L "$statedir/.credentials.json.new" ]; then
+      mv -T "$statedir/.credentials.json.new" "$statedir/.credentials.json" 2>/dev/null || rm -f "$statedir/.credentials.json.new"
+    fi
   fi
   if [ ! -e "$statedir/history.jsonl" ] && [ ! -L "$statedir/history.jsonl" ]; then
     ln -s "$HOME/.claude/history.jsonl" "$statedir/history.jsonl" 2>/dev/null || true
@@ -2653,8 +3011,9 @@ gen_claude_assets() {
 _cbox_codex_profile_workspaces() {
   local mode="${1:-global}" root="${2:-}"
   if [ "$mode" = isolated ]; then
-    [ -n "$root" ] && printf '%s\n' "$root"
-    return 0
+    [ -n "$root" ] || return 0
+    _cbox_isolated_workspaces "$root"
+    return $?
   fi
   local -a ws=()
   read -r -a ws <<< "${CBOX_WORKSPACES:-}"
@@ -3200,9 +3559,9 @@ _cbox_strip_machine_scoped_vars() {
   mv "$tmp" "$conf"
 }
 
-_cbox_override_excluded_vars() {
+_cbox_pinned_vars() {
   local v
-  for v in CBOX_MODE CBOX_WORKSPACES CBOX_WORKDIR \
+  for v in CBOX_MODE CBOX_WORKDIR \
            CBOX_EGRESS_APPLIED CBOX_NETACCESS_APPLIED CBOX_HOST_ROUTE_APPLIED \
            CBOX_NAME CBOX_TPL_SHA; do
     printf '%s\n' "$v"
@@ -3210,13 +3569,91 @@ _cbox_override_excluded_vars() {
   _cbox_machine_scoped_vars
 }
 
-_cbox_layered_is_excluded() {
+_cbox_project_owned_vars() {
+  printf '%s\n' CBOX_WORKSPACES
+}
+
+_cbox_layered_is_pinned() {
   local key="$1" v
   while IFS= read -r v; do
     [ -n "$v" ] || continue
     [ "$v" = "$key" ] && return 0
-  done < <(_cbox_override_excluded_vars)
+  done < <(_cbox_pinned_vars)
   return 1
+}
+
+_cbox_layered_is_project_owned() {
+  local key="$1" v
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    [ "$v" = "$key" ] && return 0
+  done < <(_cbox_project_owned_vars)
+  return 1
+}
+
+_cbox_layered_not_inherited() {
+  _cbox_layered_is_pinned "$1" || _cbox_layered_is_project_owned "$1"
+}
+
+_cbox_conf_changed_inherited_keys() {
+  local a="$1" b="$2" skip k
+  skip=$'\n'"$(_cbox_pinned_vars)"$'\n'"$(_cbox_project_owned_vars)"$'\n'
+  while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    case "$skip" in
+      *$'\n'"$k"$'\n'*) continue ;;
+    esac
+    printf '%s\n' "$k"
+  done < <(_cbox_conf_changed_keys "$a" "$b")
+}
+
+_cbox_project_workspaces_from_file() {
+  local file="$1" root="$2" raw="" w out
+  local -a ws=()
+  if [ -f "$file" ] && grep -q '^CBOX_WORKSPACES=' "$file" 2>/dev/null; then
+    raw="$(unset CBOX_WORKSPACES; . "$file" >/dev/null 2>&1; printf '%s' "${CBOX_WORKSPACES-}")"
+  fi
+  read -r -a ws <<< "$raw"
+  out="$root"
+  for w in "${ws[@]-}"; do
+    [ -n "$w" ] || continue
+    [ "$w" = "$root" ] && continue
+    out="$out $w"
+  done
+  printf '%s' "$out"
+}
+
+_cbox_project_extra_workspaces() {
+  local file="$1" root="$2" all w
+  local -a ws=()
+  all="$(_cbox_project_workspaces_from_file "$file" "$root")"
+  read -r -a ws <<< "$all"
+  for w in "${ws[@]-}"; do
+    [ -n "$w" ] || continue
+    [ "$w" = "$root" ] && continue
+    printf '%s\n' "$w"
+  done
+}
+
+_cbox_global_workspaces() {
+  local conf="${INSTALL_DIR:-}/cbox.conf"
+  if [ -f "$conf" ]; then
+    (unset CBOX_WORKSPACES; . "$conf" >/dev/null 2>&1; printf '%s' "${CBOX_WORKSPACES-}")
+  else
+    printf '%s' "${CBOX_WORKSPACES:-}"
+  fi
+}
+
+_cbox_project_workspaces_normalize() {
+  local root="$1" val="$2" ws_out w
+  local -a ws_all=()
+  ws_out="$(CBOX_WORKSPACES="$val"; _cbox_isolated_workspaces "$root")" || return 1
+  while IFS= read -r w; do
+    [ -n "$w" ] && ws_all+=("$w")
+  done <<< "$ws_out"
+  _cbox_check_workspace_pairs "${ws_all[@]}" || return 1
+  ( _cbox_check_workspace_overlap "${ws_all[@]}" ) || return 1
+  printf '%s' "${ws_all[*]}"
 }
 
 _cbox_conf_kv() {
@@ -3342,6 +3779,10 @@ _cbox_layered_merge() {
     esac
     k="${line%%=*}"
     vovr="${line#*=}"
+    if _cbox_layered_is_project_owned "$k"; then
+      printf '%s\n' "$line" >> "$tmp"
+      continue
+    fi
     if _cbox_layered_key_conflict "$old_base" "$new_base" "$k"; then
       vold="$(grep -m1 "^${k}=" "$old_base" 2>/dev/null)"; vold="${vold#*=}"
       vnew="$(grep -m1 "^${k}=" "$new_base" 2>/dev/null)" || vnew=""
@@ -3375,10 +3816,15 @@ _cbox_layered_bootstrap_adopt() {
   : > "$eff/cbox.override"
   while IFS= read -r k; do
     [ -n "$k" ] || continue
-    _cbox_layered_is_excluded "$k" && continue
     vline="$(grep -m1 "^${k}=" "$eff/cbox.conf")"
     _cbox_override_set "$eff" "$k" "${vline#*=}"
-  done < <(_cbox_conf_changed_keys "$eff/cbox.conf" "$eff/cbox.base.new")
+  done < <(_cbox_conf_changed_inherited_keys "$eff/cbox.conf" "$eff/cbox.base.new")
+  local _ws_val _ws_extra
+  _ws_val="$(_cbox_project_workspaces_from_file "$eff/cbox.conf" "$root")"
+  _ws_extra="${_ws_val#"$root"}"
+  if [ -n "${_ws_extra# }" ]; then
+    _cbox_override_set "$eff" CBOX_WORKSPACES "$(printf '%q' "$_ws_val")"
+  fi
   mv "$eff/cbox.base.new" "$eff/cbox.base"
   _cbox_manifest_write_keep_generated "$eff" "$root" "$eff/cbox.conf"
   keys="$(_cbox_override_keys "$eff")"

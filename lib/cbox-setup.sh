@@ -580,7 +580,7 @@ _path_is_within() {
 }
 
 reserved_path_conflict() {
-  local candidate="$1" label reserved
+  local candidate="$1" label reserved pair
   for label in INSTALL_DIR CBOX_CLAUDE_PATH CBOX_CODEX_PATH CBOX_VENV_PATH; do
     reserved="$(_cbox_realpath_m "${!label}" 2>/dev/null || printf '')"
     [ -n "$reserved" ] || continue
@@ -589,6 +589,14 @@ reserved_path_conflict() {
       if [ "$label" = INSTALL_DIR ]; then
         echo "setup: a workspace must not contain or live inside the cbox install dir - to develop cbox itself, use a copied tree"
       fi
+      return 0
+    fi
+  done
+  for pair in "the XDG runtime dir|$(_cbox_xdg_runtime_dir)" "~/.ssh|${HOME:-}/.ssh" "~/.gnupg|${HOME:-}/.gnupg" "~/.docker|${HOME:-}/.docker"; do
+    reserved="$(_cbox_realpath_m "${pair#*|}" 2>/dev/null || printf '')"
+    [ -n "$reserved" ] || continue
+    if _path_is_within "$candidate" "$reserved" || _path_is_within "$reserved" "$candidate"; then
+      echo "setup: workspace path conflicts with ${pair%%|*} ($reserved): $candidate"
       return 0
     fi
   done
@@ -1244,9 +1252,18 @@ step_mounts() {
 
 step_workspaces() {
   echo "== section: workspaces =="
-  local existing=() out=() prefill w dup idx=0
-  read -r -a existing <<< "$CBOX_WORKSPACES"
-  note "workspace directories are mounted 1:1 read-write; enter one per line, empty line finishes"
+  local existing=() out=() prefill w dup idx=0 all=() root="${SETUP_PROJECT_ROOT:-}"
+  if [ -n "$root" ]; then
+    read -r -a all <<< "$CBOX_WORKSPACES"
+    for w in "${all[@]}"; do
+      [ -n "$w" ] || continue
+      [ "$w" = "$root" ] || existing+=("$w")
+    done
+    note "project root $root is always mounted first and is fixed; enter the extra directories this project also mounts 1:1 read-write, one per line, empty line finishes"
+  else
+    read -r -a existing <<< "$CBOX_WORKSPACES"
+    note "workspace directories are mounted 1:1 read-write; enter one per line, empty line finishes"
+  fi
   while :; do
     prefill=""
     if [ "$idx" -lt "${#existing[@]}" ]; then
@@ -1256,6 +1273,11 @@ step_workspaces() {
       break
     fi
     if reserved_path_conflict "$PATH_VALUE"; then
+      idx=$((idx+1))
+      continue
+    fi
+    if [ -n "$root" ] && { _path_is_within "$PATH_VALUE" "$root" || _path_is_within "$root" "$PATH_VALUE"; }; then
+      note "overlaps the project root, ignored: $PATH_VALUE"
       idx=$((idx+1))
       continue
     fi
@@ -1279,6 +1301,13 @@ step_workspaces() {
     fi
     idx=$((idx+1))
   done
+  if [ -n "$root" ]; then
+    local joined="${out[*]-}"
+    CBOX_WORKSPACES="$root${joined:+ $joined}"
+    note "project workdir stays $root"
+    note "codex guard scope roots follow the project root plus these extra directories"
+    return 0
+  fi
   CBOX_WORKSPACES="${out[*]-}"
   if [ -z "$CBOX_WORKSPACES" ]; then
     note "warning: no workspaces mounted; the codex guard is fail-closed and the container sees no project directories"
@@ -4186,7 +4215,7 @@ run_local() {
     fi
     . "$eff/cbox.override"
     CBOX_MODE=isolated
-    CBOX_WORKSPACES="$root"
+    CBOX_WORKSPACES="$(_cbox_project_workspaces_from_file "$eff/cbox.override" "$root")"
     CBOX_WORKDIR="$root"
     mv "$eff/cbox.base.new" "$eff/cbox.base"
   else
@@ -4194,6 +4223,7 @@ run_local() {
     _cbox_layered_require_ok "$eff" \
       || die "refusing the interactive setup for $root - layered config (cbox.base/cbox.override) drifted outside cbox; fix with cbox config set/unset, or re-derive with cbox setup --local $root --from-global --reset"
     local _snap_before _snap_after _changed_key _changed_line
+    CBOX_WORKSPACES="$(_cbox_project_workspaces_from_file "$eff/cbox.override" "$root")"
     _snap_before="$(mktemp)"
     _snap_after="$(mktemp)"
     _cbox_reg_conf_write_whitelist "$_snap_before" 1
@@ -4201,7 +4231,7 @@ run_local() {
     _cbox_reg_conf_write_whitelist "$_snap_after" 1
     while IFS= read -r _changed_key; do
       [ -n "$_changed_key" ] || continue
-      _cbox_layered_is_excluded "$_changed_key" && continue
+      _cbox_layered_is_pinned "$_changed_key" && continue
       _changed_line="$(grep -m1 "^${_changed_key}=" "$_snap_after")"
       _cbox_override_set "$eff" "$_changed_key" "${_changed_line#*=}"
     done < <(_cbox_conf_changed_keys "$_snap_before" "$_snap_after")
@@ -4238,6 +4268,7 @@ run_local() {
   gen_dockerfile_into "$eff" "$digest"
   gen_env_file_into "$eff"
   gen_compose_isolated "$eff" "$root" "$img_tag" "$img_hash"
+  gen_compose_readonly_isolated_into "$eff/docker-compose.readonly.yml" "$root"
 
   _cbox_manifest_write "$eff" "$root" "$eff/cbox.conf"
   _cbox_manifest_write_generated "$eff"
@@ -4249,6 +4280,148 @@ run_local() {
   note "blessed effective config in $eff"
   note "the image builds automatically on the first cbox run (reused when inputs are unchanged)"
   note "run from $root: cbox run codex"
+}
+
+_cbox_local_update_refusal() {
+  local section="$1" scope
+  case "$section" in
+    mode)
+      printf 'section %s cannot be updated with --local: in an isolated project CBOX_MODE and CBOX_WORKDIR are pinned by the derive; run without --local to edit the global profile' "$section"
+      return 0
+      ;;
+    bashrc|mcp-servers|codex-progress|agents|codex-mcp|claude-md|settings|hooks)
+      printf 'section %s cannot be updated with --local: it writes host-wide files shared by every project; run without --local (global profile), or use cbox config set KEY=VALUE inside the project for its own keys' "$section"
+      return 0
+      ;;
+  esac
+  scope="$(sec_get SEC_SCOPE "$section")"
+  if [ "$scope" != project ]; then
+    printf 'section %s is machine-scoped (one configuration shared by every project on this host) and cannot be updated with --local; run without --local' "$section"
+    return 0
+  fi
+  return 1
+}
+
+_cbox_local_update_root() {
+  local arg="$1" root
+  if [ -z "$arg" ]; then
+    root="$(_cbox_workspace_root 2>/dev/null)" \
+      || die "refusing to operate in $PWD (home, /, or a mount root); pass the project root: cbox setup update <section> --local <root>"
+  else
+    [ -d "$arg" ] || die "not a directory: $arg"
+    if root="$(git -C "$arg" rev-parse --show-toplevel 2>/dev/null)"; then
+      root="$(_cbox_realpath "$root")"
+    else
+      root="$(_cbox_realpath "$arg")"
+    fi
+    [ "$root" != "/" ] || die "refusing to use / as a workspace"
+    [ "$root" != "$(_cbox_realpath "$HOME")" ] || die "refusing to use \$HOME as a workspace"
+    _cbox_ismount "$root" 2>/dev/null && die "refusing to use a mount root as a workspace: $root"
+  fi
+  printf '%s' "$root"
+}
+
+_cbox_local_update_stage() {
+  local root="$1" _v
+  cd "$root" || return 1
+  for _v in $(_cbox_config_whitelist); do
+    unset "$_v"
+  done
+  _cbox_config_set_isolated
+}
+
+run_update_local() {
+  local section="$1" root_arg="${2:-}" s found=0 refusal root eff status
+  require_tty "cbox setup update --local"
+  for s in "${SECTIONS[@]}"; do
+    if [ "$s" = "$section" ]; then
+      found=1
+    fi
+  done
+  [ "$found" = 1 ] || die "unknown section '$section'; valid: ${SECTIONS[*]}"
+  if refusal="$(_cbox_local_update_refusal "$section")"; then
+    die "$refusal"
+  fi
+  declare -f _cbox_config_set_isolated >/dev/null 2>&1 \
+    || die "setup update --local is only available through the cbox launcher"
+  if _cbox_config_in_container; then
+    die "setup update --local is host-only - run it from a host shell, not inside the container"
+  fi
+  root="$(_cbox_local_update_root "$root_arg")" || exit 1
+  eff="$(_cbox_local_effdir_for "$root")"
+  [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run: cbox setup --local $root"
+  _cbox_workspace_file_check "$root" "$eff"
+  [ "$(cd "$root" && _cbox_workspace_root 2>/dev/null)" = "$root" ] \
+    || die "$root is not a usable project root (home, /, or a mount root)"
+
+  SETUP_MODE=update
+  load_generators
+  status="$(_cbox_manifest_status "$eff" "$root")"
+  case "$status" in
+    malformed|collision)
+      die "refusing - effective config manifest for $root is $status; re-derive with cbox setup --local $root --from-global"
+      ;;
+    drifted)
+      die "refusing - effective config for $root was edited outside cbox; keep it with cbox setup --local $root, or re-derive with cbox setup --local $root --from-global"
+      ;;
+  esac
+  _cbox_layered_require_ok "$eff" \
+    || die "refusing - layered config (cbox.base/cbox.override) for $root drifted outside cbox; review it with cbox config diff, or re-derive with cbox setup --local $root --from-global --reset"
+
+  CONF_FILE="$eff/cbox.conf"
+  conf_load
+  SETUP_PROJECT_ROOT="$root"
+  note "updating section $section for the isolated project $root (global profile untouched)"
+
+  local _snap_before _snap_after _changed_key
+  _snap_before="$(mktemp)"
+  _snap_after="$(mktemp)"
+  _cbox_reg_conf_write_whitelist "$_snap_before" 1
+  header "$(section_title "$section")"
+  "step_${section//-/_}"
+  case "$section" in
+    python)
+      if ask_yn "setup: python changed; re-run the gpu section too? [y/N]" n; then
+        step_gpu
+      fi
+      ;;
+  esac
+  _cbox_reg_conf_write_whitelist "$_snap_after" 1
+
+  CBOX_CONFIG_KEYS=()
+  CBOX_CONFIG_VALS=()
+  while IFS= read -r _changed_key; do
+    [ -n "$_changed_key" ] || continue
+    if _cbox_layered_is_pinned "$_changed_key"; then
+      case "$_changed_key" in
+        CBOX_EGRESS_APPLIED|CBOX_NETACCESS_APPLIED|CBOX_HOST_ROUTE_APPLIED) : ;;
+        *) continue ;;
+      esac
+    fi
+    CBOX_CONFIG_KEYS+=("$_changed_key")
+    CBOX_CONFIG_VALS+=("${!_changed_key-}")
+  done < <(_cbox_conf_changed_keys "$_snap_before" "$_snap_after")
+  rm -f "$_snap_before" "$_snap_after"
+
+  if [ "${#CBOX_CONFIG_KEYS[@]}" -eq 0 ]; then
+    note "no changes; the project config of $root stays as it was"
+    return 0
+  fi
+
+  CBOX_CONFIG_MACHINE_ROUTED=0
+  local rc=0
+  ( _cbox_local_update_stage "$root" ) || rc=$?
+  [ "$rc" -eq 0 ] || die "project update of section $section failed - see the message above; the project config was restored"
+  note "project overrides written to $eff/cbox.override; the global cbox.conf was not touched"
+}
+
+_cbox_update_project_note() {
+  local section="$1" root eff
+  [ "$(sec_get SEC_SCOPE "$section")" = project ] || return 0
+  root="$(_cbox_workspace_root 2>/dev/null)" || return 0
+  eff="$(_cbox_local_effdir_for "$root")"
+  [ -f "$eff/cbox.conf" ] || return 0
+  note "this updated the global profile; the isolated project $root keeps its own config - add --local to change the project (cbox setup update $section --local)"
 }
 
 run_local_menu() {
@@ -4277,17 +4450,27 @@ _cbox_setup_main() {
       run_walk
       ;;
     --help|-h|help)
-      printf 'usage: cbox setup [classic|menu|walk|update [<section>]|list-steps|--config <file>|--local [<root>] [--from-global] [--reset]|--local [<root>] menu|--from-global|uninstall|--help]\n'
+      printf 'usage: cbox setup [classic|menu|walk|update [<section> [--local [<root>]]]|list-steps|--config <file>|--local [<root>] [--from-global] [--reset]|--local [<root>] menu|--local [<root>] update <section>|--from-global|uninstall|--help]\n'
       printf '  classic: a handful of important questions plus a big-feature checkbox, one confirm\n'
       printf '  menu: jump straight to any section (advanced editor)\n'
       printf '  walk: the linear section-by-section path (kept for one release)\n'
       printf '  update with no section: re-render all artifacts and re-bless the templates (CBOX_TPL_SHA)\n'
+      printf '  update <section>: edit that section of the global profile; add --local [<root>] (or use --local [<root>] update <section>) to edit the isolated project instead, writing only changed keys into its cbox.override\n'
       print_settings_help
       exit 0
       ;;
     update)
       if [ -n "${2:-}" ]; then
-        run_update "$2"
+        case "$2" in
+          -*) die "usage: cbox setup update [<section> [--local [<root>]]]" ;;
+        esac
+        if [ "${3:-}" = "--local" ]; then
+          [ "$#" -le 4 ] || die "usage: cbox setup update <section> --local [<root>]"
+          run_update_local "$2" "${4:-}"
+        else
+          run_update "$2"
+          _cbox_update_project_note "$2"
+        fi
       else
         run_rebless
       fi
@@ -4301,28 +4484,43 @@ _cbox_setup_main() {
       ;;
     --local)
       shift
-      local _local_root="" _local_from_global=0 _local_reset=0 _local_menu=0 _local_arg
+      local _local_root="" _local_from_global=0 _local_reset=0 _local_menu=0 _local_update="" _local_arg
+      local _local_usage="usage: cbox setup --local [<root>] [--from-global] [--reset] | cbox setup --local [<root>] menu | cbox setup --local [<root>] update <section>"
       while [ "$#" -gt 0 ]; do
         _local_arg="$1"
         case "$_local_arg" in
           --from-global) _local_from_global=1 ;;
           --reset) _local_reset=1 ;;
           menu) _local_menu=1 ;;
-          -*) die "usage: cbox setup --local [<root>] [--from-global] [--reset] | cbox setup --local [<root>] menu" ;;
+          update)
+            [ -n "${2:-}" ] || die "$_local_usage"
+            case "$2" in
+              -*) die "$_local_usage" ;;
+            esac
+            _local_update="$2"
+            shift
+            ;;
+          -*) die "$_local_usage" ;;
           *)
-            [ -z "$_local_root" ] || die "usage: cbox setup --local [<root>] [--from-global] [--reset] | cbox setup --local [<root>] menu"
+            [ -z "$_local_root" ] || die "$_local_usage"
             _local_root="$_local_arg"
             ;;
         esac
         shift
       done
-      [ -n "$_local_root" ] || _local_root="$PWD"
-      if [ "$_local_menu" = 1 ]; then
-        [ "$_local_from_global" = 0 ] && [ "$_local_reset" = 0 ] \
-          || die "usage: cbox setup --local [<root>] menu (does not combine with --from-global/--reset)"
-        run_local_menu "$_local_root"
+      if [ -n "$_local_update" ]; then
+        [ "$_local_menu" = 0 ] && [ "$_local_from_global" = 0 ] && [ "$_local_reset" = 0 ] \
+          || die "usage: cbox setup --local [<root>] update <section> (does not combine with menu/--from-global/--reset)"
+        run_update_local "$_local_update" "$_local_root"
       else
-        run_local "$_local_root" "$_local_from_global" "$_local_reset"
+        [ -n "$_local_root" ] || _local_root="$PWD"
+        if [ "$_local_menu" = 1 ]; then
+          [ "$_local_from_global" = 0 ] && [ "$_local_reset" = 0 ] \
+            || die "usage: cbox setup --local [<root>] menu (does not combine with --from-global/--reset)"
+          run_local_menu "$_local_root"
+        else
+          run_local "$_local_root" "$_local_from_global" "$_local_reset"
+        fi
       fi
       ;;
     --from-global)
@@ -4333,7 +4531,7 @@ _cbox_setup_main() {
       run_uninstall
       ;;
     *)
-      die "usage: cbox setup [classic|menu|walk|--help|update [<section>]|list-steps|--config <file>|--local [<root>] [--from-global]|--local [<root>] menu|--from-global|uninstall]"
+      die "usage: cbox setup [classic|menu|walk|--help|update [<section> [--local [<root>]]]|list-steps|--config <file>|--local [<root>] [--from-global]|--local [<root>] menu|--local [<root>] update <section>|--from-global|uninstall]"
       ;;
   esac
 }

@@ -341,4 +341,69 @@ for _v in SET UNSET; do
 done
 _ok "drift recovery: the write verbs point at a recovery path that is not blocked by the same gate"
 
+echo "--- pinned vs project-owned keys ---"
+
+for k in CBOX_MODE CBOX_WORKDIR CBOX_NAME CBOX_TPL_SHA CBOX_EGRESS_APPLIED CBOX_NETACCESS_APPLIED CBOX_HOST_ROUTE_APPLIED CBOX_OLLAMA_MODE CBOX_LOCAL_MODEL_URL; do
+  _cbox_layered_is_pinned "$k" || _fail "classification: $k must be pinned"
+  _cbox_layered_is_project_owned "$k" && _fail "classification: $k must not be project-owned"
+done
+_cbox_layered_is_project_owned CBOX_WORKSPACES || _fail "classification: CBOX_WORKSPACES must be project-owned"
+_cbox_layered_is_pinned CBOX_WORKSPACES && _fail "classification: CBOX_WORKSPACES must not be pinned (it is settable in a project)"
+_cbox_layered_not_inherited CBOX_WORKSPACES || _fail "classification: CBOX_WORKSPACES must not be inherited from global"
+_cbox_layered_not_inherited CBOX_MODE || _fail "classification: CBOX_MODE must not be inherited from global"
+for k in CBOX_HERMES_EFFORT CBOX_GPU CBOX_APT_EXTRA; do
+  _cbox_layered_not_inherited "$k" && _fail "classification: $k is an ordinary inherited key"
+done
+_ok "pinned (mode, workdir, name, tpl sha, applied flags, machine-scoped) vs project-owned (workspaces) vs inherited"
+
+printf 'CBOX_MODE=isolated\nCBOX_WORKSPACES=/a\nCBOX_WORKDIR=/a\nCBOX_NAME=x\nCBOX_HERMES_EFFORT=low\nCBOX_OLLAMA_MODE=on\n' > "$TMPBASE/inh_a"
+printf 'CBOX_MODE=global\nCBOX_WORKSPACES=/g1\\ /g2\nCBOX_WORKDIR=/g1\nCBOX_NAME=y\nCBOX_HERMES_EFFORT=high\nCBOX_OLLAMA_MODE=off\n' > "$TMPBASE/inh_b"
+inh="$(_cbox_conf_changed_inherited_keys "$TMPBASE/inh_a" "$TMPBASE/inh_b" | tr '\n' ' ')"
+[ "$inh" = "CBOX_HERMES_EFFORT " ] || _fail "changed-inherited keys must hide pinned and project-owned keys, got: $inh"
+_ok "comparison helper hides pinned and project-owned keys, keeps inherited ones"
+
+rm -rf "$EFF"; mkdir -p "$EFF"
+_load_conf "$GLOBAL/cbox.conf"
+CBOX_WORKSPACES="/legacy/global1 /legacy/global2"
+_cbox_reg_conf_write_whitelist "$EFF/cbox.base" 1
+_cbox_override_set "$EFF" CBOX_WORKSPACES "$(printf '%q' "$ROOT /extra/one")"
+_load_conf "$GLOBAL/cbox.conf"
+CBOX_WORKSPACES="$ROOT"
+_cbox_reg_conf_write_whitelist "$EFF/cbox.base.new" 1
+_cbox_layered_merge "$EFF" 2>/dev/null
+grep -q '^CBOX_WORKSPACES=' "$EFF/cbox.override" || _fail "merge: a project-owned CBOX_WORKSPACES override must never be dropped, even against a base written with the raw global list"
+[ -f "$EFF/override.dropped.log" ] && _fail "merge: nothing is dropped for a project-owned key"
+_ok "merge: the project-owned workspaces override survives a base that disagrees on it"
+
+rm -rf "$EFF"; mkdir -p "$EFF"
+XT="$TMPBASE/xt"
+mkdir -p "$XT"
+cat > "$EFF/cbox.conf" <<EOF
+CBOX_MODE=isolated
+CBOX_WORKSPACES=$(printf '%q' "$ROOT $XT")
+CBOX_WORKDIR=$ROOT
+CBOX_HERMES_EFFORT=xhigh
+EOF
+_cbox_manifest_write "$EFF" "$ROOT" "$EFF/cbox.conf"
+_cbox_layered_bootstrap_adopt "$EFF" "$ROOT" >/dev/null
+grep -qxF "$(printf 'CBOX_WORKSPACES=%q' "$ROOT $XT")" "$EFF/cbox.override" \
+  || _fail "bootstrap adopt: extra workspaces held by a legacy conf must be adopted as a project-owned override, got: $(cat "$EFF/cbox.override")"
+grep -q '^CBOX_MODE=\|^CBOX_WORKDIR=' "$EFF/cbox.override" && _fail "bootstrap adopt: pinned keys must still never become overrides"
+_cbox_layered_require_ok "$EFF" || _fail "bootstrap adopt with workspaces must leave the layered state verifying"
+_ok "bootstrap adopt: extra workspaces are adopted into the override, pinned keys are not"
+
+rm -rf "$EFF"; mkdir -p "$EFF"
+printf 'CBOX_WORKSPACES=%q\nCBOX_HERMES_EFFORT=x\n' "$ROOT /ovr/extra" > "$EFF/cbox.override"
+[ "$(_cbox_project_workspaces_from_file "$EFF/cbox.override" "$ROOT")" = "$ROOT /ovr/extra" ] || _fail "from_file: root first then the override extras"
+printf 'CBOX_WORKSPACES=%q\n' "/ovr/extra $ROOT /ovr/two" > "$EFF/cbox.override"
+[ "$(_cbox_project_workspaces_from_file "$EFF/cbox.override" "$ROOT")" = "$ROOT /ovr/extra /ovr/two" ] || _fail "from_file: root is always first and never duplicated"
+[ "$(_cbox_project_workspaces_from_file "$EFF/missing" "$ROOT")" = "$ROOT" ] || _fail "from_file: no file means the root alone"
+printf 'CBOX_HERMES_EFFORT=x\n' > "$EFF/cbox.override"
+[ "$(_cbox_project_workspaces_from_file "$EFF/cbox.override" "$ROOT")" = "$ROOT" ] || _fail "from_file: an override without the key means the root alone, whatever the environment holds"
+[ "$(_cbox_project_extra_workspaces "$EFF/cbox.override" "$ROOT")" = "" ] || _fail "extras: none for a root-only project"
+CBOX_WORKSPACES="/env/global/leak"
+[ "$(_cbox_project_workspaces_from_file "$EFF/cbox.override" "$ROOT")" = "$ROOT" ] || _fail "from_file: a global list in the environment must never leak in"
+unset CBOX_WORKSPACES
+_ok "project workspace list: root first, deduped, extras from the file only, no environment leak"
+
 echo "PASS: layered project config (base/override/merge/bootstrap/manifest)"

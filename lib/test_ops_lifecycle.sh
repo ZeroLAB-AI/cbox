@@ -36,6 +36,7 @@ RHB_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _resolve_hermes_bin)"
 HHASH_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _hermes_hash)"
 RHI_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _run_hermes_install)"
 CUP_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_compose_up)"
+BGUARD_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_bind_guard)"
 WAITREM_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_compose_up_wait_removed)"
 RMIDS_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_compose_removing_ids)"
 CDIG_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_compose_files_digest)"
@@ -62,6 +63,7 @@ done
 [ -n "$EOFF_FN" ] || _fail "cannot extract _engine_autoupdate_off"
 [ -n "$INST_FN" ] || _fail "cannot extract _install_one"
 [ -n "$CUP_FN" ] || _fail "cannot extract _cbox_compose_up"
+[ -n "$BGUARD_FN" ] || _fail "cannot extract _cbox_bind_guard"
 [ -n "$WAITREM_FN" ] || _fail "cannot extract _cbox_compose_up_wait_removed"
 [ -n "$RMIDS_FN" ] || _fail "cannot extract _cbox_compose_removing_ids"
 [ -n "$CDIG_FN" ] || _fail "cannot extract _cbox_compose_files_digest"
@@ -512,6 +514,7 @@ FORCE_OUT="$FORCE_OUT" TMPBASE="$TMPBASE" INSTALL_DIR="$INSTALL_DIR" bash -c '
   set -euo pipefail
   source "$INSTALL_DIR/lib/portable.sh"
   '"$CDIG_FN"'
+  '"$BGUARD_FN"'
   '"$CUP_FN"'
   fake_compose() {
     case "$1" in
@@ -536,6 +539,7 @@ run_compose_up_retry() {
     '"$CDIG_FN"'
     '"$RMIDS_FN"'
     '"$WAITREM_FN"'
+    '"$BGUARD_FN"'
     '"$CUP_FN"'
     sleep() { :; }
     docker() {

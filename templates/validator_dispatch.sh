@@ -20,6 +20,9 @@ _cbox_reg_validate_var_dispatch() {
     CBOX_BASE_DIGEST_TTL)
       _cbox_val_kind_uint "$val" || return 1
       ;;
+    CBOX_PROFILE)
+      _cbox_val_named_profile_name "$val" || return 1
+      ;;
     CBOX_NAME)
       _cbox_val_kind_nonempty_string "$val" || return 1
       ;;
@@ -337,6 +340,9 @@ _cbox_reg_validate_var_dispatch() {
       ;;
     CBOX_CONTEXT_PROFILE)
       _cbox_val_kind_enum "$val" 'full' 'light' || return 1
+      ;;
+    CBOX_REVIEW)
+      _cbox_val_kind_enum "$val" 'ask' 'auto' || return 1
       ;;
     CBOX_GITCONFIG)
       _cbox_val_kind_enum "$val" '0' '1' || return 1

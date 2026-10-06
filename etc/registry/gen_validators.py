@@ -22,6 +22,7 @@ NAMED_DISPATCH = {
     "kernel-lang": "_cbox_val_named_kernel_lang \"$val\"",
     "codex-model-slug": "_cbox_val_named_codex_model_slug \"$val\"",
     "host-alias-mode": "_cbox_val_named_host_alias_mode \"$val\"",
+    "profile-name": "_cbox_val_named_profile_name \"$val\"",
 }
 
 

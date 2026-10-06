@@ -6,7 +6,7 @@ import sys
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 TOP_KEYS = {"schema", "engines"}
-ENGINE_REQUIRED_KEYS = {"bin", "install", "probe", "version_vars", "enabled_var", "login"}
+ENGINE_REQUIRED_KEYS = {"bin", "install", "probe", "version_vars", "enabled_var", "login", "credentials"}
 ENGINE_OPTIONAL_KEYS = {"preassign_id", "resume_argv", "seed_channel", "history_read", "health"}
 ENGINE_KEYS = ENGINE_REQUIRED_KEYS | ENGINE_OPTIONAL_KEYS
 INSTALL_VALUES = {"bins-volume", "image"}
@@ -16,6 +16,12 @@ HISTORY_READ_VALUES = {"claude-jsonl", "codex-jsonl", "hermes-sqlite"}
 
 PROBE_KEYS_EXE_STAMP = {"kind", "stamp", "infra_filter_argv1"}
 PROBE_KEYS_CANONICAL_PATHS = {"kind", "exe_realpath_prefix", "argv0_prefix", "argv1"}
+
+CREDENTIALS_KEYS = {
+    "statedir-symlink": {"kind", "file", "mask"},
+    "engine-home-file": {"kind", "file", "home"},
+    "volume": {"kind", "volume"},
+}
 
 HEALTH_KEYS_VERSION = {"kind"}
 HEALTH_KEYS_HANDSHAKE = {"kind", "expect"}
@@ -37,6 +43,31 @@ def _check_login(name, login):
     if login.startswith("port-bridge:"):
         port = login[len("port-bridge:"):]
         _require(port.isdigit(), "engine %s: login port-bridge port not numeric: %r" % (name, login))
+
+
+def _check_credentials(name, cred):
+    _require(isinstance(cred, dict), "engine %s: credentials must be an object" % name)
+    _require("kind" in cred, "engine %s: credentials missing kind" % name)
+    kind = cred["kind"]
+    _require(isinstance(kind, str) and kind in CREDENTIALS_KEYS,
+             "engine %s: credentials.kind must be one of %s, got %r" % (name, sorted(CREDENTIALS_KEYS), kind))
+    allowed = CREDENTIALS_KEYS[kind]
+    extra = set(cred.keys()) - allowed
+    _require(not extra, "engine %s: credentials has unknown keys for %s: %s" % (name, kind, sorted(extra)))
+    missing = allowed - set(cred.keys())
+    _require(not missing, "engine %s: credentials missing keys for %s: %s" % (name, kind, sorted(missing)))
+    for key in sorted(allowed - {"kind"}):
+        _require(isinstance(cred[key], str) and cred[key], "engine %s: credentials.%s must be a non-empty string" % (name, key))
+    if "file" in cred:
+        _require("/" not in cred["file"] and cred["file"] not in (".", ".."),
+                 "engine %s: credentials.file must be a bare file name" % name)
+    for key in ("mask", "home"):
+        if key in cred:
+            _require(cred[key].startswith("~/") and ".." not in cred[key].split("/"),
+                     "engine %s: credentials.%s must start with ~/ and contain no .. segment" % (name, key))
+    if "volume" in cred:
+        _require(NAME_RE.match(cred["volume"]) is not None,
+                 "engine %s: credentials.volume must match %s" % (name, NAME_RE.pattern))
 
 
 def _check_probe(name, probe):
@@ -126,6 +157,8 @@ def _check_engine(name, spec):
     _require(ev is None or (isinstance(ev, str) and ev), "engine %s: enabled_var must be null or a non-empty string" % name)
 
     _check_login(name, spec["login"])
+
+    _check_credentials(name, spec["credentials"])
 
     _check_capabilities(name, spec)
 

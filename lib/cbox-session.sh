@@ -416,11 +416,33 @@ sys.stdout.write(text.rsplit(begin, 1)[1].split(end, 1)[0])
 '
 }
 
+_cbox_session_profile_enter() {
+  _CBOX_SESSION_PROFILE_OWNED=0
+  [ "${_CBOX_RUN_PROFILE_SET:-0}" != 1 ] || return 0
+  _cbox_profile_select "" || return 1
+  _CBOX_RUN_PROFILE="$_CBOX_VERB_PROFILE"
+  _CBOX_RUN_PROFILE_SET=1
+  _CBOX_SESSION_PROFILE_OWNED=1
+}
+
+_cbox_session_profile_leave() {
+  if [ "${_CBOX_SESSION_PROFILE_OWNED:-0}" = 1 ]; then
+    _CBOX_RUN_PROFILE=""
+    _CBOX_RUN_PROFILE_SET=0
+    _CBOX_SESSION_PROFILE_OWNED=0
+  fi
+}
+
 _cbox_session_sync_native() {
   local root raw discovered plan lockfd=9 count=0
   root="$(_cbox_workspace_root)" || { echo "cbox: refusing session sync outside a workspace root" >&2; return 1; }
   [ -f "$_CBOX_SESSION_BRIDGE" ] || { echo "cbox: session bridge missing at $_CBOX_SESSION_BRIDGE" >&2; return 1; }
-  raw="$(_run_isolated python3 /opt/cbox/cbox_session_bridge.py discover --root "$root" --envelope)" || return 1
+  _cbox_session_profile_enter || return 1
+  raw="$(_run_isolated python3 /opt/cbox/cbox_session_bridge.py discover --root "$root" --envelope)" || {
+    _cbox_session_profile_leave
+    return 1
+  }
+  _cbox_session_profile_leave
   discovered="$(printf '%s' "$raw" | _cbox_session_envelope_json)" || {
     echo "cbox: native session discovery returned an invalid envelope" >&2
     return 1
@@ -706,8 +728,13 @@ _cbox_session_run_leg() {
   fi
   engine_args+=("$@")
 
-  _run_isolated "$engine" --session-env --pre-hook _cbox_session_leg_pre_hook \
-    --post-hook _cbox_session_leg_post_hook -- "${engine_args[@]}" || rc=$?
+  if _cbox_session_profile_enter; then
+    _run_isolated "$engine" --session-env --pre-hook _cbox_session_leg_pre_hook \
+      --post-hook _cbox_session_leg_post_hook -- "${engine_args[@]}" || rc=$?
+    _cbox_session_profile_leave
+  else
+    rc=1
+  fi
 
   _cbox_runtime_leg_clear "$root" "$sid" || true
 

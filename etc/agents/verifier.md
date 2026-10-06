@@ -1,6 +1,6 @@
 ---
 name: verifier
-description: Runs the named check and reports pass/fail with evidence - never fixes anything. Use proactively after code changes, before accepting a claim, or to confirm a regression. Priority 5 (paid): while hermes-local is installed, spawn it only with a 'local-skip: <reason>' or 'local-verify:' marker in the description - the agent_label_guard refuses it otherwise.
+description: Runs the named check and reports pass/fail with evidence - never fixes anything. Runs only on the owner's explicit request; tests are run as plain commands, not through this agent. Priority 5 (paid): while hermes-local is installed, spawn it only with a 'local-skip: <reason>' or 'local-verify:' marker in the description - the agent_label_guard refuses it otherwise.
 tools: Read, Bash, Grep, Glob
 model: sonnet
 effort: medium

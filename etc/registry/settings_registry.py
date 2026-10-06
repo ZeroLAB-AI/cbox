@@ -42,6 +42,7 @@ NAMED_VALIDATORS = {
     "kernel-lang",
     "codex-model-slug",
     "host-alias-mode",
+    "profile-name",
 }
 
 NAMED_RESOLVERS = {

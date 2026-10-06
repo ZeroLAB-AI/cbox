@@ -712,6 +712,42 @@ class ContextFromCboxTests(unittest.TestCase):
             self.assertEqual(ctx["mode"], "isolated")
 
 
+class ProfileContextTests(unittest.TestCase):
+    def _snap(self, **extra):
+        snap = load_fixture("main_isolated")
+        snap["ctx"] = dict(snap["ctx"], **extra)
+        return snap
+
+    def test_header_names_a_non_default_profile(self):
+        text, _actions = screens.render_main(self._snap(profile="work"))
+        self.assertIn("  profile work", text.splitlines()[0])
+
+    def test_header_stays_unchanged_for_the_default_profile(self):
+        base, _actions = screens.render_main(load_fixture("main_isolated"))
+        text, _actions = screens.render_main(self._snap(profile="default", profile_error=""))
+        self.assertEqual(text, base)
+        self.assertNotIn("profile", text.splitlines()[0])
+
+    def test_header_flags_an_unresolvable_profile(self):
+        text, _actions = screens.render_main(self._snap(profile="default", profile_error="the configured profile cannot be resolved"))
+        self.assertIn("  profile ?", text.splitlines()[0])
+
+    def test_probe_asks_the_profile_compose_project(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "argv.log")
+            fake = os.path.join(tmp, "fake_docker")
+            with open(fake, "w", encoding="ascii") as fh:
+                fh.write("#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + log + "\necho cid-profile\n")
+            os.chmod(fake, 0o755)
+            eff = os.path.join(tmp, "eff", "profiles", "work")
+            ctx = {"mode": "isolated", "service": "cbox",
+                   "compose_argv": [fake, "compose", "--project-directory", eff, "-f", eff + "/docker-compose.yml"]}
+            self.assertEqual(MOD.Probe(ctx).container_id(), "cid-profile")
+            with open(log, encoding="ascii") as fh:
+                seen = fh.read()
+            self.assertIn("--project-directory %s -f %s/docker-compose.yml ps -q cbox" % (eff, eff), seen)
+
+
 class CliUsageTests(unittest.TestCase):
     def test_missing_binary_falls_back_to_static_usage(self):
         text = MOD.cli_usage("/does/not/exist/cbox")

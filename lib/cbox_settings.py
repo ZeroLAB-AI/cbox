@@ -166,7 +166,14 @@ def build_index_screen(sections_grouped, vars_by_section, values, pending_map, o
     return "\n".join(lines) + "\n", rows
 
 
-def build_section_screen(section, section_vars, values, pending_map, overridden_keys, failed=None):
+def local_setup_argv(cbox_path, sid, isolated):
+    argv = [cbox_path, "setup", "update", sid]
+    if isolated and sid == "workspaces":
+        argv.append("--local")
+    return argv
+
+
+def build_section_screen(section, section_vars, values, pending_map, overridden_keys, failed=None, isolated=False):
     sid = section["id"]
     lines = ["cbox settings - %s" % section.get("title", sid)]
     desc = section.get("description")
@@ -190,7 +197,8 @@ def build_section_screen(section, section_vars, values, pending_map, overridden_
         lines.append("     %s" % prompt)
     lines.append("  b) back")
     if sid in SIDE_EFFECT_SECTIONS:
-        lines.append("  w) cbox setup update %s (apply host side effects)" % sid)
+        suffix = " --local" if isolated and sid == "workspaces" else ""
+        lines.append("  w) cbox setup update %s%s (apply host side effects)" % (sid, suffix))
     return "\n".join(lines) + "\n", rows
 
 
@@ -353,7 +361,7 @@ def run_section_loop(cbox_path, root, isolated, section, section_vars, cwd, stdi
             failed.append("cbox config pending")
         if isolated and not overridden_ok:
             failed.append("cbox config diff")
-        screen, rows = build_section_screen(section, section_vars, values, pending_map, overridden, failed)
+        screen, rows = build_section_screen(section, section_vars, values, pending_map, overridden, failed, isolated)
         stdout_write(screen)
         stdout_write("> ")
         line = stdin_stream.readline()
@@ -364,7 +372,7 @@ def run_section_loop(cbox_path, root, isolated, section, section_vars, cwd, stdi
         if ans in ("b", "B"):
             return "back"
         if ans in ("w", "W") and sid in SIDE_EFFECT_SECTIONS:
-            report_call_rc([cbox_path, "setup", "update", sid], cwd, stdout_write)
+            report_call_rc(local_setup_argv(cbox_path, sid, isolated), cwd, stdout_write)
             continue
         if not ans.isdigit():
             stdout_write("cbox: unrecognized selection '%s'\n" % ans)

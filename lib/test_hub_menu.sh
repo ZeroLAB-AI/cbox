@@ -247,6 +247,40 @@ grep -q '"mode": "isolated"' "$CTX_OUT" || _fail "__hub_context did not resolve 
 grep -q '"egress": "on"' "$CTX_OUT" || _fail "__hub_context egress must come from the per-project isolated cbox.conf, not the global one: $(cat "$CTX_OUT")"
 _ok "__hub_context reads egress from the isolated project's own cbox.conf (per-project on is reported even though no global conf sets it)"
 
+python3 - "$CTX_OUT" "$IEFF" <<'PY' || _fail "default hub context must carry profile default and the project compose argv"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["profile"] == "default", d
+assert d["container_eff"] == sys.argv[2], d
+assert d["compose_argv"][-1] == sys.argv[2] + "/docker-compose.yml", d
+PY
+mkdir -p "$ISOHOME/.config/cbox/profiles/work"
+chmod 0700 "$ISOHOME/.config/cbox/profiles" "$ISOHOME/.config/cbox/profiles/work"
+echo "CBOX_PROFILE=work" >> "$IEFF/cbox.conf"
+CTX_PROF="$TMPBASE/ctx_prof.json"
+( cd "$ISOPROJ" && HOME="$ISOHOME" PATH="$STUBBIN:$PATH" "$INSTALLISO/cbox" __hub_context ) > "$CTX_PROF" 2>/dev/null \
+  || _fail "__hub_context failed for a project with a profile ($(cat "$CTX_PROF"))"
+python3 - "$CTX_PROF" "$IEFF" <<'PY' || _fail "hub context must carry the effective profile and its eff and compose argv: $(cat "$CTX_PROF")"
+import json, sys
+d = json.load(open(sys.argv[1]))
+eff = sys.argv[2]
+assert d["profile"] == "work", d
+assert d["eff"] == eff, d
+assert d["container_eff"] == eff + "/profiles/work", d
+assert d["compose_argv"] == ["docker", "compose", "--project-directory", eff + "/profiles/work", "-f", eff + "/profiles/work/docker-compose.yml"], d
+assert d["profile_error"] == "", d
+PY
+sed -i 's/^CBOX_PROFILE=work$/CBOX_PROFILE=ghost/' "$IEFF/cbox.conf"
+( cd "$ISOPROJ" && HOME="$ISOHOME" PATH="$STUBBIN:$PATH" "$INSTALLISO/cbox" __hub_context ) > "$CTX_PROF" 2>/dev/null \
+  || _fail "__hub_context must not fail for an unresolvable profile"
+python3 - "$CTX_PROF" <<'PY' || _fail "an unresolvable profile must be reported, not hidden: $(cat "$CTX_PROF")"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["profile"] == "default" and d["profile_error"], d
+PY
+sed -i '/^CBOX_PROFILE=/d' "$IEFF/cbox.conf"
+_ok "__hub_context carries the effective profile with its eff and compose argv (default, a configured profile, an unresolvable one)"
+
 BINSHOME="$TMPBASE/home-bins"
 mkdir -p "$BINSHOME/.config/cbox"
 BINSPROJ="$TMPBASE/bins-proj"
