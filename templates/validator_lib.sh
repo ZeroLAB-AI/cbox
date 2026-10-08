@@ -231,6 +231,51 @@ _cbox_val_named_ollama_keep_alive() {
     || { printf 'expected an ollama duration (e.g. 30m, 1h, 0, -1) or plain seconds (e.g. 3600)'; return 1; }
 }
 
+_cbox_val_named_gpu_device_list() {
+  local val="$1" entry rest
+  local re_idx='^([0-9]|[1-9][0-9])$' re_uuid='^GPU-[0-9A-Fa-f-]{8,}$'
+  [ -n "$val" ] || { printf 'must not be empty'; return 1; }
+  [ "$val" = all ] && return 0
+  rest="$val,"
+  while [ -n "$rest" ]; do
+    entry="${rest%%,*}"
+    rest="${rest#*,}"
+    if [[ ! "$entry" =~ $re_idx && ! "$entry" =~ $re_uuid ]]; then
+      printf 'expected all, or a comma list of GPU indices (0-99) or GPU-<uuid> ids'
+      return 1
+    fi
+  done
+  return 0
+}
+
+_cbox_val_named_hyperqwen_models_path() {
+  local val="$1"
+  [ -n "$val" ] || return 0
+  case "$val" in
+    /*) ;;
+    *) printf 'expected an absolute path, or empty'; return 1 ;;
+  esac
+  case "$val" in
+    *[[:space:]]*|*:*|*\$*|*\`*|*\"*|*"'"*) printf 'must not contain whitespace, colon, dollar, backtick or quote characters'; return 1 ;;
+  esac
+  return 0
+}
+
+_cbox_val_named_hyperqwen_max_len() {
+  local val="$1" re='^[1-9][0-9]{0,6}$'
+  [ -n "$val" ] || return 0
+  if [[ "$val" =~ $re ]] && [ "$val" -le 1048576 ]; then
+    return 0
+  fi
+  printf 'expected a positive integer without leading zero, at most 1048576, or empty'
+  return 1
+}
+
+_cbox_val_named_shm_size() {
+  local val="$1" re='^[1-9][0-9]{0,5}[kmg]?$'
+  [[ "$val" =~ $re ]] || { printf 'expected <n>[kmg] (e.g. 8g)'; return 1; }
+}
+
 _cbox_val_named_wg_address_cidr() {
   local val="$1" min_prefix="${2:-8}"
   command -v _cbox_is_ipv4_cidr >/dev/null 2>&1 || . "$INSTALL_DIR/templates/generators.sh"

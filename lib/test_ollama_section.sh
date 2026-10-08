@@ -18,7 +18,7 @@ source "$INSTALL_DIR/lib/portable.sh"
 source "$INSTALL_DIR/templates/sections.sh"
 source "$INSTALL_DIR/templates/conf_lib.sh"
 
-OLLAMA_VARS="CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL CBOX_OLLAMA_CONTEXT_LENGTH CBOX_OLLAMA_FLASH_ATTENTION CBOX_OLLAMA_KV_CACHE_TYPE CBOX_OLLAMA_KEEP_ALIVE"
+OLLAMA_VARS="CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_GPU_DEVICE CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL CBOX_OLLAMA_CONTEXT_LENGTH CBOX_OLLAMA_FLASH_ATTENTION CBOX_OLLAMA_KV_CACHE_TYPE CBOX_OLLAMA_KEEP_ALIVE"
 
 case " ${SECTIONS[*]} " in
   *" ollama "*) ;;
@@ -61,12 +61,12 @@ _ok "registry: SEC_SCOPE[ollama]=machine"
 other_bad=""
 for s in "${SECTIONS[@]}"; do
   case "$s" in
-    ollama|wireguard|local-model|hermes-delegate) continue ;;
+    ollama|hyperqwen|wireguard|local-model|hermes-delegate) continue ;;
   esac
   [ -n "$(sec_get SEC_SCOPE "$s")" ] || { other_bad="$other_bad missing:$s"; continue; }
   [ "$(sec_get SEC_SCOPE "$s")" = project ] || other_bad="$other_bad wrong:$s=$(sec_get SEC_SCOPE "$s")"
 done
-[ -z "$other_bad" ] || _fail "registry: SEC_SCOPE should default to project for every section except the machine-scoped ones (ollama, wireguard, local-model, hermes-delegate):$other_bad"
+[ -z "$other_bad" ] || _fail "registry: SEC_SCOPE should default to project for every section except the machine-scoped ones (ollama, hyperqwen, wireguard, local-model, hermes-delegate):$other_bad"
 _ok "registry: SEC_SCOPE defaults to project for every non-machine-scoped section"
 
 _load_cbox_config_block() {

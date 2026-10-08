@@ -231,11 +231,28 @@ def _hermes_base_url():
 
 
 def _probe_hermes_blocking(base, timeout, result):
+    import urllib.error
     import urllib.request
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(base + "/api/ps", timeout=timeout) as resp:
             raw = resp.read(HERMES_PROBE_READ_CAP)
+    except urllib.error.HTTPError:
+        try:
+            with opener.open(base + "/v1/models", timeout=timeout) as resp:
+                raw = resp.read(HERMES_PROBE_READ_CAP)
+        except Exception:
+            return
+        result["reachable"] = True
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception:
+            return
+        if isinstance(payload, dict):
+            data = payload.get("data")
+            if isinstance(data, list) and len(data) > 0:
+                result["model_loaded"] = True
+        return
     except Exception:
         return
     result["reachable"] = True

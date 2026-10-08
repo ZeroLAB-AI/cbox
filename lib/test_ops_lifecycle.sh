@@ -36,6 +36,7 @@ RHB_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _resolve_hermes_bin)"
 HHASH_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _hermes_hash)"
 RHI_FN="$(_extract_fn "$INSTALL_DIR/install-bins.sh" _run_hermes_install)"
 CUP_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_compose_up)"
+DEADNET_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_compose_stopped_dead_network)"
 BGUARD_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_bind_guard)"
 WAITREM_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_compose_up_wait_removed)"
 RMIDS_FN="$(_extract_fn "$INSTALL_DIR/cbox" _cbox_compose_removing_ids)"
@@ -63,6 +64,7 @@ done
 [ -n "$EOFF_FN" ] || _fail "cannot extract _engine_autoupdate_off"
 [ -n "$INST_FN" ] || _fail "cannot extract _install_one"
 [ -n "$CUP_FN" ] || _fail "cannot extract _cbox_compose_up"
+[ -n "$DEADNET_FN" ] || _fail "cannot extract _cbox_compose_stopped_dead_network"
 [ -n "$BGUARD_FN" ] || _fail "cannot extract _cbox_bind_guard"
 [ -n "$WAITREM_FN" ] || _fail "cannot extract _cbox_compose_up_wait_removed"
 [ -n "$RMIDS_FN" ] || _fail "cannot extract _cbox_compose_removing_ids"
@@ -515,6 +517,7 @@ FORCE_OUT="$FORCE_OUT" TMPBASE="$TMPBASE" INSTALL_DIR="$INSTALL_DIR" bash -c '
   source "$INSTALL_DIR/lib/portable.sh"
   '"$CDIG_FN"'
   '"$BGUARD_FN"'
+  '"$DEADNET_FN"'
   '"$CUP_FN"'
   fake_compose() {
     case "$1" in
@@ -528,6 +531,54 @@ FORCE_OUT="$FORCE_OUT" TMPBASE="$TMPBASE" INSTALL_DIR="$INSTALL_DIR" bash -c '
 grep -qx 'up -d --force-recreate' "$FORCE_OUT" || _fail "compose: managed-settings repair must force recreate"
 _ok "compose: managed-settings repair forces recreation"
 
+run_compose_up_deadnet() {
+  local scenario="$1"
+  local out_file="$TMPBASE/deadnet-$scenario.up"
+  : > "$out_file"
+  INSTALL_DIR="$INSTALL_DIR" OUT_FILE="$out_file" SCENARIO="$scenario" bash -c '
+    set -u
+    source "$INSTALL_DIR/lib/portable.sh"
+    '"$CDIG_FN"'
+    '"$BGUARD_FN"'
+    '"$DEADNET_FN"'
+    '"$CUP_FN"'
+    docker() {
+      case "$1 $2" in
+        "inspect --format") printf "netalive\nnetgone\n" ;;
+        "network inspect")
+          case "$*" in
+            *netgone*) [ "$SCENARIO" = alive ] || return 1 ;;
+          esac
+          ;;
+      esac
+      return 0
+    }
+    fake_compose() {
+      case "$1" in
+        ps)
+          case "$*" in
+            *" -a "*) printf "stoppedcid\n" ;;
+            *) [ "$SCENARIO" = running ] && printf "runcid\n" ;;
+          esac
+          return 0 ;;
+        up) printf "%s\n" "$*" > "$OUT_FILE" ;;
+      esac
+      return 0
+    }
+    _cbox_compose_files_digest fake_compose > "$OUT_FILE.stamp"
+    _cbox_compose_up "$OUT_FILE.stamp" fake_compose
+  ' deadnet 2>&1
+}
+
+DN_OUT="$(run_compose_up_deadnet gone)"
+grep -qx 'up -d --force-recreate' "$TMPBASE/deadnet-gone.up" || _fail "compose: a stopped container that references a removed network must be recreated (plain start fails with 'network <id> not found'): $DN_OUT"
+printf '%s\n' "$DN_OUT" | grep -q 'no longer exists' || _fail "compose: the dead-network recreate must say why: $DN_OUT"
+run_compose_up_deadnet alive >/dev/null
+grep -qx 'up -d' "$TMPBASE/deadnet-alive.up" || _fail "compose: a stopped container whose networks all exist must start plainly, not be recreated"
+run_compose_up_deadnet running >/dev/null
+grep -qx 'up -d' "$TMPBASE/deadnet-running.up" || _fail "compose: a running container must never be recreated by the dead-network check (it would kill the live session)"
+_ok "compose: a stopped container pointing at a removed network is recreated; live networks or a running container start plainly"
+
 run_compose_up_retry() {
   local scenario="$1" out
   local calls="$TMPBASE/cup-$scenario.calls"
@@ -540,6 +591,7 @@ run_compose_up_retry() {
     '"$RMIDS_FN"'
     '"$WAITREM_FN"'
     '"$BGUARD_FN"'
+    '"$DEADNET_FN"'
     '"$CUP_FN"'
     sleep() { :; }
     docker() {

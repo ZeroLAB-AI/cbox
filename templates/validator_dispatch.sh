@@ -221,6 +221,9 @@ _cbox_reg_validate_var_dispatch() {
     CBOX_OLLAMA_GPU)
       _cbox_val_kind_enum "$val" 'off' 'cdi' || return 1
       ;;
+    CBOX_OLLAMA_GPU_DEVICE)
+      _cbox_val_named_gpu_device_list "$val" || return 1
+      ;;
     CBOX_OLLAMA_STORE)
       _cbox_val_kind_enum "$val" 'dedicated' 'shared' || return 1
       ;;
@@ -244,6 +247,39 @@ _cbox_reg_validate_var_dispatch() {
       ;;
     CBOX_OLLAMA_KEEP_ALIVE)
       _cbox_val_named_ollama_keep_alive "$val" || return 1
+      ;;
+    CBOX_HYPERQWEN_MODE)
+      _cbox_val_kind_enum "$val" 'off' 'on' || return 1
+      ;;
+    CBOX_HYPERQWEN_IMAGE)
+      _cbox_val_named_ollama_image "$val" || return 1
+      ;;
+    CBOX_HYPERQWEN_GPU_DEVICE)
+      _cbox_val_named_gpu_device_list "$val" || return 1
+      ;;
+    CBOX_HYPERQWEN_MODELS_PATH)
+      _cbox_val_named_hyperqwen_models_path "$val" || return 1
+      ;;
+    CBOX_HYPERQWEN_SPEC)
+      _cbox_val_kind_enum "$val" 'dflash2' 'mtp' || return 1
+      ;;
+    CBOX_HYPERQWEN_CTX)
+      _cbox_val_kind_enum "$val" 'fast' 'long' 'huge' || return 1
+      ;;
+    CBOX_HYPERQWEN_MAX_LEN)
+      _cbox_val_named_hyperqwen_max_len "$val" || return 1
+      ;;
+    CBOX_HYPERQWEN_SHM_SIZE)
+      _cbox_val_named_shm_size "$val" || return 1
+      ;;
+    CBOX_HYPERQWEN_KV_OFFLOAD)
+      _cbox_val_kind_enum "$val" 'off' 'on' || return 1
+      ;;
+    CBOX_HYPERQWEN_KV_OFFLOAD_MIB)
+      _cbox_val_kind_uint_range "$val" 1024 49152 || return 1
+      ;;
+    CBOX_HYPERQWEN_RAM_RESERVE_GIB)
+      _cbox_val_kind_uint_range "$val" 8 32 || return 1
       ;;
     CBOX_WG_MODE)
       _cbox_val_kind_enum "$val" 'off' 'server' 'client' 'both' || return 1

@@ -22,8 +22,10 @@ Two independent pieces, both text-only, both gated off by default:
   loop (including .cbox SessionStart/write hooks) can run against a local
   model instead of a subscription.
 
-Ollama itself runs OUTSIDE cbox always. Nothing here grants cbox a GPU or
-CDI device; compute stays wherever ollama runs, cbox only makes HTTP calls
+Two cbox-managed local model servers exist, ollama (Path A) and hyperqwen
+(Path A2); `cbox llm use <ollama|hyperqwen>` points the consumers at one of them.
+Local model servers run OUTSIDE cbox always. Nothing here grants cbox a GPU or
+CDI device; compute stays wherever the server runs, cbox only makes HTTP calls
 to it and gets text back.
 
 ## Path A: cbox-managed ollama (machine-scoped owner project)
@@ -62,6 +64,74 @@ automatically and picks it up with no extra step. If CBOX_MCP_SERVERS was
 narrowed to an explicit subset before local-model was configured, re-run
 `cbox setup update mcp-servers` once after setting the URL to add local-qwen
 to that subset.
+
+## Path A2: cbox-managed hyperqwen (vLLM, machine-scoped owner project)
+
+HyperQwen is a vLLM server optimized for Qwen3.8-27B on a single 24 GB RTX 3090.
+It serves exactly one model (`qwen3.8-27b`) and is tuned for that card. The
+cbox default profile is mtp + long: 150k context at roughly 95-100 tok/s;
+dflash2 + fast trades the window down to 64k for about 127 tok/s. Use Path A (ollama) for model choice; use Path
+A2 when 27B speed on one 3090 is the goal. Both can coexist on two cards.
+
+Host steps:
+
+1. Prerequisites: NVIDIA driver >= 580 (CUDA 13), the CDI spec as for ollama
+   (`cbox hyperqwen gpu-check` must pass), ~40 GB free disk (model ~20 GB plus
+   requantization and compile caches). Optional: `sudo nvidia-smi -pl 250`
+   (upstream's measured power limit, a host setting the container cannot change).
+
+2. Enable hyperqwen: `cbox config set CBOX_HYPERQWEN_MODE=on`. Optionally set
+   `CBOX_HYPERQWEN_SPEC` (mtp/dflash2, default mtp), `CBOX_HYPERQWEN_CTX`
+   (fast/long/huge, default long), `CBOX_HYPERQWEN_MAX_LEN`, `CBOX_HYPERQWEN_GPU_DEVICE`,
+   or `CBOX_HYPERQWEN_MODELS_PATH` (see cbox/MANUAL.md section "hyperqwen" for
+   full configuration).
+
+3. If ollama is running on the same card: `cbox config set CBOX_OLLAMA_MODE=off`
+   then `cbox ollama reconcile` to free the GPU.
+
+4. Bring up hyperqwen: `cbox hyperqwen up`. First run pulls the ~9.5 GB image,
+   prepares the model (~20 GB download plus CPU requantization, 20+ minutes),
+   then boots (torch.compile/CUDA graphs, 2-3 min first time, ~1 min later;
+   the healthcheck allows 15 minutes for the first boot).
+
+5. Verify health: `cbox hyperqwen logs | grep "GPU KV cache size"` and
+   `cbox hyperqwen ps` (check `/health` and `/v1/models` endpoints).
+
+6. Point consumers at hyperqwen: `cbox llm use hyperqwen`, then restart running
+   sessions (`cbox down` per project, or start new sessions).
+
+7. Check final state: `cbox llm status` shows which backend each consumer uses.
+
+### Optional: enable the RAM tier (KV cache offload)
+
+Adds a host RAM tier of about 20 GB so a long prompt prefix that the GPU evicted is
+reloaded instead of recomputed. It needs the default profile (`mtp` + `long`) and a
+host with enough free RAM. On the host:
+
+1. Check the budget: `free -m`; the available column minus 16 GiB (the desktop reserve,
+   `CBOX_HYPERQWEN_RAM_RESERVE_GIB`) minus 8 GiB must be at least 19072 MiB.
+2. `cbox config set CBOX_HYPERQWEN_KV_OFFLOAD=on` (size `CBOX_HYPERQWEN_KV_OFFLOAD_MIB`,
+   default 19072; lower it if the budget is smaller).
+3. `cbox hyperqwen reconcile`. A WARN with the numbers means the size does not fit; the
+   start still goes ahead, so lower the size or turn the tier off and reconcile again.
+4. After the boot: `cbox hyperqwen logs | grep -i offload`, and `free -g` during a long
+   prefill. The container restart policy is `no` with the tier on; the next session start
+   or `cbox hyperqwen up` starts it again.
+
+To turn it off: `cbox config set CBOX_HYPERQWEN_KV_OFFLOAD=off`, then `cbox hyperqwen reconcile`.
+Details: cbox/MANUAL.md section "hyperqwen".
+
+### Switching back and running both
+
+To switch back to ollama: `cbox llm use ollama [--model <name>]`, then restart sessions.
+
+To run both backends at once, they must use separate GPUs: set `CBOX_HYPERQWEN_GPU_DEVICE=0`
+and `CBOX_OLLAMA_GPU_DEVICE=1` (or your own GPU indices). On one card the overlap warning
+applies: vLLM pins almost the whole card at boot, so whichever backend loads
+second runs out of VRAM.
+
+Note: `cbox ai local-qwen` drives codex `--oss --local-provider ollama`, which speaks
+ollama's native API, so that engine stays ollama-only.
 
 ## Path B: Manual sibling container (deprecated; use Path A)
 

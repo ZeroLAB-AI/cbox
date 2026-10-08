@@ -332,6 +332,51 @@ class ReportCallRcTests(unittest.TestCase):
         self.assertEqual(out, [])
 
 
+class InfraReconcileApplyTests(unittest.TestCase):
+    def _run(self, pending_map, answer="y\n"):
+        calls = []
+        out = []
+        old = MOD.subprocess.call
+        MOD.subprocess.call = lambda argv, cwd=None: calls.append(list(argv)) or 0
+        try:
+            MOD.run_apply_pending("/x/cbox", "/w", pending_map, io.StringIO(answer), out.append)
+        finally:
+            MOD.subprocess.call = old
+        return calls, "".join(out)
+
+    def test_hyperqwen_section_runs_only_the_hyperqwen_verb(self):
+        calls, text = self._run({"hyperqwen": "infra-reconcile"})
+        self.assertEqual(calls, [["/x/cbox", "hyperqwen", "reconcile"]])
+        self.assertIn("cbox hyperqwen reconcile", text)
+        self.assertNotIn("cbox ollama reconcile", text)
+
+    def test_ollama_and_wireguard_sections_run_the_ollama_verb(self):
+        for sid in ("ollama", "wireguard"):
+            calls, text = self._run({sid: "infra-reconcile"})
+            self.assertEqual(calls, [["/x/cbox", "ollama", "reconcile"]])
+            self.assertNotIn("hyperqwen", text)
+
+    def test_both_pending_runs_both_verbs_once_each(self):
+        calls, text = self._run({"ollama": "infra-reconcile", "wireguard": "infra-reconcile", "hyperqwen": "infra-reconcile"})
+        self.assertEqual(calls, [["/x/cbox", "ollama", "reconcile"], ["/x/cbox", "hyperqwen", "reconcile"]])
+        self.assertIn("'cbox ollama reconcile' and 'cbox hyperqwen reconcile'", text)
+
+    def test_declined_runs_nothing(self):
+        calls, _ = self._run({"hyperqwen": "infra-reconcile"}, answer="n\n")
+        self.assertEqual(calls, [])
+
+    def test_non_infra_pending_asks_nothing(self):
+        calls, text = self._run({"mode": "restart"})
+        self.assertEqual(calls, [])
+        self.assertNotIn("reconcile' now", text)
+
+    def test_apply_cmd_text_names_the_section_verb(self):
+        self.assertIn("cbox hyperqwen reconcile", MOD.apply_cmd_for("infra-reconcile", "hyperqwen"))
+        self.assertIn("cbox ollama reconcile", MOD.apply_cmd_for("infra-reconcile", "ollama"))
+        self.assertIn("cbox ollama reconcile", MOD.apply_cmd_for("infra-reconcile"))
+        self.assertIn("cbox hyperqwen reconcile", MOD.apply_cmd_for("infra-reconcile"))
+
+
 class ParseArgvTests(unittest.TestCase):
     def test_global_invocation(self):
         parsed = MOD.parse_argv(["cbox_settings.py", "/install", "/install/cbox"])

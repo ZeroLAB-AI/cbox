@@ -194,6 +194,18 @@
       ]
     },
     {
+      "id": "hyperqwen",
+      "title": "HyperQwen (machine-scoped)",
+      "description": "Off by default. Machine-scoped infra service: HyperQwen (a vLLM server for Qwen3.8-27B tuned for one 24 GB card) runs in its own owner compose project (cbox-infra-u<uid>-hyperqwen), next to ollama and independent of it, so either one or both can run. It always needs a GPU, and it cannot share a card with an ollama that holds a model. One value applies to every project on this machine; the isolated per-project wizard never asks about it.",
+      "apply_class": "infra-reconcile",
+      "profile": "skip",
+      "scope": "machine",
+      "dependencies": [],
+      "doctor_rows": [
+        "hyperqwen"
+      ]
+    },
+    {
       "id": "wireguard",
       "title": "WireGuard (machine-scoped)",
       "description": "Off by default. Machine-scoped WireGuard sidecar in the same owner project as ollama: server mode shares this machine ollama over one authenticated UDP port (no routing, no NAT, no IP forwarding - a single-service TCP forwarder only); client mode dials a remote peer and exposes it under a stable internal alias. One value applies to every project on this machine; the isolated per-project wizard never asks about it.",
@@ -1515,6 +1527,20 @@
       "validator": null
     },
     {
+      "key": "CBOX_OLLAMA_GPU_DEVICE",
+      "section": "ollama",
+      "type": {
+        "kind": "nonempty-string",
+        "escape_hatch": "gpu-device-list"
+      },
+      "default": "all",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: ollama GPU device (all, or comma-separated GPU indices or GPU-<uuid> ids)",
+      "help": "Which GPUs the ollama reservation targets when CBOX_OLLAMA_GPU is cdi: all, or a comma list of GPU indices (0-99) or GPU-<uuid> ids. Pin ollama and hyperqwen to different cards to run both at once.",
+      "validator": null
+    },
+    {
       "key": "CBOX_OLLAMA_STORE",
       "section": "ollama",
       "type": {
@@ -1632,6 +1658,175 @@
       "export": true,
       "prompt": "setup: ollama OLLAMA_KEEP_ALIVE (how long a loaded model stays in memory, e.g. 30m, 1h, 0, -1)",
       "help": "Ollama keep-alive controlling how long a loaded model stays in memory: a duration string (30m, 1h30m), plain seconds (3600), 0 to unload immediately, or any negative value (-1) to keep it loaded forever - the same forms ollama's own parser accepts.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HYPERQWEN_MODE",
+      "section": "hyperqwen",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: enable the hyperqwen machine service",
+      "help": "Machine-scoped infra service: hyperqwen (vLLM, Qwen3.8-27B) runs in its own owner compose project, never inside a generated cbox project. Needs an NVIDIA GPU (CDI) and a one-time model download via 'cbox hyperqwen prepare'.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HYPERQWEN_IMAGE",
+      "section": "hyperqwen",
+      "type": {
+        "kind": "ollama-image",
+        "escape_hatch": "ollama-image"
+      },
+      "default": "ghcr.io/syv-ai/hyperqwen:sha-53557bc",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: hyperqwen image reference (pinned tag or digest)",
+      "help": "Pinned hyperqwen image reference.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HYPERQWEN_GPU_DEVICE",
+      "section": "hyperqwen",
+      "type": {
+        "kind": "nonempty-string",
+        "escape_hatch": "gpu-device-list"
+      },
+      "default": "all",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: hyperqwen GPU device (all, or comma-separated GPU indices or GPU-<uuid> ids)",
+      "help": "Which GPUs the hyperqwen reservation targets: all, or a comma list of GPU indices (0-99) or GPU-<uuid> ids. vLLM pins nearly the whole card, so give it a card ollama does not use.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HYPERQWEN_MODELS_PATH",
+      "section": "hyperqwen",
+      "type": {
+        "kind": "path-or-empty",
+        "escape_hatch": "hyperqwen-models-path"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: hyperqwen host models directory (empty = cbox-owned named volume)",
+      "help": "Empty uses the cbox-owned named volume for the ~20 GB model. Otherwise an absolute host directory bind-mounted at /app/models; no whitespace, colon, dollar, backtick or quote characters.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HYPERQWEN_SPEC",
+      "section": "hyperqwen",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "dflash2",
+          "mtp"
+        ]
+      },
+      "default": "mtp",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: hyperqwen speculative decoding profile",
+      "help": "Speculative decoding profile rendered as SPEC: mtp (default, the upstream pick for long context) or dflash2 (the fastest single-stream profile at 64k, about 127 tok/s against roughly 95-100 for mtp with CTX=long).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HYPERQWEN_CTX",
+      "section": "hyperqwen",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "fast",
+          "long",
+          "huge"
+        ]
+      },
+      "default": "long",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: hyperqwen context profile",
+      "help": "Context profile rendered as CTX. Default window per profile: mtp fast 65536, long 150000 (default), huge 200000; dflash2 fast 65536, long 131072, huge 245760. mtp with huge runs with the prefix cache off.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HYPERQWEN_MAX_LEN",
+      "section": "hyperqwen",
+      "type": {
+        "kind": "uint-or-empty",
+        "escape_hatch": "hyperqwen-max-len"
+      },
+      "default": "",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: hyperqwen MAX_LEN override in tokens (empty = profile default)",
+      "help": "Empty uses the profile default from CBOX_HYPERQWEN_SPEC and CBOX_HYPERQWEN_CTX. Otherwise a positive integer (no leading zero, at most 1048576) rendered as MAX_LEN and mirrored into hermes as model.context_length.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HYPERQWEN_SHM_SIZE",
+      "section": "hyperqwen",
+      "type": {
+        "kind": "nonempty-string",
+        "escape_hatch": "shm-size"
+      },
+      "default": "8g",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: hyperqwen shared memory size (e.g. 8g)",
+      "help": "Container shared memory rendered as shm_size: a number with an optional k, m or g suffix.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HYPERQWEN_KV_OFFLOAD",
+      "section": "hyperqwen",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: hyperqwen KV cache offload to host RAM (off, on)",
+      "help": "Off by default. On adds a host RAM tier for the KV cache so prompt prefixes evicted from the GPU can be reloaded instead of recomputed (prefix reuse, not a longer per-request window). The tier is allocated at boot, counts against host RAM as /dev/shm fills, and the container restart policy becomes no (cbox heal starts it at session start).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HYPERQWEN_KV_OFFLOAD_MIB",
+      "section": "hyperqwen",
+      "type": {
+        "kind": "uint-range",
+        "min": 1024,
+        "max": 49152
+      },
+      "default": "19072",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: hyperqwen KV offload size in MiB (1024..49152)",
+      "help": "Size of the host RAM KV tier in MiB when CBOX_HYPERQWEN_KV_OFFLOAD=on, rendered as --kv-offloading-size MIB/1024 GiB. Default 19072 MiB (about 20 GB). cbox warns before a start when it does not fit the host's available RAM and never resizes it on its own.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HYPERQWEN_RAM_RESERVE_GIB",
+      "section": "hyperqwen",
+      "type": {
+        "kind": "uint-range",
+        "min": 8,
+        "max": 32
+      },
+      "default": "16",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: RAM in GiB to keep free for the desktop when sizing the KV offload (8..32)",
+      "help": "Host RAM in GiB the offload preflight leaves for the rest of the machine. The warning budget is MemAvailable minus this reserve minus 8 GiB of engine headroom. A recommendation for the check, not a hard OS reservation.",
       "validator": null
     },
     {

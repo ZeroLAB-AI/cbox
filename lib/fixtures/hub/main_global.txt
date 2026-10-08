@@ -6,6 +6,8 @@ doctor: 2 warnings
  1 claude    start             e sessions
  2 codex     start             n network
                                o ollama
+                               h hyperqwen
+                               l llm
                                w wireguard
                                s settings
                                m maintenance

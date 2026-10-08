@@ -270,6 +270,7 @@ class HermesDelegateUnitTests(unittest.TestCase):
         os.environ.pop("CBOX_HERMES_MODEL_URL", None)
         os.environ.pop("CBOX_HERMES_MODEL_NAME", None)
         os.environ.pop("CBOX_OLLAMA_CONTEXT_LENGTH", None)
+        os.environ.pop("CBOX_HERMES_DELEGATE_CONTEXT_LENGTH", None)
         os.environ.pop("CBOX_HERMES_DELEGATE_TIMEOUT_SEC", None)
         os.environ.pop("CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC", None)
         os.environ.pop("CBOX_HERMES_DELEGATE_MAX_PROMPT_BYTES", None)
@@ -609,6 +610,33 @@ class HermesDelegateUnitTests(unittest.TestCase):
             calls = fh.read()
         self.assertIn("config set model.context_length 131072", calls)
         self.assertNotIn("config set model.context_length 65536", calls)
+
+    def test_context_length_prefers_the_delegate_context_var(self):
+        marker = os.path.join(self.tmpdir, "marker_ctx_delegate.txt")
+        write_control(self.control_file, marker=marker)
+        os.environ["CBOX_OLLAMA_CONTEXT_LENGTH"] = "131072"
+        os.environ["CBOX_HERMES_DELEGATE_CONTEXT_LENGTH"] = "245760"
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertFalse(result["isError"], result)
+        with open(marker) as fh:
+            calls = fh.read()
+        self.assertIn("config set model.context_length 245760", calls)
+        self.assertNotIn("config set model.context_length 131072", calls)
+
+    def test_context_length_setting_precedence(self):
+        os.environ.pop("CBOX_OLLAMA_CONTEXT_LENGTH", None)
+        os.environ.pop("CBOX_HERMES_DELEGATE_CONTEXT_LENGTH", None)
+        self.assertEqual(MOD._context_length_setting(), "65536")
+        os.environ["CBOX_OLLAMA_CONTEXT_LENGTH"] = "98304"
+        self.assertEqual(MOD._context_length_setting(), "98304")
+        os.environ["CBOX_HERMES_DELEGATE_CONTEXT_LENGTH"] = "200000"
+        self.assertEqual(MOD._context_length_setting(), "200000")
+        os.environ["CBOX_HERMES_DELEGATE_CONTEXT_LENGTH"] = "bogus"
+        self.assertEqual(MOD._context_length_setting(), "98304")
+        os.environ["CBOX_HERMES_DELEGATE_CONTEXT_LENGTH"] = "0"
+        self.assertEqual(MOD._context_length_setting(), "98304")
+        os.environ["CBOX_HERMES_DELEGATE_CONTEXT_LENGTH"] = ""
+        self.assertEqual(MOD._context_length_setting(), "98304")
 
     def test_context_length_not_managed_for_hosted_providers(self):
         marker = os.path.join(self.tmpdir, "marker_ctx_hosted.txt")
@@ -1435,6 +1463,7 @@ class HermesDelegateStdioTests(unittest.TestCase):
         self.env["CBOX_HERMES_DELEGATE_PROVIDER"] = "local"
         self.env["CBOX_HERMES_DELEGATE_BASE_URL"] = "http://127.0.0.1:11434"
         self.env.pop("CBOX_OLLAMA_CONTEXT_LENGTH", None)
+        self.env.pop("CBOX_HERMES_DELEGATE_CONTEXT_LENGTH", None)
         self.env.pop("CBOX_HERMES_DELEGATE_MODEL", None)
         self.env.pop("CBOX_HERMES_PROVIDER", None)
         self.env.pop("CBOX_HERMES_MODEL_URL", None)
@@ -2250,7 +2279,8 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
         os.environ[MOD.BASE_URL_VAR] = "http://127.0.0.1:11434"
         for name in (MOD.MODEL_VAR, MOD.CONSOLE_PROVIDER_VAR,
                      MOD.CONSOLE_BASE_URL_VAR, MOD.CONSOLE_MODEL_VAR,
-                     "CBOX_OLLAMA_CONTEXT_LENGTH", MOD.TIMEOUT_VAR,
+                     "CBOX_OLLAMA_CONTEXT_LENGTH",
+                     "CBOX_HERMES_DELEGATE_CONTEXT_LENGTH", MOD.TIMEOUT_VAR,
                      MOD.IDLE_TIMEOUT_VAR, MOD.MAX_PROMPT_VAR,
                      MOD.MAX_RESPONSE_VAR, MOD.DEPTH_VAR,
                      MOD.LEGACY_DEPTH_VAR, MOD.CONCURRENCY_VAR,

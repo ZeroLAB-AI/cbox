@@ -312,11 +312,16 @@ run_gc_net() {
     docker() {
       echo "$*" >> "$CALLS"
       case "$1" in
+        ps)
+          case "$*" in
+            *network=cbox-ollama-u1000-pabc*) printf "stoppedcid\n" ;;
+          esac
+          ;;
         network)
           case "$2" in
             ls) printf "cbox-infra-u1000_default\ncbox-ollama-u1000-global\ncbox-ollama-u1000-pabc\n" ;;
             inspect) printf "%s" "'"$count"'" ;;
-            rm) return 0 ;;
+            rm|disconnect) return 0 ;;
           esac
           ;;
       esac
@@ -330,9 +335,16 @@ grep -q 'network rm -- cbox-ollama-u1000-global' "$TMPBASE/gc.calls" || _fail "g
 grep -q 'network rm -- cbox-ollama-u1000-pabc' "$TMPBASE/gc.calls" || _fail "gc must remove an isolated per-scope network with zero attached endpoints: $(cat "$TMPBASE/gc.calls")"
 ! grep -q 'cbox-infra-u1000_default' "$TMPBASE/gc.calls" || _fail "gc must never touch the owner project's compose default network even at zero endpoints (ollama stopped) - removing it makes the next owner start fail with 'network not found' and forces a recreate that drops every per-scope attachment: $(cat "$TMPBASE/gc.calls")"
 _ok "gc_scope_networks: zero-endpoint per-scope networks (global and isolated) are removed, the owner's compose default network never is"
+disc_line="$(grep -n -x 'network disconnect -f -- cbox-ollama-u1000-pabc stoppedcid' "$TMPBASE/gc.calls" | head -n1 | cut -d: -f1 || true)"
+rm_line="$(grep -n -x 'network rm -- cbox-ollama-u1000-pabc' "$TMPBASE/gc.calls" | head -n1 | cut -d: -f1 || true)"
+[ -n "$disc_line" ] || _fail "gc must force-disconnect a stopped container that still references a zero-endpoint scope network - otherwise its next start fails with 'network <id> not found': $(cat "$TMPBASE/gc.calls")"
+[ -n "$rm_line" ] && [ "$disc_line" -lt "$rm_line" ] || _fail "gc must disconnect stopped members before removing the network: $(cat "$TMPBASE/gc.calls")"
+! grep -q 'network disconnect -f -- cbox-ollama-u1000-global' "$TMPBASE/gc.calls" || _fail "gc must disconnect only containers that reference the network: $(cat "$TMPBASE/gc.calls")"
+_ok "gc_scope_networks: stopped containers still referencing a zero-endpoint scope network are disconnected before it is removed"
 
 run_gc_net 2
 ! grep -q 'network rm' "$TMPBASE/gc.calls" || _fail "gc must not remove a per-scope network while endpoints remain attached: $(cat "$TMPBASE/gc.calls")"
+! grep -q 'network disconnect' "$TMPBASE/gc.calls" || _fail "gc must not disconnect anything from a per-scope network with running endpoints: $(cat "$TMPBASE/gc.calls")"
 _ok "gc_scope_networks: a labeled per-scope network with attached containers is left alone"
 
 grep -q 'label=cbox.component=ollama-net' <(echo "$GC_NET_FN") || _fail "gc_scope_networks must filter strictly by the ollama-net component label"

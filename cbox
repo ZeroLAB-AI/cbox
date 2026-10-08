@@ -205,6 +205,17 @@ _cbox_bind_guard() {
   python3 -I "$guard" check "$HOME" "$(_cbox_xdg_runtime_dir)" "$roots" "${files[@]}"
 }
 
+_cbox_compose_stopped_dead_network() {
+  local cid net
+  cid="$("$@" ps -a -q cbox 2>/dev/null | head -n1)" || return 1
+  [ -n "$cid" ] || return 1
+  while IFS= read -r net; do
+    [ -n "$net" ] || continue
+    docker network inspect -- "$net" >/dev/null 2>&1 || return 0
+  done < <(docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$v.NetworkID}}{{"\n"}}{{end}}' -- "$cid" 2>/dev/null)
+  return 1
+}
+
 _cbox_compose_up() {
   local stamp="$1"; shift
   local new old="" force=0 rc=0 have="" try
@@ -216,6 +227,10 @@ _cbox_compose_up() {
     force=1
   fi
   if [ -n "$have" ] && [ "$old" != "$new" ]; then
+    force=1
+  fi
+  if [ -z "$have" ] && _cbox_compose_stopped_dead_network "$@"; then
+    echo "cbox: the stopped container of this project points at a network that no longer exists - recreating it" >&2
     force=1
   fi
   for try in 1 2; do
@@ -1151,16 +1166,16 @@ _cbox_ollama_err_line() {
 }
 
 _cbox_ollama_connect_scope_network() {
-  local netname="$1" ollama_cid="$2" cbox_cid="$3"
+  local netname="$1" ollama_cid="$2" cbox_cid="$3" backend_alias="${4:-ollama}"
   local ollama_nets cbox_nets connected_ollama=0 connected_cbox=0 err
   ollama_nets="$(_cbox_ollama_endpoint_networks "$ollama_cid")"
   cbox_nets="$(_cbox_ollama_endpoint_networks "$cbox_cid")"
   if ! printf '%s\n' "$ollama_nets" | grep -qxF "$netname"; then
-    if err="$(docker network connect --alias ollama -- "$netname" "$ollama_cid" 2>&1 >/dev/null)"; then
+    if err="$(docker network connect --alias "$backend_alias" -- "$netname" "$ollama_cid" 2>&1 >/dev/null)"; then
       connected_ollama=1
     else
       err="$(_cbox_ollama_err_line "$err")"
-      echo "cbox: failed to attach ollama to $netname${err:+: $err}" >&2
+      echo "cbox: failed to attach $backend_alias to $netname${err:+: $err}" >&2
       return 1
     fi
   fi
@@ -1276,8 +1291,15 @@ _cbox_wg_detach_client_alias() {
 }
 
 _cbox_ollama_reconcile_one_scope() {
-  local scope="$1" cbox_cid="$2" p_hash="${3:-}" ollama_cid="$4" netname rc=0
+  local scope="$1" cbox_cid="$2" p_hash="${3:-}" ollama_cid="${4:-}" hq_cid="${5:-}" netname rc=0
   netname="$(_cbox_ollama_scope_network_name "$scope" "$p_hash")"
+  if [ -n "$hq_cid" ]; then
+    if _cbox_ollama_ensure_scope_network "$netname"; then
+      _cbox_ollama_connect_scope_network "$netname" "$hq_cid" "$cbox_cid" hyperqwen || rc=1
+    else
+      rc=1
+    fi
+  fi
   if [ -n "$ollama_cid" ]; then
     _cbox_ollama_ensure_scope_network "$netname" || return 1
     _cbox_ollama_connect_scope_network "$netname" "$ollama_cid" "$cbox_cid" || return 1
@@ -1305,7 +1327,7 @@ _cbox_ollama_disconnect_stale_scope_networks() {
     esac
     members="$(docker network inspect --format '{{range $k, $v := .Containers}}{{$v.Name}}{{"\n"}}{{end}}' -- "$name" 2>/dev/null | sed '/^$/d')" || continue
     [ -n "$members" ] || continue
-    if printf '%s\n' "$members" | grep -qvE "^${owner}-(ollama|wireguard)-[0-9]+$"; then
+    if printf '%s\n' "$members" | grep -qvE "^${owner}(-(ollama|wireguard)|-hyperqwen-hyperqwen)-[0-9]+$"; then
       continue
     fi
     while IFS= read -r member; do
@@ -1318,23 +1340,29 @@ EOF_MEMBERS
 }
 
 _cbox_ollama_reconcile_networks_impl() {
-  local dir ollama_cid rc=0
+  local dir ollama_cid hq_cid rc=0
   dir="$(_cbox_ollama_owner_dir)"
-  [ -f "$dir/docker-compose.yml" ] || return 0
+  if [ ! -f "$dir/docker-compose.yml" ] && [ "${CBOX_HYPERQWEN_MODE:-off}" != on ]; then
+    return 0
+  fi
   ollama_cid=""
   if [ "${CBOX_OLLAMA_MODE:-off}" = on ]; then
     ollama_cid="$(_cbox_ollama_owner_compose ps -q ollama 2>/dev/null)" || ollama_cid=""
   fi
+  hq_cid=""
+  if [ "${CBOX_HYPERQWEN_MODE:-off}" = on ]; then
+    hq_cid="$(_cbox_hyperqwen_owner_compose ps -q hyperqwen 2>/dev/null | head -n1)" || hq_cid=""
+  fi
   local cid
   cid="$("${COMPOSE[@]}" ps -q "$SERVICE" 2>/dev/null)" || cid=""
   if [ -n "$cid" ]; then
-    _cbox_ollama_reconcile_one_scope global "$cid" "" "$ollama_cid" || rc=1
+    _cbox_ollama_reconcile_one_scope global "$cid" "" "$ollama_cid" "$hq_cid" || rc=1
   fi
   local phash effdir
   while IFS="$(printf '\t')" read -r cid phash; do
     [ -n "$cid" ] || continue
     [ -n "$phash" ] || continue
-    _cbox_ollama_reconcile_one_scope isolated "$cid" "$phash" "$ollama_cid" || rc=1
+    _cbox_ollama_reconcile_one_scope isolated "$cid" "$phash" "$ollama_cid" "$hq_cid" || rc=1
   done < <(docker ps --filter label=cbox.kind=isolated --format '{{.ID}}'$'\t''{{.Label "cbox.phash"}}' 2>/dev/null)
   _cbox_ollama_disconnect_stale_scope_networks "$(_cbox_ollama_owner_name)"
   return "$rc"
@@ -1352,7 +1380,7 @@ _cbox_gc_orphan_proxy_networks() {
 }
 
 _cbox_ollama_gc_scope_networks_impl() {
-  local name endpoints owner prefix
+  local name endpoints owner prefix member
   owner="$(_cbox_ollama_owner_name)"
   prefix="$(_cbox_ollama_scope_network_prefix)"
   docker network ls --filter label=cbox.component=ollama-net --filter "label=cbox.owner=$owner" --format '{{.Name}}' 2>/dev/null | while IFS= read -r name; do
@@ -1363,6 +1391,10 @@ _cbox_ollama_gc_scope_networks_impl() {
     esac
     endpoints="$(docker network inspect --format '{{len .Containers}}' -- "$name" 2>/dev/null)" || continue
     if [ "${endpoints:-0}" = 0 ]; then
+      docker ps -a -q --filter "network=$name" 2>/dev/null | while IFS= read -r member; do
+        [ -n "$member" ] || continue
+        docker network disconnect -f -- "$name" "$member" >/dev/null 2>&1 || true
+      done
       docker network rm -- "$name" >/dev/null 2>&1 || true
     fi
   done
@@ -1399,25 +1431,25 @@ _cbox_docker_restart_rootless() {
 }
 
 _cbox_ollama_copyup_recover() {
-  local ans
+  local ans label="${1:-ollama}"
   if [ "${CBOX_OLLAMA_COPYUP_RESTARTED:-0}" = 1 ]; then
-    echo "cbox: docker was already restarted once in this run and the ollama owner still fails on the copy-up symptom - not asking again; run 'cbox ollama gpu-check' for the fix list" >&2
+    echo "cbox: docker was already restarted once in this run and the $label owner still fails on the copy-up symptom - not asking again; run 'cbox $label gpu-check' for the fix list" >&2
     return 1
   fi
-  echo "cbox: the ollama owner cannot start because the rootless docker daemon still sees the /etc and /run snapshot from its own start (copy-up) - a CDI spec or persistenced socket created since then is invisible to it" >&2
+  echo "cbox: the $label owner cannot start because the rootless docker daemon still sees the /etc and /run snapshot from its own start (copy-up) - a CDI spec or persistenced socket created since then is invisible to it" >&2
   if ! _cbox_is_rootless_docker; then
-    echo "cbox: docker is not rootless here - restart the daemon yourself (sudo systemctl restart docker) and then run 'cbox ollama reconcile'" >&2
+    echo "cbox: docker is not rootless here - restart the daemon yourself (sudo systemctl restart docker) and then run 'cbox $label reconcile'" >&2
     return 1
   fi
   if ! _cbox_ollama_heal_can_prompt; then
-    echo "cbox: no terminal to ask on - run 'systemctl --user restart docker && cbox ollama reconcile' yourself" >&2
+    echo "cbox: no terminal to ask on - run 'systemctl --user restart docker && cbox $label reconcile' yourself" >&2
     return 1
   fi
   printf 'cbox: restart the docker daemon now? This stops EVERY container on this daemon, including other cbox sessions. [Y/n] ' >&2
   read -r -t 60 ans || ans=n
   case "$ans" in
     n|N)
-      echo "cbox: skipped - run 'systemctl --user restart docker && cbox ollama reconcile' when ready" >&2
+      echo "cbox: skipped - run 'systemctl --user restart docker && cbox $label reconcile' when ready" >&2
       return 1
       ;;
   esac
@@ -1558,6 +1590,7 @@ ollama_cmd() {
       ;;
     up)
       _cbox_flock -x -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+      _cbox_local_backends_gpu_overlap_warn
       _cbox_ollama_up_cmd || rc=$?
       ;;
     down)
@@ -1570,6 +1603,7 @@ ollama_cmd() {
       ;;
     reconcile)
       _cbox_flock -x -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+      _cbox_local_backends_gpu_overlap_warn
       _cbox_ollama_reconcile_cmd || rc=$?
       ;;
     gpu-check)
@@ -1579,6 +1613,934 @@ ollama_cmd() {
   esac
   exec 6>&-
   return "$rc"
+}
+
+_cbox_local_backends_gpu_overlap_text() {
+  local ol_mode="${1:-off}" ol_gpu="${2:-off}" ol_dev="${3:-all}" hq_mode="${4:-off}" hq_dev="${5:-all}"
+  [ "$ol_mode" = on ] && [ "$hq_mode" = on ] || return 1
+  [ "$ol_gpu" = cdi ] || return 1
+  _cbox_gpu_devices_overlap "$ol_dev" "$hq_dev" || return 1
+  printf 'ollama (gpu=cdi, device %s) and hyperqwen (device %s) share a GPU - vLLM pins nearly the whole card, so an ollama model loaded there or the hyperqwen start will fail; fix: turn one off (%s config set CBOX_OLLAMA_MODE=off) or pin each backend to its own card (CBOX_OLLAMA_GPU_DEVICE and CBOX_HYPERQWEN_GPU_DEVICE)' "$ol_dev" "$hq_dev" "$0"
+}
+
+_cbox_local_backends_gpu_overlap_warn() {
+  local text
+  if text="$(_cbox_local_backends_gpu_overlap_text "${CBOX_OLLAMA_MODE:-off}" "${CBOX_OLLAMA_GPU:-off}" "${CBOX_OLLAMA_GPU_DEVICE:-all}" "${CBOX_HYPERQWEN_MODE:-off}" "${CBOX_HYPERQWEN_GPU_DEVICE:-all}")"; then
+    echo "cbox: WARN - $text" >&2
+  fi
+  return 0
+}
+
+_cbox_hyperqwen_image() {
+  printf '%s' "${CBOX_HYPERQWEN_IMAGE:-ghcr.io/syv-ai/hyperqwen:sha-53557bc}"
+}
+
+_cbox_hyperqwen_owner_compose() {
+  local dir
+  dir="$(_cbox_hyperqwen_owner_dir)"
+  local -a cmd=(docker compose --project-directory "$dir" -f "$dir/docker-compose.yml")
+  if [ -f "$dir/docker-compose.gpu.yml" ]; then
+    cmd+=(-f "$dir/docker-compose.gpu.yml")
+  fi
+  "${cmd[@]}" "$@"
+}
+
+_cbox_hyperqwen_guard() {
+  if [ "${CBOX_HYPERQWEN_MODE:-off}" != on ]; then
+    echo "cbox: hyperqwen is off (CBOX_HYPERQWEN_MODE=${CBOX_HYPERQWEN_MODE:-off}) - turn it on first: $0 config set CBOX_HYPERQWEN_MODE=on" >&2
+    return 1
+  fi
+  return 0
+}
+
+_cbox_hyperqwen_models_guard() {
+  local path="${CBOX_HYPERQWEN_MODELS_PATH:-}" owner_uid
+  [ -n "$path" ] || return 0
+  case "$path" in
+    /*) ;;
+    *)
+      echo "cbox: refusing - CBOX_HYPERQWEN_MODELS_PATH '$path' is not an absolute path" >&2
+      return 1
+      ;;
+  esac
+  if [ -L "$path" ]; then
+    echo "cbox: refusing - $path is a symlink, not a real directory" >&2
+    return 1
+  fi
+  if [ ! -d "$path" ]; then
+    echo "cbox: refusing - $path does not exist yet; create it (owned by you) before using CBOX_HYPERQWEN_MODELS_PATH" >&2
+    return 1
+  fi
+  owner_uid="$(_cbox_stat_uid -- "$path" 2>/dev/null)" || owner_uid=""
+  if [ -z "$owner_uid" ] || [ "$owner_uid" != "$(id -u)" ]; then
+    echo "cbox: refusing - $path is not owned by the invoking user (uid $(id -u))" >&2
+    return 1
+  fi
+  return 0
+}
+
+_cbox_hyperqwen_adopt_or_refuse() {
+  local dir="$1" name cid labels project image want_image
+  name="$(_cbox_hyperqwen_owner_name)"
+  cid="$(docker ps -a --filter "name=^/${name}-hyperqwen-" --format '{{.ID}}' 2>/dev/null | head -n1)"
+  if [ -z "$cid" ]; then
+    cid="$(docker ps -a --filter "label=cbox.owner=$name" --filter "label=cbox.component=hyperqwen" --format '{{.ID}}' 2>/dev/null | head -n1)"
+  fi
+  [ -n "$cid" ] || return 0
+  labels="$(docker inspect --format '{{index .Config.Labels "cbox.kind"}}|{{index .Config.Labels "cbox.component"}}|{{index .Config.Labels "cbox.owner"}}' "$cid" 2>/dev/null)" || labels=""
+  case "$labels" in
+    infra\|hyperqwen\|"$name")
+      project="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$cid" 2>/dev/null)" || project=""
+      if [ -n "$project" ] && [ "$project" != "$name" ]; then
+        echo "cbox: refusing - a container ($cid) carries cbox hyperqwen labels for $name but belongs to compose project '$project', not '$name'; remove it before running cbox hyperqwen up" >&2
+        return 1
+      fi
+      image="$(docker inspect --format '{{.Config.Image}}' "$cid" 2>/dev/null)" || image=""
+      want_image="$(_cbox_hyperqwen_image)"
+      if [ -n "$image" ] && [ "$image" != "$want_image" ]; then
+        echo "cbox: found an existing container ($cid) owned by $name but its image ($image) does not match the configured CBOX_HYPERQWEN_IMAGE ($want_image) - run 'cbox hyperqwen reconcile' to recreate it" >&2
+        return 0
+      fi
+      if _cbox_hyperqwen_manifest_matches_current "$dir"; then
+        return 0
+      fi
+      echo "cbox: found an existing container ($cid) owned by $name but the ownership manifest does not match the current config - run 'cbox hyperqwen reconcile' to update it" >&2
+      return 0
+      ;;
+    *)
+      echo "cbox: refusing - a container ($cid) already uses the name/labels cbox expects for $name but is not cbox-owned (labels: ${labels:-none}); remove it or rename it before running cbox hyperqwen up" >&2
+      return 1
+      ;;
+  esac
+}
+
+_cbox_hyperqwen_volume_ensure() {
+  local vol="$1" component="$2"
+  docker volume inspect -- "$vol" >/dev/null 2>&1 && return 0
+  docker volume create \
+    --label cbox.kind=infra \
+    --label "cbox.component=$component" \
+    --label "cbox.owner=$(_cbox_hyperqwen_owner_name)" \
+    -- "$vol" >/dev/null || {
+    echo "cbox: hyperqwen: could not create the docker volume $vol" >&2
+    return 1
+  }
+}
+
+_cbox_hyperqwen_volumes_ensure() {
+  if [ -z "${CBOX_HYPERQWEN_MODELS_PATH:-}" ]; then
+    _cbox_hyperqwen_volume_ensure "$(_cbox_hyperqwen_models_volume)" hyperqwen-models || return 1
+  fi
+  _cbox_hyperqwen_volume_ensure "$(_cbox_hyperqwen_cache_volume)" hyperqwen-cache
+}
+
+_cbox_hyperqwen_prepared_marker() {
+  printf '%s/prepared' "$(_cbox_hyperqwen_owner_dir)"
+}
+
+_cbox_hyperqwen_prepared_ok() {
+  local marker have
+  marker="$(_cbox_hyperqwen_prepared_marker)"
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  have="$(head -n1 "$marker" 2>/dev/null)" || return 1
+  [ "$have" = "$(_cbox_hyperqwen_prepared_key)" ]
+}
+
+_cbox_hyperqwen_prepared_key() {
+  printf '%s %s' "$(_cbox_hyperqwen_image)" "${CBOX_HYPERQWEN_MODELS_PATH:-$(_cbox_hyperqwen_models_volume)}"
+}
+
+_cbox_hyperqwen_prepared_write() {
+  local dir marker tmp
+  dir="$(_cbox_hyperqwen_owner_dir)"
+  marker="$dir/prepared"
+  mkdir -p "$dir"
+  if [ -L "$marker" ]; then
+    echo "cbox: refusing - $marker is a symlink, not a plain marker file" >&2
+    return 1
+  fi
+  tmp="$(mktemp "$dir/.prepared.XXXXXX")" || return 1
+  printf '%s\n' "$(_cbox_hyperqwen_prepared_key)" > "$tmp"
+  chmod 0644 "$tmp"
+  mv -f -- "$tmp" "$marker"
+}
+
+_cbox_hyperqwen_heal_recreate_marker() {
+  printf '%s/.heal-recreate' "$(_cbox_hyperqwen_owner_dir)"
+}
+
+_cbox_hyperqwen_heal_recreate_set() {
+  local m
+  m="$(_cbox_hyperqwen_heal_recreate_marker)"
+  [ -L "$m" ] && return 0
+  : > "$m" 2>/dev/null || true
+}
+
+_cbox_hyperqwen_heal_recreate_clear() {
+  local m
+  m="$(_cbox_hyperqwen_heal_recreate_marker)"
+  [ -L "$m" ] && return 0
+  rm -f -- "$m" 2>/dev/null || true
+}
+
+_cbox_hyperqwen_gpu_preflight() {
+  _cbox_nvidia_uvm_present && return 0
+  if _cbox_nvidia_uvm_ensure; then
+    echo "cbox: hyperqwen gpu: /dev/nvidia-uvm was missing - the driver creates it on demand for the first CUDA client after a boot or an eGPU replug, so cbox created it before starting the owner container" >&2
+    return 0
+  fi
+  echo "cbox: hyperqwen gpu: /dev/nvidia-uvm is missing and cbox could not create it (nvidia-modprobe and nvidia-smi both unavailable or the driver is not loaded) - if the CDI spec lists that node the start below fails with 'failed to stat CDI host device'; 'cbox hyperqwen gpu-check' prints the fix candidates" >&2
+  return 0
+}
+
+_cbox_hyperqwen_container_running() {
+  local cid state
+  cid="$(_cbox_hyperqwen_owner_compose ps -q hyperqwen 2>/dev/null | head -n1)" || cid=""
+  [ -n "$cid" ] || return 1
+  state="$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null)" || state=""
+  [ "$state" = running ]
+}
+
+_cbox_hyperqwen_offload_preflight_warn() {
+  [ "${CBOX_HYPERQWEN_KV_OFFLOAD:-off}" = on ] || return 0
+  local avail_kib avail_mib want_mib reserve_gib budget_mib note=""
+  avail_kib="$(_cbox_mem_available_kib 2>/dev/null)" || avail_kib=""
+  case "$avail_kib" in
+    ''|*[!0-9]*)
+      echo "cbox: WARN - hyperqwen KV offload RAM check skipped: MemAvailable could not be read on this host" >&2
+      return 0
+      ;;
+  esac
+  want_mib="${CBOX_HYPERQWEN_KV_OFFLOAD_MIB:-19072}"
+  reserve_gib="${CBOX_HYPERQWEN_RAM_RESERVE_GIB:-16}"
+  case "$want_mib" in ''|*[!0-9]*) want_mib=19072 ;; esac
+  case "$reserve_gib" in ''|*[!0-9]*) reserve_gib=16 ;; esac
+  want_mib=$((10#$want_mib))
+  reserve_gib=$((10#$reserve_gib))
+  avail_mib=$((avail_kib / 1024))
+  budget_mib=$((avail_mib - reserve_gib * 1024 - 8192))
+  if [ "$want_mib" -le "$budget_mib" ]; then
+    return 0
+  fi
+  if _cbox_hyperqwen_container_running; then
+    note=" The running hyperqwen container still holds its own RAM, which this check does not add back."
+  fi
+  echo "cbox: WARN - hyperqwen KV offload is set to $want_mib MiB but the host budget is $budget_mib MiB (MemAvailable $avail_mib MiB - CBOX_HYPERQWEN_RAM_RESERVE_GIB $reserve_gib GiB - 8 GiB engine headroom). cbox starts it as configured and never resizes it: the engine may be killed for lack of RAM or starve the desktop.$note Fix: lower the size ($0 config set CBOX_HYPERQWEN_KV_OFFLOAD_MIB=<MiB>) or turn the tier off ($0 config set CBOX_HYPERQWEN_KV_OFFLOAD=off), then run '$0 hyperqwen reconcile'." >&2
+  return 0
+}
+
+_cbox_hyperqwen_owner_up() {
+  local out
+  _cbox_hyperqwen_volumes_ensure || return 1
+  _cbox_hyperqwen_gpu_preflight
+  if out="$(_cbox_hyperqwen_owner_compose up -d --remove-orphans 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    _cbox_hyperqwen_heal_recreate_clear
+    return 0
+  fi
+  case "$out" in
+    *"network "*" not found"*)
+      echo "cbox: hyperqwen owner: a container points at a network that no longer exists (typical after a docker daemon restart) - removing the dead container and starting again" >&2
+      _cbox_hyperqwen_heal_recreate_set
+      _cbox_hyperqwen_owner_compose rm -f -s >/dev/null 2>&1 || true
+      if out="$(_cbox_hyperqwen_owner_compose up -d --remove-orphans 2>&1)"; then
+        printf '%s\n' "$out" >&2
+        _cbox_hyperqwen_heal_recreate_clear
+        return 0
+      fi
+      ;;
+    *"CDI host device"*)
+      if _cbox_nvidia_uvm_ensure; then
+        echo "cbox: hyperqwen owner: the start failed on an on-demand CDI device node that did not exist yet - cbox created /dev/nvidia-uvm and is starting again" >&2
+        if out="$(_cbox_hyperqwen_owner_compose up -d --remove-orphans 2>&1)"; then
+          printf '%s\n' "$out" >&2
+          _cbox_hyperqwen_heal_recreate_clear
+          return 0
+        fi
+      else
+        echo "cbox: hyperqwen owner: the CDI spec lists a host device node that does not exist and cbox could not create it - run 'cbox hyperqwen gpu-check' for the fix candidates" >&2
+      fi
+      ;;
+    *"nvidia-persistenced/socket"*|*"unresolvable CDI devices"*)
+      if _cbox_ollama_copyup_recover hyperqwen; then
+        echo "cbox: hyperqwen owner: docker restarted - starting the owner project again" >&2
+        if out="$(_cbox_hyperqwen_owner_compose up -d --remove-orphans 2>&1)"; then
+          printf '%s\n' "$out" >&2
+          _cbox_hyperqwen_heal_recreate_clear
+          return 0
+        fi
+      fi
+      ;;
+  esac
+  printf '%s\n' "$out" >&2
+  return 1
+}
+
+_cbox_hyperqwen_prepare_restore() {
+  [ "${_CBOX_HQ_PREPARE_ACTIVE:-0}" = 1 ] || return 0
+  _CBOX_HQ_PREPARE_ACTIVE=0
+  docker rm -f -- "$_CBOX_HQ_PREPARE_CONTAINER" >/dev/null 2>&1 || true
+  docker network rm -- "$_CBOX_HQ_PREPARE_NET" >/dev/null 2>&1 || true
+  if [ "$_CBOX_HQ_PREPARE_RESTART" = 1 ]; then
+    _cbox_hyperqwen_gpu_preflight >/dev/null 2>&1 || true
+    _cbox_hyperqwen_owner_compose up -d hyperqwen >/dev/null 2>&1 || true
+    _cbox_ollama_reconcile_networks_impl >/dev/null 2>&1 || true
+  fi
+}
+
+_cbox_hyperqwen_prepare_run() {
+  local inline="${1:-0}" dir was_running=0 cid state models_src image rc=0
+  dir="$(_cbox_hyperqwen_owner_dir)"
+  image="$(_cbox_hyperqwen_image)"
+  _cbox_hyperqwen_models_guard || return 1
+  models_src="${CBOX_HYPERQWEN_MODELS_PATH:-$(_cbox_hyperqwen_models_volume)}"
+  if [ -f "$dir/docker-compose.yml" ]; then
+    cid="$(_cbox_hyperqwen_owner_compose ps -q hyperqwen 2>/dev/null | head -n1)" || cid=""
+    if [ -n "$cid" ]; then
+      state="$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null)" || state=unknown
+      if [ "$state" = running ]; then
+        was_running=1
+      fi
+      echo "cbox: hyperqwen prepare: stopping the serving container for the duration of the prepare (serving never has egress)" >&2
+      _cbox_hyperqwen_owner_compose stop hyperqwen >/dev/null 2>&1 || true
+    fi
+  fi
+  _cbox_hyperqwen_volumes_ensure || return 1
+  _CBOX_HQ_PREPARE_NET="cbox-hyperqwen-prepare-$(id -u)-$$-$(date +%s%N 2>/dev/null || echo 0)"
+  _CBOX_HQ_PREPARE_CONTAINER="cbox-hyperqwen-prepare-$(id -u)-$$"
+  _CBOX_HQ_PREPARE_RESTART="$was_running"
+  _CBOX_HQ_PREPARE_ACTIVE=1
+  trap '_cbox_hyperqwen_prepare_restore' EXIT
+  trap '_cbox_hyperqwen_prepare_restore; exit 130' INT TERM
+  if ! docker network create --label cbox.kind=infra --label cbox.component=hyperqwen-prepare -- "$_CBOX_HQ_PREPARE_NET" >/dev/null 2>&1; then
+    echo "cbox: failed to create the temporary prepare network $_CBOX_HQ_PREPARE_NET" >&2
+    trap - EXIT INT TERM
+    _cbox_hyperqwen_prepare_restore
+    return 1
+  fi
+  echo "cbox: hyperqwen prepare: running '$image prepare' (the first run downloads about 20 GB from Hugging Face and requantizes on the CPU; later runs are idempotent)" >&2
+  if ! docker image inspect -- "$image" >/dev/null 2>&1; then
+    echo "cbox: hyperqwen prepare: pulling $image first (about 4.6 GB compressed, 9.5 GB unpacked; one layer alone is 4 GB, so its line can sit on 'Pulling fs layer' or 'Downloading' for minutes)" >&2
+  fi
+  docker run --rm --name "$_CBOX_HQ_PREPARE_CONTAINER" --network "$_CBOX_HQ_PREPARE_NET" \
+    -v "$models_src:/app/models" -v "$(_cbox_hyperqwen_cache_volume):/cache" \
+    -e HOME=/cache "$image" prepare || rc=$?
+  trap - EXIT INT TERM
+  if [ "$rc" = 0 ]; then
+    _cbox_hyperqwen_prepared_write || rc=1
+  fi
+  if [ "$rc" = 0 ] && [ "$inline" = 1 ]; then
+    _CBOX_HQ_PREPARE_RESTART=0
+  fi
+  _cbox_hyperqwen_prepare_restore
+  if [ "$rc" != 0 ]; then
+    echo "cbox: hyperqwen prepare failed (rc=$rc) - the prepared marker was not written" >&2
+  fi
+  return "$rc"
+}
+
+_cbox_hyperqwen_prepare_cmd() {
+  mkdir -p "$(_cbox_hyperqwen_owner_dir)"
+  _cbox_hyperqwen_prepare_run 0 || return 1
+  echo "cbox: hyperqwen prepare: models ready for $(_cbox_hyperqwen_image) (marker $(_cbox_hyperqwen_prepared_marker))"
+}
+
+_cbox_hyperqwen_prepare_inline() {
+  if _cbox_hyperqwen_prepared_ok; then
+    return 0
+  fi
+  echo "cbox: hyperqwen: models are not prepared for $(_cbox_hyperqwen_image) (marker missing or for another image) - running the prepare step first" >&2
+  _cbox_hyperqwen_prepare_run 1 || {
+    echo "cbox: hyperqwen: the prepare step failed - fix the error above and run 'cbox hyperqwen prepare'" >&2
+    return 1
+  }
+}
+
+_cbox_hyperqwen_status_cmd() {
+  local dir cid state prepared=no
+  dir="$(_cbox_hyperqwen_owner_dir)"
+  if [ "${CBOX_HYPERQWEN_MODE:-off}" != on ]; then
+    echo "hyperqwen: OFF (CBOX_HYPERQWEN_MODE=off)"
+    return 0
+  fi
+  if [ ! -f "$dir/docker-compose.yml" ]; then
+    echo "hyperqwen: CONFIG-ONLY (CBOX_HYPERQWEN_MODE=on, owner project not yet rendered - run 'cbox hyperqwen reconcile')"
+    return 0
+  fi
+  cid="$(_cbox_hyperqwen_owner_compose ps -q hyperqwen 2>/dev/null | head -n1)" || cid=""
+  if [ -z "$cid" ]; then
+    echo "hyperqwen: CONFIG-ONLY (CBOX_HYPERQWEN_MODE=on, owner project rendered but not running - run 'cbox hyperqwen up')"
+    return 0
+  fi
+  state="$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null)" || state=unknown
+  _cbox_hyperqwen_prepared_ok && prepared=yes
+  echo "hyperqwen: ACTIVE (container $cid, state=$state, owner=$(_cbox_hyperqwen_owner_name), image=$(_cbox_hyperqwen_image), gpu=${CBOX_HYPERQWEN_GPU_DEVICE:-all}, port=$(_cbox_local_backend_port hyperqwen), context=$(_cbox_hyperqwen_max_len 2>/dev/null || echo unknown), prepared=$prepared)"
+}
+
+_cbox_hyperqwen_ps_cmd() {
+  local dir cid state port
+  dir="$(_cbox_hyperqwen_owner_dir)"
+  port="$(_cbox_local_backend_port hyperqwen)"
+  if [ "${CBOX_HYPERQWEN_MODE:-off}" != on ]; then
+    echo "hyperqwen: OFF (CBOX_HYPERQWEN_MODE=off)"
+    return 0
+  fi
+  if [ ! -f "$dir/docker-compose.yml" ]; then
+    echo "hyperqwen: CONFIG-ONLY (owner project not yet rendered - run 'cbox hyperqwen reconcile')"
+    return 0
+  fi
+  cid="$(_cbox_hyperqwen_owner_compose ps -q hyperqwen 2>/dev/null | head -n1)" || cid=""
+  if [ -z "$cid" ]; then
+    echo "hyperqwen: not running - run 'cbox hyperqwen up'"
+    return 0
+  fi
+  state="$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null)" || state=unknown
+  if [ "$state" != running ]; then
+    echo "hyperqwen: container $cid present but state=$state - run 'cbox hyperqwen up'"
+    return 0
+  fi
+  if docker exec -- "$cid" curl -sf "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
+    echo "health: ok (GET /health)"
+  else
+    echo "health: not ready (GET /health failed - the first boot compiles kernels for several minutes; see 'cbox hyperqwen logs')"
+  fi
+  echo "models:"
+  docker exec -- "$cid" curl -sf "http://127.0.0.1:$port/v1/models" 2>/dev/null || echo "  (GET /v1/models failed)"
+  echo
+  docker stats --no-stream --format 'container memory: {{.MemUsage}}  cpu: {{.CPUPerc}}' -- "$cid" 2>/dev/null || true
+}
+
+_cbox_hyperqwen_reconcile_cmd() {
+  local dir
+  dir="$(_cbox_hyperqwen_owner_dir)"
+  mkdir -p "$dir"
+  if [ "${CBOX_HYPERQWEN_MODE:-off}" != on ]; then
+    if [ -f "$dir/docker-compose.yml" ]; then
+      _cbox_ollama_reconcile_networks_impl >/dev/null 2>&1 || true
+      _cbox_hyperqwen_owner_compose down >/dev/null 2>&1 || true
+    fi
+    gen_hyperqwen_owner_compose_into "$dir" || return 1
+    rm -f -- "$dir/docker-compose.yml" "$dir/docker-compose.gpu.yml" "$dir/ownership.manifest"
+    _cbox_hyperqwen_heal_recreate_clear
+    _cbox_ollama_gc_scope_networks_impl
+    echo "cbox: hyperqwen reconcile: mode is off - owner project torn down and de-rendered"
+    return 0
+  fi
+  _cbox_hyperqwen_models_guard || return 1
+  _cbox_hyperqwen_adopt_or_refuse "$dir" || return 1
+  _cbox_local_backends_gpu_overlap_warn
+  _cbox_hyperqwen_prepare_inline || return 1
+  gen_hyperqwen_owner_compose_into "$dir" || return 1
+  _cbox_hyperqwen_manifest_write "$dir"
+  _cbox_hyperqwen_offload_preflight_warn
+  _cbox_hyperqwen_owner_up || { echo "cbox: hyperqwen reconcile: owner project $(_cbox_hyperqwen_owner_name) rendered at $dir but its container failed to start - see the error above" >&2; return 1; }
+  _cbox_ollama_reconcile_networks_impl || echo "cbox: hyperqwen reconcile: owner project is up but per-scope network reconciliation reported an error - run 'cbox hyperqwen reconcile' again" >&2
+  echo "cbox: hyperqwen reconcile: owner project $(_cbox_hyperqwen_owner_name) applied at $dir"
+}
+
+_cbox_hyperqwen_render_matches() {
+  local dir="$1" tmp f rc=0
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/cbox-hq-render.XXXXXX")" || return 1
+  if ! gen_hyperqwen_owner_compose_into "$tmp" >/dev/null 2>&1; then
+    rm -rf -- "$tmp"
+    return 1
+  fi
+  for f in docker-compose.yml docker-compose.gpu.yml; do
+    if [ -f "$tmp/$f" ] || [ -f "$dir/$f" ]; then
+      cmp -s -- "$tmp/$f" "$dir/$f" || rc=1
+    fi
+  done
+  rm -rf -- "$tmp"
+  return "$rc"
+}
+
+_cbox_hyperqwen_up_cmd() {
+  local dir
+  dir="$(_cbox_hyperqwen_owner_dir)"
+  if [ ! -f "$dir/docker-compose.yml" ] || ! _cbox_hyperqwen_manifest_matches_current "$dir"; then
+    _cbox_hyperqwen_reconcile_cmd || return 1
+    return 0
+  fi
+  if ! _cbox_hyperqwen_render_matches "$dir"; then
+    echo "cbox: hyperqwen up: the owner compose on disk differs from what this cbox version renders - reconciling" >&2
+    _cbox_hyperqwen_reconcile_cmd || return 1
+    return 0
+  fi
+  _cbox_hyperqwen_models_guard || return 1
+  _cbox_hyperqwen_adopt_or_refuse "$dir" || return 1
+  _cbox_local_backends_gpu_overlap_warn
+  _cbox_hyperqwen_prepare_inline || return 1
+  if [ "${CBOX_HYPERQWEN_KV_OFFLOAD:-off}" = on ] && ! _cbox_hyperqwen_container_running; then
+    _cbox_hyperqwen_offload_preflight_warn
+  fi
+  _cbox_hyperqwen_owner_up || { echo "cbox: hyperqwen up: owner project rendered but its container failed to start - see the error above" >&2; return 1; }
+  _cbox_ollama_reconcile_networks_impl || echo "cbox: hyperqwen up: per-scope network reconciliation reported an error - run 'cbox hyperqwen reconcile' again" >&2
+}
+
+_cbox_hyperqwen_down_cmd() {
+  local dir
+  dir="$(_cbox_hyperqwen_owner_dir)"
+  [ -f "$dir/docker-compose.yml" ] || { echo "cbox: hyperqwen owner project not rendered - nothing to stop" >&2; return 0; }
+  _cbox_hyperqwen_heal_recreate_clear
+  _cbox_hyperqwen_owner_compose down
+  _cbox_ollama_gc_scope_networks_impl
+}
+
+_cbox_hyperqwen_logs_cmd() {
+  local dir follow=0
+  case "${1:-}" in
+    '') ;;
+    -f|--follow) follow=1 ;;
+    *) echo "cbox: usage: $0 hyperqwen logs [-f]" >&2; return 1 ;;
+  esac
+  dir="$(_cbox_hyperqwen_owner_dir)"
+  [ -f "$dir/docker-compose.yml" ] || { echo "cbox: hyperqwen owner project not rendered - run 'cbox hyperqwen reconcile' first" >&2; return 1; }
+  if [ "$follow" = 1 ]; then
+    _cbox_hyperqwen_owner_compose logs --tail 200 -f hyperqwen
+  else
+    _cbox_hyperqwen_owner_compose logs --tail 200 hyperqwen
+  fi
+}
+
+_cbox_hyperqwen_gpu_check_base_image() {
+  printf '%s' 'nvidia/cuda:13.0.3-base-ubuntu24.04'
+}
+
+_cbox_hyperqwen_gpu_check_cmd() {
+  local image dev out cuda major
+  image="$(_cbox_hyperqwen_image)"
+  if ! docker image inspect -- "$image" >/dev/null 2>&1; then
+    echo "cbox: gpu-check: $image is not pulled yet (about 9.5 GB) - checking with its CUDA base image $(_cbox_hyperqwen_gpu_check_base_image) instead (about 100 MB, its layers are shared with the real image); 'cbox hyperqwen up' pulls the real one" >&2
+    image="$(_cbox_hyperqwen_gpu_check_base_image)"
+  fi
+  dev="$(_cbox_gpu_device_ids "${CBOX_HYPERQWEN_GPU_DEVICE:-all}" | head -n1)"
+  [ -n "$dev" ] || dev="nvidia.com/gpu=all"
+  echo "cbox: gpu-check: running 'docker run --rm --entrypoint nvidia-smi --device $dev -- $image' as a CDI smoke test" >&2
+  if out="$(docker run --rm --entrypoint nvidia-smi --device "$dev" -- "$image" 2>&1)"; then
+    printf '%s\n' "$out"
+    cuda="$(printf '%s\n' "$out" | sed -n 's/.*CUDA Version: *\([0-9][0-9]*\)\.[0-9].*/\1/p' | head -n1)"
+    major="${cuda:-0}"
+    if [ "$major" -lt 13 ]; then
+      echo "cbox: gpu-check: FAIL - the CDI device $dev works but the driver reports CUDA ${cuda:-unknown}; hyperqwen needs CUDA 13 (driver 580 or newer)" >&2
+      return 1
+    fi
+    echo "cbox: gpu-check: PASS - the CDI device $dev is visible to a container, nvidia-smi ran inside $image and the driver reports CUDA $cuda"
+    return 0
+  fi
+  printf '%s\n' "$out" >&2
+  echo "cbox: gpu-check: FAIL - could not start a container with --device $dev against $image, or nvidia-smi failed inside it" >&2
+  echo "cbox: gpu-check: fix candidates: (1) regenerate the CDI spec after any GPU replug - 'sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml'; (2) on rootless docker restart the daemon once after /etc/cdi or /run/nvidia-persistenced is first created ('systemctl --user restart docker'); (3) 'failed to stat CDI host device /dev/nvidia-uvm' means the on-demand node is missing - install nvidia-modprobe or run any CUDA command on the host once; (4) the image needs a driver of 580 or newer (CUDA 13); the longer list is printed by 'cbox ollama gpu-check'" >&2
+  return 1
+}
+
+_cbox_hyperqwen_owner_heal_impl() {
+  local dir cid state out
+  [ "${CBOX_HYPERQWEN_MODE:-off}" = on ] || return 0
+  dir="$(_cbox_hyperqwen_owner_dir)"
+  [ -f "$dir/docker-compose.yml" ] || return 0
+  cid="$(_cbox_hyperqwen_owner_compose ps -q -a hyperqwen 2>/dev/null | head -n1)" || cid=""
+  if [ -z "$cid" ]; then
+    [ -f "$(_cbox_hyperqwen_heal_recreate_marker)" ] || return 0
+    echo "cbox: the hyperqwen owner container is missing because an earlier self-heal removed it and the reconcile that should have recreated it failed - creating it again before this session" >&2
+  else
+    state="$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null)" || state=unknown
+    if [ "$state" = running ]; then
+      _cbox_hyperqwen_heal_recreate_clear
+      return 0
+    fi
+    echo "cbox: hyperqwen owner container is $state - starting it before this session" >&2
+  fi
+  if ! _cbox_hyperqwen_prepared_ok; then
+    echo "cbox: hyperqwen models are not prepared for $(_cbox_hyperqwen_image) - run 'cbox hyperqwen prepare' on the host (it downloads, so it never runs at session start); this session continues without hyperqwen" >&2
+    return 0
+  fi
+  _cbox_hyperqwen_volumes_ensure || return 1
+  _cbox_hyperqwen_offload_preflight_warn
+  _cbox_hyperqwen_gpu_preflight
+  if out="$(_cbox_hyperqwen_owner_compose up -d hyperqwen 2>&1)"; then
+    _cbox_hyperqwen_heal_recreate_clear
+    return 0
+  fi
+  case "$out" in
+    *"network "*" not found"*)
+      echo "cbox: the hyperqwen owner container points at a network that no longer exists (typical after a docker daemon restart) - recreating it through the owner reconcile" >&2
+      _cbox_hyperqwen_heal_recreate_set
+      _cbox_hyperqwen_owner_compose rm -f -s hyperqwen >/dev/null 2>&1 || true
+      if out="$(_cbox_hyperqwen_reconcile_cmd 2>&1)"; then
+        _cbox_hyperqwen_heal_recreate_clear
+        return 0
+      fi
+      ;;
+    *"CDI host device"*)
+      if _cbox_nvidia_uvm_ensure; then
+        echo "cbox: the hyperqwen owner could not start because an on-demand CDI device node did not exist yet - cbox created /dev/nvidia-uvm and is starting it again" >&2
+        if out="$(_cbox_hyperqwen_owner_compose up -d hyperqwen 2>&1)"; then
+          _cbox_hyperqwen_heal_recreate_clear
+          return 0
+        fi
+      else
+        echo "cbox: the hyperqwen owner cannot start because the CDI spec lists a host device node that does not exist and cbox could not create it - run 'cbox hyperqwen gpu-check' for the fix candidates" >&2
+      fi
+      ;;
+  esac
+  case "$out" in
+    *"nvidia-persistenced/socket"*|*"unresolvable CDI devices"*)
+      _cbox_ollama_copyup_recover hyperqwen || return 1
+      if out="$(_cbox_hyperqwen_reconcile_cmd 2>&1)"; then
+        echo "cbox: docker restarted and the hyperqwen owner project reconciled" >&2
+        _cbox_hyperqwen_heal_recreate_clear
+        return 0
+      fi
+      ;;
+  esac
+  echo "cbox: the hyperqwen owner container could not be started - run 'cbox hyperqwen reconcile' on the host; this session continues without hyperqwen" >&2
+  printf '%s\n' "$out" | tail -n 3 >&2
+  return 1
+}
+
+_cbox_hyperqwen_owner_heal() {
+  local lockfile rc=0 fd
+  [ "${CBOX_HYPERQWEN_MODE:-off}" = on ] || return 0
+  mkdir -p "$HOME/.config/cbox/infra"
+  lockfile="$(_cbox_ollama_lock_file)"
+  if [ -L "$lockfile" ]; then
+    echo "cbox: refusing - $lockfile is a symlink, not a plain lock file" >&2
+    return 1
+  fi
+  exec {fd}>> "$lockfile" || return 1
+  if ! _cbox_flock -x -w 30 "$fd"; then
+    echo "cbox: could not lock $lockfile for the hyperqwen owner check" >&2
+    exec {fd}>&-
+    return 1
+  fi
+  _cbox_hyperqwen_owner_heal_impl || rc=1
+  exec {fd}>&-
+  return "$rc"
+}
+
+hyperqwen_cmd() {
+  local sub="${1:-}"
+  case "$sub" in
+    status|ps|up|down|prepare|reconcile|logs|gpu-check) ;;
+    *)
+      echo "cbox: usage: $0 hyperqwen {status|ps|up|down|prepare|reconcile|logs [-f]|gpu-check}" >&2
+      return 1
+      ;;
+  esac
+  shift
+  if _cbox_config_in_container; then
+    echo "cbox: hyperqwen $sub is host-only - it manages the machine-scoped owner compose project" >&2
+    return 1
+  fi
+  [ -f "$INSTALL_DIR/templates/sections.sh" ] || die "$INSTALL_DIR/templates/sections.sh missing"
+  . "$INSTALL_DIR/templates/sections.sh"
+  if [ "$sub" != status ] && [ "$sub" != ps ] && [ "$sub" != gpu-check ] && [ "$sub" != reconcile ]; then
+    _cbox_hyperqwen_guard || return 1
+  fi
+  mkdir -p "$HOME/.config/cbox/infra"
+  if [ "$sub" = logs ]; then
+    _cbox_hyperqwen_logs_cmd "$@"
+    return $?
+  fi
+  local lockfile rc=0
+  lockfile="$(_cbox_ollama_lock_file)"
+  _cbox_ollama_lock_fd_open 6 "$lockfile" || return 1
+  case "$sub" in
+    status)
+      _cbox_flock -s -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+      _cbox_hyperqwen_status_cmd || rc=$?
+      ;;
+    ps)
+      _cbox_flock -s -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+      _cbox_hyperqwen_ps_cmd || rc=$?
+      ;;
+    up)
+      _cbox_flock -x -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+      _cbox_hyperqwen_up_cmd || rc=$?
+      ;;
+    down)
+      _cbox_flock -x -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+      _cbox_hyperqwen_down_cmd || rc=$?
+      ;;
+    prepare)
+      _cbox_flock -x -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+      _cbox_hyperqwen_prepare_cmd || rc=$?
+      ;;
+    reconcile)
+      _cbox_flock -x -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+      _cbox_hyperqwen_reconcile_cmd || rc=$?
+      ;;
+    gpu-check)
+      _cbox_flock -s -w 30 6 || { echo "cbox: cannot lock $lockfile" >&2; exec 6>&-; return 1; }
+      _cbox_hyperqwen_gpu_check_cmd || rc=$?
+      ;;
+  esac
+  exec 6>&-
+  return "$rc"
+}
+
+_cbox_llm_backend_mode_key() {
+  case "$1" in
+    ollama) printf 'CBOX_OLLAMA_MODE' ;;
+    hyperqwen) printf 'CBOX_HYPERQWEN_MODE' ;;
+    *) return 1 ;;
+  esac
+}
+
+_cbox_llm_backend_compose() {
+  local backend="$1"
+  shift
+  case "$backend" in
+    ollama) _cbox_ollama_owner_compose "$@" ;;
+    hyperqwen) _cbox_hyperqwen_owner_compose "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
+_cbox_llm_backend_owner_dir() {
+  case "$1" in
+    ollama) _cbox_ollama_owner_dir ;;
+    hyperqwen) _cbox_hyperqwen_owner_dir ;;
+    *) return 1 ;;
+  esac
+}
+
+_cbox_llm_backend_state() {
+  local backend="$1" dir cid state
+  if ! _cbox_local_backend_active "$backend"; then
+    printf 'off'
+    return 0
+  fi
+  if _cbox_config_in_container || ! command -v docker >/dev/null 2>&1; then
+    printf 'host-check'
+    return 0
+  fi
+  dir="$(_cbox_llm_backend_owner_dir "$backend")"
+  if [ ! -f "$dir/docker-compose.yml" ]; then
+    printf 'not-rendered'
+    return 0
+  fi
+  cid="$(_cbox_llm_backend_compose "$backend" ps -q -a "$backend" 2>/dev/null | head -n1)" || cid=""
+  if [ -z "$cid" ]; then
+    printf 'not-running'
+    return 0
+  fi
+  state="$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null)" || state=unknown
+  printf '%s' "$state"
+}
+
+_cbox_llm_ollama_models() {
+  local cid out
+  cid="$(_cbox_ollama_owner_compose ps -q ollama 2>/dev/null | head -n1)" || cid=""
+  [ -n "$cid" ] || return 1
+  out="$(docker exec -- "$cid" ollama ls 2>/dev/null)" || return 1
+  printf '%s\n' "$out" | awk 'NR > 1 && $1 != "" { print $1 }'
+}
+
+_cbox_llm_consumers() {
+  printf 'local-model CBOX_LOCAL_MODEL_URL CBOX_LOCAL_MODEL_NAME\n'
+  printf 'hermes CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME\n'
+  printf 'hermes-delegate CBOX_HERMES_DELEGATE_BASE_URL CBOX_HERMES_DELEGATE_MODEL\n'
+}
+
+_cbox_llm_consumer_uses_local() {
+  case "$1" in
+    local-model)
+      [ "${CBOX_LOCAL_MODEL:-off}" = on ] || [ -n "${CBOX_LOCAL_MODEL_URL:-}" ]
+      ;;
+    hermes)
+      [ "${CBOX_HERMES_PROVIDER:-local}" = local ]
+      ;;
+    hermes-delegate)
+      case "${CBOX_HERMES_DELEGATE_PROVIDER:-}" in
+        local) return 0 ;;
+        '') [ "${CBOX_HERMES_PROVIDER:-local}" = local ] ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+_cbox_llm_consumer_pointing() {
+  local url="$1" b
+  if [ -z "$url" ]; then
+    printf 'unset'
+    return 0
+  fi
+  if b="$(_cbox_local_backend_of_url "$url")"; then
+    printf '%s' "$b"
+    return 0
+  fi
+  printf 'custom'
+}
+
+_cbox_llm_status_cmd() {
+  local b mode state url model ctx models line
+  for b in $(_cbox_local_backends); do
+    if _cbox_local_backend_active "$b"; then mode=on; else mode=off; fi
+    state="$(_cbox_llm_backend_state "$b")"
+    url="$(_cbox_local_backend_url "$b")"
+    model="$(_cbox_local_backend_served_model "$b")"
+    ctx="$(_cbox_local_backend_context_length "$b" 2>/dev/null)" || ctx=""
+    if [ -z "$model" ]; then
+      model="(any pulled model)"
+      if [ "$state" = running ]; then
+        models="$(_cbox_llm_ollama_models 2>/dev/null | paste -sd, -)" || models=""
+        [ -n "$models" ] && model="$models"
+      fi
+    fi
+    printf '%s: mode=%s container=%s url=%s model=%s context=%s\n' "$b" "$mode" "$state" "$url" "$model" "${ctx:-unknown}"
+  done
+  local id urlkey namekey cur_url cur_model target uses
+  while read -r id urlkey namekey; do
+    [ -n "$id" ] || continue
+    cur_url="${!urlkey:-}"
+    cur_model="${!namekey:-}"
+    if _cbox_llm_consumer_uses_local "$id"; then uses=local; else uses=other-provider; fi
+    target="$(_cbox_llm_consumer_pointing "$cur_url")"
+    line="consumer $id: provider=$uses backend=$target url=${cur_url:-(unset)} model=${cur_model:-(unset)}"
+    printf '%s\n' "$line"
+  done < <(_cbox_llm_consumers)
+}
+
+_cbox_llm_ollama_model_for_use() {
+  local explicit="$1" id urlkey namekey cur_url cur_model models count
+  if [ -n "$explicit" ]; then
+    printf '%s' "$explicit"
+    return 0
+  fi
+  while read -r id urlkey namekey; do
+    [ -n "$id" ] || continue
+    _cbox_llm_consumer_uses_local "$id" || continue
+    cur_url="${!urlkey:-}"
+    cur_model="${!namekey:-}"
+    [ -n "$cur_model" ] || continue
+    if [ "$(_cbox_llm_consumer_pointing "$cur_url")" = ollama ]; then
+      printf '%s' "$cur_model"
+      return 0
+    fi
+  done < <(_cbox_llm_consumers)
+  models="$(_cbox_llm_ollama_models 2>/dev/null)" || models=""
+  count="$(printf '%s' "$models" | grep -c . || true)"
+  if [ "${count:-0}" = 1 ]; then
+    printf '%s' "$models"
+    return 0
+  fi
+  if [ "${count:-0}" = 0 ]; then
+    echo "cbox: llm use: cannot pick an ollama model - no consumer points at ollama yet and the running ollama owner lists no models (is it running? '$0 ollama status'); pass --model <name> or pull one with '$0 ollama pull <model>'" >&2
+  else
+    echo "cbox: llm use: cannot pick an ollama model - the running ollama owner lists $count: $(printf '%s' "$models" | paste -sd, -); pass --model <name>" >&2
+  fi
+  return 1
+}
+
+_cbox_llm_apply_pairs() {
+  local -a pairs=("$@")
+  local -a iso_pairs=()
+  local pair key root eff mode pinned
+  _cbox_config_set_force_global "${pairs[@]}" || return 1
+  mode="$(_cbox_effective_mode 2>/dev/null)" || mode=""
+  [ "$mode" = isolated ] || return 0
+  root="$(_cbox_workspace_root 2>/dev/null)" || return 0
+  eff="$(_cbox_local_effdir_for "$root")"
+  pinned=$'\n'"$(_cbox_override_keys "$eff")"$'\n'
+  for pair in "${pairs[@]}"; do
+    key="${pair%%=*}"
+    case "$pinned" in
+      *$'\n'"$key"$'\n'*) iso_pairs+=("$pair") ;;
+    esac
+  done
+  [ "${#iso_pairs[@]}" -gt 0 ] || return 0
+  _cbox_config_set "${iso_pairs[@]}"
+}
+
+_cbox_llm_use_cmd() {
+  local backend="" model="" explicit="" url served id urlkey namekey mode_key
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --model)
+        [ "$#" -ge 2 ] || { echo "cbox: usage: $0 llm use <ollama|hyperqwen> [--model <name>]" >&2; return 1; }
+        explicit="$2"
+        shift 2
+        ;;
+      --model=*)
+        explicit="${1#--model=}"
+        shift
+        ;;
+      -*)
+        echo "cbox: usage: $0 llm use <ollama|hyperqwen> [--model <name>]" >&2
+        return 1
+        ;;
+      *)
+        [ -z "$backend" ] || { echo "cbox: usage: $0 llm use <ollama|hyperqwen> [--model <name>]" >&2; return 1; }
+        backend="$1"
+        shift
+        ;;
+    esac
+  done
+  case "$backend" in
+    ollama|hyperqwen) ;;
+    *)
+      echo "cbox: usage: $0 llm use <ollama|hyperqwen> [--model <name>]" >&2
+      return 1
+      ;;
+  esac
+  if _cbox_config_in_container; then
+    echo "cbox: llm use is host-only - it writes the machine and global config through 'config set'" >&2
+    return 1
+  fi
+  mode_key="$(_cbox_llm_backend_mode_key "$backend")"
+  if ! _cbox_local_backend_active "$backend"; then
+    echo "cbox: refusing - $backend is off ($mode_key=off); enable it first: $0 config set $mode_key=on && $0 $backend reconcile" >&2
+    return 1
+  fi
+  url="$(_cbox_local_backend_url "$backend")"
+  served="$(_cbox_local_backend_served_model "$backend")"
+  if [ -n "$served" ]; then
+    if [ -n "$explicit" ] && [ "$explicit" != "$served" ]; then
+      echo "cbox: refusing - $backend serves only '$served', not '$explicit'" >&2
+      return 1
+    fi
+    model="$served"
+  else
+    model="$(_cbox_llm_ollama_model_for_use "$explicit")" || return 1
+    _cbox_ollama_model_ref_ok "$model" || { echo "cbox: refusing - model reference '$model' contains characters other than [A-Za-z0-9._:/@-]" >&2; return 1; }
+  fi
+  local -a pairs=()
+  local names=""
+  while read -r id urlkey namekey; do
+    [ -n "$id" ] || continue
+    _cbox_llm_consumer_uses_local "$id" || continue
+    pairs+=("$urlkey=$url" "$namekey=$model")
+    names="$names $id"
+  done < <(_cbox_llm_consumers)
+  if [ "${#pairs[@]}" -eq 0 ]; then
+    echo "cbox: llm use: no consumer uses the local provider (local-model off with no url, hermes provider not local) - nothing to switch" >&2
+    return 0
+  fi
+  _cbox_local_backends_gpu_overlap_warn
+  _cbox_llm_apply_pairs "${pairs[@]}" || return 1
+  echo "cbox: llm use: switched${names} to $backend ($url, model $model)"
+  echo "cbox: llm use: running projects pick the change up on their next start (cbox down && cbox run <bin>)"
+}
+
+llm_cmd() {
+  local sub="${1:-}"
+  case "$sub" in
+    status|use) ;;
+    *)
+      echo "cbox: usage: $0 llm {status|use <ollama|hyperqwen> [--model <name>]}" >&2
+      return 1
+      ;;
+  esac
+  shift
+  [ -f "$INSTALL_DIR/templates/sections.sh" ] || die "$INSTALL_DIR/templates/sections.sh missing"
+  . "$INSTALL_DIR/templates/sections.sh"
+  case "$sub" in
+    status) _cbox_llm_status_cmd ;;
+    use) _cbox_llm_use_cmd "$@" ;;
+  esac
 }
 
 _cbox_wg_guard() {
@@ -2889,6 +3851,7 @@ _run_global() {
     _clip_bridge_stop
     return 1
   }
+  _cbox_hyperqwen_owner_heal || true
   _cbox_ollama_owner_heal || true
   _cbox_compose_up "$HOME/.config/cbox/compose.up.stamp" "${COMPOSE[@]}" >/dev/null || {
     _container_exec_bridge_stop
@@ -4566,6 +5529,7 @@ _session_run() {
     exec 8>&-
     return 1
   }
+  _cbox_hyperqwen_owner_heal || true
   _cbox_ollama_owner_heal || true
   _cbox_compose_up "$eff/.compose.up.stamp" docker compose --project-directory "$eff" -f "$eff/docker-compose.yml" || {
     trap - INT TERM HUP
@@ -5021,6 +5985,7 @@ shell_isolated() {
     exec 8>&-
     return 1
   }
+  _cbox_hyperqwen_owner_heal || true
   _cbox_ollama_owner_heal || true
   _cbox_compose_up "$eff/.compose.up.stamp" docker compose --project-directory "$eff" -f "$eff/docker-compose.yml" || {
     _container_exec_bridge_stop
@@ -5308,6 +6273,7 @@ up() {
     mkdir -p -m 0700 "$(_cbox_container_exec_dir "${CBOX_NAME:-cbox}")/sockets"
     chmod 0700 "$(_cbox_container_exec_dir "${CBOX_NAME:-cbox}")" "$(_cbox_container_exec_dir "${CBOX_NAME:-cbox}")/sockets"
   fi
+  _cbox_hyperqwen_owner_heal || true
   _cbox_ollama_owner_heal || true
   _cbox_compose_up "$HOME/.config/cbox/compose.up.stamp" "${COMPOSE[@]}"
   _cbox_probe_exes_seed "$INSTALL_DIR" "$("${COMPOSE[@]}" ps -q "$SERVICE" 2>/dev/null | head -n1)"
@@ -7252,6 +8218,26 @@ doctor() {
   fi
 
   if [ "$in_container" = 1 ]; then
+    _cbox_doctor_row "hyperqwen" HOST-CHECK "machine-scoped - CBOX_HYPERQWEN_* is decided by the host owner project, not this container"
+  else
+    local hq_conf="$INSTALL_DIR/cbox.conf" hq_mode hq_dev ol_mode ol_gpu ol_dev hq_overlap
+    hq_mode="$(_cbox_machine_conf_value "$hq_conf" CBOX_HYPERQWEN_MODE off)"
+    if [ "$hq_mode" = on ]; then
+      hq_dev="$(_cbox_machine_conf_value "$hq_conf" CBOX_HYPERQWEN_GPU_DEVICE all)"
+      ol_mode="$(_cbox_machine_conf_value "$hq_conf" CBOX_OLLAMA_MODE off)"
+      ol_gpu="$(_cbox_machine_conf_value "$hq_conf" CBOX_OLLAMA_GPU off)"
+      ol_dev="$(_cbox_machine_conf_value "$hq_conf" CBOX_OLLAMA_GPU_DEVICE all)"
+      if hq_overlap="$(_cbox_local_backends_gpu_overlap_text "$ol_mode" "$ol_gpu" "$ol_dev" "$hq_mode" "$hq_dev")"; then
+        _cbox_doctor_row "hyperqwen" WARN "CBOX_HYPERQWEN_MODE=on (machine-scoped) - $hq_overlap"
+      else
+        _cbox_doctor_row "hyperqwen" CONFIG-ONLY "CBOX_HYPERQWEN_MODE=on (machine-scoped) - verify the owner project with cbox hyperqwen status, run cbox hyperqwen gpu-check first and cbox hyperqwen prepare once"
+      fi
+    else
+      _cbox_doctor_row "hyperqwen" OFF "CBOX_HYPERQWEN_MODE=off (default, machine-scoped)"
+    fi
+  fi
+
+  if [ "$in_container" = 1 ]; then
     _cbox_doctor_row "wireguard" HOST-CHECK "machine-scoped - CBOX_WG_* is decided by the host owner project, not this container"
   else
     local wg_conf="$INSTALL_DIR/cbox.conf" wg_mode=off
@@ -7475,6 +8461,16 @@ sys.exit(0 if 'SessionStart' not in ('',) and hooks else 1)
   echo "legend: ACTIVE=wired and operational here, CONFIG-ONLY=configured but not active in this container, OFF=disabled, MISSING=expected artifact absent, HOST-CHECK=needs docker/GPU/TTY, not decidable in-container"
 }
 
+_cbox_machine_conf_value() {
+  local conf="$1" var="$2" def="${3:-}" val
+  if [ ! -f "$conf" ]; then
+    printf '%s' "$def"
+    return 0
+  fi
+  val="$(unset "$var"; . "$conf" >/dev/null 2>&1; printf '%s' "${!var:-}")"
+  printf '%s' "${val:-$def}"
+}
+
 _cbox_config_load_sections() {
   [ -n "${SECTIONS[*]:-}" ] && return 0
   local sec="$INSTALL_DIR/templates/sections.sh"
@@ -7566,14 +8562,19 @@ _cbox_config_dep_gate() {
 }
 
 _cbox_config_apply_cmd_for() {
-  local class="$1"
+  local class="$1" section="${2:-}"
   case "$class" in
     none) printf 'none - takes effect on next cbox run' ;;
     shell) printf 'source ~/.bashrc' ;;
     restart) printf 'cbox down && cbox run <bin>' ;;
     recreate|topology) printf 'cbox down && cbox run <bin> (compose recreates)' ;;
     rebuild) printf 'next cbox run rebuilds the image automatically (image.inputs changed)' ;;
-    infra-reconcile) printf 'cbox ollama reconcile (owner project, not the current cbox compose project)' ;;
+    infra-reconcile)
+      case "$section" in
+        hyperqwen) printf 'cbox hyperqwen reconcile (owner project, not the current cbox compose project)' ;;
+        *) printf 'cbox ollama reconcile (owner project, not the current cbox compose project)' ;;
+      esac
+      ;;
     *) printf 'unknown apply class' ;;
   esac
 }
@@ -7749,7 +8750,7 @@ _cbox_config_print_report() {
   echo "cbox: config set staged - apply status:"
   for s in "${sections[@]}"; do
     local _a="$(sec_get SEC_APPLY "$s")"
-    printf '  %-16s %-10s %s\n' "$s" "${_a:-none}" "$(_cbox_config_apply_cmd_for "${_a:-none}")"
+    printf '  %-16s %-10s %s\n' "$s" "${_a:-none}" "$(_cbox_config_apply_cmd_for "${_a:-none}" "$s")"
     if _cbox_config_section_has_dictate "$s"; then
       printf '    note: %s has wizard-only auto-deploy behavior (hook install/removal) that headless config set does not perform - run cbox setup to match wizard state if this section flipped on/off\n' "$s"
     fi
@@ -8106,7 +9107,7 @@ _cbox_config_set_global() {
 
   if [ "${CBOX_CONFIG_MACHINE_ROUTED:-0}" = 1 ]; then
     echo "cbox: machine-scoped keys were written to the machine-level $conf, which every project on this host shares"
-    echo "cbox: apply them with the owning verb - 'cbox ollama reconcile' for ollama, 'cbox wg up' for wireguard; local-model and hermes-delegate keys reach a project on its next start, so restart each project that should pick them up (cbox down && cbox run <bin>) - the pending record above lives next to that conf, not in your project"
+    echo "cbox: apply them with the owning verb - 'cbox ollama reconcile' for ollama, 'cbox hyperqwen reconcile' for hyperqwen, 'cbox wg up' for wireguard; local-model and hermes-delegate keys reach a project on its next start, so restart each project that should pick them up (cbox down && cbox run <bin>) - the pending record above lives next to that conf, not in your project"
   fi
 
   echo "cbox: previous global cbox.conf kept at $backup"
@@ -8517,6 +9518,11 @@ _hub_render() {
     HUB_ROWS+=("ollama")
     i=$((i + 1))
   fi
+  if [ "${CBOX_HYPERQWEN_MODE:-off}" = on ] && ! _cbox_config_in_container; then
+    printf '  %d) hyperqwen\n' "$i" >&2
+    HUB_ROWS+=("hyperqwen")
+    i=$((i + 1))
+  fi
   if [ "${CBOX_WG_MODE:-off}" != off ] && ! _cbox_config_in_container; then
     printf '  %d) wg\n' "$i" >&2
     HUB_ROWS+=("wg")
@@ -8678,6 +9684,36 @@ _hub_ollama_submenu() {
         ;;
       5) ollama_cmd reconcile 2>&1 | cat 1>&2 || true ;;
       6) ollama_cmd gpu-check 2>&1 | cat 1>&2 || true ;;
+      b|B) return 0 ;;
+      *) echo "cbox: unrecognized choice '$ans'" >&2 ;;
+    esac
+  done
+}
+
+_hub_hyperqwen_submenu() {
+  while true; do
+    echo "cbox hyperqwen:" >&2
+    echo "  1) status" >&2
+    echo "  2) ps (health and served models)" >&2
+    echo "  3) up" >&2
+    echo "  4) down" >&2
+    echo "  5) prepare (download and requantize the model, needs egress)" >&2
+    echo "  6) reconcile" >&2
+    echo "  7) logs" >&2
+    echo "  8) gpu-check (CDI smoke test, does not touch config)" >&2
+    echo "  b) back" >&2
+    printf '> ' >&2
+    local ans
+    IFS= read -r ans || return 0
+    case "$ans" in
+      1) hyperqwen_cmd status 2>&1 | cat 1>&2 || true ;;
+      2) hyperqwen_cmd ps 2>&1 | cat 1>&2 || true ;;
+      3) hyperqwen_cmd up 2>&1 | cat 1>&2 || true ;;
+      4) hyperqwen_cmd down 2>&1 | cat 1>&2 || true ;;
+      5) hyperqwen_cmd prepare 2>&1 | cat 1>&2 || true ;;
+      6) hyperqwen_cmd reconcile 2>&1 | cat 1>&2 || true ;;
+      7) hyperqwen_cmd logs 2>&1 | cat 1>&2 || true ;;
+      8) hyperqwen_cmd gpu-check 2>&1 | cat 1>&2 || true ;;
       b|B) return 0 ;;
       *) echo "cbox: unrecognized choice '$ans'" >&2 ;;
     esac
@@ -8962,6 +9998,7 @@ _hub_dispatch_row() {
     settings) _hub_settings_dispatch "$mode" "$root" || true ;;
     netaccess) _hub_netaccess_submenu "$mode" || true ;;
     ollama) _hub_ollama_submenu || true ;;
+    hyperqwen) _hub_hyperqwen_submenu || true ;;
     wg) _hub_wg_submenu || true ;;
     session-broker) _hub_session_broker_submenu || true ;;
     sessions) _hub_sessions_submenu || true ;;
@@ -9124,7 +10161,7 @@ print(json.dumps({
 }
 
 usage() {
-  echo "usage: $0 {run [--session <id>] [--profile <name>|--new-profile <name>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force] [--profile <name>]|restart [--gpu]|shell [--profile <name>]|logs [--profile <name>] [args]|update|reinstall-bins [--fresh|--force|--if-stale]|bins {status|history [tool]|rollback [tool]}|install-hooks|profile {add <name>|list|ls|rm <name> [--yes]}|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|unset|diff|pending}|netaccess {status|allow|deny}|ollama {status|ps|up|down|pull <model>|reconcile|gpu-check}|wg {status|up [--yes]|down|keygen|peer {add|rm|list|config}|server add-client <name> [<pubkey>] [--endpoint host:port] [--plain] [--yes]|client join <token> [--yes]}|session-broker {status|access {disabled|viewer|full-attach}|window {off|<minutes>}|key {add <pubkey-file> [comment]|rm <fingerprint>|fingerprints}}|backup|login [--profile <name>] [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}"
+  echo "usage: $0 {run [--session <id>] [--profile <name>|--new-profile <name>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force] [--profile <name>]|restart [--gpu]|shell [--profile <name>]|logs [--profile <name>] [args]|update|reinstall-bins [--fresh|--force|--if-stale]|bins {status|history [tool]|rollback [tool]}|install-hooks|profile {add <name>|list|ls|rm <name> [--yes]}|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|unset|diff|pending}|netaccess {status|allow|deny}|ollama {status|ps|up|down|pull <model>|reconcile|gpu-check}|hyperqwen {status|ps|up|down|prepare|reconcile|logs [-f]|gpu-check}|llm {status|use <ollama|hyperqwen> [--model <name>]}|wg {status|up [--yes]|down|keygen|peer {add|rm|list|config}|server add-client <name> [<pubkey>] [--endpoint host:port] [--plain] [--yes]|client join <token> [--yes]}|session-broker {status|access {disabled|viewer|full-attach}|window {off|<minutes>}|key {add <pubkey-file> [comment]|rm <fingerprint>|fingerprints}}|backup|login [--profile <name>] [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}"
   echo "cbox: with zero arguments and a TTY on stdin+stdout, bare '$0' opens the interactive hub instead of this usage text"
   echo "cbox: 'cbox ls' lists RUNNING isolated projects only, not every configured project"
   exit 1
@@ -9271,6 +10308,8 @@ case "${1:-}" in
   netaccess) shift; netaccess_cmd "$@";;
   bins) shift; bins_cmd "$@";;
   ollama) shift; ollama_cmd "$@";;
+  hyperqwen) shift; hyperqwen_cmd "$@";;
+  llm) shift; llm_cmd "$@";;
   wg) shift; wg_cmd "$@";;
   session-broker) shift; session_broker_cmd "$@";;
   backup) backup;;

@@ -1804,6 +1804,79 @@ step_codex_progress() {
   note "host claude picks the change up on next start; the container needs re-bless + restart (the read-only ~/.claude.json seed bind pins the old inode; the live container state is ~/.claude-cbox/.claude.json)"
 }
 
+_setup_suggest_backend() {
+  local b
+  declare -F _cbox_local_backend_active >/dev/null 2>&1 || return 1
+  for b in hyperqwen ollama; do
+    if _cbox_local_backend_active "$b"; then
+      printf '%s' "$b"
+      return 0
+    fi
+  done
+  return 1
+}
+
+_setup_prefill_url() {
+  local cur="${1:-}" b
+  if [ -n "$cur" ]; then
+    printf '%s' "$cur"
+    return 0
+  fi
+  b="$(_setup_suggest_backend)" || return 0
+  _cbox_local_backend_url "$b"
+}
+
+_setup_prefill_model() {
+  local cur="${1:-}" url="${2:-}" b
+  if [ -n "$cur" ]; then
+    printf '%s' "$cur"
+    return 0
+  fi
+  [ -n "$url" ] || return 0
+  declare -F _cbox_local_backend_of_url >/dev/null 2>&1 || return 0
+  b="$(_cbox_local_backend_of_url "$url")" || return 0
+  [ "$b" = hyperqwen ] || return 0
+  _cbox_local_backend_served_model "$b"
+}
+
+_setup_backend_hint_note() {
+  local b
+  b="$(_setup_suggest_backend)" || return 0
+  note "active local backend: $b - the url below is prefilled from it when empty (cbox llm use <ollama|hyperqwen> switches every consumer at once)"
+}
+
+_setup_gpu_devices_overlap() {
+  local a="${1:-all}" b="${2:-all}" x y
+  [ "$a" = all ] && return 0
+  [ "$b" = all ] && return 0
+  local IFS=,
+  for x in $a; do
+    for y in $b; do
+      [ "$x" = "$y" ] && return 0
+    done
+  done
+  return 1
+}
+
+_setup_backend_overlap_note() {
+  [ "${CBOX_OLLAMA_MODE:-off}" = on ] && [ "${CBOX_HYPERQWEN_MODE:-off}" = on ] || return 0
+  [ "${CBOX_OLLAMA_GPU:-off}" = cdi ] || return 0
+  _setup_gpu_devices_overlap "${CBOX_OLLAMA_GPU_DEVICE:-all}" "${CBOX_HYPERQWEN_GPU_DEVICE:-all}" || return 0
+  warn "ollama (CBOX_OLLAMA_GPU_DEVICE=${CBOX_OLLAMA_GPU_DEVICE:-all}) and hyperqwen (CBOX_HYPERQWEN_GPU_DEVICE=${CBOX_HYPERQWEN_GPU_DEVICE:-all}) share a GPU - hyperqwen pins nearly the whole card, so a loaded ollama model will not fit next to it; set CBOX_OLLAMA_MODE=off, or pin each backend to its own card with the GPU device settings"
+}
+
+_setup_ask_validated() {
+  local key="$1" prompt="$2" cur="$3" msg
+  while :; do
+    ask "$prompt" "$cur"
+    if msg="$(_cbox_reg_validate_var "$key" "$ASK_VALUE")"; then
+      return 0
+    fi
+    warn "invalid $key: $msg"
+    cur="$ASK_VALUE"
+  done
+}
+
 step_local_model() {
   echo "== section: local-model =="
   note "off by default; a text-only MCP delegate (local-qwen) backed by an OpenAI-compatible endpoint such as ollama - see docs/LOCAL_MODEL_RUNBOOK.md"
@@ -1817,9 +1890,10 @@ step_local_model() {
     note "  sibling container:      http://ollama:11434"
     note "  host-side server:       http://host.docker.internal:11434 (needs hostroute gateway-alias=on)"
     note "  remote over wireguard:  http://TUNNEL-IP:11434"
-    ask "setup: local model endpoint url (OpenAI-compatible)" "$CBOX_LOCAL_MODEL_URL"
+    _setup_backend_hint_note
+    ask "setup: local model endpoint url (OpenAI-compatible)" "$(_setup_prefill_url "$CBOX_LOCAL_MODEL_URL")"
     CBOX_LOCAL_MODEL_URL="$ASK_VALUE"
-    ask "setup: local model name (as known to the endpoint, e.g. qwen2.5:7b)" "$CBOX_LOCAL_MODEL_NAME"
+    ask "setup: local model name (as known to the endpoint, e.g. qwen2.5:7b)" "$(_setup_prefill_model "$CBOX_LOCAL_MODEL_NAME" "$CBOX_LOCAL_MODEL_URL")"
     CBOX_LOCAL_MODEL_NAME="$ASK_VALUE"
     note "raise this above the endpoint's own worst-case response time for larger models (e.g. a 27B model on one GPU can take several minutes)"
     ask "setup: local model request timeout in seconds" "$CBOX_LOCAL_MODEL_TIMEOUT_SEC"
@@ -1877,12 +1951,13 @@ step_hermes() {
     CBOX_HERMES_PROVIDER="$ASK_VALUE"
     if [ "$CBOX_HERMES_PROVIDER" = local ]; then
       note "endpoint must be OpenAI-compatible (ollama, llama.cpp, vllm): http://ollama:11434 (sibling container), http://host.docker.internal:11434 (host-side, needs hostroute gateway-alias=on), or http://TUNNEL-IP:11434 (remote over wireguard)"
-      ask "setup: hermes local model endpoint url (OpenAI-compatible)" "${CBOX_HERMES_MODEL_URL:-$CBOX_LOCAL_MODEL_URL}"
+      _setup_backend_hint_note
+      ask "setup: hermes local model endpoint url (OpenAI-compatible)" "$(_setup_prefill_url "${CBOX_HERMES_MODEL_URL:-$CBOX_LOCAL_MODEL_URL}")"
       CBOX_HERMES_MODEL_URL="$ASK_VALUE"
     else
       CBOX_HERMES_MODEL_URL=""
     fi
-    ask "setup: hermes model name" "$CBOX_HERMES_MODEL_NAME"
+    ask "setup: hermes model name" "$(_setup_prefill_model "$CBOX_HERMES_MODEL_NAME" "$CBOX_HERMES_MODEL_URL")"
     CBOX_HERMES_MODEL_NAME="$ASK_VALUE"
     note "reasoning effort: none turns thinking off; medium is the default. On a local 27B model the deepest level costs about three times the wall-clock for the same task and shortens the final answer. Only none plus the levels the local qwen template documents (low, medium, xhigh) are offered."
     ask_choice "setup: hermes reasoning effort" "${CBOX_HERMES_EFFORT:-medium}" none low medium xhigh
@@ -1929,12 +2004,13 @@ step_hermes_delegate() {
       CBOX_HERMES_DELEGATE_PROVIDER="$ASK_VALUE"
       if [ "$CBOX_HERMES_DELEGATE_PROVIDER" = local ]; then
         note "endpoint must be OpenAI-compatible (ollama, llama.cpp, vllm): http://ollama:11434 (sibling container), http://host.docker.internal:11434 (host-side, needs hostroute gateway-alias=on), or http://TUNNEL-IP:11434 (remote over wireguard)"
-        ask "setup: hermes delegate local model endpoint url (OpenAI-compatible)" "${CBOX_HERMES_DELEGATE_BASE_URL:-$CBOX_HERMES_MODEL_URL}"
+        _setup_backend_hint_note
+        ask "setup: hermes delegate local model endpoint url (OpenAI-compatible)" "$(_setup_prefill_url "${CBOX_HERMES_DELEGATE_BASE_URL:-$CBOX_HERMES_MODEL_URL}")"
         CBOX_HERMES_DELEGATE_BASE_URL="$ASK_VALUE"
       else
         CBOX_HERMES_DELEGATE_BASE_URL=""
       fi
-      ask "setup: hermes delegate model name" "${CBOX_HERMES_DELEGATE_MODEL:-$CBOX_HERMES_MODEL_NAME}"
+      ask "setup: hermes delegate model name" "$(_setup_prefill_model "${CBOX_HERMES_DELEGATE_MODEL:-$CBOX_HERMES_MODEL_NAME}" "$CBOX_HERMES_DELEGATE_BASE_URL")"
       CBOX_HERMES_DELEGATE_MODEL="$ASK_VALUE"
       note "mode: qa only reasons and answers (terminal, file, web, code_execution, delegation, browser, computer_use pinned off); agent works inside the project root with terminal and file tools on (code_execution, web, delegation, browser, computer_use, cronjob pinned off) and refuses to run unless the hermes guard hooks are rendered (CBOX_HERMES_HOOKS=on)"
       ask_choice "setup: hermes delegate mode" "${CBOX_HERMES_DELEGATE_MODE:-qa}" qa agent
@@ -1967,6 +2043,7 @@ step_ollama() {
   note "machine-scoped: this section applies once per machine, never per project - the isolated per-project wizard never asks about it, and 'cbox config set' writes these keys to the global config from any scope, since the service they configure is shared by every project"
   note "off by default; ollama runs as its own owner compose project (cbox-infra-u<uid>), outside any generated cbox project, so it survives 'cbox down' and per-project compose teardown"
   local prev_mode="$CBOX_OLLAMA_MODE" prev_image="$CBOX_OLLAMA_IMAGE" prev_gpu="$CBOX_OLLAMA_GPU" \
+    prev_gpu_device="${CBOX_OLLAMA_GPU_DEVICE:-all}" \
     prev_store="$CBOX_OLLAMA_STORE" prev_store_path="$CBOX_OLLAMA_STORE_PATH" \
     prev_port="$CBOX_OLLAMA_PORT" prev_parallel="$CBOX_OLLAMA_NUM_PARALLEL" \
     prev_context_length="$CBOX_OLLAMA_CONTEXT_LENGTH" prev_flash_attention="$CBOX_OLLAMA_FLASH_ATTENTION" \
@@ -1980,6 +2057,11 @@ step_ollama() {
     CBOX_OLLAMA_GPU="$ASK_VALUE"
     if [ "$CBOX_OLLAMA_GPU" = cdi ] && _cbox_no_cdi; then
       warn "nvidia-ctk or /etc/cdi/nvidia.yaml not found - the reservation will fail until CDI is set up on this host"
+    fi
+    if [ "$CBOX_OLLAMA_GPU" = cdi ]; then
+      note "pin ollama to one card (index or GPU-<uuid>, comma list for several) when hyperqwen runs on another card; all means every card"
+      _setup_ask_validated CBOX_OLLAMA_GPU_DEVICE "setup: ollama GPU device (all, or comma-separated GPU indices or GPU-<uuid> ids)" "${CBOX_OLLAMA_GPU_DEVICE:-all}"
+      CBOX_OLLAMA_GPU_DEVICE="$ASK_VALUE"
     fi
     ask_choice "setup: ollama model store" "$CBOX_OLLAMA_STORE" dedicated shared
     CBOX_OLLAMA_STORE="$ASK_VALUE"
@@ -2032,8 +2114,10 @@ step_ollama() {
   else
     CBOX_OLLAMA_STORE_PATH=""
   fi
+  _setup_backend_overlap_note
   if [ "$CBOX_OLLAMA_MODE" = "$prev_mode" ] && [ "$CBOX_OLLAMA_IMAGE" = "$prev_image" ] \
-      && [ "$CBOX_OLLAMA_GPU" = "$prev_gpu" ] && [ "$CBOX_OLLAMA_STORE" = "$prev_store" ] \
+      && [ "$CBOX_OLLAMA_GPU" = "$prev_gpu" ] && [ "${CBOX_OLLAMA_GPU_DEVICE:-all}" = "$prev_gpu_device" ] \
+      && [ "$CBOX_OLLAMA_STORE" = "$prev_store" ] \
       && [ "$CBOX_OLLAMA_STORE_PATH" = "$prev_store_path" ] && [ "$CBOX_OLLAMA_PORT" = "$prev_port" ] \
       && [ "$CBOX_OLLAMA_NUM_PARALLEL" = "$prev_parallel" ] \
       && [ "$CBOX_OLLAMA_CONTEXT_LENGTH" = "$prev_context_length" ] \
@@ -2043,6 +2127,75 @@ step_ollama() {
     return 0
   fi
   note "ollama is an infra-reconcile change (SEC_APPLY[ollama]=infra-reconcile): run 'cbox ollama reconcile' to create/update/tear down the owner project - a plain 'cbox down && cbox run' does not touch it"
+}
+
+step_hyperqwen() {
+  echo "== section: hyperqwen =="
+  note "machine-scoped: this section applies once per machine, never per project - the isolated per-project wizard never asks about it, and 'cbox config set' writes these keys to the global config from any scope, since the service they configure is shared by every project"
+  note "off by default; hyperqwen (a vLLM server for Qwen3.8-27B tuned for one 24 GB GPU) runs as its own owner compose project (cbox-infra-u<uid>-hyperqwen), next to ollama and independent of it - either one or both can run, and each consumer picks its backend through its endpoint url (cbox llm use <ollama|hyperqwen>)"
+  local prev_mode="$CBOX_HYPERQWEN_MODE" prev_image="$CBOX_HYPERQWEN_IMAGE" \
+    prev_gpu_device="$CBOX_HYPERQWEN_GPU_DEVICE" prev_models_path="$CBOX_HYPERQWEN_MODELS_PATH" \
+    prev_spec="$CBOX_HYPERQWEN_SPEC" prev_ctx="$CBOX_HYPERQWEN_CTX" prev_max_len="$CBOX_HYPERQWEN_MAX_LEN" \
+    prev_shm="$CBOX_HYPERQWEN_SHM_SIZE" prev_kv_offload="$CBOX_HYPERQWEN_KV_OFFLOAD" \
+    prev_kv_offload_mib="$CBOX_HYPERQWEN_KV_OFFLOAD_MIB" prev_ram_reserve="$CBOX_HYPERQWEN_RAM_RESERVE_GIB" \
+    models_try msg_models
+  ask_choice "setup: enable the hyperqwen machine service" "$CBOX_HYPERQWEN_MODE" off on
+  CBOX_HYPERQWEN_MODE="$ASK_VALUE"
+  if [ "$CBOX_HYPERQWEN_MODE" = on ]; then
+    _setup_ask_validated CBOX_HYPERQWEN_IMAGE "setup: hyperqwen image reference (pinned tag or digest)" "$CBOX_HYPERQWEN_IMAGE"
+    CBOX_HYPERQWEN_IMAGE="$ASK_VALUE"
+    if _cbox_no_cdi; then
+      warn "nvidia-ctk or /etc/cdi/nvidia.yaml not found - hyperqwen always needs a GPU and the reservation will fail until CDI is set up on this host"
+    fi
+    note "vLLM pins nearly the whole card: give hyperqwen a card ollama does not use (index or GPU-<uuid>, comma list for several), or all"
+    _setup_ask_validated CBOX_HYPERQWEN_GPU_DEVICE "setup: hyperqwen GPU device (all, or comma-separated GPU indices or GPU-<uuid> ids)" "$CBOX_HYPERQWEN_GPU_DEVICE"
+    CBOX_HYPERQWEN_GPU_DEVICE="$ASK_VALUE"
+    note "the model is about 20 GB (plus a small fast variant); empty keeps it in a cbox-owned named volume, or give an absolute existing host directory you own (not a symlink) to bind-mount instead"
+    models_try="$CBOX_HYPERQWEN_MODELS_PATH"
+    while :; do
+      ask "setup: hyperqwen host models directory (empty = cbox-owned named volume): " "$models_try"
+      models_try="$ASK_VALUE"
+      case "$models_try" in
+        "~") models_try="$HOME" ;;
+        "~/"*) models_try="$HOME/${models_try#\~/}" ;;
+      esac
+      if msg_models="$(_cbox_reg_validate_var CBOX_HYPERQWEN_MODELS_PATH "$models_try")"; then
+        break
+      fi
+      warn "invalid CBOX_HYPERQWEN_MODELS_PATH: $msg_models"
+    done
+    CBOX_HYPERQWEN_MODELS_PATH="$models_try"
+    ask_choice "setup: hyperqwen speculative decoding profile" "$CBOX_HYPERQWEN_SPEC" dflash2 mtp
+    CBOX_HYPERQWEN_SPEC="$ASK_VALUE"
+    note "context profile: fast = 65536 tokens, long = 131072 (dflash2) or 150000 (mtp), huge = 245760 (dflash2) or 200000 (mtp); mtp with huge runs with the prefix cache off"
+    ask_choice "setup: hyperqwen context profile" "$CBOX_HYPERQWEN_CTX" fast long huge
+    CBOX_HYPERQWEN_CTX="$ASK_VALUE"
+    _setup_ask_validated CBOX_HYPERQWEN_MAX_LEN "setup: hyperqwen MAX_LEN override in tokens (empty = profile default): " "$CBOX_HYPERQWEN_MAX_LEN"
+    CBOX_HYPERQWEN_MAX_LEN="$ASK_VALUE"
+    _setup_ask_validated CBOX_HYPERQWEN_SHM_SIZE "setup: hyperqwen shared memory size (e.g. 8g)" "$CBOX_HYPERQWEN_SHM_SIZE"
+    CBOX_HYPERQWEN_SHM_SIZE="$ASK_VALUE"
+    note "the KV cache tier keeps already processed prompt prefixes in host RAM so they reload instead of being recomputed, and uses up to the configured size of RAM through /dev/shm"
+    ask_choice "setup: enable hyperqwen KV cache offload to host RAM" "$CBOX_HYPERQWEN_KV_OFFLOAD" off on
+    CBOX_HYPERQWEN_KV_OFFLOAD="$ASK_VALUE"
+    if [ "$CBOX_HYPERQWEN_KV_OFFLOAD" = on ]; then
+      _setup_ask_validated CBOX_HYPERQWEN_KV_OFFLOAD_MIB "setup: hyperqwen KV offload RAM size in MiB (1024..49152)" "$CBOX_HYPERQWEN_KV_OFFLOAD_MIB"
+      CBOX_HYPERQWEN_KV_OFFLOAD_MIB="$ASK_VALUE"
+      _setup_ask_validated CBOX_HYPERQWEN_RAM_RESERVE_GIB "setup: hyperqwen host RAM always reserved in GiB (8..32)" "$CBOX_HYPERQWEN_RAM_RESERVE_GIB"
+      CBOX_HYPERQWEN_RAM_RESERVE_GIB="$ASK_VALUE"
+    fi
+    note "no API key and no published host port: hyperqwen is reachable only from this user's cbox containers over the internal infra networks, same posture as ollama"
+  fi
+  _setup_backend_overlap_note
+  if [ "$CBOX_HYPERQWEN_MODE" = "$prev_mode" ] && [ "$CBOX_HYPERQWEN_IMAGE" = "$prev_image" ] \
+      && [ "$CBOX_HYPERQWEN_GPU_DEVICE" = "$prev_gpu_device" ] && [ "$CBOX_HYPERQWEN_MODELS_PATH" = "$prev_models_path" ] \
+      && [ "$CBOX_HYPERQWEN_SPEC" = "$prev_spec" ] && [ "$CBOX_HYPERQWEN_CTX" = "$prev_ctx" ] \
+      && [ "$CBOX_HYPERQWEN_MAX_LEN" = "$prev_max_len" ] && [ "$CBOX_HYPERQWEN_SHM_SIZE" = "$prev_shm" ] \
+      && [ "$CBOX_HYPERQWEN_KV_OFFLOAD" = "$prev_kv_offload" ] && [ "$CBOX_HYPERQWEN_KV_OFFLOAD_MIB" = "$prev_kv_offload_mib" ] \
+      && [ "$CBOX_HYPERQWEN_RAM_RESERVE_GIB" = "$prev_ram_reserve" ]; then
+    return 0
+  fi
+  note "hyperqwen is an infra-reconcile change (SEC_APPLY[hyperqwen]=infra-reconcile): run 'cbox hyperqwen reconcile' to create/update/tear down the owner project - the first reconcile downloads the model (needs network egress) before serving; a plain 'cbox down && cbox run' does not touch it"
+  note "point consumers at it with 'cbox llm use hyperqwen'"
 }
 
 step_wireguard() {
@@ -3656,7 +3809,7 @@ default_preset_summary() {
   note "  claude target: $CBOX_CLAUDE_TARGET  codex version: $CBOX_CODEX_VERSION  bins scope: $CBOX_BINS_SCOPE"
   note "  container mode: $CBOX_MODE  restart policy: $CBOX_RESTART_POLICY"
   note "  history: $CBOX_HISTORY  git: $CBOX_GIT  diary: $CBOX_DIARY  open-questions: $CBOX_OPEN_QUESTIONS  context-profile: $CBOX_CONTEXT_PROFILE"
-  note "  ollama: $CBOX_OLLAMA_MODE  local-model: $CBOX_LOCAL_MODEL ($CBOX_LOCAL_MODEL_NAME)  hermes: $CBOX_HERMES ($CBOX_HERMES_MODEL_NAME)  hermes-delegate: $CBOX_HERMES_DELEGATE"
+  note "  ollama: $CBOX_OLLAMA_MODE  hyperqwen: ${CBOX_HYPERQWEN_MODE:-off}  local-model: $CBOX_LOCAL_MODEL ($CBOX_LOCAL_MODEL_NAME)  hermes: $CBOX_HERMES ($CBOX_HERMES_MODEL_NAME)  hermes-delegate: $CBOX_HERMES_DELEGATE"
 }
 
 _classic_feature_on() {
@@ -3671,12 +3824,19 @@ _classic_feature_on() {
       CBOX_OLLAMA_STORE=dedicated
       ;;
     local-model)
-      _classic_feature_on ollama
       CBOX_LOCAL_MODEL=on
-      CBOX_LOCAL_MODEL_URL="http://ollama:11434"
-      ask "setup: local model name (as known to the endpoint, e.g. qwen2.5:7b)" "$CBOX_LOCAL_MODEL_NAME"
-      CBOX_LOCAL_MODEL_NAME="$ASK_VALUE"
-      note "run 'cbox ollama pull $CBOX_LOCAL_MODEL_NAME' to download it - the endpoint 404s until the model is pulled"
+      if [ "${CBOX_HYPERQWEN_MODE:-off}" = on ]; then
+        CBOX_LOCAL_MODEL_URL="$(_cbox_local_backend_url hyperqwen)"
+        ask "setup: local model name (as known to the endpoint, hyperqwen serves one model)" "$(_cbox_local_backend_served_model hyperqwen)"
+        CBOX_LOCAL_MODEL_NAME="$ASK_VALUE"
+        note "run 'cbox hyperqwen prepare' once to download the model (about 20 GB) - 'cbox hyperqwen reconcile' does it automatically before the first start"
+      else
+        _classic_feature_on ollama
+        CBOX_LOCAL_MODEL_URL="http://ollama:11434"
+        ask "setup: local model name (as known to the endpoint, e.g. qwen2.5:7b)" "$CBOX_LOCAL_MODEL_NAME"
+        CBOX_LOCAL_MODEL_NAME="$ASK_VALUE"
+        note "run 'cbox ollama pull $CBOX_LOCAL_MODEL_NAME' to download it - the endpoint 404s until the model is pulled"
+      fi
       ;;
     hermes)
       CBOX_HERMES=on

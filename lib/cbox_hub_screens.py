@@ -7,6 +7,8 @@ MAIN_AREAS = [
     ("e", "sessions", "sessions"),
     ("n", "network", "network"),
     ("o", "ollama", "ollama"),
+    ("h", "hyperqwen", "hyperqwen"),
+    ("l", "llm", "llm"),
     ("w", "wireguard", "wireguard"),
     ("s", "settings", "settings"),
     ("m", "maintenance", "maintenance"),
@@ -235,6 +237,58 @@ def render_ollama(snapshot):
     return "\n".join(lines) + "\n", actions
 
 
+def render_hyperqwen(snapshot):
+    ctx = snapshot["ctx"]
+    cbox_path = snapshot["cbox_path"]
+    lines = _submenu_header("hyperqwen", ctx)
+    actions = [
+        Action("s", "status", kind="run", argv=[cbox_path, "hyperqwen", "status"]),
+        Action("p", "ps", kind="run", argv=[cbox_path, "hyperqwen", "ps"]),
+        Action("u", "up", kind="run", argv=[cbox_path, "hyperqwen", "up"]),
+        Action("d", "down", kind="run", argv=[cbox_path, "hyperqwen", "down"]),
+        Action("a", "prepare", kind="run", argv=[cbox_path, "hyperqwen", "prepare"]),
+        Action("r", "reconcile", kind="run", argv=[cbox_path, "hyperqwen", "reconcile"]),
+        Action("l", "logs", kind="run", argv=[cbox_path, "hyperqwen", "logs"]),
+        Action("g", "gpu-check", kind="run", argv=[cbox_path, "hyperqwen", "gpu-check"]),
+        Action("b", "back", kind="back"),
+    ]
+    for a in actions:
+        lines.append(_key_column(a.key) + a.label)
+    return "\n".join(lines) + "\n", actions
+
+
+LLM_BACKENDS = ("ollama", "hyperqwen")
+
+
+def _llm_use_argv(cbox_path, text):
+    parts = text.split()
+    if len(parts) != 2:
+        return None
+    backend, model = parts
+    if backend not in LLM_BACKENDS or model.startswith("-"):
+        return None
+    return [cbox_path, "llm", "use", backend, "--model", model]
+
+
+def render_llm(snapshot):
+    ctx = snapshot["ctx"]
+    cbox_path = snapshot["cbox_path"]
+    lines = _submenu_header("llm", ctx)
+    actions = [
+        Action("s", "status", kind="run", argv=[cbox_path, "llm", "status"]),
+        Action("o", "use ollama", kind="run", argv=[cbox_path, "llm", "use", "ollama"]),
+        Action("h", "use hyperqwen", kind="run", argv=[cbox_path, "llm", "use", "hyperqwen"]),
+        Action("m", "use with model", kind="run",
+               argv_builder=lambda text: _llm_use_argv(cbox_path, text),
+               prompt="backend and model (e.g. ollama qwen2.5:7b): ",
+               hint="%s llm use <backend> --model <name>" % cbox_path),
+        Action("b", "back", kind="back"),
+    ]
+    for a in actions:
+        lines.append(_key_column(a.key) + a.label)
+    return "\n".join(lines) + "\n", actions
+
+
 def render_wireguard(snapshot):
     ctx = snapshot["ctx"]
     cbox_path = snapshot["cbox_path"]
@@ -313,6 +367,8 @@ RENDERERS = {
     "sessions": render_sessions,
     "network": render_network,
     "ollama": render_ollama,
+    "hyperqwen": render_hyperqwen,
+    "llm": render_llm,
     "wireguard": render_wireguard,
     "maintenance": render_maintenance,
 }

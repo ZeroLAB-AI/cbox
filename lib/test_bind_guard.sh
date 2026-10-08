@@ -236,7 +236,7 @@ export HOME="$H"
 export XDG_RUNTIME_DIR="$RUNDIR"
 . "$REAL_DIR/_common.sh"
 . "$NEWGEN"
-for _fn in _cbox_bind_guard _cbox_compose_up _cbox_compose_files_digest _cbox_compose_removing_ids _cbox_compose_up_wait_removed; do
+for _fn in _cbox_bind_guard _cbox_compose_stopped_dead_network _cbox_compose_up _cbox_compose_files_digest _cbox_compose_removing_ids _cbox_compose_up_wait_removed; do
   _body="$(_extract_fn "$REAL_DIR/cbox" "$_fn")"
   [ -n "$_body" ] || _fail "cannot extract $_fn from cbox"
   eval "$_body"

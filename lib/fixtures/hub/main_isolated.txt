@@ -5,6 +5,8 @@ container  up (since 2026-09-25T10:00:00)
  1 claude    attach            e sessions
  2 codex     start             n network
  3 hermes    start             o ollama
+                               h hyperqwen
+                               l llm
                                w wireguard
                                s settings
                                m maintenance

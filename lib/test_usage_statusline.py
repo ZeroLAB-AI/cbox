@@ -319,6 +319,96 @@ class ProbeDeadlineTests(unittest.TestCase):
             tmp.cleanup()
 
 
+class HermesBlockingProbeTests(unittest.TestCase):
+    def setUp(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "usage_statusline_blocking_probe", str(SCRIPT))
+        self.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.mod)
+        self._patcher = mock.patch("urllib.request.build_opener")
+        self.build_opener = self._patcher.start()
+        self.opener = mock.Mock()
+        self.build_opener.return_value = self.opener
+        self.addCleanup(self._patcher.stop)
+
+    def _cm(self, payload):
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8")
+
+        class _Resp:
+            def read(self, n=None):
+                return payload
+
+        class _CM:
+            def __enter__(self):
+                return _Resp()
+
+            def __exit__(self, *a):
+                return False
+
+        return _CM()
+
+    def _probe(self, base="http://127.0.0.1:8999"):
+        result = {"reachable": False, "model_loaded": False}
+        self.mod._probe_hermes_blocking(base, 1.0, result)
+        return result
+
+    def test_api_ps_success_marks_reachable_and_model_loaded(self):
+        self.opener.open.side_effect = lambda *a, **kw: self._cm(
+            json.dumps({"models": [{"name": "qwen"}]}))
+        result = self._probe()
+        self.assertTrue(result["reachable"])
+        self.assertTrue(result["model_loaded"])
+
+    def test_api_ps_404_falls_back_to_v1_models(self):
+        import urllib.error
+        ps_err = urllib.error.HTTPError(
+            "http://127.0.0.1:8999/api/ps", 404, "Not Found", {}, None)
+
+        def open_side_effect(*a, **kw):
+            if "v1/models" in a[0]:
+                return self._cm(json.dumps({"data": [{"id": "qwen3.8-27b"}]}))
+            raise ps_err
+
+        self.opener.open.side_effect = open_side_effect
+        result = self._probe()
+        self.assertTrue(result["reachable"])
+        self.assertTrue(result["model_loaded"])
+
+    def test_api_ps_404_and_v1_models_failure_leaves_reachable_false(self):
+        import urllib.error
+        ps_err = urllib.error.HTTPError(
+            "http://127.0.0.1:8999/api/ps", 404, "Not Found", {}, None)
+        models_err = urllib.error.URLError("connection refused")
+
+        def open_side_effect(*a, **kw):
+            if "v1/models" in a[0]:
+                raise models_err
+            raise ps_err
+
+        self.opener.open.side_effect = open_side_effect
+        result = self._probe()
+        self.assertFalse(result["reachable"])
+        self.assertFalse(result["model_loaded"])
+
+    def test_api_ps_url_error_leaves_reachable_false_and_skips_v1_models(self):
+        import urllib.error
+        url_err = urllib.error.URLError("connection refused")
+
+        def open_side_effect(*a, **kw):
+            raise url_err
+
+        self.opener.open.side_effect = open_side_effect
+        result = self._probe()
+        self.assertFalse(result["reachable"])
+        self.assertFalse(result["model_loaded"])
+        urls = [c[0][0] for c in self.opener.open.call_args_list]
+        self.assertEqual(len(urls), 1)
+        self.assertIn("api/ps", urls[0])
+        self.assertFalse(any("v1/models" in u for u in urls))
+
+
 class SamplesLogTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

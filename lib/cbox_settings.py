@@ -30,8 +30,14 @@ APPLY_CMD_FOR = {
     "recreate": "cbox down && cbox run <bin> (compose recreates)",
     "topology": "cbox down && cbox run <bin> (compose recreates)",
     "rebuild": "next cbox run rebuilds the image automatically (image.inputs changed)",
-    "infra-reconcile": "cbox ollama reconcile (owner project, not the current cbox compose project)",
+    "infra-reconcile": "cbox ollama reconcile or cbox hyperqwen reconcile (owner project, not the current cbox compose project)",
 }
+
+INFRA_RECONCILE_VERB = {
+    "hyperqwen": "hyperqwen",
+}
+INFRA_RECONCILE_DEFAULT_VERB = "ollama"
+INFRA_RECONCILE_VERB_ORDER = ("ollama", "hyperqwen")
 
 OVERRIDE_KEY_RE = re.compile(r'^([A-Z][A-Z0-9_]*)=')
 
@@ -95,8 +101,22 @@ def parse_diff_overridden_keys(text):
     return keys
 
 
-def apply_cmd_for(cls):
+def apply_cmd_for(cls, section_id=None):
+    if cls == "infra-reconcile" and section_id is not None:
+        return "cbox %s reconcile (owner project, not the current cbox compose project)" % infra_reconcile_verb(section_id)
     return APPLY_CMD_FOR.get(cls, "unknown apply class")
+
+
+def infra_reconcile_verb(section_id):
+    return INFRA_RECONCILE_VERB.get(section_id, INFRA_RECONCILE_DEFAULT_VERB)
+
+
+def infra_reconcile_verbs(pending_map):
+    found = set()
+    for section_id, cls in pending_map.items():
+        if cls == "infra-reconcile":
+            found.add(infra_reconcile_verb(section_id))
+    return [v for v in INFRA_RECONCILE_VERB_ORDER if v in found]
 
 
 def enum_choices(var):
@@ -313,12 +333,14 @@ def run_apply_pending(cbox_path, cwd, pending_map, stdin_stream, stdout_write):
     stdout_write("cbox: pending apply status:\n")
     for section_id in sorted(pending_map.keys()):
         cls = pending_map[section_id]
-        stdout_write("  %-16s %-16s %s\n" % (section_id, cls, apply_cmd_for(cls)))
-    if any(cls == "infra-reconcile" for cls in pending_map.values()):
-        stdout_write("run 'cbox ollama reconcile' now? [y/N] ")
+        stdout_write("  %-16s %-16s %s\n" % (section_id, cls, apply_cmd_for(cls, section_id)))
+    verbs = infra_reconcile_verbs(pending_map)
+    if verbs:
+        stdout_write("run %s now? [y/N] " % " and ".join("'cbox %s reconcile'" % v for v in verbs))
         ans = stdin_stream.readline().strip().lower()
         if ans == "y":
-            report_call_rc([cbox_path, "ollama", "reconcile"], cwd, stdout_write)
+            for verb in verbs:
+                report_call_rc([cbox_path, verb, "reconcile"], cwd, stdout_write)
 
 
 def edit_value(cbox_path, cwd, var, stdin_stream, stdout_write):

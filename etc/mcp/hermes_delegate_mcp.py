@@ -111,6 +111,7 @@ HOOKS_WRITER = (
 ACCEPT_HOOKS_VAR = "HERMES_ACCEPT_HOOKS"
 GUARD_EVENT = "pre_tool_call"
 CONTEXT_LENGTH_VAR = "CBOX_OLLAMA_CONTEXT_LENGTH"
+DELEGATE_CONTEXT_LENGTH_VAR = "CBOX_HERMES_DELEGATE_CONTEXT_LENGTH"
 EFFORT_VAR = "CBOX_HERMES_EFFORT"
 VALID_EFFORTS = ("none", "low", "medium", "xhigh")
 DEFAULT_CONTEXT_LENGTH = 65536
@@ -749,7 +750,8 @@ def _effort_setting(override=None):
 
 
 def _context_length_setting():
-    return str(int_env(CONTEXT_LENGTH_VAR, DEFAULT_CONTEXT_LENGTH))
+    fallback = int_env(CONTEXT_LENGTH_VAR, DEFAULT_CONTEXT_LENGTH)
+    return str(int_env(DELEGATE_CONTEXT_LENGTH_VAR, fallback))
 
 
 def _write_disabled_toolsets(ephemeral_home, env_base, toolsets):

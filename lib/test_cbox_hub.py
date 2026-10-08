@@ -127,6 +127,44 @@ class GoldenScreenTests(unittest.TestCase):
         self._assert_cols_and_ascii(hints)
 
 
+class LocalBackendScreenTests(unittest.TestCase):
+    def test_main_menu_offers_hyperqwen_and_llm_on_free_keys(self):
+        _text, actions = screens.render_main(load_fixture("main_isolated"))
+        by_key = dict((a.key, a) for a in actions)
+        self.assertEqual(by_key["h"].kind, "submenu")
+        self.assertEqual(by_key["h"].submenu, "hyperqwen")
+        self.assertEqual(by_key["l"].kind, "submenu")
+        self.assertEqual(by_key["l"].submenu, "llm")
+        keys = [a.key for a in actions]
+        self.assertEqual(len(keys), len(set(keys)), "duplicate main menu keys: %s" % keys)
+
+    def test_hyperqwen_and_llm_screens_are_registered(self):
+        self.assertIn("hyperqwen", screens.RENDERERS)
+        self.assertIn("llm", screens.RENDERERS)
+
+    def test_submenu_keys_are_unique_per_screen(self):
+        for name in ("hyperqwen", "llm", "ollama"):
+            keys = [a.key for a in _actions_for(name)]
+            self.assertEqual(len(keys), len(set(keys)), "%s has duplicate keys: %s" % (name, keys))
+
+    def test_llm_use_with_model_builds_the_explicit_model_argv(self):
+        action = dict((a.key, a) for a in _actions_for("llm"))["m"]
+        self.assertEqual(action.argv_builder("hyperqwen qwen3.8-27b"),
+                         [CBOX_PATH, "llm", "use", "hyperqwen", "--model", "qwen3.8-27b"])
+        self.assertIn("llm use", action.hint)
+        self.assertTrue(action.prompt)
+
+    def test_llm_use_with_model_rejects_malformed_input(self):
+        action = dict((a.key, a) for a in _actions_for("llm"))["m"]
+        for bad in ("", "ollama", "ollama a b", "vllm qwen", "ollama --model", "ollama -x"):
+            self.assertIsNone(action.argv_builder(bad), bad)
+
+    def test_backend_screens_never_confirm(self):
+        for name in ("hyperqwen", "llm"):
+            for a in _actions_for(name):
+                self.assertFalse(a.confirm, "%s/%s" % (name, a.key))
+
+
 class RunningEngineLabelTests(unittest.TestCase):
     def test_running_engine_shows_attach_not_start(self):
         snap = {
@@ -186,6 +224,22 @@ ARGV_TABLE = {
         "r": ["run", ["ollama", "reconcile"]],
         "g": ["run", ["ollama", "gpu-check"]],
     },
+    "hyperqwen": {
+        "s": ["run", ["hyperqwen", "status"]],
+        "p": ["run", ["hyperqwen", "ps"]],
+        "u": ["run", ["hyperqwen", "up"]],
+        "d": ["run", ["hyperqwen", "down"]],
+        "a": ["run", ["hyperqwen", "prepare"]],
+        "r": ["run", ["hyperqwen", "reconcile"]],
+        "l": ["run", ["hyperqwen", "logs"]],
+        "g": ["run", ["hyperqwen", "gpu-check"]],
+    },
+    "llm": {
+        "s": ["run", ["llm", "status"]],
+        "o": ["run", ["llm", "use", "ollama"]],
+        "h": ["run", ["llm", "use", "hyperqwen"]],
+        "m": ["builder", ["llm", "use", "ollama", "--model", "qwen2.5:7b"]],
+    },
     "wireguard": {
         "s": ["run", ["wg", "status"]],
         "u": ["run", ["wg", "up"]],
@@ -220,6 +274,7 @@ SAMPLE_TEXT_BY_ACTION = {
     ("network", "a"): "TARGET",
     ("network", "x"): "TARGET",
     ("ollama", "l"): "MODEL",
+    ("llm", "m"): "ollama qwen2.5:7b",
     ("wireguard", "a"): "NAME",
     ("wireguard", "p"): "NAME",
     ("wireguard", "x"): "NAME",

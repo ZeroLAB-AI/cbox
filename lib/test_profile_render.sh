@@ -66,6 +66,8 @@ for line in open(p).read().split("\n"):
     out.append(line)
     if line == "      - CBOX_CONTEXT_PROFILE=full":
         out.append("      - CBOX_REVIEW=ask")
+    if line.startswith("      - CBOX_HERMES_DELEGATE="):
+        out.append("      - CBOX_HERMES_DELEGATE_CONTEXT_LENGTH=65536")
 open(p, "w").write("\n".join(out))
 PY
 }
@@ -101,7 +103,7 @@ if [ "$HAVE_BASE" = 1 ]; then
   cmp -s "$TMPBASE/def_new.yml" "$DEFEFF/docker-compose.yml" \
     || _fail "default render differs from baseline $BASE_REV:
 $(diff "$TMPBASE/def_new.yml" "$DEFEFF/docker-compose.yml")"
-  _ok "default render is byte-identical to baseline $BASE_REV except the one CBOX_REVIEW env line"
+  _ok "default render is byte-identical to baseline $BASE_REV except the one CBOX_REVIEW env line (and the CBOX_HERMES_DELEGATE_CONTEXT_LENGTH line next to the delegate env line when hermes is on)"
 
   HEFF="$TMPBASE/defeff_h"
   mkdir -p "$HEFF"
@@ -113,7 +115,7 @@ $(diff "$TMPBASE/def_new.yml" "$DEFEFF/docker-compose.yml")"
     || _fail "default hermes+gpu render differs from baseline $BASE_REV:
 $(diff "$TMPBASE/def_h_new.yml" "$HEFF/docker-compose.yml")"
   grep -qF 'name: cbox-p' "$TMPBASE/def_h_new.yml" && grep -q 'hermes-home:' "$TMPBASE/def_h_new.yml" || _fail "hermes variant did not render the hermes volume"
-  _ok "default render with hermes and gpu is byte-identical to baseline $BASE_REV except the one CBOX_REVIEW env line"
+  _ok "default render with hermes and gpu is byte-identical to baseline $BASE_REV except the one CBOX_REVIEW env line (and the CBOX_HERMES_DELEGATE_CONTEXT_LENGTH line next to the delegate env line when hermes is on)"
   GLI="$TMPBASE/glinstall"
   mkdir -p "$GLI/generated/state" "$GLI/generated/claude-config" "$GLI/generated/hooks" "$GLI/home"
   cp -r "$INSTALL_DIR/etc" "$INSTALL_DIR/templates" "$INSTALL_DIR/lib" "$GLI/"
@@ -137,7 +139,7 @@ $(diff "$TMPBASE/def_h_new.yml" "$HEFF/docker-compose.yml")"
     || _fail "global default render differs from baseline $BASE_REV:
 $(diff "$TMPBASE/glob_new.yml" "$GLI/docker-compose.yml")"
   grep -qxF -- '      - CBOX_REVIEW=ask' "$TMPBASE/glob_new.yml" || _fail "global render lacks the CBOX_REVIEW env line"
-  _ok "global default render is byte-identical to baseline $BASE_REV except the one CBOX_REVIEW env line"
+  _ok "global default render is byte-identical to baseline $BASE_REV except the one CBOX_REVIEW env line (and the CBOX_HERMES_DELEGATE_CONTEXT_LENGTH line next to the delegate env line when hermes is on)"
 else
   echo "skip: baseline $BASE_REV not reachable from this checkout - byte-identity diff not run"
 fi

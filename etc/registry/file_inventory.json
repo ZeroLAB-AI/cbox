@@ -304,6 +304,22 @@
       "layer": "test",
       "purpose": "asserts gen_hooks_dir deploys etc/hooks/codex_usage_refresh.py and etc/hooks/claude_usage_refresh.py (and keeps deploying usage_statusline.py) into generated/hooks, with codex_mcp_shim.py and codex_mode_guard.py beside the codex refresher"
     },
+    "lib/test_hyperqwen_lifecycle.sh": {
+      "layer": "test",
+      "purpose": "hyperqwen lifecycle with stubbed docker: prepare on a temporary egress network before the first up and whenever the marker names another image or models source, serving never gets that network, failed prepare restores serving, down never removes volumes, session heal never downloads, models path guard, adopt refusal, mode-off and in-container refusals, gpu overlap warning"
+    },
+    "lib/test_hyperqwen_network.sh": {
+      "layer": "test",
+      "purpose": "scope networks attach every running local backend under its own alias (ollama, hyperqwen), ollama-only attach unchanged, stale sweep treats hyperqwen containers as infra members"
+    },
+    "lib/test_hyperqwen_render.sh": {
+      "layer": "test",
+      "purpose": "hyperqwen render: owner compose and cdi overlay per setting, profile context table, models bind vs volume, invalid values refuse the render, manifest round trip, backend table and url lookup, no_proxy and hermes context per backend, ollama gpu device overlay, default renders byte-identical to the pre-hyperqwen baseline"
+    },
+    "lib/test_llm_use.sh": {
+      "layer": "test",
+      "purpose": "cbox llm use/status: which consumer keys are written per provider combination, refusal of a backend that is off, ollama model resolution order, gpu overlap warning"
+    },
     "lib/test_run_egress_lockdown_gate.sh": {
       "layer": "test",
       "purpose": "asserts cbox run applies a configured egress/netaccess lockdown exactly once, only after login credentials exist for the engine being run (mount and volume mode, global and isolated scope), and never re-applies once marked applied"
@@ -539,6 +555,10 @@
     "lib/test_settings_merge_statusline.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite; asserts merge_settings_json only installs cbox's statusLine when the target has none, and leaves an existing user statusLine untouched; an older cbox-owned statusLine gains refreshInterval 60 unless the user set one, and the shipped statusLine pins refreshInterval 60"
+    },
+    "lib/test_setup_hyperqwen.sh": {
+      "layer": "test",
+      "purpose": "setup step for the hyperqwen machine section and the ollama gpu device, consumer endpoint prefill from the first active backend, classic preset picks hyperqwen when it is on"
     },
     "lib/test_usage_statusline.py": {
       "layer": "test",

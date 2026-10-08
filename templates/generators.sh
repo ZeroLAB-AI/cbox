@@ -389,13 +389,15 @@ _cbox_hermes_delegate_defaults() {
 _cbox_render_mcp_for_target() {
   local servers_file="$1" expanded="$2" hooks_dir="$3" progress_flag="$4" target="$5"
   local user_dir="${CBOX_USER_DIR-$HOME/.config/cbox/user}"
-  local netmap_active="off"
+  local netmap_active="off" delegate_context=""
   _cbox_netaccess_active && netmap_active="on"
+  delegate_context="$(_cbox_hermes_delegate_context_length 2>/dev/null)" || delegate_context=""
+  _cbox_hermes_validate_context_length "$delegate_context" || delegate_context=""
   if [ "$target" = codex ]; then
-    CBOX_DELEGATION_DEPTH_FOR_CODEX_CHILD=1 CBOX_NETMAP_ACTIVE="$netmap_active" \
+    CBOX_HERMES_DELEGATE_CONTEXT_LENGTH="$delegate_context" CBOX_DELEGATION_DEPTH_FOR_CODEX_CHILD=1 CBOX_NETMAP_ACTIVE="$netmap_active" \
       python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$servers_file" "$expanded" "$hooks_dir" "$progress_flag" "$target" "$user_dir"
   else
-    CBOX_DELEGATION_DEPTH_FOR_CODEX_CHILD= CBOX_NETMAP_ACTIVE="$netmap_active" \
+    CBOX_HERMES_DELEGATE_CONTEXT_LENGTH="$delegate_context" CBOX_DELEGATION_DEPTH_FOR_CODEX_CHILD= CBOX_NETMAP_ACTIVE="$netmap_active" \
       python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$servers_file" "$expanded" "$hooks_dir" "$progress_flag" "$target" "$user_dir"
   fi
 }
@@ -1059,6 +1061,9 @@ _cbox_no_proxy_hosts() {
   if [ "${CBOX_OLLAMA_MODE:-off}" = on ]; then
     hosts+=("ollama")
   fi
+  if [ "${CBOX_HYPERQWEN_MODE:-off}" = on ]; then
+    hosts+=("hyperqwen")
+  fi
   if _cbox_wg_active && _cbox_wg_client_role; then
     hosts+=("$(_cbox_wg_client_alias)")
   fi
@@ -1264,8 +1269,9 @@ EOF
       - CBOX_HERMES_MODEL_URL=${CBOX_HERMES_MODEL_URL:-}
       - CBOX_HERMES_MODEL_NAME=${CBOX_HERMES_MODEL_NAME:-}
       - CBOX_HERMES_DELEGATE=${CBOX_HERMES_DELEGATE:-off}
-      - HERMES_HOME=\${HOST_HOME}/.hermes-cbox
 EOF
+    _cbox_hermes_delegate_context_env_into "$tmp"
+    printf '      - HERMES_HOME=${HOST_HOME}/.hermes-cbox\n' >> "$tmp"
   fi
   _cbox_clip_env_into "$tmp"
   _cbox_container_exec_env_into "$tmp"
@@ -1764,8 +1770,9 @@ EOF
       - CBOX_HERMES_MODEL_URL=${CBOX_HERMES_MODEL_URL:-}
       - CBOX_HERMES_MODEL_NAME=${CBOX_HERMES_MODEL_NAME:-}
       - CBOX_HERMES_DELEGATE=${CBOX_HERMES_DELEGATE:-off}
-      - HERMES_HOME=\${HOST_HOME}/.hermes-cbox
 EOF
+    _cbox_hermes_delegate_context_env_into "$tmp"
+    printf '      - HERMES_HOME=${HOST_HOME}/.hermes-cbox\n' >> "$tmp"
   fi
   if [ "$claude_mode" = "mount" ] && [ "$session_scope" = "isolated" ]; then
     local resume_prompt="${CBOX_LIMIT_RESUME_PROMPT:-pokracuj}"
@@ -2776,10 +2783,11 @@ gen_hermes_managed_into() {
     _cbox_hermes_validate_effort "$effort" \
       || die "invalid CBOX_HERMES_EFFORT '$effort' (expected none, low, medium, or xhigh - none plus the levels the local qwen template documents)"
   fi
-  local context_length="${CBOX_OLLAMA_CONTEXT_LENGTH:-65536}"
+  local context_length
+  context_length="$(_cbox_local_context_length_for_url "$url")" || context_length=""
   if [ "$provider" = local ]; then
     _cbox_hermes_validate_context_length "$context_length" \
-      || die "invalid CBOX_OLLAMA_CONTEXT_LENGTH '$context_length' (expected a positive integer; it is the context window hermes is told to budget against)"
+      || die "invalid context window '$context_length' for $url (expected a positive integer from CBOX_OLLAMA_CONTEXT_LENGTH or the hyperqwen window; it is the context window hermes is told to budget against)"
   fi
   {
     printf 'HERMES_MANAGED_PROVIDER=%s\n' "$provider"
@@ -3972,6 +3980,10 @@ gen_ollama_owner_compose_into() {
         return 1
       }
     done
+    _ol_err="$(_cbox_config_validate_var CBOX_OLLAMA_GPU_DEVICE "${CBOX_OLLAMA_GPU_DEVICE:-all}" 2>&1)" || {
+      echo "cbox: refusing to render the ollama owner compose - CBOX_OLLAMA_GPU_DEVICE is invalid: $_ol_err" >&2
+      return 1
+    }
   fi
   local image="${CBOX_OLLAMA_IMAGE:-ollama/ollama:0.33.3}"
   local store="${CBOX_OLLAMA_STORE:-dedicated}"
@@ -4150,19 +4162,23 @@ gen_ollama_owner_gpu_into() {
     rm -f "$dir/docker-compose.gpu.yml"
     return 0
   fi
-  _cbox_write "$dir/docker-compose.gpu.yml" <<'EOF'
-services:
-  ollama:
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: cdi
-              device_ids:
-                - nvidia.com/gpu=all
-              capabilities:
-                - gpu
-EOF
+  local id ids
+  ids="$(_cbox_gpu_device_ids "${CBOX_OLLAMA_GPU_DEVICE:-all}")" || { echo "cbox: refusing to render the ollama GPU overlay - CBOX_OLLAMA_GPU_DEVICE is invalid" >&2; return 1; }
+  {
+    printf 'services:\n'
+    printf '  ollama:\n'
+    printf '    deploy:\n'
+    printf '      resources:\n'
+    printf '        reservations:\n'
+    printf '          devices:\n'
+    printf '            - driver: cdi\n'
+    printf '              device_ids:\n'
+    while IFS= read -r id; do
+      printf '                - %s\n' "$id"
+    done <<< "$ids"
+    printf '              capabilities:\n'
+    printf '                - gpu\n'
+  } | _cbox_write "$dir/docker-compose.gpu.yml"
 }
 
 _cbox_ollama_manifest_peers_hash() {
@@ -4172,13 +4188,14 @@ _cbox_ollama_manifest_peers_hash() {
 }
 
 _cbox_ollama_manifest_write() {
-  local dir="$1" name image store store_path gpu port
+  local dir="$1" name image store store_path gpu gpu_device port
   local context_length flash_attention kv_cache_type keep_alive
   name="$(_cbox_ollama_owner_name)"
   image="${CBOX_OLLAMA_IMAGE:-ollama/ollama:0.33.3}"
   store="${CBOX_OLLAMA_STORE:-dedicated}"
   store_path="$(_cbox_ollama_store_path)"
   gpu="${CBOX_OLLAMA_GPU:-off}"
+  gpu_device="${CBOX_OLLAMA_GPU_DEVICE:-all}"
   port="${CBOX_OLLAMA_PORT:-11434}"
   context_length="${CBOX_OLLAMA_CONTEXT_LENGTH:-65536}"
   flash_attention="${CBOX_OLLAMA_FLASH_ATTENTION:-on}"
@@ -4192,6 +4209,7 @@ _cbox_ollama_manifest_write() {
     printf 'store=%s\n' "$store"
     printf 'store_path=%s\n' "$store_path"
     printf 'gpu=%s\n' "$gpu"
+    printf 'gpu_device=%s\n' "$gpu_device"
     printf 'port=%s\n' "$port"
     printf 'context_length=%s\n' "$context_length"
     printf 'flash_attention=%s\n' "$flash_attention"
@@ -4224,7 +4242,7 @@ _cbox_ollama_manifest_digest() {
 _cbox_ollama_manifest_matches_current() {
   local dir="$1" want have
   [ -f "$dir/ownership.manifest" ] || return 1
-  local name image store store_path gpu port
+  local name image store store_path gpu gpu_device port
   local context_length flash_attention kv_cache_type keep_alive
   local wg_mode wg_impl wg_address wg_listen_port wg_publish_addr
   local wg_peer_endpoint wg_peer_pubkey wg_peer_address wg_keepalive wg_forwards wg_peers_hash
@@ -4233,6 +4251,7 @@ _cbox_ollama_manifest_matches_current() {
   store="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" store)" || return 1
   store_path="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" store_path)" || return 1
   gpu="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" gpu)" || return 1
+  gpu_device="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" gpu_device)" || gpu_device=all
   port="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" port)" || return 1
   context_length="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" context_length)" || context_length=65536
   flash_attention="$(_cbox_ollama_manifest_field "$dir/ownership.manifest" flash_attention)" || flash_attention=on
@@ -4254,6 +4273,7 @@ _cbox_ollama_manifest_matches_current() {
   [ "$store" = "${CBOX_OLLAMA_STORE:-dedicated}" ] || return 1
   [ "$store_path" = "$(_cbox_ollama_store_path)" ] || return 1
   [ "$gpu" = "${CBOX_OLLAMA_GPU:-off}" ] || return 1
+  [ "$gpu_device" = "${CBOX_OLLAMA_GPU_DEVICE:-all}" ] || return 1
   [ "$port" = "${CBOX_OLLAMA_PORT:-11434}" ] || return 1
   [ "$context_length" = "${CBOX_OLLAMA_CONTEXT_LENGTH:-65536}" ] || return 1
   [ "$flash_attention" = "${CBOX_OLLAMA_FLASH_ATTENTION:-on}" ] || return 1
@@ -4270,6 +4290,445 @@ _cbox_ollama_manifest_matches_current() {
   [ "$wg_keepalive" = "${CBOX_WG_KEEPALIVE:-25}" ] || return 1
   [ "$wg_forwards" = "${CBOX_WG_FORWARDS:-}" ] || return 1
   [ "$wg_peers_hash" = "$(_cbox_ollama_manifest_peers_hash)" ] || return 1
+  return 0
+}
+
+_cbox_hyperqwen_owner_name() {
+  printf 'cbox-infra-u%s-hyperqwen' "$(id -u)"
+}
+
+_cbox_hyperqwen_owner_dir() {
+  printf '%s/.config/cbox/infra/hyperqwen' "$HOME"
+}
+
+_cbox_hyperqwen_models_volume() {
+  printf 'cbox-hyperqwen-u%s-models' "$(id -u)"
+}
+
+_cbox_hyperqwen_cache_volume() {
+  printf 'cbox-hyperqwen-u%s-cache' "$(id -u)"
+}
+
+_cbox_hyperqwen_max_len() {
+  local explicit="${CBOX_HYPERQWEN_MAX_LEN:-}"
+  if [ -n "$explicit" ]; then
+    printf '%s' "$explicit"
+    return 0
+  fi
+  case "${CBOX_HYPERQWEN_SPEC:-mtp}:${CBOX_HYPERQWEN_CTX:-long}" in
+    dflash2:fast) printf '65536' ;;
+    dflash2:long) printf '131072' ;;
+    dflash2:huge) printf '245760' ;;
+    mtp:fast) printf '65536' ;;
+    mtp:long) printf '150000' ;;
+    mtp:huge) printf '200000' ;;
+    *) return 1 ;;
+  esac
+}
+
+_cbox_hyperqwen_prefix_cache() {
+  if [ "${CBOX_HYPERQWEN_SPEC:-mtp}" = mtp ] && [ "${CBOX_HYPERQWEN_CTX:-long}" = huge ]; then
+    printf '0'
+  else
+    printf '1'
+  fi
+}
+
+_cbox_gpu_device_ids() {
+  local val="${1:-all}" rest entry
+  if [ "$val" = all ]; then
+    printf 'nvidia.com/gpu=all\n'
+    return 0
+  fi
+  rest="$val,"
+  while [ -n "$rest" ]; do
+    entry="${rest%%,*}"
+    rest="${rest#*,}"
+    [ -n "$entry" ] || continue
+    case "$entry" in
+      *[!A-Za-z0-9-]*) return 1 ;;
+    esac
+    printf 'nvidia.com/gpu=%s\n' "$entry"
+  done
+}
+
+_cbox_gpu_devices_overlap() {
+  local a="${1:-all}" b="${2:-all}" ea eb rest_a rest_b
+  [ "$a" = all ] && return 0
+  [ "$b" = all ] && return 0
+  rest_a="$a,"
+  while [ -n "$rest_a" ]; do
+    ea="${rest_a%%,*}"
+    rest_a="${rest_a#*,}"
+    [ -n "$ea" ] || continue
+    rest_b="$b,"
+    while [ -n "$rest_b" ]; do
+      eb="${rest_b%%,*}"
+      rest_b="${rest_b#*,}"
+      [ -n "$eb" ] || continue
+      [ "$ea" = "$eb" ] && return 0
+    done
+  done
+  return 1
+}
+
+_cbox_local_backends() {
+  printf 'ollama\nhyperqwen\n'
+}
+
+_cbox_local_backend_active() {
+  case "$1" in
+    ollama) [ "${CBOX_OLLAMA_MODE:-off}" = on ] ;;
+    hyperqwen) [ "${CBOX_HYPERQWEN_MODE:-off}" = on ] ;;
+    *) return 1 ;;
+  esac
+}
+
+_cbox_local_backend_alias() {
+  case "$1" in
+    ollama|hyperqwen) printf '%s' "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
+_cbox_local_backend_port() {
+  case "$1" in
+    ollama) printf '11434' ;;
+    hyperqwen) printf '18020' ;;
+    *) return 1 ;;
+  esac
+}
+
+_cbox_local_backend_url() {
+  case "$1" in
+    ollama) printf 'http://ollama:11434' ;;
+    hyperqwen) printf 'http://hyperqwen:18020' ;;
+    *) return 1 ;;
+  esac
+}
+
+_cbox_local_backend_context_length() {
+  case "$1" in
+    ollama) printf '%s' "${CBOX_OLLAMA_CONTEXT_LENGTH:-65536}" ;;
+    hyperqwen) _cbox_hyperqwen_max_len ;;
+    *) return 1 ;;
+  esac
+}
+
+_cbox_local_backend_served_model() {
+  case "$1" in
+    ollama) return 0 ;;
+    hyperqwen) printf 'qwen3.8-27b' ;;
+    *) return 1 ;;
+  esac
+}
+
+_cbox_local_backend_of_url() {
+  local host b
+  host="$(_cbox_url_host "${1:-}")"
+  [ -n "$host" ] || return 1
+  for b in $(_cbox_local_backends); do
+    if [ "$host" = "$(_cbox_local_backend_alias "$b")" ]; then
+      printf '%s' "$b"
+      return 0
+    fi
+  done
+  return 1
+}
+
+_cbox_local_context_length_for_url() {
+  local backend
+  if backend="$(_cbox_local_backend_of_url "${1:-}")"; then
+    _cbox_local_backend_context_length "$backend"
+    return $?
+  fi
+  printf '%s' "${CBOX_OLLAMA_CONTEXT_LENGTH:-65536}"
+}
+
+_cbox_hermes_delegate_context_length() {
+  local url="${CBOX_HERMES_DELEGATE_BASE_URL:-}"
+  [ -n "$url" ] || url="${CBOX_HERMES_MODEL_URL:-}"
+  [ -n "$url" ] || url="${CBOX_LOCAL_MODEL_URL:-}"
+  _cbox_local_context_length_for_url "$url"
+}
+
+_cbox_hermes_delegate_context_env_into() {
+  local n
+  n="$(_cbox_hermes_delegate_context_length)" || n=""
+  _cbox_hermes_validate_context_length "$n" \
+    || die "invalid hermes delegate context length '$n' (expected a positive integer from CBOX_OLLAMA_CONTEXT_LENGTH or the hyperqwen window)"
+  printf '      - CBOX_HERMES_DELEGATE_CONTEXT_LENGTH=%s\n' "$n" >> "$1"
+}
+
+_cbox_hyperqwen_kv_offload_enabled() {
+  [ "${CBOX_HYPERQWEN_KV_OFFLOAD:-off}" = on ]
+}
+
+_cbox_hyperqwen_uint_or() {
+  case "$1" in
+    ''|*[!0-9]*) printf '%s' "$2" ;;
+    *) printf '%s' "$((10#$1))" ;;
+  esac
+}
+
+_cbox_hyperqwen_kv_offload_mib() {
+  _cbox_hyperqwen_uint_or "${CBOX_HYPERQWEN_KV_OFFLOAD_MIB:-}" 19072
+}
+
+_cbox_hyperqwen_ram_reserve_gib() {
+  _cbox_hyperqwen_uint_or "${CBOX_HYPERQWEN_RAM_RESERVE_GIB:-}" 16
+}
+
+_cbox_hyperqwen_kv_offload_gib_text() {
+  local mib milli
+  mib="$(_cbox_hyperqwen_kv_offload_mib)"
+  milli=$(( (mib * 1000 + 512) / 1024 ))
+  printf '%d.%03d' "$((milli / 1000))" "$((milli % 1000))"
+}
+
+_cbox_hyperqwen_shm_bytes() {
+  local val="$1" n unit=1
+  case "$val" in
+    *k) n="${val%k}"; unit=1024 ;;
+    *m) n="${val%m}"; unit=1048576 ;;
+    *g) n="${val%g}"; unit=1073741824 ;;
+    *) n="$val" ;;
+  esac
+  printf '%s' "$((10#$n * unit))"
+}
+
+_cbox_hyperqwen_effective_shm() {
+  local raw="${CBOX_HYPERQWEN_SHM_SIZE:-8g}" base off margin need
+  if ! _cbox_hyperqwen_kv_offload_enabled; then
+    printf '%s' "$raw"
+    return 0
+  fi
+  base="$(_cbox_hyperqwen_shm_bytes "$raw")"
+  off=$(( $(_cbox_hyperqwen_kv_offload_mib) * 1048576 ))
+  margin=$(( (off + 8589934591) / 8589934592 ))
+  [ "$margin" -ge 2 ] || margin=2
+  need=$(( off + margin * 1073741824 ))
+  if [ "$base" -ge "$need" ]; then
+    printf '%s' "$base"
+  else
+    printf '%s' "$need"
+  fi
+}
+
+_cbox_hyperqwen_restart_policy() {
+  if _cbox_hyperqwen_kv_offload_enabled; then
+    printf 'no'
+  else
+    printf 'unless-stopped'
+  fi
+}
+
+_cbox_hyperqwen_validate_var() {
+  if command -v _cbox_config_validate_var >/dev/null 2>&1; then
+    _cbox_config_validate_var "$1" "$2"
+    return $?
+  fi
+  command -v _cbox_reg_validate_var >/dev/null 2>&1 || {
+    . "$INSTALL_DIR/templates/validator_lib.sh"
+    . "$INSTALL_DIR/templates/validator_dispatch.sh"
+  }
+  _cbox_reg_validate_var "$1" "$2"
+}
+
+_cbox_hyperqwen_validate_all() {
+  local _hq_pair _hq_var _hq_def _hq_val _hq_err
+  for _hq_pair in CBOX_HYPERQWEN_IMAGE=ghcr.io/syv-ai/hyperqwen:sha-53557bc CBOX_HYPERQWEN_GPU_DEVICE=all CBOX_HYPERQWEN_MODELS_PATH= CBOX_HYPERQWEN_SPEC=dflash2 CBOX_HYPERQWEN_CTX=fast CBOX_HYPERQWEN_MAX_LEN= CBOX_HYPERQWEN_SHM_SIZE=8g CBOX_HYPERQWEN_KV_OFFLOAD=off CBOX_HYPERQWEN_KV_OFFLOAD_MIB=19072 CBOX_HYPERQWEN_RAM_RESERVE_GIB=16; do
+    _hq_var="${_hq_pair%%=*}"
+    _hq_def="${_hq_pair#*=}"
+    _hq_val="$(eval "printf '%s' \"\${$_hq_var:-}\"")"
+    [ -n "$_hq_val" ] || _hq_val="$_hq_def"
+    _hq_err="$(_cbox_hyperqwen_validate_var "$_hq_var" "$_hq_val" 2>&1)" || {
+      echo "cbox: refusing to render the hyperqwen owner compose - $_hq_var is invalid: $_hq_err" >&2
+      return 1
+    }
+  done
+  local models_path="${CBOX_HYPERQWEN_MODELS_PATH:-}"
+  if [ -n "$models_path" ]; then
+    if [ -L "$models_path" ] || [ ! -d "$models_path" ] || [ ! -O "$models_path" ]; then
+      echo "cbox: refusing to render the hyperqwen owner compose - CBOX_HYPERQWEN_MODELS_PATH '$models_path' must be an existing directory owned by you and not a symlink" >&2
+      return 1
+    fi
+  fi
+  return 0
+}
+
+gen_hyperqwen_owner_compose_into() {
+  local dir="$1"
+  if [ "${CBOX_HYPERQWEN_MODE:-off}" != on ]; then
+    rm -f "$dir/docker-compose.yml" "$dir/docker-compose.gpu.yml"
+    return 0
+  fi
+  _cbox_hyperqwen_validate_all || return 1
+  local image="${CBOX_HYPERQWEN_IMAGE:-ghcr.io/syv-ai/hyperqwen:sha-53557bc}"
+  local spec="${CBOX_HYPERQWEN_SPEC:-mtp}"
+  local ctx="${CBOX_HYPERQWEN_CTX:-long}"
+  local models_path="${CBOX_HYPERQWEN_MODELS_PATH:-}"
+  local max_len prefix_cache name tmp models_vol cache_vol
+  max_len="$(_cbox_hyperqwen_max_len)" || { echo "cbox: refusing to render the hyperqwen owner compose - no context default for $spec/$ctx" >&2; return 1; }
+  prefix_cache="$(_cbox_hyperqwen_prefix_cache)"
+  name="$(_cbox_hyperqwen_owner_name)"
+  models_vol="$(_cbox_hyperqwen_models_volume)"
+  cache_vol="$(_cbox_hyperqwen_cache_volume)"
+  local restart shm_out
+  restart="$(_cbox_hyperqwen_restart_policy)"
+  shm_out="$(_cbox_hyperqwen_effective_shm)"
+  if _cbox_hyperqwen_kv_offload_enabled; then
+    if [ "$spec" != mtp ] || [ "$ctx" != long ] || [ "$prefix_cache" != 1 ]; then
+      echo "cbox: refusing to render the hyperqwen owner compose - CBOX_HYPERQWEN_KV_OFFLOAD=on is supported only with CBOX_HYPERQWEN_SPEC=mtp and CBOX_HYPERQWEN_CTX=long (prefix cache on); got $spec/$ctx - set those or turn the offload off (CBOX_HYPERQWEN_KV_OFFLOAD=off)" >&2
+      return 1
+    fi
+  fi
+  mkdir -p "$dir"
+  tmp="$(mktemp "$dir/.cbox.XXXXXX")"
+  cat > "$tmp" <<YML
+name: "$name"
+services:
+  hyperqwen:
+    image: "$image"
+    command: ["single"]
+    restart: "$restart"
+    labels:
+      cbox.kind: infra
+      cbox.component: hyperqwen
+      cbox.owner: $name
+    environment:
+      - "HOME=/cache"
+      - "PORT=18020"
+      - "SPEC=$spec"
+      - "CTX=$ctx"
+      - "MAX_LEN=$max_len"
+      - "PREFIX_CACHE=$prefix_cache"
+      - "PREPARE=0"
+      - "VLLM_NO_USAGE_STATS=1"
+      - "DO_NOT_TRACK=1"
+YML
+  if _cbox_hyperqwen_kv_offload_enabled; then
+    printf '      - "EXTRA_ARGS=--kv-offloading-size %s --kv-offloading-backend native"\n' "$(_cbox_hyperqwen_kv_offload_gib_text)" >> "$tmp"
+    printf '      - "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False"\n' >> "$tmp"
+    printf '      - "VLLM_USE_SIMPLE_KV_OFFLOAD=0"\n' >> "$tmp"
+  fi
+  cat >> "$tmp" <<YML
+    shm_size: "$shm_out"
+    volumes:
+YML
+  if [ -n "$models_path" ]; then
+    printf "      - '%s:/app/models'\n" "$models_path" >> "$tmp"
+  else
+    printf '      - %s:/app/models\n' "$models_vol" >> "$tmp"
+  fi
+  cat >> "$tmp" <<YML
+      - $cache_vol:/cache
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:18020/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 900s
+networks:
+  default:
+    internal: true
+    labels:
+      cbox.kind: infra
+      cbox.component: hyperqwen-net
+      cbox.owner: $name
+volumes:
+YML
+  if [ -z "$models_path" ]; then
+    cat >> "$tmp" <<YML
+  $models_vol:
+    name: $models_vol
+    external: true
+YML
+  fi
+  cat >> "$tmp" <<YML
+  $cache_vol:
+    name: $cache_vol
+    external: true
+YML
+  chmod 0644 "$tmp"
+  mv "$tmp" "$dir/docker-compose.yml"
+  gen_hyperqwen_owner_gpu_into "$dir"
+}
+
+gen_hyperqwen_owner_gpu_into() {
+  local dir="$1" id ids
+  ids="$(_cbox_gpu_device_ids "${CBOX_HYPERQWEN_GPU_DEVICE:-all}")" || { echo "cbox: refusing to render the hyperqwen GPU overlay - CBOX_HYPERQWEN_GPU_DEVICE is invalid" >&2; return 1; }
+  {
+    printf 'services:\n'
+    printf '  hyperqwen:\n'
+    printf '    deploy:\n'
+    printf '      resources:\n'
+    printf '        reservations:\n'
+    printf '          devices:\n'
+    printf '            - driver: cdi\n'
+    printf '              device_ids:\n'
+    while IFS= read -r id; do
+      printf '                - %s\n' "$id"
+    done <<< "$ids"
+    printf '              capabilities:\n'
+    printf '                - gpu\n'
+  } | _cbox_write "$dir/docker-compose.gpu.yml"
+}
+
+_cbox_hyperqwen_manifest_write() {
+  local dir="$1"
+  {
+    printf 'schema=1\n'
+    printf 'owner=%s\n' "$(_cbox_hyperqwen_owner_name)"
+    printf 'uid=%s\n' "$(id -u)"
+    printf 'image=%s\n' "${CBOX_HYPERQWEN_IMAGE:-ghcr.io/syv-ai/hyperqwen:sha-53557bc}"
+    printf 'gpu_device=%s\n' "${CBOX_HYPERQWEN_GPU_DEVICE:-all}"
+    printf 'models_path=%s\n' "${CBOX_HYPERQWEN_MODELS_PATH:-}"
+    printf 'spec=%s\n' "${CBOX_HYPERQWEN_SPEC:-mtp}"
+    printf 'ctx=%s\n' "${CBOX_HYPERQWEN_CTX:-long}"
+    printf 'max_len=%s\n' "$(_cbox_hyperqwen_max_len)"
+    printf 'prefix_cache=%s\n' "$(_cbox_hyperqwen_prefix_cache)"
+    printf 'shm_size=%s\n' "${CBOX_HYPERQWEN_SHM_SIZE:-8g}"
+    printf 'kv_offload=%s\n' "${CBOX_HYPERQWEN_KV_OFFLOAD:-off}"
+    printf 'kv_offload_mib=%s\n' "$(_cbox_hyperqwen_kv_offload_mib)"
+    printf 'ram_reserve_gib=%s\n' "$(_cbox_hyperqwen_ram_reserve_gib)"
+  } | _cbox_write "$dir/ownership.manifest"
+}
+
+_cbox_hyperqwen_manifest_matches_current() {
+  local mf="$1/ownership.manifest" have pair key
+  [ -f "$mf" ] || return 1
+  local -a pairs=(
+    "owner=$(_cbox_hyperqwen_owner_name)"
+    "uid=$(id -u)"
+    "image=${CBOX_HYPERQWEN_IMAGE:-ghcr.io/syv-ai/hyperqwen:sha-53557bc}"
+    "gpu_device=${CBOX_HYPERQWEN_GPU_DEVICE:-all}"
+    "models_path=${CBOX_HYPERQWEN_MODELS_PATH:-}"
+    "spec=${CBOX_HYPERQWEN_SPEC:-mtp}"
+    "ctx=${CBOX_HYPERQWEN_CTX:-long}"
+    "max_len=$(_cbox_hyperqwen_max_len)"
+    "prefix_cache=$(_cbox_hyperqwen_prefix_cache)"
+    "shm_size=${CBOX_HYPERQWEN_SHM_SIZE:-8g}"
+  )
+  local -a opt_pairs=(
+    "kv_offload=${CBOX_HYPERQWEN_KV_OFFLOAD:-off}=off"
+    "kv_offload_mib=$(_cbox_hyperqwen_kv_offload_mib)=19072"
+    "ram_reserve_gib=$(_cbox_hyperqwen_ram_reserve_gib)=16"
+  )
+  for pair in "${pairs[@]}"; do
+    key="${pair%%=*}"
+    have="$(_cbox_manifest_field "$mf" "$key")" || return 1
+    [ "$have" = "${pair#*=}" ] || return 1
+  done
+  local want fallback
+  for pair in "${opt_pairs[@]}"; do
+    key="${pair%%=*}"
+    fallback="${pair##*=}"
+    want="${pair#*=}"
+    want="${want%=*}"
+    have="$(_cbox_manifest_field "$mf" "$key")" || have="$fallback"
+    [ "$have" = "$want" ] || return 1
+  done
   return 0
 }
 

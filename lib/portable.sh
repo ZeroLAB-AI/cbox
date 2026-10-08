@@ -52,6 +52,15 @@ _cbox_ismount() {
   return $?
 }
 
+_cbox_mem_available_kib() {
+  local kib
+  kib="$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null)" || return 1
+  case "$kib" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s' "$kib"
+}
+
 _cbox_xdg_runtime_dir() {
   if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
     printf '%s' "$XDG_RUNTIME_DIR"
