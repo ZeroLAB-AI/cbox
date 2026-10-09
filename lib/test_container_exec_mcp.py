@@ -235,6 +235,7 @@ class SocketAbsentToolLevelTests(unittest.TestCase):
         result = MOD.run_container_list({})
         self.assertTrue(result["isError"])
         self.assertIn("operator", result["content"][0]["text"])
+        self.assertIn("container-exec row of 'cbox doctor'", result["content"][0]["text"])
 
     def test_container_exec_bridge_unavailable_is_a_tool_error_not_a_crash(self):
         result = MOD.run_container_exec(

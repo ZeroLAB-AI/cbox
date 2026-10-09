@@ -1,0 +1,44 @@
+name: "cbox-infra-u@UID@-hyperqwen"
+services:
+  hyperqwen:
+    image: "ghcr.io/syv-ai/hyperqwen:sha-53557bc@sha256:25bfa39ca4b71d5ba5ea32e5486c841dd4fb8b6429846c012ec5d1b06b2457a6"
+    command: ["single"]
+    restart: "unless-stopped"
+    labels:
+      cbox.kind: infra
+      cbox.component: hyperqwen
+      cbox.owner: cbox-infra-u@UID@-hyperqwen
+    environment:
+      - "HOME=/cache"
+      - "PORT=18020"
+      - "SPEC=mtp"
+      - "CTX=long"
+      - "MAX_LEN=150000"
+      - "PREFIX_CACHE=1"
+      - "PREPARE=0"
+      - "VLLM_NO_USAGE_STATS=1"
+      - "DO_NOT_TRACK=1"
+    shm_size: "16g"
+    volumes:
+      - cbox-hyperqwen-u@UID@-models:/app/models
+      - cbox-hyperqwen-u@UID@-cache:/cache
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:18020/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 900s
+networks:
+  default:
+    internal: true
+    labels:
+      cbox.kind: infra
+      cbox.component: hyperqwen-net
+      cbox.owner: cbox-infra-u@UID@-hyperqwen
+volumes:
+  cbox-hyperqwen-u@UID@-models:
+    name: cbox-hyperqwen-u@UID@-models
+    external: true
+  cbox-hyperqwen-u@UID@-cache:
+    name: cbox-hyperqwen-u@UID@-cache
+    external: true

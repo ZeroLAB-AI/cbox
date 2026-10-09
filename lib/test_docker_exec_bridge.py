@@ -391,5 +391,156 @@ class DockerExecBridgeTests(unittest.TestCase):
                 self._stop_bridge(originals, thread, stop)
 
 
+FAKE_DOCKER = r"""#!/usr/bin/env python3
+import json
+import sys
+
+STATE = json.load(open(__file__ + ".json"))
+args = sys.argv[1:]
+if args[:2] == ["network", "ls"]:
+    print("\n".join(STATE["networks"].keys()))
+elif args[:2] == ["network", "inspect"]:
+    name = args[2]
+    if name not in STATE["networks"]:
+        sys.stderr.write("Error: No such network: %s\n" % name)
+        sys.exit(1)
+    print(json.dumps([STATE["networks"][name]]))
+elif args[:1] == ["inspect"]:
+    cid = args[1]
+    if cid not in STATE["containers"]:
+        sys.stderr.write("Error: No such object: %s\n" % cid)
+        sys.exit(1)
+    print(json.dumps([STATE["containers"][cid]]))
+else:
+    sys.exit(2)
+"""
+
+
+def net_doc(name, driver="bridge", labels=None, subnet="10.1.0.0/24", members=None):
+    ipam = [{"Subnet": subnet}] if subnet else []
+    containers = {}
+    for cid, cname in (members or {}).items():
+        containers[cid] = {"Name": cname, "IPv4Address": "10.1.0.5/24"}
+    return {"Name": name, "Driver": driver, "Labels": labels or {}, "IPAM": {"Config": ipam}, "Containers": containers}
+
+
+def make_fake_docker(tmp, mount_source=None):
+    networks = {
+        "app_net": net_doc("app_net", subnet="10.1.0.0/24", members={"c1": "app"}),
+        "other_net": net_doc("other_net", subnet="10.2.0.0/24", members={"c2": "worker"}),
+        "host": net_doc("host", driver="host", subnet=None),
+        "cbox_internal": net_doc(
+            "cbox_internal",
+            labels={"com.docker.compose.project": "cbox", "com.docker.compose.network": "internal"},
+            subnet="172.30.0.0/24", members={"c3": "cbox-main"}),
+        "ollama_net": net_doc("ollama_net", labels={"cbox.kind": "infra"}, subnet="10.9.0.0/24", members={"c4": "ollama"}),
+        "v6_net": net_doc("v6_net", subnet=None, members={"c5": "v6only"}),
+        "mac_net": net_doc("mac_net", driver="macvlan", subnet="10.7.0.0/24", members={"c6": "macvlan-app"}),
+        "foreign_internal": net_doc(
+            "foreign_internal",
+            labels={"com.docker.compose.project": "shop", "com.docker.compose.network": "internal"},
+            subnet="10.5.0.0/24", members={"c7": "shop-db"}),
+    }
+    mounts = []
+    if mount_source:
+        mounts = [{"Type": "bind", "Source": mount_source, "Destination": "/data"}]
+    containers = {}
+    for cid in ("c1", "c2", "c3", "c4", "c5", "c6", "c7"):
+        doc = container_doc()
+        doc["Mounts"] = list(mounts) if cid == "c1" else []
+        containers[cid] = doc
+    path = os.path.join(tmp, "docker")
+    with open(path, "w", encoding="ascii") as handle:
+        handle.write(FAKE_DOCKER)
+    os.chmod(path, 0o755)
+    with open(path + ".json", "w", encoding="ascii") as handle:
+        json.dump({"networks": networks, "containers": containers}, handle)
+    return path
+
+
+class AllNetworksTests(unittest.TestCase):
+    def test_eligible_networks_follow_the_netaccess_scope_all_rules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            docker = make_fake_docker(tmp)
+            names = MOD.eligible_networks(docker, "cbox")
+            self.assertEqual(sorted(names), ["app_net", "foreign_internal", "other_net"])
+            for excluded in ("host", "cbox_internal", "ollama_net", "v6_net", "mac_net"):
+                self.assertNotIn(excluded, names)
+
+    def test_missing_project_excludes_every_compose_internal_or_egress_network(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            docker = make_fake_docker(tmp)
+            names = MOD.eligible_networks(docker, "")
+            self.assertEqual(sorted(names), ["app_net", "other_net"])
+
+    def test_handler_under_all_lists_only_eligible_network_members(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            docker = make_fake_docker(tmp)
+            handler = MOD.Handler(docker, [], [], 30, 4096, os.path.join(tmp, "audit.jsonl"), True, "cbox")
+            listed = handler.handle({"op": "list"})
+            names = sorted(item["name"] for item in listed["containers"])
+            self.assertEqual(names, ["app", "shop-db", "worker"])
+
+    def test_handler_under_all_still_applies_every_deny_class(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            docker = make_fake_docker(tmp)
+            state_path = docker + ".json"
+            with open(state_path, encoding="ascii") as handle:
+                state = json.load(handle)
+            state["containers"]["c2"]["HostConfig"]["Privileged"] = True
+            with open(state_path, "w", encoding="ascii") as handle:
+                json.dump(state, handle)
+            handler = MOD.Handler(docker, [], [], 30, 4096, os.path.join(tmp, "audit.jsonl"), True, "cbox")
+            listed = handler.handle({"op": "list"})
+            blocked = {item["name"]: item["blockedReason"] for item in listed["containers"]}
+            self.assertEqual(blocked["worker"], "privileged container")
+            self.assertIsNone(blocked["app"])
+
+    def test_handler_under_all_sees_networks_created_after_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            docker = make_fake_docker(tmp)
+            handler = MOD.Handler(docker, [], [], 30, 4096, os.path.join(tmp, "audit.jsonl"), True, "cbox")
+            before = sorted(item["name"] for item in handler.handle({"op": "list"})["containers"])
+            state_path = docker + ".json"
+            with open(state_path, encoding="ascii") as handle:
+                state = json.load(handle)
+            state["networks"]["late_net"] = net_doc("late_net", subnet="10.3.0.0/24", members={"c8": "late"})
+            state["containers"]["c8"] = container_doc()
+            with open(state_path, "w", encoding="ascii") as handle:
+                json.dump(state, handle)
+            after = sorted(item["name"] for item in handler.handle({"op": "list"})["containers"])
+            self.assertNotIn("late", before)
+            self.assertIn("late", after)
+
+    def test_workspace_guard_stays_an_opt_in_under_all(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = os.path.join(tmp, "outside")
+            inside = os.path.join(tmp, "inside")
+            os.makedirs(outside)
+            os.makedirs(inside)
+            docker = make_fake_docker(tmp, mount_source=outside)
+            unguarded = MOD.Handler(docker, [], [], 30, 4096, os.path.join(tmp, "a.jsonl"), True, "cbox")
+            blocked = {i["name"]: i["blockedReason"] for i in unguarded.handle({"op": "list"})["containers"]}
+            self.assertIsNone(blocked["app"])
+            guarded = MOD.Handler(docker, [], [os.path.realpath(inside)], 30, 4096, os.path.join(tmp, "b.jsonl"), True, "cbox")
+            blocked = {i["name"]: i["blockedReason"] for i in guarded.handle({"op": "list"})["containers"]}
+            self.assertEqual(blocked["app"], "bind mount outside workspace scope")
+
+    def test_resolution_failure_is_an_error_not_an_open_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            handler = MOD.Handler(os.path.join(tmp, "missing-docker"), [], [], 30, 4096, os.path.join(tmp, "audit.jsonl"), True, "cbox")
+            with self.assertRaises(RuntimeError):
+                handler.handle({"op": "list"})
+
+    def test_main_requires_exactly_one_network_source(self):
+        base = ["--sock-dir", "/tmp/x", "--parent-pid", "1", "--parent-start", "1", "--audit-path", "/tmp/a.jsonl"]
+        with self.assertRaises(ValueError):
+            MOD.main(base)
+        with self.assertRaises(ValueError):
+            MOD.main(base + ["--networks", "a", "--all-networks"])
+        with self.assertRaises(ValueError):
+            MOD.main(base + ["--all-networks", "--project", "bad name"])
+
+
 if __name__ == "__main__":
     unittest.main()

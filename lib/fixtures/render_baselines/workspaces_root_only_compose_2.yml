@@ -1,0 +1,99 @@
+name: cbox-p@ROOTHASH@
+services:
+  cbox:
+    image: testimg
+    init: true
+    stdin_open: true
+    tty: true
+    restart: "no"
+    working_dir: @TMP@/pw/root
+    labels:
+      cbox.kind: isolated
+      cbox.root: "@TMP@/pw/root"
+      cbox.effdir: "@TMP@/eff_id"
+      cbox.phash: "@ROOTHASH@"
+      cbox.imghash: "testhash123456"
+    environment:
+      - HOST_USER=${HOST_USER}
+      - HOST_UID=${HOST_UID}
+      - HOST_GID=${HOST_GID}
+      - HOST_HOME=${HOST_HOME}
+      - CODEX_GUARD_CONFIG=${HOST_HOME}/.claude/hooks/codex_scope.container.json
+      - CODEX_GUARD_AUDIT=${HOST_HOME}/.claude/codex_guard_audit.container.jsonl
+      - CODEX_GUARD_EXTRA_ROOTS=@TMP@/pw/root
+      - CBOX_MANAGED_DIRS=${HOST_HOME}/.claude-cbox:${HOST_HOME}/.claude/projects/@TMPSLUG@-pw-root
+      - CBOX_RUNTIME=container
+      - CBOX_CONTEXT_PROFILE=full
+      - DISABLE_AUTOUPDATER=1
+      - CBOX_SESSION_MULTIPLEX=off
+      - CBOX_PROFILE=default
+      - CLAUDE_CONFIG_DIR=${HOST_HOME}/.claude-cbox
+      - CLAUDE_SECURESTORAGE_CONFIG_DIR=${HOST_HOME}/.claude
+      - CBOX_SCOPE_ROOT=@TMP@/pw/root
+      - CBOX_SCOPE_SLUG=@TMPSLUG@-pw-root
+      - CBOX_LIMIT_AUTORESUME=off
+      - CBOX_REGULATOR_AUTORESUME=on
+      - CBOX_SAFEGUARD_AUTOCONFIRM=off
+      - CBOX_LIMIT_RESUME_DELAY=10
+      - CBOX_LIMIT_RESUME_PROMPT=pokracuj
+      - CBOX_LIMIT_RESUME_STAGGER=3
+      - CBOX_LIMIT_RESUME_MAX_PER_DAY=10
+      - CBOX_CLIP_SOCK=/run/cbox-clip/clip.sock
+      - 'ANTHROPIC_DEFAULT_FABLE_MODEL=claude-fable-5[1m]'
+      - 'ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5-5[1m]'
+      - 'CBOX_AGENT_MODEL_BAN=fable-5-1'
+      - 'CBOX_AGENT_MODEL_DENY=opus-4'
+      - TZ=UTC
+    volumes:
+      - @TMP@/run/cbox-clip-p@ROOTHASH@:/run/cbox-clip
+      - @INSTALL@/etc/clipboard/wl_paste_shim.py:/usr/local/bin/wl-paste:ro
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - @TMP@/pw/root:@TMP@/pw/root:rw
+      - @INSTALL@/lib/cbox_session_bridge.py:/opt/cbox/cbox_session_bridge.py:ro
+      - @TMP@/home/.claude:${HOST_HOME}/.claude:rw
+      - @TMP@/home/.claude/hooks:${HOST_HOME}/.claude/hooks:ro
+      - @TMP@/home/.claude/settings.json:${HOST_HOME}/.claude/settings.json:rw
+      - @INSTALL@/generated/managed-settings.json:/etc/claude-code/managed-settings.json:ro
+      - @TMP@/home/.claude.json:${HOST_HOME}/.claude.json:ro
+      - @TMP@/home/.claude/CLAUDE.md:${HOST_HOME}/.claude/CLAUDE.md:ro
+      - @TMP@/home/.claude/agents:${HOST_HOME}/.claude/agents:ro
+      - @TMP@/home/.claude/policies:${HOST_HOME}/.claude/policies:ro
+      - @TMP@/home/.claude/templates:${HOST_HOME}/.claude/templates:ro
+      - @TMP@/eff_id/claude-config:${HOST_HOME}/.claude-cbox:rw
+      - @TMP@/home/.claude/commands:${HOST_HOME}/.claude-cbox/commands:ro
+      - @TMP@/home/.claude/skills:${HOST_HOME}/.claude-cbox/skills:ro
+      - @TMP@/home/.claude/rules:${HOST_HOME}/.claude-cbox/rules:ro
+      - @TMP@/home/.claude/session-env:${HOST_HOME}/.claude-cbox/session-env:rw
+      - @TMP@/home/.claude/plugins:${HOST_HOME}/.claude-cbox/plugins:rw
+      - @TMP@/home/.claude/file-history:${HOST_HOME}/.claude-cbox/file-history:rw
+      - @TMP@/home/.claude/plans:${HOST_HOME}/.claude-cbox/plans:rw
+      - @TMP@/home/.claude/shell-snapshots:${HOST_HOME}/.claude-cbox/shell-snapshots:rw
+      - @TMP@/home/.claude/agent-memory:${HOST_HOME}/.claude-cbox/agent-memory:rw
+      - @TMP@/home/.claude/hooks:${HOST_HOME}/.claude-cbox/hooks:ro
+      - @TMP@/home/.claude/settings.json:${HOST_HOME}/.claude-cbox/settings.json:rw
+      - @TMP@/home/.claude/CLAUDE.md:${HOST_HOME}/.claude-cbox/CLAUDE.md:ro
+      - @TMP@/home/.claude/agents:${HOST_HOME}/.claude-cbox/agents:ro
+      - @TMP@/home/.claude/policies:${HOST_HOME}/.claude-cbox/policies:ro
+      - @TMP@/home/.claude/templates:${HOST_HOME}/.claude-cbox/templates:ro
+      - @TMP@/home/.claude/projects/@TMPSLUG@-pw-root:${HOST_HOME}/.claude/projects/@TMPSLUG@-pw-root:rw
+      - @TMP@/home/.claude/projects:${HOST_HOME}/.claude-cbox/.host-projects:rw
+      - @TMP@/home/.claude/tasks:${HOST_HOME}/.claude-cbox/.host-tasks:rw
+      - @TMP@/home/.claude/jobs:${HOST_HOME}/.claude-cbox/.host-jobs:rw
+      - @TMP@/home/.claude/projects/@TMPSLUG@-pw-root:${HOST_HOME}/.claude-cbox/projects/@TMPSLUG@-pw-root:rw
+      - @TMP@/home/.codex:${HOST_HOME}/.codex:rw
+      - @TMP@/home/.codex/config.toml:${HOST_HOME}/.codex/config.toml:ro
+      - @TMP@/home/.codex/AGENTS.md:${HOST_HOME}/.codex/AGENTS.md:ro
+      - @TMP@/home/.codex/cbox-host.config.toml:${HOST_HOME}/.codex/cbox-host.config.toml:ro
+      - claude-local:${HOST_HOME}/.local:ro
+      - codex-packages:${HOST_HOME}/.codex/packages:ro
+      - @TMP@/eff_id/codex/cbox-container.config.toml:${HOST_HOME}/.codex/cbox-container.config.toml:ro
+      - @TMP@/eff_id/codex/AGENTS.override.md:${HOST_HOME}/.codex/AGENTS.override.md:ro
+      - @TMP@/eff_id/codex/hooks.json:${HOST_HOME}/.codex/hooks.json:ro
+volumes:
+  claude-local:
+    external: true
+    name: cbox-bins-claude
+  codex-packages:
+    external: true
+    name: cbox-bins-codex

@@ -10,6 +10,11 @@ import tempfile
 import unittest
 from unittest import mock
 
+for _k in [k for k in os.environ if k.startswith("CBOX_BUDGET_") or k == "CBOX_SUBSCRIPTION_PROFILE"]:
+    del os.environ[_k]
+
+FORCE_BRAKE = {"CBOX_BUDGET_LOW_5H": "101", "CBOX_BUDGET_LOW_7D": "101"}
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "etc" / "hooks" / "cbox_budget.py"
 
@@ -247,8 +252,11 @@ class FixtureBudgetTests(unittest.TestCase):
         self.usage_dir = self._tmp.name
         self._old = os.environ.get("CBOX_USAGE_DIR")
         os.environ["CBOX_USAGE_DIR"] = self.usage_dir
+        self._brake = mock.patch.dict(os.environ, FORCE_BRAKE)
+        self._brake.start()
 
     def tearDown(self):
+        self._brake.stop()
         if self._old is None:
             os.environ.pop("CBOX_USAGE_DIR", None)
         else:
@@ -353,12 +361,17 @@ class StalenessAndUnknownTests(unittest.TestCase):
         now = 1700000000.0
         write_source(self.usage_dir, "claude", {
             "captured_at": now - 901,
-            "five_hour": {"used_percentage": 50, "resets_at": now + 3600},
+            "five_hour": {"used_percentage": 95, "resets_at": now + 3600},
             "seven_day": {"used_percentage": 10, "resets_at": now + 6 * 24 * 3600},
         })
         result = cbox_budget.budget_for_family("claude", now=now)
         self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["free"])
+        with mock.patch.dict(os.environ, FORCE_BRAKE):
+            result = cbox_budget.budget_for_family("claude", now=now)
+        self.assertEqual(result["status"], "ok")
         self.assertIsNotNone(result["b"])
+        self.assertEqual(result["brake"], "low_7d")
 
     def test_data_older_than_2_hours_is_fully_unknown(self):
         now = 1700000000.0
@@ -642,8 +655,11 @@ class ResetsAtClampTests(unittest.TestCase):
         self.usage_dir = self._tmp.name
         self._old = os.environ.get("CBOX_USAGE_DIR")
         os.environ["CBOX_USAGE_DIR"] = self.usage_dir
+        self._brake = mock.patch.dict(os.environ, FORCE_BRAKE)
+        self._brake.start()
 
     def tearDown(self):
+        self._brake.stop()
         if self._old is None:
             os.environ.pop("CBOX_USAGE_DIR", None)
         else:
@@ -1194,6 +1210,562 @@ class LocalTierPresenceTests(unittest.TestCase):
                 os.environ.pop("HOME", None)
             else:
                 os.environ["HOME"] = saved_home
+
+
+class BrakeHarness(unittest.TestCase):
+    NOW = _epoch(2026, 10, 7, 12, 0)
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.usage_dir = self._tmp.name
+        self._env = mock.patch.dict(os.environ, {"CBOX_USAGE_DIR": self.usage_dir})
+        self._env.start()
+
+    def tearDown(self):
+        self._env.stop()
+        self._tmp.cleanup()
+
+    def claude(self, five=None, seven=None, five_in=600, seven_in=98 * 3600, captured=None):
+        now = self.NOW
+        payload = {"captured_at": now if captured is None else captured}
+        if five is not None:
+            payload["five_hour"] = {"used_percentage": five, "resets_at": now + five_in}
+        if seven is not None:
+            payload["seven_day"] = {"used_percentage": seven, "resets_at": now + seven_in}
+        write_source(self.usage_dir, "claude", payload)
+
+    def samples(self, rows, family="claude"):
+        with open(os.path.join(self.usage_dir, "samples.jsonl"), "w", encoding="utf-8") as f:
+            for ts, used in rows:
+                f.write(json.dumps({"ts": ts, "family": family, "five_hour": {"used": None},
+                                    "seven_day": {"used": used}}) + "\n")
+
+    def dense(self, start, end, start_used, end_used, step=600):
+        pts = []
+        t = start
+        while t < end:
+            frac = (t - start) / (end - start)
+            pts.append((t, start_used + (end_used - start_used) * frac))
+            t += step
+        pts.append((end, end_used))
+        self.samples(pts)
+        return pts
+
+    def budget(self, **env):
+        with mock.patch.dict(os.environ, env):
+            return cbox_budget.budget_for_family("claude", now=self.NOW)
+
+
+class FreeStateTests(BrakeHarness):
+    def test_owner_example_is_free(self):
+        self.claude(five=45, seven=32, five_in=600, seven_in=98 * 3600)
+        r = self.budget()
+        self.assertEqual(r["status"], "ok")
+        self.assertTrue(r["free"])
+        self.assertIsNone(r["b"])
+        self.assertIsNone(r["n"])
+        self.assertEqual(r["brake"], "none")
+        self.assertEqual(r["brakes"], [])
+        self.assertEqual(r["five_hour_used"], 45)
+        self.assertEqual(r["seven_day_used"], 32)
+        self.assertEqual(r["resets_at"], self.NOW + 600)
+
+    def test_free_state_does_not_write_the_hysteresis_state(self):
+        self.claude(five=45, seven=32)
+        self.budget()
+        self.assertFalse(os.path.exists(os.path.join(self.usage_dir, "state.json")))
+
+    def test_free_result_is_json_serialisable_through_the_cli(self):
+        real = time_now()
+        write_source(self.usage_dir, "claude", {
+            "captured_at": real,
+            "five_hour": {"used_percentage": 45, "resets_at": real + 600},
+            "seven_day": {"used_percentage": 32, "resets_at": real + 98 * 3600},
+        })
+        proc = subprocess.run(["python3", str(SCRIPT), "budget", "claude"],
+                              capture_output=True, text=True, env=dict(os.environ))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        out = json.loads(proc.stdout)["claude"]
+        self.assertEqual(out["status"], "ok")
+        self.assertTrue(out["free"])
+        self.assertIsNone(out["b"])
+
+    def test_single_healthy_window_is_free(self):
+        self.claude(seven=10)
+        self.assertTrue(self.budget()["free"])
+
+    def test_codex_family_is_free_when_healthy_too(self):
+        write_source(self.usage_dir, "codex", {
+            "captured_at": self.NOW,
+            "seven_day": {"used_percentage": 30, "resets_at": self.NOW + 5 * 24 * 3600},
+        })
+        r = cbox_budget.budget_for_family("codex", now=self.NOW)
+        self.assertTrue(r["free"])
+
+
+def time_now():
+    import time as _time
+    return _time.time()
+
+
+class LowBrakeTests(BrakeHarness):
+    def test_low_five_hour_brakes_with_todays_formula(self):
+        self.claude(five=90, seven=10, five_in=2 * 3600)
+        r = self.budget()
+        self.assertFalse(r["free"])
+        self.assertEqual(r["brake"], "low_5h")
+        self.assertEqual(r["brakes"], ["low_5h"])
+        q, d = 10.0, cbox_budget._driver_reserve("claude", 10.0, 2.0, "five_hour")
+        expected = min(cbox_budget.CONCURRENCY_CAP_P, (q - d) / (6.0 * 2.0))
+        self.assertAlmostEqual(r["b"], expected, places=6)
+        self.assertIsInstance(r["n"], int)
+        self.assertEqual(r["resets_at"], self.NOW + 2 * 3600)
+
+    def test_five_hour_boundary_is_strict(self):
+        self.claude(five=85, seven=10, five_in=2 * 3600)
+        self.assertTrue(self.budget()["free"])
+        self.claude(five=85.5, seven=10, five_in=2 * 3600)
+        self.assertEqual(self.budget()["brake"], "low_5h")
+
+    def test_low_seven_day_brakes_with_todays_formula(self):
+        self.claude(five=10, seven=85, seven_in=2 * 24 * 3600)
+        r = self.budget()
+        self.assertEqual(r["brake"], "low_7d")
+        h = cbox_budget.active_hours_between(self.NOW, self.NOW + 2 * 24 * 3600)
+        q, d = 15.0, cbox_budget._driver_reserve("claude", 15.0, 48.0, "seven_day")
+        expected = min(cbox_budget.CONCURRENCY_CAP_P, (q - d) / (1.5 * max(h, cbox_budget.H_FLOOR_HOURS)))
+        self.assertAlmostEqual(r["b"], expected, places=6)
+
+    def test_seven_day_boundary_is_strict(self):
+        self.claude(seven=80)
+        self.assertTrue(self.budget()["free"])
+        self.claude(seven=80.5)
+        self.assertEqual(self.budget()["brake"], "low_7d")
+
+    def test_braked_window_alone_decides_b(self):
+        self.claude(five=95, seven=40, five_in=3600)
+        r = self.budget()
+        self.assertEqual(r["brake"], "low_5h")
+        d = cbox_budget._driver_reserve("claude", 5.0, 1.0, "five_hour")
+        self.assertAlmostEqual(r["b"], max(0.0, min(3.0, (5.0 - d) / 6.0)), places=6)
+
+    def test_thresholds_are_tunable_from_the_environment(self):
+        self.claude(five=90, seven=10, five_in=2 * 3600)
+        self.assertTrue(self.budget(CBOX_BUDGET_LOW_5H="5")["free"])
+        self.claude(five=50, seven=10, five_in=2 * 3600)
+        self.assertEqual(self.budget(CBOX_BUDGET_LOW_5H="60")["brake"], "low_5h")
+        self.claude(five=10, seven=70)
+        self.assertEqual(self.budget(CBOX_BUDGET_LOW_7D="40")["brake"], "low_7d")
+        self.assertTrue(self.budget(CBOX_BUDGET_LOW_7D="0")["free"])
+
+    def test_both_low_windows_pick_the_binding_label(self):
+        self.claude(five=95, seven=90, five_in=3600, seven_in=3 * 24 * 3600)
+        r = self.budget()
+        self.assertEqual(r["brakes"], ["low_5h", "low_7d"])
+        self.assertIn(r["brake"], ("low_5h", "low_7d"))
+        h = cbox_budget.active_hours_between(self.NOW, self.NOW + 3 * 24 * 3600)
+        d5 = cbox_budget._driver_reserve("claude", 5.0, 1.0, "five_hour")
+        d7 = cbox_budget._driver_reserve("claude", 10.0, 72.0, "seven_day")
+        v5 = max(0.0, min(3.0, (5.0 - d5) / 6.0))
+        v7 = max(0.0, min(3.0, (10.0 - d7) / (1.5 * max(h, 0.25))))
+        self.assertAlmostEqual(r["b"], min(v5, v7), places=6)
+        self.assertEqual(r["brake"], "low_5h" if v5 <= v7 else "low_7d")
+
+    def test_stale_five_hour_does_not_brake(self):
+        self.claude(five=99, seven=10, captured=self.NOW - 901)
+        self.assertTrue(self.budget()["free"])
+
+    def test_driver_reserve_floor_keeps_b_at_zero(self):
+        self.claude(seven=95, seven_in=100 * 3600)
+        r = self.budget()
+        self.assertEqual(r["brake"], "low_7d")
+        self.assertEqual(r["b"], 0.0)
+        self.assertEqual(r["n"], 0)
+
+    def test_driver_reserve_floor_value(self):
+        self.assertEqual(cbox_budget._driver_reserve("claude", 5.0), cbox_budget.DRIVER_RESERVE_FLOOR)
+        self.claude(seven=88, seven_in=100 * 3600)
+        r = self.budget()
+        h = cbox_budget.active_hours_between(self.NOW, self.NOW + 100 * 3600)
+        expected = (12.0 - cbox_budget.DRIVER_RESERVE_FLOOR) / (1.5 * h)
+        self.assertAlmostEqual(r["b"], min(3.0, expected), places=6)
+
+
+class ThresholdParsingTests(unittest.TestCase):
+    def test_defaults(self):
+        with mock.patch.dict(os.environ, {}):
+            for k in list(os.environ):
+                if k.startswith("CBOX_BUDGET_"):
+                    del os.environ[k]
+            self.assertEqual(cbox_budget.brake_threshold("low_5h"), 15.0)
+            self.assertEqual(cbox_budget.brake_threshold("low_7d"), 20.0)
+            self.assertEqual(cbox_budget.brake_threshold("pace_window_h"), 3.0)
+            self.assertEqual(cbox_budget.brake_threshold("pace_slack_h"), 8.0)
+
+    def test_invalid_values_fall_back_to_defaults(self):
+        for bad in ("abc", "-1", "nan", "inf", ""):
+            with mock.patch.dict(os.environ, {"CBOX_BUDGET_LOW_5H": bad, "CBOX_BUDGET_PACE_SLACK_H": bad}):
+                self.assertEqual(cbox_budget.brake_threshold("low_5h"), 15.0, bad)
+                self.assertEqual(cbox_budget.brake_threshold("pace_slack_h"), 8.0, bad)
+        with mock.patch.dict(os.environ, {"CBOX_BUDGET_PACE_WINDOW_H": "0"}):
+            self.assertEqual(cbox_budget.brake_threshold("pace_window_h"), 3.0)
+
+    def test_valid_values_are_used(self):
+        with mock.patch.dict(os.environ, {"CBOX_BUDGET_LOW_7D": "33.5", "CBOX_BUDGET_PACE_WINDOW_H": "6",
+                                          "CBOX_BUDGET_PACE_SLACK_H": "0"}):
+            self.assertEqual(cbox_budget.brake_threshold("low_7d"), 33.5)
+            self.assertEqual(cbox_budget.brake_threshold("pace_window_h"), 6.0)
+            self.assertEqual(cbox_budget.brake_threshold("pace_slack_h"), 0.0)
+
+
+class PaceBrakeTests(BrakeHarness):
+    def hot_samples(self):
+        n = self.NOW
+        self.dense(n - 3 * 3600, n, 30.0, 60.0, 600)
+
+    def test_fast_burn_fires_the_pace_brake(self):
+        self.claude(five=20, seven=45, five_in=3 * 3600, seven_in=98 * 3600)
+        self.hot_samples()
+        r = self.budget()
+        self.assertFalse(r["free"])
+        self.assertEqual(r["brake"], "pace_7d")
+        self.assertEqual(r["brakes"], ["pace_7d"])
+        info = r["pace"]
+        first = self.NOW - 3 * 3600
+        last = self.NOW
+        wall_h = (last - first) / 3600.0
+        self.assertAlmostEqual(info["rate"], 30.0 / wall_h, places=6)
+        q = 55.0
+        reserve = cbox_budget._driver_reserve("claude", q, 98.0, "seven_day")
+        self.assertAlmostEqual(info["spendable"], q - reserve, places=6)
+        self.assertAlmostEqual(info["hours_to_exhaust"], (q - reserve) / info["rate"], places=6)
+        left = cbox_budget.active_hours_between(self.NOW, self.NOW + 98 * 3600)
+        self.assertLess(info["hours_to_exhaust"], left - 8.0)
+        h = max(left, 0.25)
+        expected = min(3.0, (q - reserve) / (1.5 * h))
+        self.assertAlmostEqual(r["b"], max(0.0, expected), places=6)
+        self.assertEqual(r["resets_at"], self.NOW + 98 * 3600)
+
+    def test_normal_burn_does_not_fire_the_pace_brake(self):
+        n = self.NOW
+        self.claude(five=20, seven=34, five_in=3 * 3600, seven_in=98 * 3600)
+        self.dense(n - 53 * 60, n - 60, 31.0, 33.0, 420)
+        r = self.budget()
+        self.assertTrue(r["free"])
+        self.assertEqual(r["brake"], "none")
+        self.assertIsNotNone(r["pace"])
+        info = r["pace"]
+        self.assertAlmostEqual(info["rate"], 2.0 / (53 * 60 / 3600.0), delta=0.1)
+        self.assertGreater(info["hours_to_exhaust"], info["active_hours_left"] - 8.0)
+
+    def test_fast_burn_exhausts_the_seven_day_window(self):
+        n = self.NOW
+        self.claude(five=20, seven=53.85, five_in=3 * 3600, seven_in=96 * 3600)
+        self.dense(n - 3 * 3600, n, 35.0, 53.0, 600)
+        r = self.budget()
+        self.assertFalse(r["free"])
+        self.assertEqual(r["brake"], "pace_7d")
+        info = r["pace"]
+        self.assertAlmostEqual(info["rate"], 6.0, places=6)
+        self.assertAlmostEqual(info["spendable"], 30.0, delta=0.1)
+        self.assertAlmostEqual(info["active_hours_left"], 16.0, delta=1.0)
+        self.assertLess(info["hours_to_exhaust"], info["active_hours_left"] - 8.0)
+
+    def test_idle_gap_is_excluded_from_active_time(self):
+        n = self.NOW
+        self.claude(five=20, seven=34, five_in=3 * 3600, seven_in=98 * 3600)
+        self.samples([(n - 10800, 31.0), (n - 10380, 32.0), (n - 9960, 32.0),
+                      (n - 2760, 32.0), (n - 2340, 32.0), (n - 1920, 32.0)])
+        r = self.budget()
+        self.assertTrue(r["free"])
+        info = r["pace"]
+        active_wall = 420.0 + 420.0 + 420.0 + 420.0
+        self.assertAlmostEqual(info["rate"], 1.0 / (active_wall / 3600.0), places=6)
+
+    def test_slow_burn_stays_free(self):
+        n = self.NOW
+        self.claude(five=20, seven=32, five_in=3 * 3600)
+        self.dense(n - 3 * 3600, n, 31.0, 32.0, 600)
+        r = self.budget()
+        self.assertTrue(r["free"])
+        self.assertIsNotNone(r["pace"])
+        self.assertGreater(r["pace"]["hours_to_exhaust"], r["pace"]["active_hours_left"] - 8.0)
+
+    def test_slack_is_tunable(self):
+        self.claude(five=20, seven=45, five_in=3 * 3600)
+        self.hot_samples()
+        self.assertEqual(self.budget()["brake"], "pace_7d")
+        self.assertTrue(self.budget(CBOX_BUDGET_PACE_SLACK_H="1000")["free"])
+
+    def test_window_hours_is_tunable(self):
+        n = self.NOW
+        self.claude(five=20, seven=45, five_in=3 * 3600)
+        self.dense(n - 6 * 3600, n - 3 * 3600 - 420, 5.0, 40.0, 420)
+        self.samples([(n - 6 * 3600 + 420 * i, 5.0 + 35.0 * i / 24.0) for i in range(25)]
+                     + [(n - 100, 45.0)])
+        with_default = self.budget()
+        self.assertTrue(with_default["free"])
+        self.assertIsNone(with_default["pace"])
+        r = self.budget(CBOX_BUDGET_PACE_WINDOW_H="6")
+        self.assertEqual(r["brake"], "pace_7d")
+
+    def test_pace_brake_does_not_apply_near_the_reset(self):
+        n = self.NOW
+        self.claude(five=20, seven=45, five_in=3 * 3600, seven_in=5 * 3600)
+        self.hot_samples()
+        self.assertTrue(self.budget()["free"])
+
+    def test_low_and_pace_on_the_same_window_report_low(self):
+        self.claude(five=20, seven=90, five_in=3 * 3600, seven_in=98 * 3600)
+        n = self.NOW
+        self.dense(n - 3 * 3600, n, 70.0, 90.0, 600)
+        r = self.budget()
+        self.assertEqual(r["brake"], "low_7d")
+        self.assertEqual(r["brakes"], ["low_7d", "pace_7d"])
+
+    def test_low_five_hour_and_pace_both_listed(self):
+        self.claude(five=95, seven=45, five_in=3600, seven_in=98 * 3600)
+        self.hot_samples()
+        r = self.budget()
+        self.assertEqual(r["brakes"], ["low_5h", "pace_7d"])
+        self.assertIn(r["brake"], ("low_5h", "pace_7d"))
+
+    def test_five_hour_window_gets_no_pace_brake(self):
+        n = self.NOW
+        self.claude(five=70, seven=10, five_in=3 * 3600)
+        rows = [(n - 3 * 3600 + 600, 5.0, 10.0), (n - 3 * 3600 + 1800, 30.0, 10.0),
+               (n - 60 - 600, 45.0, 10.0), (n - 60, 70.0, 10.0)]
+        with open(os.path.join(self.usage_dir, "samples.jsonl"), "w", encoding="utf-8") as f:
+            for ts, five, seven in rows:
+                f.write(json.dumps({"ts": ts, "family": "claude", "five_hour": {"used": five},
+                                    "seven_day": {"used": seven}}) + "\n")
+        r = self.budget()
+        self.assertTrue(r["free"])
+        self.assertEqual(r["pace"]["rate"], 0.0)
+
+    def test_pace_ignored_when_seven_day_is_stale_or_missing(self):
+        self.claude(five=20, seven=None)
+        self.hot_samples()
+        self.assertTrue(self.budget()["free"])
+
+    def test_zero_burn_is_not_a_brake(self):
+        n = self.NOW
+        self.claude(five=20, seven=45, five_in=3 * 3600)
+        self.samples([(n - 3 * 3600 + 600, 45.0), (n - 3 * 3600 + 1800, 45.0),
+                      (n - 60 - 600, 45.0), (n - 60, 45.0)])
+        r = self.budget()
+        self.assertTrue(r["free"])
+        self.assertIsNone(r["pace"]["hours_to_exhaust"])
+
+
+class PaceMeasurabilityTests(BrakeHarness):
+    def setUp(self):
+        super().setUp()
+        self.claude(five=20, seven=45, five_in=3 * 3600)
+
+    def rate(self):
+        return cbox_budget.seven_day_burn_rate("claude", self.NOW)
+
+    def test_no_samples_file(self):
+        self.assertIsNone(self.rate())
+        self.assertTrue(self.budget()["free"])
+
+    def test_single_sample(self):
+        self.samples([(self.NOW - 60, 45.0)])
+        self.assertIsNone(self.rate())
+
+    def test_span_under_thirty_minutes(self):
+        n = self.NOW
+        self.samples([(n - 1700, 30.0), (n - 60, 45.0)])
+        self.assertIsNone(self.rate())
+        self.assertTrue(self.budget()["free"])
+
+    def test_span_of_exactly_thirty_minutes_is_measurable(self):
+        n = self.NOW
+        self.samples([(n - 1860, 30.0), (n - 660, 40.0), (n - 60, 45.0)])
+        self.assertIsNotNone(self.rate())
+
+    def test_samples_outside_the_window_are_ignored(self):
+        n = self.NOW
+        self.samples([(n - 10 * 3600, 1.0), (n - 9 * 3600, 20.0), (n - 60, 45.0)])
+        self.assertIsNone(self.rate())
+
+    def test_other_family_samples_are_ignored(self):
+        n = self.NOW
+        self.samples([(n - 3 * 3600 + 60, 30.0), (n - 60, 45.0)], family="codex")
+        self.assertIsNone(self.rate())
+
+    def test_garbage_lines_and_missing_values_are_skipped(self):
+        n = self.NOW
+        with open(os.path.join(self.usage_dir, "samples.jsonl"), "w", encoding="utf-8") as f:
+            f.write("not json\n")
+            f.write(json.dumps({"ts": n - 7000, "family": "claude", "seven_day": {"used": None}}) + "\n")
+            f.write(json.dumps({"ts": n - 7000, "family": "claude", "seven_day": {"used": True}}) + "\n")
+            f.write(json.dumps([1, 2]) + "\n")
+            f.write(json.dumps({"ts": n - 7000, "family": "claude", "seven_day": {"used": 30}}) + "\n")
+            f.write(json.dumps({"ts": n - 660, "family": "claude", "seven_day": {"used": 40}}) + "\n")
+            f.write(json.dumps({"ts": n - 60, "family": "claude", "seven_day": {"used": 45}}) + "\n")
+        self.assertIsNotNone(self.rate())
+
+    def test_samples_entirely_outside_active_hours_are_unmeasurable(self):
+        night = _epoch(2026, 10, 7, 23, 0)
+        self.samples([(night, 30.0), (night + 3600, 30.0)])
+        with mock.patch.dict(os.environ, {"CBOX_BUDGET_PACE_WINDOW_H": "3"}):
+            self.assertIsNone(cbox_budget.seven_day_burn_rate("claude", night + 3700))
+
+    def test_future_samples_are_ignored(self):
+        n = self.NOW
+        self.samples([(n + 7200, 30.0), (n + 9000, 45.0)])
+        self.assertIsNone(self.rate())
+
+    def test_reset_crossing_uses_only_the_post_reset_segment(self):
+        n = self.NOW
+        pre = [(n - 2.9 * 3600, 90.0), (n - 2.6 * 3600, 95.0)]
+        post = [(n - 2 * 3600 + 420 * i, 8.0 * i / 17.0) for i in range(18)]
+        self.samples(pre + post)
+        active = (2 * 3600 - 60) / 3600.0
+        self.assertAlmostEqual(self.rate(), 8.0 / active, places=6)
+
+    def test_reset_leaving_one_sample_is_unmeasurable(self):
+        n = self.NOW
+        self.samples([(n - 2.9 * 3600, 70.0), (n - 2.6 * 3600, 95.0), (n - 60, 1.0)])
+        self.assertIsNone(self.rate())
+        self.assertTrue(self.budget()["free"])
+
+    def test_reset_with_a_short_post_reset_span_is_unmeasurable(self):
+        n = self.NOW
+        self.samples([(n - 2.9 * 3600, 70.0), (n - 2.6 * 3600, 95.0),
+                      (n - 1200, 1.0), (n - 60, 3.0)])
+        self.assertIsNone(self.rate())
+
+    def test_tail_read_drops_the_partial_first_line(self):
+        n = self.NOW
+        self.samples([(n - 3 * 3600 + 60, 30.0), (n - 60, 45.0)])
+        with mock.patch.object(cbox_budget, "SAMPLES_TAIL_BYTES", 150):
+            text = cbox_budget._read_tail_text(os.path.join(self.usage_dir, "samples.jsonl"), 150)
+        for line in text.splitlines():
+            json.loads(line)
+        self.assertEqual(len(text.splitlines()), 1)
+
+    def test_samples_path_must_be_a_regular_file(self):
+        os.mkdir(os.path.join(self.usage_dir, "samples.jsonl"))
+        self.assertIsNone(self.rate())
+
+    def test_real_sequence_18_29_to_19_32(self):
+        now = time_now()
+        rows = [
+            (_epoch(2026, 10, 7, 17, 8), 31.0),
+            (_epoch(2026, 10, 7, 17, 13), 31.0),
+            (_epoch(2026, 10, 7, 17, 19), 31.0),
+            (_epoch(2026, 10, 7, 17, 25), 31.0),
+            (_epoch(2026, 10, 7, 17, 57), 32.0),
+            (_epoch(2026, 10, 7, 18, 4), 32.0),
+            (_epoch(2026, 10, 7, 18, 11), 32.0),
+            (_epoch(2026, 10, 7, 18, 18), 33.0),
+            (_epoch(2026, 10, 7, 18, 23), 34.0),
+            (_epoch(2026, 10, 7, 18, 29), 34.0),
+            (_epoch(2026, 10, 7, 19, 32), 40.0),
+            (_epoch(2026, 10, 7, 19, 46), 42.0),
+        ]
+        self.samples(rows)
+        rate = cbox_budget.seven_day_burn_rate("claude", now)
+        self.assertIsNotNone(rate)
+        self.assertGreaterEqual(rate, 3.5)
+        self.assertLessEqual(rate, 5.5)
+
+    def test_idle_long_gap_is_excluded(self):
+        now = time_now()
+        t0 = now - 2 * 3600
+        self.samples([(t0, 50.0), (t0 + 4000, 50.0)])
+        self.assertIsNone(cbox_budget.seven_day_burn_rate("claude", now))
+
+    def test_long_gap_with_growth_counts_full_duration(self):
+        now = time_now()
+        t0 = now - 2 * 3600
+        self.samples([(t0, 50.0), (t0 + 3000, 60.0)])
+        self.assertAlmostEqual(cbox_budget.seven_day_burn_rate("claude", now), 12.0, places=6)
+
+
+class BrakePrecedenceTests(BrakeHarness):
+    def test_override_beats_the_free_state(self):
+        self.claude(five=45, seven=32)
+        with open(os.path.join(self.usage_dir, "override.json"), "w", encoding="utf-8") as f:
+            json.dump({"until": self.NOW + 60, "b": 0.0}, f)
+        r = self.budget()
+        self.assertEqual(r["status"], "override")
+        self.assertEqual(r["b"], 0.0)
+        self.assertFalse(r["free"])
+        self.assertEqual(r["brake"], "override")
+
+    def test_off_mode_ignores_every_brake(self):
+        self.claude(five=99, seven=99)
+        r = self.budget(CBOX_BUDGET_MODE="off")
+        self.assertEqual(r["status"], "off")
+        self.assertIsNone(r["b"])
+        self.assertFalse(r["free"])
+        self.assertEqual(r["brake"], "none")
+
+    def test_unknown_data_is_never_free(self):
+        r = self.budget()
+        self.assertEqual(r["status"], "unknown")
+        self.assertFalse(r["free"])
+        self.assertIsNone(r["b"])
+        self.assertEqual(r["brake"], "none")
+
+    def test_fully_stale_data_is_unknown_not_free(self):
+        self.claude(five=99, seven=99, captured=self.NOW - 7201)
+        r = self.budget()
+        self.assertEqual(r["status"], "unknown")
+        self.assertFalse(r["free"])
+
+    def test_hysteresis_still_applies_under_a_brake(self):
+        self.claude(seven=85, seven_in=2 * 24 * 3600)
+        first = self.budget()
+        again = self.budget()
+        self.assertEqual(first["n"], again["n"])
+        with open(os.path.join(self.usage_dir, "state.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["claude"]["n"], first["n"])
+
+
+class SubscriptionProfileTests(BrakeHarness):
+    def test_low_clamps_none_to_one(self):
+        self.claude(five=45, seven=32)
+        r = self.budget(CBOX_SUBSCRIPTION_PROFILE="low")
+        self.assertEqual(r["n"], 1)
+        self.assertEqual(r["brake"], "low profile")
+
+    def test_low_clamps_multi_agent_result_to_one(self):
+        self.claude(five=88, five_in=450)
+        r = self.budget(CBOX_SUBSCRIPTION_PROFILE="low")
+        self.assertEqual(r["n"], 1)
+        self.assertEqual(r["brake"], "low profile")
+        base = self.budget(CBOX_SUBSCRIPTION_PROFILE="high")
+        self.assertGreaterEqual(base["n"], 2)
+        self.assertNotEqual(base["brake"], "low profile")
+
+    def test_low_keeps_zero(self):
+        self.claude(seven=95, seven_in=100 * 3600)
+        r = self.budget(CBOX_SUBSCRIPTION_PROFILE="low")
+        self.assertEqual(r["n"], 0)
+        self.assertEqual(r["brake"], "low_7d")
+
+    def test_max_behaves_as_mode_off(self):
+        self.claude(five=99, seven=99)
+        r = self.budget(CBOX_SUBSCRIPTION_PROFILE="max")
+        self.assertEqual(r["status"], "off")
+        self.assertIsNone(r["b"])
+        self.assertFalse(r["free"])
+        self.assertEqual(r["brake"], "none")
+
+    def test_unknown_value_behaves_as_high(self):
+        self.assertEqual(cbox_budget._subscription_profile(), "high")
+        for val in ("", "banana", "max2", "off"):
+            with mock.patch.dict(os.environ, {"CBOX_SUBSCRIPTION_PROFILE": val}):
+                self.assertEqual(cbox_budget._subscription_profile(), "high", val)
+        self.claude(five=45, seven=32)
+        r = self.budget(CBOX_SUBSCRIPTION_PROFILE="banana")
+        self.assertIsNone(r["n"])
+        self.assertEqual(r["brake"], "none")
 
 
 if __name__ == "__main__":

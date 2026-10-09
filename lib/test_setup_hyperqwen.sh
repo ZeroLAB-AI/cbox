@@ -231,6 +231,22 @@ _ok "step_hyperqwen defaults survive Enter on every prompt and the models path n
 OUT="$(_run tilde step_hyperqwen on __KEEP__ __KEEP__ "~/models-dir" __KEEP__ __KEEP__ __KEEP__ __KEEP__ __KEEP__ __KEEP__)"
 [ "$(_var "$OUT" CBOX_HYPERQWEN_MODELS_PATH)" = "$HOME/models-dir" ] || _fail "tilde: models path should expand to \$HOME"
 _ok "step_hyperqwen expands a leading ~/ in the models path before validating"
+_has "$OUT" "home directory itself" && _fail "tilde: a ~/ subdirectory must not trigger the home-directory refusal"
+
+OUT="$(_run tildehome1 step_hyperqwen on __KEEP__ __KEEP__ "~" "$HOME/models-dir" __KEEP__ __KEEP__ __KEEP__ __KEEP__ __KEEP__)"
+[ "$(printf '%s\n' "$OUT" | grep -c "home directory itself")" = 1 ] || _fail "tilde bare: bare ~ must be refused with the dedicated-directory warning"
+[ "$(grep -c "host models directory" "$TMPBASE/tildehome1.log" || true)" = 2 ] || _fail "tilde bare: the models prompt must be re-asked after refusing bare ~"
+[ "$(_var "$OUT" CBOX_HYPERQWEN_MODELS_PATH)" = "$HOME/models-dir" ] || _fail "tilde bare: the dedicated directory must be accepted after the re-ask"
+[ "$(_prompt_count tildehome1)" = 10 ] || _fail "tilde bare: expected 10 prompts, got $(_prompt_count tildehome1)"
+_ok "step_hyperqwen refuses bare ~ (the home directory) and re-asks until a dedicated directory is given"
+
+OUT="$(_run tildehome2 step_hyperqwen on __KEEP__ __KEEP__ "~/" "~/bogus" "$HOME/models-dir" __KEEP__ __KEEP__ __KEEP__ __KEEP__ __KEEP__)"
+[ "$(printf '%s\n' "$OUT" | grep -c "home directory itself")" = 1 ] || _fail "tilde empty: ~/ must be refused with the dedicated-directory warning"
+[ "$(printf '%s\n' "$OUT" | grep -c "not an existing directory")" = 1 ] || _fail "tilde empty: the expanded ~/bogus must be refused by the directory check"
+[ "$(grep -c "host models directory" "$TMPBASE/tildehome2.log" || true)" = 3 ] || _fail "tilde empty: the models prompt must be re-asked after each refusal"
+[ "$(_var "$OUT" CBOX_HYPERQWEN_MODELS_PATH)" = "$HOME/models-dir" ] || _fail "tilde empty: the dedicated directory must be accepted after the re-asks"
+[ "$(_prompt_count tildehome2)" = 11 ] || _fail "tilde empty: expected 11 prompts, got $(_prompt_count tildehome2)"
+_ok "step_hyperqwen refuses ~/ (nothing after the slash) and keeps re-asking until a dedicated directory is given"
 
 OUT="$(_run invalid step_hyperqwen on -bad "has space" ghcr.io/x/y:1 foo 999 0,1 /nonexistent relative "" dflash2 fast 0 abc 70000 8x "" 4g on 500 25000 33 30)"
 [ "$(_var "$OUT" CBOX_HYPERQWEN_IMAGE)" = "ghcr.io/x/y:1" ] || _fail "invalid: image should be re-asked until valid"

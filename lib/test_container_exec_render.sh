@@ -35,7 +35,7 @@ assert spec['args'] == ['container_exec_mcp.py'], spec
 cbox = spec['_cbox']
 assert cbox['adapter'] == 'stdio-mcp', cbox
 assert cbox['available_to'] == ['claude', 'codex', 'hermes'], cbox
-assert cbox['enabled_when_env'] == 'CBOX_CONTAINER_EXEC_TOOL', cbox
+assert cbox['enabled_when_env'] == ['CBOX_CONTAINER_EXEC_TOOL', 'CBOX_CONTAINER_EXEC_ACTIVE'], cbox
 assert 'spawns-docker-exec-subprocess' in cbox['side_effects'], cbox
 "
 _ok "container-exec entry shape matches the stdio-mcp delegate contract"
@@ -58,7 +58,7 @@ if env -u CBOX_CONTAINER_EXEC_TOOL \
   >/dev/null 2>"$ERR_EXPLICIT"; then
   _fail "render_mcp.py accepted an explicit container-exec selection with CBOX_CONTAINER_EXEC_TOOL unset"
 fi
-grep -q "explicitly selected but CBOX_CONTAINER_EXEC_TOOL is not set" "$ERR_EXPLICIT" \
+grep -q "explicitly selected but CBOX_CONTAINER_EXEC_TOOL, CBOX_CONTAINER_EXEC_ACTIVE is not set" "$ERR_EXPLICIT" \
   || _fail "render_mcp.py refusal message missing for unconfigured explicit container-exec selection"
 _ok "render_mcp.py refuses an explicit unconfigured container-exec selection loudly"
 
@@ -74,7 +74,7 @@ assert 'container-exec' not in data, data.keys()
 _ok "container-exec is absent from selection=all render when CBOX_CONTAINER_EXEC_TOOL=off is explicitly exported"
 
 RENDERED_PRESENT="$TMPBASE/present.json"
-CBOX_CONTAINER_EXEC_TOOL=on \
+CBOX_CONTAINER_EXEC_TOOL=on CBOX_CONTAINER_EXEC_ACTIVE=on \
   python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
   "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$RENDERED_PRESENT"
 python3 -c "
@@ -89,6 +89,26 @@ assert spec['tool_timeout_sec'] == 3600, spec
 "
 _ok "container-exec renders for claude when CBOX_CONTAINER_EXEC_TOOL=on"
 
+RENDERED_TOOL_ONLY="$TMPBASE/tool_only.json"
+CBOX_CONTAINER_EXEC_TOOL=on CBOX_CONTAINER_EXEC_ACTIVE=off \
+  python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
+  "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$RENDERED_TOOL_ONLY"
+python3 -c "
+import json
+data = json.load(open('$RENDERED_TOOL_ONLY'))
+assert 'container-exec' not in data, data.keys()
+"
+RENDERED_TOOL_UNSET_ACTIVE="$TMPBASE/tool_unset_active.json"
+env -u CBOX_CONTAINER_EXEC_ACTIVE CBOX_CONTAINER_EXEC_TOOL=on \
+  python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
+  "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$RENDERED_TOOL_UNSET_ACTIVE"
+python3 -c "
+import json
+data = json.load(open('$RENDERED_TOOL_UNSET_ACTIVE'))
+assert 'container-exec' not in data, data.keys()
+"
+_ok "container-exec is absent when CBOX_CONTAINER_EXEC_TOOL=on but exec is inactive (ACTIVE off or unset)"
+
 RENDERED_CODEX_ABSENT="$TMPBASE/codex_absent.json"
 env -u CBOX_CONTAINER_EXEC_TOOL \
   python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
@@ -102,7 +122,7 @@ assert sorted(data.keys()) == ['ask-claude'], data.keys()
 _ok "container-exec is absent from codex target render when CBOX_CONTAINER_EXEC_TOOL is unset"
 
 RENDERED_CODEX="$TMPBASE/codex.json"
-CBOX_CONTAINER_EXEC_TOOL=on \
+CBOX_CONTAINER_EXEC_TOOL=on CBOX_CONTAINER_EXEC_ACTIVE=on \
   python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
   "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off codex > "$RENDERED_CODEX"
 python3 -c "
@@ -113,7 +133,7 @@ assert sorted(data.keys()) == ['ask-claude', 'container-exec'], data.keys()
 _ok "container-exec is available_to codex when CBOX_CONTAINER_EXEC_TOOL=on (ask-claude still present)"
 
 RENDERED_GATE="$TMPBASE/gate.json"
-CBOX_CONTAINER_EXEC_TOOL=on \
+CBOX_CONTAINER_EXEC_TOOL=on CBOX_CONTAINER_EXEC_ACTIVE=on \
   python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" \
   "$INSTALL_DIR/etc/mcp/delegates.json" all "/home/x/.claude/hooks" off claude > "$RENDERED_GATE"
 HOSTHOME="$TMPBASE/hosthome_container_exec"

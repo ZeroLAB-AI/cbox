@@ -244,6 +244,9 @@ CTX_OUT="$TMPBASE/ctx_iso.json"
 ( cd "$ISOPROJ" && HOME="$ISOHOME" PATH="$STUBBIN:$PATH" "$INSTALLISO/cbox" __hub_context ) > "$CTX_OUT" 2>/dev/null \
   || _fail "__hub_context failed for the isolated project ($(cat "$CTX_OUT"))"
 grep -q '"mode": "isolated"' "$CTX_OUT" || _fail "__hub_context did not resolve isolated mode: $(cat "$CTX_OUT")"
+grep -q '"egress"\|"bins"' "$CTX_OUT" && _fail "the default __hub_context must not carry egress or bins (the main hub never reads them): $(cat "$CTX_OUT")"
+( cd "$ISOPROJ" && HOME="$ISOHOME" PATH="$STUBBIN:$PATH" "$INSTALLISO/cbox" __hub_context --full ) > "$CTX_OUT" 2>/dev/null \
+  || _fail "__hub_context --full failed for the isolated project ($(cat "$CTX_OUT"))"
 grep -q '"egress": "on"' "$CTX_OUT" || _fail "__hub_context egress must come from the per-project isolated cbox.conf, not the global one: $(cat "$CTX_OUT")"
 _ok "__hub_context reads egress from the isolated project's own cbox.conf (per-project on is reported even though no global conf sets it)"
 
@@ -311,7 +314,7 @@ EOF
 chmod +x "$BINSSPYBIN/docker"
 
 CTX_BINS_OUT="$TMPBASE/ctx_bins.json"
-( cd "$BINSPROJ" && HOME="$BINSHOME" PATH="$BINSSPYBIN:$PATH" "$INSTALLISO/cbox" __hub_context ) > "$CTX_BINS_OUT" 2>/dev/null \
+( cd "$BINSPROJ" && HOME="$BINSHOME" PATH="$BINSSPYBIN:$PATH" "$INSTALLISO/cbox" __hub_context --full ) > "$CTX_BINS_OUT" 2>/dev/null \
   || _fail "__hub_context failed for the bins-field project ($(cat "$CTX_BINS_OUT"))"
 grep -qF '"bins": "bins: claude 2.1.0 codex 0.153.4 [held] hermes off"' "$CTX_BINS_OUT" \
   || _fail "__hub_context bins field did not render from the canned bins.stamp/bins.hold caches: $(cat "$CTX_BINS_OUT")"

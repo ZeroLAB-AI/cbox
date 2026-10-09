@@ -230,7 +230,11 @@
     },
     "lib/cbox_hub.py": {
       "layer": "host",
-      "purpose": "the hub core (docs/SETUP_HUB_DESIGN.md section 3, increment 1); invoked host-side by cbox bare-invocation dispatch when python3 is present and the file py_compiles, reads scope context from cbox __hub_context, orchestrates cbox_hub_ui (RawKeys/LineKeys input) and cbox_hub_screens (main + submenu renderers) and dispatches every action as an existing CLI verb subprocess; falls back to the bash hub() otherwise"
+      "purpose": "the hub core (docs/SETUP_HUB_DESIGN.md section 3, increment 1); invoked host-side by cbox bare-invocation dispatch when python3 and lib/cbox_hub_launch.py are present, reads scope context from cbox __hub_context, orchestrates cbox_hub_ui (RawKeys/LineKeys input) and cbox_hub_screens (main + submenu renderers) and dispatches every action as an existing CLI verb subprocess; probes the container with one docker exec scan plus a concurrent inspect, shows a short-lived per-scope status cache (private, atomic, no symlinks followed) while the fresh probe runs, and prints phase timings to stderr when CBOX_HUB_TIMING=1; falls back to the bash hub() otherwise"
+    },
+    "lib/cbox_hub_launch.py": {
+      "layer": "host",
+      "purpose": "single-start launcher for the python hub core; imports lib/cbox_hub.py and runs its main, mapping any import, syntax or runtime failure to the reserved exit code 97 so cbox degrades to the bash hub without a separate syntax-check interpreter start"
     },
     "lib/cbox_profile_seed.py": {
       "layer": "host",
@@ -472,6 +476,10 @@
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
+    "lib/test_container_exec_all.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
     "lib/test_container_exec_inertness.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
@@ -545,6 +553,10 @@
       "purpose": "host-side test harness under the lib/test_* suite"
     },
     "lib/test_hub_menu.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_hub_speed.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },

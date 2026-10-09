@@ -131,7 +131,10 @@
       "side_effects": [
         "spawns-docker-exec-subprocess"
       ],
-      "enabled_when_env": "CBOX_CONTAINER_EXEC_TOOL"
+      "enabled_when_env": [
+        "CBOX_CONTAINER_EXEC_TOOL",
+        "CBOX_CONTAINER_EXEC_ACTIVE"
+      ]
     }
   },
   "cbox-net": {

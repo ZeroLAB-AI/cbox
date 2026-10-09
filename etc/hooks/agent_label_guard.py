@@ -170,6 +170,8 @@ def quota_deny_reason(text, family="claude"):
     hermes = snap["hermes"]
     if budget.get("status") not in ("ok", "override"):
         return None
+    if budget.get("free"):
+        return None
     b = budget.get("b")
     if b is None:
         return None
@@ -191,6 +193,8 @@ def quota_local_busy_deny_reason(family="claude"):
     budget = snap["budget"]
     if budget.get("status") not in ("ok", "override"):
         return None
+    if budget.get("free"):
+        return None
     b = budget.get("b")
     if b is None or b >= QUOTA_LOCAL_BUSY_MIN:
         return None
@@ -200,11 +204,17 @@ def quota_local_busy_deny_reason(family="claude"):
 
 
 def quota_n_claude(family="claude"):
+    if cbox_budget is not None and cbox_budget._subscription_profile() == "low":
+        snap = _quota_snapshot(family)
+        n = None
+        if snap:
+            n = snap["budget"].get("n")
+        return 0 if n == 0 else 1
     snap = _quota_snapshot(family)
     if not snap:
         return None
     budget = snap["budget"]
-    if budget.get("status") not in ("ok", "override"):
+    if budget.get("status") not in ("ok", "override") or budget.get("free"):
         return None
     return budget.get("n")
 
@@ -319,6 +329,17 @@ def workflow_script(ti):
     return ""
 
 
+STARTED_SCRIPT_RE = re.compile(r"(?:^|/)workflows/scripts/[^/]*-wf_[A-Za-z0-9][A-Za-z0-9-]{0,63}\.js$")
+
+
+def workflow_is_resume(ti):
+    run_id = ti.get("resumeFromRunId")
+    if isinstance(run_id, str) and run_id.strip():
+        return True
+    path = ti.get("scriptPath")
+    return isinstance(path, str) and STARTED_SCRIPT_RE.search(path) is not None
+
+
 def scan_js(script):
     tokens = []
     i, n = 0, len(script)
@@ -412,7 +433,7 @@ def _script_runs_local_agent(tokens):
     return False
 
 
-def workflow_violations(script, local_first=True):
+def workflow_violations(script, local_first=True, enforce_cap=True):
     tokens = scan_js(script)
     local_in_script = _script_runs_local_agent(tokens)
     problems = []
@@ -471,7 +492,7 @@ def workflow_violations(script, local_first=True):
             problems.append("agent() #%d (%s) reuses the justification of agent() #%d ('%s')" % (calls, atype, seen[why], why))
             continue
         seen[why] = calls
-    n_claude = quota_n_claude()
+    n_claude = quota_n_claude() if enforce_cap else None
     if n_claude is not None:
         cap = max(1, n_claude) + 1
         if sub_calls > cap:
@@ -509,7 +530,7 @@ def main():
                    "not a regular file, a symlink, over %d bytes, or not UTF-8); pass it inline "
                    "or as a regular file" % WORKFLOW_SCRIPT_CAP_BYTES)
             return
-        problems = workflow_violations(script, local_first)
+        problems = workflow_violations(script, local_first, not workflow_is_resume(ti))
         if problems:
             quota = next((p for p in problems if p.startswith("quota: B=")), None)
             if quota:

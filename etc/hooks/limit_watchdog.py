@@ -673,9 +673,11 @@ def _regulator_marker_pass(path, name, now):
         return
     reset_text = time.strftime("%H:%M:%SZ", time.gmtime(int(due) - 2))
     n = budget.get("n")
-    if not isinstance(n, int):
-        n = 0
-    prompt = "cbox: quota reset at %s, agents: %d; continue the blocked step" % (reset_text, n)
+    if budget.get("free") or budget.get("status") == "off":
+        agents_text = "inf"
+    else:
+        agents_text = str(n if isinstance(n, int) else 0)
+    prompt = "cbox: quota reset at %s, agents: %s; continue the blocked step" % (reset_text, agents_text)
     try:
         partial = inject(pane_id, prompt)
     except (OSError, subprocess.SubprocessError) as exc:

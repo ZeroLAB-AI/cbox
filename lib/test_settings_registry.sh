@@ -89,6 +89,63 @@ grep -Fq 'CBOX_REGULATOR_AUTORESUME-on' "$INSTALL_DIR/entrypoint.sh" \
   || _fail "claude session wrapping does not include regulator auto-resume"
 _ok "regulator auto-resume reaches isolated compose and the session wrapper"
 
+grep -Fq 'CBOX_BUDGET_MODE=${CBOX_BUDGET_MODE:-on}' "$INSTALL_DIR/templates/generators.sh" \
+  || _fail "compose renders omit the CBOX_BUDGET_MODE default"
+[ "$(grep -Fc 'CBOX_BUDGET_MODE=${CBOX_BUDGET_MODE:-on}' "$INSTALL_DIR/templates/generators.sh")" = 2 ] \
+  || _fail "CBOX_BUDGET_MODE must be rendered by exactly the global and the isolated compose"
+python3 - "$REG" <<'PY' || _fail "CBOX_BUDGET_MODE registry entry is not an on|off enum default on in the autoresume section, global scope"
+import json, sys
+data = json.load(open(sys.argv[1]))
+v = [x for x in data["variables"] if x["key"] == "CBOX_BUDGET_MODE"]
+assert len(v) == 1
+v = v[0]
+assert v["section"] == "autoresume" and v["role"] == "setting"
+assert v["type"] == {"kind": "enum", "values": ["off", "on"]} and v["default"] == "on"
+assert [s for s in data["sections"] if s["id"] == "autoresume"][0]["scope"] == "project"
+PY
+_ok "CBOX_BUDGET_MODE is a registry setting (autoresume, on|off, default on) rendered into both composes"
+
+python3 - "$REG" <<'PY' || _fail "CBOX_SUBSCRIPTION_PROFILE registry entry is not a low|high|max enum default high in the autoresume section, global scope"
+import json, sys
+data = json.load(open(sys.argv[1]))
+v = [x for x in data["variables"] if x["key"] == "CBOX_SUBSCRIPTION_PROFILE"]
+assert len(v) == 1
+v = v[0]
+assert v["section"] == "autoresume" and v["role"] == "setting"
+assert v["type"] == {"kind": "enum", "values": ["low", "high", "max"]} and v["default"] == "high"
+assert v["export"] is False and v["prompt"] is None and v["validator"] is None
+assert [s for s in data["sections"] if s["id"] == "autoresume"][0]["scope"] == "project"
+PY
+for kv in 'CBOX_SUBSCRIPTION_PROFILE=${CBOX_SUBSCRIPTION_PROFILE:-high}'; do
+  [ "$(grep -Fc "$kv" "$INSTALL_DIR/templates/generators.sh")" = 2 ] \
+    || _fail "$kv must be rendered by exactly the global and the isolated compose"
+done
+_ok "CBOX_SUBSCRIPTION_PROFILE is a registry setting (autoresume, low|high|max, default high) rendered into both composes"
+
+python3 - "$REG" <<'PY' || _fail "regulator threshold registry entries are not autoresume uint-range settings with the documented defaults"
+import json, sys
+data = json.load(open(sys.argv[1]))
+want = {
+    "CBOX_BUDGET_LOW_5H": (15, 0, 100),
+    "CBOX_BUDGET_LOW_7D": (20, 0, 100),
+    "CBOX_BUDGET_PACE_WINDOW_H": (3, 1, 168),
+    "CBOX_BUDGET_PACE_SLACK_H": (8, 0, 168),
+}
+order = [x["key"] for x in data["variables"] if x["section"] == "autoresume"]
+assert order.index("CBOX_SUBSCRIPTION_PROFILE") + 1 == order.index("CBOX_BUDGET_LOW_5H")
+for key, (default, lo, hi) in want.items():
+    v = [x for x in data["variables"] if x["key"] == key]
+    assert len(v) == 1, key
+    v = v[0]
+    assert v["section"] == "autoresume" and v["role"] == "setting", key
+    assert v["type"] == {"kind": "uint-range", "min": lo, "max": hi} and v["default"] == default, key
+PY
+for kv in 'CBOX_BUDGET_LOW_5H=${CBOX_BUDGET_LOW_5H:-15}' 'CBOX_BUDGET_LOW_7D=${CBOX_BUDGET_LOW_7D:-20}' 'CBOX_BUDGET_PACE_WINDOW_H=${CBOX_BUDGET_PACE_WINDOW_H:-3}' 'CBOX_BUDGET_PACE_SLACK_H=${CBOX_BUDGET_PACE_SLACK_H:-8}'; do
+  [ "$(grep -Fc "$kv" "$INSTALL_DIR/templates/generators.sh")" = 2 ] \
+    || _fail "$kv must be rendered by exactly the global and the isolated compose"
+done
+_ok "the regulator thresholds are registry settings next to CBOX_BUDGET_MODE rendered into both composes with their defaults"
+
 DUMP_HARNESS="$TMPBASE/dump.sh"
 cat > "$DUMP_HARNESS" << 'EOF'
 #!/usr/bin/env bash
@@ -261,7 +318,7 @@ MODIFIED = {
         "mode": "CBOX_MODE CBOX_SESSION_SCOPE CBOX_BASE_DIGEST_TTL CBOX_PROFILE",
         "netaccess": "CBOX_NETACCESS_MODE CBOX_NETACCESS_APPLIED CBOX_NETACCESS_SCOPE CBOX_NETACCESS_NETWORKS CBOX_NETACCESS_CIDRS CBOX_NETACCESS_SOCKS_PORT CBOX_NETACCESS_EXEC_MODE CBOX_NETACCESS_EXEC_WORKSPACE_GUARD CBOX_NETACCESS_EXEC_TIMEOUT CBOX_NETACCESS_EXEC_MAX_BYTES CBOX_CONTAINER_EXEC_TOOL",
         "mounts": "CBOX_CLAUDE_MODE CBOX_CLAUDE_PATH CBOX_CLAUDE_BACKUP CBOX_CODEX_MODE CBOX_CODEX_PATH CBOX_CODEX_BACKUP CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG",
-        "autoresume": "CBOX_LIMIT_AUTORESUME CBOX_REGULATOR_AUTORESUME CBOX_SESSION_MULTIPLEX CBOX_SAFEGUARD_AUTOCONFIRM CBOX_SESSION_BROKER_MODE CBOX_SSHD_LISTEN_ADDR CBOX_SSHD_PORT CBOX_LIMIT_RESUME_DELAY CBOX_LIMIT_RESUME_PROMPT CBOX_LIMIT_RESUME_STAGGER CBOX_LIMIT_RESUME_MAX_PER_DAY",
+        "autoresume": "CBOX_LIMIT_AUTORESUME CBOX_REGULATOR_AUTORESUME CBOX_BUDGET_MODE CBOX_SUBSCRIPTION_PROFILE CBOX_BUDGET_LOW_5H CBOX_BUDGET_LOW_7D CBOX_BUDGET_PACE_WINDOW_H CBOX_BUDGET_PACE_SLACK_H CBOX_SESSION_MULTIPLEX CBOX_SAFEGUARD_AUTOCONFIRM CBOX_SESSION_BROKER_MODE CBOX_SSHD_LISTEN_ADDR CBOX_SSHD_PORT CBOX_LIMIT_RESUME_DELAY CBOX_LIMIT_RESUME_PROMPT CBOX_LIMIT_RESUME_STAGGER CBOX_LIMIT_RESUME_MAX_PER_DAY",
         "wireguard": "CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE CBOX_WG_FORWARDS CBOX_WG_CLIENT_ATTACH",
         "bashrc": "CBOX_BASHRC CBOX_BASHRC_COMMANDS",
         "hermes": "CBOX_HERMES CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_EFFORT CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME CBOX_HERMES_HOOKS",
@@ -275,6 +332,7 @@ MODIFIED = {
     "SEC_DESC": {
         "local-model": "Off by default. A text-only MCP delegate (local-qwen) backed by a local OpenAI-compatible endpoint such as ollama - see docs/LOCAL_MODEL_RUNBOOK.md. Machine-scoped: the endpoint is a fact about this host, not about a project, so it is configured once and every project on the machine reads the same value.",
         "hermes-delegate": "Off by default. A zero-cost MCP delegate tool (hermes-local) that shells out to a one-shot hermes -z call per invocation, in an ephemeral per-call home isolated from the hermes console engine. Machine-scoped: decided once per host and inherited by every project; the tool is rendered only in projects where the hermes console engine (CBOX_HERMES=on, project-scoped) is present, so a project without hermes simply does not get it.",
+        "netaccess": "Reach Docker networks through Dante SOCKS; optional host-side exec bridge runs tests only in containers on the networks netaccess reaches (explicit scope=list networks for scoped, every eligible network for all) and never mounts docker.sock into cbox.",
         "autoresume": "Wrap interactive sessions in tmux and let a per-container watchdog type the resume prompt after a usage-limit window resets (isolated session scope + claude mount only). Also carries the in-container sshd remote-attach feature (disabled by default): three layers - WireGuard, an ssh key, and this container's access level - gate list/attach/spawn against the tmux sessions the wrap creates.",
     },
     "SEC_DOCTOR_ROWS": {
@@ -329,7 +387,7 @@ if expected != new:
 EOF
 
 python3 "$ADOPTION_DELTA_PY" "$TMPBASE/old_norm.txt" "$TMPBASE/new_norm.txt" 2> "$TMPBASE/parity_diff.txt" \
-  || _fail "SEC_* arrays differ from the pre-registry snapshot by MORE than the declared shadow-setting adoption (sections autoupdate/dns/clipboard with their six variables, plus the netaccess CBOX_CONTAINER_EXEC_TOOL variable/doctor-row addition, plus the mounts CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG variable addition, plus the autoresume CBOX_SESSION_MULTIPLEX variable addition, plus the wireguard CBOX_WG_FORWARDS variable addition, plus the autoresume CBOX_SESSION_BROKER_MODE variable and session-broker doctor-row addition, plus the autoresume CBOX_SSHD_LISTEN_ADDR and CBOX_SSHD_PORT variable additions and updated SEC_DESC for the in-container sshd ForceCommand entry, plus the new kernel-lang section with its two CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING variables, plus the capabilities and stale-binds doctor-extra-row additions to DOCTOR_EXTRA_ROWS, plus the clipboard doctor row on the clipboard section, plus the hermes CBOX_HERMES_HOOKS variable addition, plus the codex-mcp CBOX_CODEX_HOOKS variable addition, plus the codex-mcp CBOX_CODEX_MODEL and CBOX_CODEX_EFFORT variable additions, plus the ollama CBOX_OLLAMA_CONTEXT_LENGTH/CBOX_OLLAMA_FLASH_ATTENTION/CBOX_OLLAMA_KV_CACHE_TYPE/CBOX_OLLAMA_KEEP_ALIVE variable additions, plus the local-model CBOX_LOCAL_MODEL_TIMEOUT_SEC variable addition, plus local-model moving to machine scope because the endpoint is a fact about the host and every project on it reads the same one, plus hermes-delegate moving to machine scope and dropping its disable:hermes-off dependency - the hermes-local render gate on CBOX_HERMES replaces it, so the dependency text disappears from SEC_DEP_TEXT; plus the binaries section gaining its own binaries doctor row, plus the binaries CBOX_BINS_HEALTH_GATE variable addition, plus the mcp-servers/agents/codex-mcp sections flipping SEC_PROFILE from skip to auto (run_classic is their first production consumer), plus the hermes-delegate CBOX_HERMES_DELEGATE_TIMEOUT_SEC and CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC variable additions, plus the wireguard CBOX_WG_CLIENT_ATTACH variable addition, plus the hermes-delegate section gaining a hermes-agent doctor row alongside its own hermes-delegate row, plus the netaccess section gaining a cbox-net doctor row, plus CBOX_CODEX_SHIM_TURN_TIMEOUT_SEC added to the existing codex-progress section (the shim's wall-clock cap on a single turn), plus the new host-aliases section inserted right before netaccess with its own CBOX_NETACCESS_HOST_ALIASES variable and host-aliases doctor row (the host-alias SOCKS-proxy redirection, apply_class recreate, skip profile, project scope), plus the mode section gaining the CBOX_PROFILE variable (login profile default, project scope, no wizard prompt) and the profile doctor-extra-row, plus the continuity section gaining the CBOX_REVIEW variable (reviewer policy ask|auto, default ask, no wizard prompt), plus the new hyperqwen section inserted right before wireguard with its eight CBOX_HYPERQWEN_* variables and hyperqwen doctor row, plus ollama gaining CBOX_OLLAMA_GPU_DEVICE):
+  || _fail "SEC_* arrays differ from the pre-registry snapshot by MORE than the declared shadow-setting adoption (sections autoupdate/dns/clipboard with their six variables, plus the netaccess CBOX_CONTAINER_EXEC_TOOL variable/doctor-row addition, plus the mounts CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG variable addition, plus the autoresume CBOX_SESSION_MULTIPLEX variable addition, plus the wireguard CBOX_WG_FORWARDS variable addition, plus the autoresume CBOX_SESSION_BROKER_MODE variable and session-broker doctor-row addition, plus the autoresume CBOX_SSHD_LISTEN_ADDR and CBOX_SSHD_PORT variable additions and updated SEC_DESC for the in-container sshd ForceCommand entry, plus the new kernel-lang section with its two CBOX_KERNEL_LANG_OUTPUT/CBOX_KERNEL_LANG_REASONING variables, plus the capabilities and stale-binds doctor-extra-row additions to DOCTOR_EXTRA_ROWS, plus the clipboard doctor row on the clipboard section, plus the hermes CBOX_HERMES_HOOKS variable addition, plus the codex-mcp CBOX_CODEX_HOOKS variable addition, plus the codex-mcp CBOX_CODEX_MODEL and CBOX_CODEX_EFFORT variable additions, plus the ollama CBOX_OLLAMA_CONTEXT_LENGTH/CBOX_OLLAMA_FLASH_ATTENTION/CBOX_OLLAMA_KV_CACHE_TYPE/CBOX_OLLAMA_KEEP_ALIVE variable additions, plus the local-model CBOX_LOCAL_MODEL_TIMEOUT_SEC variable addition, plus local-model moving to machine scope because the endpoint is a fact about the host and every project on it reads the same one, plus hermes-delegate moving to machine scope and dropping its disable:hermes-off dependency - the hermes-local render gate on CBOX_HERMES replaces it, so the dependency text disappears from SEC_DEP_TEXT; plus the binaries section gaining its own binaries doctor row, plus the binaries CBOX_BINS_HEALTH_GATE variable addition, plus the mcp-servers/agents/codex-mcp sections flipping SEC_PROFILE from skip to auto (run_classic is their first production consumer), plus the hermes-delegate CBOX_HERMES_DELEGATE_TIMEOUT_SEC and CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC variable additions, plus the wireguard CBOX_WG_CLIENT_ATTACH variable addition, plus the hermes-delegate section gaining a hermes-agent doctor row alongside its own hermes-delegate row, plus the netaccess section gaining a cbox-net doctor row, plus CBOX_CODEX_SHIM_TURN_TIMEOUT_SEC added to the existing codex-progress section (the shim's wall-clock cap on a single turn), plus the new host-aliases section inserted right before netaccess with its own CBOX_NETACCESS_HOST_ALIASES variable and host-aliases doctor row (the host-alias SOCKS-proxy redirection, apply_class recreate, skip profile, project scope), plus the mode section gaining the CBOX_PROFILE variable (login profile default, project scope, no wizard prompt) and the profile doctor-extra-row, plus the continuity section gaining the CBOX_REVIEW variable (reviewer policy ask|auto, default ask, no wizard prompt), plus the new hyperqwen section inserted right before wireguard with its eight CBOX_HYPERQWEN_* variables and hyperqwen doctor row, plus ollama gaining CBOX_OLLAMA_GPU_DEVICE, plus the autoresume CBOX_BUDGET_MODE variable addition (paid-agent regulator switch on|off, default on, no wizard prompt), plus the autoresume CBOX_BUDGET_LOW_5H/CBOX_BUDGET_LOW_7D/CBOX_BUDGET_PACE_WINDOW_H/CBOX_BUDGET_PACE_SLACK_H regulator threshold additions (integers, no wizard prompt)):
 $(cat "$TMPBASE/parity_diff.txt")"
 _ok "parity gate: generated sections.sh equals the pre-registry snapshot plus exactly the declared adoption delta (autoupdate/dns/clipboard sections, six variables, skip profile, project scope, empty doctor rows; plus CBOX_CONTAINER_EXEC_TOOL added to the existing netaccess section and its container-exec-tool doctor row; plus CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG added to the existing mounts section; plus CBOX_SESSION_MULTIPLEX added to the existing autoresume section; plus CBOX_SAFEGUARD_AUTOCONFIRM added to the existing autoresume section; plus CBOX_WG_FORWARDS added to the existing wireguard section; plus CBOX_SESSION_BROKER_MODE added to the existing autoresume section and its session-broker doctor row; plus CBOX_SSHD_LISTEN_ADDR and CBOX_SSHD_PORT added to the existing autoresume section with its SEC_DESC updated for sshd; plus the new kernel-lang section (CBOX_KERNEL_LANG_OUTPUT, CBOX_KERNEL_LANG_REASONING), apply_class none, skip profile, project scope, empty doctor rows; plus the capabilities and stale-binds doctor-extra-rows added to DOCTOR_EXTRA_ROWS; plus the clipboard section gaining its own clipboard doctor row; plus CBOX_HERMES_HOOKS added to the existing hermes section (M4 experiment gate, default off); plus CBOX_CODEX_HOOKS added to the existing codex-mcp section (M4 experiment gate, default off); plus CBOX_CODEX_MODEL and CBOX_CODEX_EFFORT added to the existing codex-mcp section (configurable codex profile model/effort, defaults gpt-5.6-terra/xhigh); plus hermes-delegate moving to machine scope with its hermes-off dependency and dependency text removed in favour of the render gate; plus the binaries section gaining its own binaries doctor row; plus CBOX_BINS_HEALTH_GATE added to the existing binaries section (start-time health gate switch, default off); plus mcp-servers/agents/codex-mcp flipping SEC_PROFILE from skip to auto (run_classic is their first production consumer); plus CBOX_HERMES_DELEGATE_TIMEOUT_SEC and CBOX_HERMES_DELEGATE_IDLE_TIMEOUT_SEC added to the existing hermes-delegate section (the call's wall-clock cap and its no-progress stall check); plus CBOX_WG_CLIENT_ATTACH added to the existing wireguard section (client-role consumer attach: global session on the shared infra network, isolated projects hub-and-spoke); plus the hermes-delegate section gaining a hermes-agent doctor row alongside its own hermes-delegate row; plus the netaccess section gaining a cbox-net doctor row; plus CBOX_CODEX_SHIM_TURN_TIMEOUT_SEC added to the existing codex-progress section (the shim's wall-clock cap on a single turn); plus the new host-aliases section inserted right before netaccess with its own CBOX_NETACCESS_HOST_ALIASES variable and host-aliases doctor row; plus CBOX_PROFILE added to the existing mode section and the profile row added to DOCTOR_EXTRA_ROWS; plus CBOX_REVIEW added to the existing continuity section) - nothing else moved"
 
@@ -340,8 +398,8 @@ _ok "sections command lists section ids"
 VARS="$(python3 "$PY" vars "$REG")"
 [ -n "$VARS" ] || _fail "vars command returned nothing"
 VAR_COUNT="$(printf '%s\n' "$VARS" | grep -c .)"
-[ "$VAR_COUNT" -eq 140 ] || _fail "expected 140 variables in the registry, got $VAR_COUNT"
-_ok "vars command lists all 140 variables"
+[ "$VAR_COUNT" -eq 147 ] || _fail "expected 147 variables in the registry, got $VAR_COUNT"
+_ok "vars command lists all 147 variables"
 
 W="$TMPBASE/reg"
 mkdir -p "$W"

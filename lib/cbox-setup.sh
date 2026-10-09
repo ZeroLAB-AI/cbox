@@ -1033,9 +1033,10 @@ merge_mcp_json() {
   local user_dir="${CBOX_USER_DIR-$HOME/.config/cbox/user}"
   local rendered_file
   rendered_file="$(mktemp)"
-  local netmap_active="off"
+  local netmap_active="off" exec_active="off"
   _cbox_netaccess_active && netmap_active="on"
-  CBOX_NETMAP_ACTIVE="$netmap_active" \
+  if declare -F _cbox_netaccess_exec_active >/dev/null 2>&1 && _cbox_netaccess_exec_active; then exec_active="on"; fi
+  CBOX_NETMAP_ACTIVE="$netmap_active" CBOX_CONTAINER_EXEC_ACTIVE="$exec_active" \
     python3 "$ETC_DIR/mcp/render_mcp.py" "$servers" "$selected" "$hooks_dir" "$progress_flag" claude "$user_dir" > "$rendered_file" \
     || { rm -f "$rendered_file"; die "render_mcp.py failed for $servers"; }
   python3 - "$target" "$selected" "$out" "$rendered_file" "$servers" "$ETC_DIR/registry/retired.json" <<'PYEOF'
@@ -1537,17 +1538,22 @@ step_netaccess() {
       fi
       ;;
   esac
-  ask_choice "setup: direct test execution inside scoped containers" "$CBOX_NETACCESS_EXEC_MODE" off scoped
+  note "exec scoped = only scope=list with explicit networks; exec all = every network netaccess reaches (the listed networks under scope=list, every eligible Docker network under scope=all)"
+  ask_choice "setup: direct test execution inside containers" "$CBOX_NETACCESS_EXEC_MODE" off scoped all
   CBOX_NETACCESS_EXEC_MODE="$ASK_VALUE"
   if [ "$CBOX_NETACCESS_EXEC_MODE" = scoped ] && [ "$CBOX_NETACCESS_SCOPE" != list ]; then
-    warn "scoped exec requires scope=list with explicit Docker networks; keeping exec off"
+    warn "scoped exec requires scope=list with explicit Docker networks; keeping exec off (exec all works under scope=all)"
     CBOX_NETACCESS_EXEC_MODE=off
   fi
   if [ "$CBOX_NETACCESS_EXEC_MODE" = scoped ] && [ -z "$CBOX_NETACCESS_NETWORKS" ]; then
     warn "scoped exec requires at least one explicit Docker network; keeping exec off"
     CBOX_NETACCESS_EXEC_MODE=off
   fi
-  if [ "$CBOX_NETACCESS_EXEC_MODE" = scoped ]; then
+  if [ "$CBOX_NETACCESS_EXEC_MODE" = all ] && [ "$CBOX_NETACCESS_SCOPE" = list ] && [ -z "$CBOX_NETACCESS_NETWORKS" ]; then
+    warn "exec all under scope=list requires at least one explicit Docker network; keeping exec off"
+    CBOX_NETACCESS_EXEC_MODE=off
+  fi
+  if [ "$CBOX_NETACCESS_EXEC_MODE" = scoped ] || [ "$CBOX_NETACCESS_EXEC_MODE" = all ]; then
     ask_choice "setup: additionally require host bind mounts to stay inside the current workspace" "$CBOX_NETACCESS_EXEC_WORKSPACE_GUARD" off on
     CBOX_NETACCESS_EXEC_WORKSPACE_GUARD="$ASK_VALUE"
   fi
@@ -2156,7 +2162,10 @@ step_hyperqwen() {
       ask "setup: hyperqwen host models directory (empty = cbox-owned named volume): " "$models_try"
       models_try="$ASK_VALUE"
       case "$models_try" in
-        "~") models_try="$HOME" ;;
+        "~"|"~/")
+          warn "invalid CBOX_HYPERQWEN_MODELS_PATH: $models_try is the home directory itself - the models path must be a dedicated directory (e.g. ~/models), not the home directory"
+          continue
+          ;;
         "~/"*) models_try="$HOME/${models_try#\~/}" ;;
       esac
       if msg_models="$(_cbox_reg_validate_var CBOX_HYPERQWEN_MODELS_PATH "$models_try")"; then
@@ -2772,6 +2781,7 @@ claude_md_container_exec_paragraph() {
   case "$gate" in
     ""|off|0|false|no) return 0 ;;
   esac
+  _cbox_netaccess_exec_active || return 0
   cat <<'EOF'
 
 You also have a container-exec MCP tool (tools container_list,

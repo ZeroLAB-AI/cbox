@@ -71,7 +71,8 @@ def bridge_unavailable_message(detail):
         "container-exec bridge is unavailable (%s) - this means the "
         "operator has not enabled the feature for this session (netaccess "
         "exec mode off, or the tool gate off), not that you did anything "
-        "wrong; there is nothing to retry here" % detail)
+        "wrong; there is nothing to retry here. The exact reason is in the "
+        "container-exec row of 'cbox doctor' run on the host" % detail)
 
 
 def call_bridge(payload):

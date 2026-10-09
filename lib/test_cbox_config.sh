@@ -107,8 +107,9 @@ fi
 _ok "validator: numeric (CBOX_NETACCESS_SOCKS_PORT)"
 
 _cbox_config_validate_var CBOX_NETACCESS_EXEC_MODE scoped || _fail "netaccess exec: scoped should be valid"
-if _cbox_config_validate_var CBOX_NETACCESS_EXEC_MODE all >/dev/null 2>&1; then
-  _fail "netaccess exec: all should be rejected"
+_cbox_config_validate_var CBOX_NETACCESS_EXEC_MODE all || _fail "netaccess exec: all should be valid"
+if _cbox_config_validate_var CBOX_NETACCESS_EXEC_MODE everything >/dev/null 2>&1; then
+  _fail "netaccess exec: unknown value should be rejected"
 fi
 _cbox_config_validate_var CBOX_NETACCESS_EXEC_WORKSPACE_GUARD on || _fail "netaccess exec workspace guard: on should be valid"
 if _cbox_config_validate_var CBOX_NETACCESS_EXEC_WORKSPACE_GUARD required >/dev/null 2>&1; then
@@ -742,6 +743,34 @@ _ok "machine-scope routing: config set writes a machine-scoped key to the machin
 grep -qi "different config files" "$TMPBASE/machinemix.stderr" || _fail "machine-scope routing: the mixed-call refusal should explain that the keys live in different config files: $(cat "$TMPBASE/machinemix.stderr")"
 [ -f "$TMPBASE/machinemix.routed" ] && _fail "machine-scope routing: a refused mixed call must not write anything at all"
 _ok "machine-scope routing: a mixed machine/project call is refused before any write"
+
+for _scope_val in list all; do
+  (
+    cd "$ROOT"
+    HOME="$TMPBASE/home"
+    export HOME
+    CBOX_MODE=isolated
+    HAVE_GLOBAL_CONF=1
+    _cbox_config_in_container() { return 1; }
+    _cbox_config_set_global() { printf 'global\n' > "$TMPBASE/scopeset.$_scope_val.routed"; return 0; }
+    _cbox_config_set_isolated() { printf 'isolated\n' > "$TMPBASE/scopeset.$_scope_val.routed"; return 0; }
+    _cbox_config_set "CBOX_NETACCESS_SCOPE=$_scope_val"
+  ) > "$TMPBASE/scopeset.stdout" 2>"$TMPBASE/scopeset.stderr" || _fail "config set CBOX_NETACCESS_SCOPE=$_scope_val must pass validation: $(cat "$TMPBASE/scopeset.stderr")"
+  [ -f "$TMPBASE/scopeset.$_scope_val.routed" ] || _fail "config set CBOX_NETACCESS_SCOPE=$_scope_val reached no writer"
+done
+(
+  cd "$ROOT"
+  HOME="$TMPBASE/home"
+  export HOME
+  CBOX_MODE=isolated
+  HAVE_GLOBAL_CONF=1
+  _cbox_config_in_container() { return 1; }
+  _cbox_config_set_global() { return 0; }
+  _cbox_config_set_isolated() { return 0; }
+  _cbox_config_set "CBOX_NETACCESS_SCOPE=bogus"
+) > /dev/null 2>"$TMPBASE/scopebogus.stderr" && _fail "config set CBOX_NETACCESS_SCOPE=bogus must be rejected"
+grep -q "invalid value for CBOX_NETACCESS_SCOPE" "$TMPBASE/scopebogus.stderr" || _fail "bogus scope rejection must name the key: $(cat "$TMPBASE/scopebogus.stderr")"
+_ok "config set accepts CBOX_NETACCESS_SCOPE list and all and rejects bogus"
 
 _cbox_path_hash() { printf 'machinestriphash'; }
 MACHINESTRIP="$HOME/.config/cbox/projects/machinestriphash"

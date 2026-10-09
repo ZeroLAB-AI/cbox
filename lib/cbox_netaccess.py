@@ -115,7 +115,7 @@ def network_subnets(doc):
 
 def compose_network_kind(doc, project):
     labels = doc.get("Labels") if isinstance(doc.get("Labels"), dict) else {}
-    if labels.get("com.docker.compose.project") != project:
+    if project is not None and labels.get("com.docker.compose.project") != project:
         return ""
     kind = labels.get("com.docker.compose.network")
     return kind if kind in ("internal", "egress") else ""
@@ -180,6 +180,11 @@ def select_networks(docker_bin, scope, requested, project):
         selected.append(name)
         docs[name] = doc
     return list(dict.fromkeys(selected)), docs, skipped
+
+
+def eligible_network_names(docker_bin, project=None):
+    selected, _docs, _skipped = select_networks(docker_bin, "all", [], project)
+    return selected
 
 
 def parse_etc_hosts(path):

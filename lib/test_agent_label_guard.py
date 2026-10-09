@@ -13,6 +13,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 GUARD = ROOT / "etc" / "hooks" / "agent_label_guard.py"
 BUDGET_MODULE = ROOT / "etc" / "hooks" / "cbox_budget.py"
 
+os.environ.pop("CBOX_SUBSCRIPTION_PROFILE", None)
+os.environ.pop("CBOX_BUDGET_MODE", None)
+
 
 def hold_all_slots(lock_dir, n):
     os.makedirs(lock_dir, exist_ok=True)
@@ -76,7 +79,8 @@ def _run_payload(home, payload, env=None):
     e = {
         k: v for k, v in os.environ.items()
         if k not in ("CBOX_AGENT_MODEL_DENY", "CBOX_AGENT_MODEL_BAN", "CBOX_HERMES_DELEGATE",
-                     "CBOX_USAGE_DIR", "CBOX_BUDGET_MODE", "CLAUDE_CONFIG_DIR")
+                     "CBOX_USAGE_DIR", "CBOX_BUDGET_MODE", "CBOX_SUBSCRIPTION_PROFILE", "CLAUDE_CONFIG_DIR")
+        and not k.startswith("CBOX_BUDGET_")
         and not (k.startswith("ANTHROPIC_DEFAULT_") and k.endswith("_MODEL"))
     }
     e["HOME"] = home
@@ -195,7 +199,8 @@ class LocalFirstGateTests(unittest.TestCase):
         write_local_tier(self.home)
         e = {k: v for k, v in os.environ.items()
              if k not in ("CBOX_AGENT_MODEL_DENY", "CBOX_AGENT_MODEL_BAN", "CBOX_HERMES_DELEGATE",
-                          "CBOX_USAGE_DIR", "CBOX_BUDGET_MODE", "CLAUDE_CONFIG_DIR")
+                          "CBOX_USAGE_DIR", "CBOX_BUDGET_MODE", "CBOX_SUBSCRIPTION_PROFILE", "CLAUDE_CONFIG_DIR")
+             and not k.startswith("CBOX_BUDGET_")
              and not (k.startswith("ANTHROPIC_DEFAULT_") and k.endswith("_MODEL"))}
         e["HOME"] = self.home
         payload = {"tool_name": "Agent",
@@ -301,7 +306,8 @@ class LocalFirstGateTests(unittest.TestCase):
         os.makedirs(gone)
         e = {k: v for k, v in os.environ.items()
              if k not in ("CBOX_AGENT_MODEL_DENY", "CBOX_AGENT_MODEL_BAN", "CBOX_HERMES_DELEGATE",
-                          "CBOX_USAGE_DIR", "CBOX_BUDGET_MODE", "CLAUDE_CONFIG_DIR")
+                          "CBOX_USAGE_DIR", "CBOX_BUDGET_MODE", "CBOX_SUBSCRIPTION_PROFILE", "CLAUDE_CONFIG_DIR")
+             and not k.startswith("CBOX_BUDGET_")
              and not (k.startswith("ANTHROPIC_DEFAULT_") and k.endswith("_MODEL"))}
         e["HOME"] = self.home
         e["CLAUDE_CONFIG_DIR"] = os.path.join(self.home, ".claude-cfg")
@@ -705,7 +711,8 @@ class QuotaGuardTests(unittest.TestCase):
     def test_local_busy_claim_without_local_tier_still_hits_the_busy_quota_floor(self):
         write_claude_usage(self.usage_dir, seven_day_used=59)
         write_hermes_state(self.usage_dir, reachable=True)
-        out = self._run("worker", "local-skip: local-busy - hermes is running the extraction step")
+        out = self._run("worker", "local-skip: local-busy - hermes is running the extraction step",
+                        env={"CBOX_BUDGET_LOW_7D": "101"})
         self.assertEqual(out["permissionDecision"], "deny")
         self.assertIn("below 1.0", out["permissionDecisionReason"])
 
@@ -752,10 +759,16 @@ class QuotaGuardTests(unittest.TestCase):
         spec.loader.exec_module(mod)
         old_env = os.environ.get("CBOX_USAGE_DIR")
         os.environ["CBOX_USAGE_DIR"] = self.usage_dir
+        old_low = os.environ.get("CBOX_BUDGET_LOW_7D")
+        os.environ["CBOX_BUDGET_LOW_7D"] = "101"
         try:
             write_claude_usage(self.usage_dir, seven_day_used=59)
             result = mod.budget_for_family("claude")
         finally:
+            if old_low is None:
+                os.environ.pop("CBOX_BUDGET_LOW_7D", None)
+            else:
+                os.environ["CBOX_BUDGET_LOW_7D"] = old_low
             if old_env is None:
                 os.environ.pop("CBOX_USAGE_DIR", None)
             else:
@@ -771,6 +784,7 @@ class QuotaGuardTests(unittest.TestCase):
             out = self._run("worker",
                              "local-skip: local-busy - hermes is running the extraction step",
                              env={"CBOX_HERMES_DELEGATE_LOCK_DIR": lock_dir,
+                                  "CBOX_BUDGET_LOW_7D": "101",
                                   "CBOX_HERMES_DELEGATE_MAX_CONCURRENCY": "1"})
             self.assertEqual(out["permissionDecision"], "deny")
             self.assertTrue(out["permissionDecisionReason"].startswith(
@@ -789,6 +803,7 @@ class QuotaGuardTests(unittest.TestCase):
         try:
             out = run_workflow(self.home, script, env={
                 "CBOX_USAGE_DIR": self.usage_dir,
+                "CBOX_BUDGET_LOW_7D": "101",
                 "CBOX_HERMES_DELEGATE_LOCK_DIR": lock_dir,
                 "CBOX_HERMES_DELEGATE_MAX_CONCURRENCY": "1"})
             self.assertEqual(out["permissionDecision"], "deny")
@@ -808,6 +823,7 @@ class QuotaGuardTests(unittest.TestCase):
             "await agent(P, {label: 'worker: local-skip: local-busy - hermes is running the extraction step', agentType: 'worker'})\n")
         out = run_workflow(self.home, script, env={
             "CBOX_USAGE_DIR": self.usage_dir,
+            "CBOX_BUDGET_LOW_7D": "101",
             "CBOX_HERMES_DELEGATE_LOCK_DIR": lock_dir})
         self.assertEqual(out["permissionDecision"], "deny")
         self.assertTrue(out["permissionDecisionReason"].startswith("quota: B="))
@@ -863,7 +879,8 @@ class QuotaGuardTests(unittest.TestCase):
         shutil.copy(str(GUARD), guard_copy)
         e = {k: v for k, v in os.environ.items()
              if k not in ("CBOX_AGENT_MODEL_DENY", "CBOX_AGENT_MODEL_BAN", "CBOX_HERMES_DELEGATE",
-                          "CBOX_USAGE_DIR", "CBOX_BUDGET_MODE", "CLAUDE_CONFIG_DIR")
+                          "CBOX_USAGE_DIR", "CBOX_BUDGET_MODE", "CBOX_SUBSCRIPTION_PROFILE", "CLAUDE_CONFIG_DIR")
+             and not k.startswith("CBOX_BUDGET_")
              and not (k.startswith("ANTHROPIC_DEFAULT_") and k.endswith("_MODEL"))}
         e["HOME"] = self.home
         e["CLAUDE_CONFIG_DIR"] = os.path.join(self.home, ".claude-cfg")
@@ -950,6 +967,313 @@ class FableTierTests(unittest.TestCase):
         payload_env = dict(self.ENV)
         out = run(self.home, "fab-alias", "design", env=dict(payload_env, ANTHROPIC_DEFAULT_FABLE_MODEL="claude-fable-5-1"))
         self.assertEqual(out["permissionDecision"], "deny")
+
+
+def write_full_usage(usage_dir, five, seven, five_in=600, seven_in=98 * 3600, now=None):
+    now = now if now is not None else time.time()
+    os.makedirs(usage_dir, exist_ok=True)
+    payload = {"captured_at": now,
+               "five_hour": {"used_percentage": five, "resets_at": now + five_in},
+               "seven_day": {"used_percentage": seven, "resets_at": now + seven_in}}
+    with open(os.path.join(usage_dir, "claude.json"), "w", encoding="ascii") as f:
+        json.dump(payload, f)
+
+
+def write_samples(usage_dir, rows):
+    with open(os.path.join(usage_dir, "samples.jsonl"), "w", encoding="ascii") as f:
+        for ts, used in rows:
+            f.write(json.dumps({"ts": ts, "family": "claude", "five_hour": {"used": None},
+                                "seven_day": {"used": used}}) + "\n")
+
+
+SKIP_DESC = "local-skip: edge-case-spec - implementation against a specification with edge cases"
+
+
+class FreeVersusBrakeGuardTests(unittest.TestCase):
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        write_agent(self.home, "worker")
+        write_agent(self.home, "hermes-local", model="haiku", effort="low")
+        self.usage_dir = tempfile.mkdtemp()
+        write_hermes_state(self.usage_dir, reachable=True)
+
+    def _run(self, description, env=None):
+        e = {"CBOX_USAGE_DIR": self.usage_dir}
+        if env:
+            e.update(env)
+        return run(self.home, "worker", description, env=e)
+
+    def _workflow(self, calls, env=None):
+        script = WF_HEAD + "".join(
+            "await agent(P%d, {label: 'worker: local-skip: edge-case-spec - implementation of specification number %d with edge cases', agentType: 'worker'})\n" % (i, i)
+            for i in range(calls))
+        e = {"CBOX_USAGE_DIR": self.usage_dir}
+        if env:
+            e.update(env)
+        return run_workflow(self.home, script, env=e)
+
+    def test_free_state_never_denies_a_paid_spawn(self):
+        write_full_usage(self.usage_dir, five=45, seven=32)
+        out = self._run(SKIP_DESC)
+        self.assertEqual(out["permissionDecision"], "allow")
+
+    def test_free_state_has_no_workflow_cap(self):
+        write_full_usage(self.usage_dir, five=45, seven=32)
+        self.assertIsNone(self._workflow(9))
+
+    def test_free_state_allows_a_local_busy_claim_when_hermes_is_busy(self):
+        write_full_usage(self.usage_dir, five=45, seven=32)
+        lock_dir = tempfile.mkdtemp()
+        fds = hold_all_slots(lock_dir, 1)
+        try:
+            out = self._run("local-skip: local-busy - hermes is running the extraction step",
+                            env={"CBOX_HERMES_DELEGATE_LOCK_DIR": lock_dir,
+                                 "CBOX_HERMES_DELEGATE_MAX_CONCURRENCY": "1"})
+            self.assertEqual(out["permissionDecision"], "allow")
+        finally:
+            release_slots(fds)
+
+    def test_low_five_hour_brake_denies(self):
+        write_full_usage(self.usage_dir, five=97, seven=20, five_in=3600)
+        out = self._run(SKIP_DESC)
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("quota: B=", out["permissionDecisionReason"])
+
+    def test_low_seven_day_brake_denies(self):
+        write_full_usage(self.usage_dir, five=10, seven=95)
+        out = self._run(SKIP_DESC)
+        self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_pace_brake_denies_when_the_budget_runs_below_the_floor(self):
+        now = time.time()
+        write_full_usage(self.usage_dir, five=20, seven=88, five_in=3 * 3600, now=now)
+        write_samples(self.usage_dir, [(now - 3 * 3600 + 60 + 120 * i, 70.0 + 18.0 * i / 89.0) for i in range(90)])
+        out = self._run(SKIP_DESC)
+        self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_pace_brake_alone_can_cap_the_workflow(self):
+        now = time.time()
+        write_full_usage(self.usage_dir, five=20, seven=55, five_in=3 * 3600, now=now)
+        write_samples(self.usage_dir, [(now - 3 * 3600 + 60 + 120 * i, 25.0 + 30.0 * i / 89.0) for i in range(90)])
+        out = self._workflow(9)
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("cap of", out["permissionDecisionReason"])
+
+    def test_brake_with_a_budget_above_the_floor_still_caps_the_workflow(self):
+        write_full_usage(self.usage_dir, five=10, seven=59, seven_in=7 * 24 * 3600)
+        out = self._workflow(3, env={"CBOX_BUDGET_LOW_7D": "101"})
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("cap of 2", out["permissionDecisionReason"])
+        self.assertIsNone(self._workflow(2, env={"CBOX_BUDGET_LOW_7D": "101"}))
+
+    def test_raising_the_threshold_env_disables_the_denial(self):
+        write_full_usage(self.usage_dir, five=10, seven=95)
+        out = self._run(SKIP_DESC, env={"CBOX_BUDGET_LOW_7D": "0"})
+        self.assertEqual(out["permissionDecision"], "allow")
+
+    def test_unknown_usage_never_denies(self):
+        out = self._run(SKIP_DESC)
+        self.assertEqual(out["permissionDecision"], "allow")
+        self.assertIsNone(self._workflow(9))
+
+    def test_override_still_wins_over_the_free_state(self):
+        write_full_usage(self.usage_dir, five=45, seven=32)
+        write_override(self.usage_dir, b=0.1)
+        out = self._run(SKIP_DESC)
+        self.assertEqual(out["permissionDecision"], "deny")
+
+
+class WorkflowResumeCapTests(unittest.TestCase):
+    BRAKE = {"CBOX_BUDGET_LOW_7D": "101"}
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        write_agent(self.home, "worker")
+        self.usage_dir = tempfile.mkdtemp()
+        write_hermes_state(self.usage_dir, reachable=True)
+        self.calls = 4
+
+    def _script(self, calls=None, marked=True):
+        n = self.calls if calls is None else calls
+        label = ("worker: local-skip: edge-case-spec - implementation of specification number %d with edge cases"
+                 if marked else "step %d")
+        return WF_HEAD + "".join(
+            "await agent(P%d, {label: '%s', agentType: 'worker'})\n" % (i, label % i) for i in range(n))
+
+    def _run(self, tool_input, usage_dir=None, env=None, home=None):
+        e = {"CBOX_USAGE_DIR": usage_dir or self.usage_dir}
+        e.update(self.BRAKE)
+        if env:
+            e.update(env)
+        payload = {"tool_name": "Workflow", "tool_input": tool_input}
+        return _run_payload(home or self.home, payload, e)
+
+    def _tight(self, usage_dir=None):
+        write_full_usage(usage_dir or self.usage_dir, five=10, seven=59, seven_in=7 * 24 * 3600)
+
+    def test_new_workflow_over_the_cap_under_a_brake_is_refused(self):
+        self._tight()
+        out = self._run({"script": self._script()})
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("cap of 2", out["permissionDecisionReason"])
+
+    def test_resume_after_n_dropped_is_admitted(self):
+        self._tight()
+        out = self._run({"script": self._script(), "resumeFromRunId": "wf_a1fb4cd4-4ad"})
+        self.assertIsNone(out)
+
+    def test_resume_after_an_account_switch_is_admitted(self):
+        other_usage = tempfile.mkdtemp()
+        write_hermes_state(other_usage, reachable=True)
+        write_full_usage(other_usage, five=10, seven=59, seven_in=7 * 24 * 3600)
+        scripts = os.path.join(self.home, "projects", "p", "sid", "workflows", "scripts")
+        os.makedirs(scripts)
+        path = os.path.join(scripts, "design-wf_a1fb4cd4-4ad.js")
+        with open(path, "w", encoding="ascii") as f:
+            f.write(self._script())
+        out = self._run({"scriptPath": path, "resumeFromRunId": "wf_a1fb4cd4-4ad"}, usage_dir=other_usage)
+        self.assertIsNone(out)
+
+    def test_a_stored_run_script_path_is_exempt_without_the_resume_field(self):
+        self._tight()
+        scripts = os.path.join(self.home, "projects", "p", "sid", "workflows", "scripts")
+        os.makedirs(scripts)
+        path = os.path.join(scripts, "design-wf_1c0ebc90-c16.js")
+        with open(path, "w", encoding="ascii") as f:
+            f.write(self._script())
+        self.assertIsNone(self._run({"scriptPath": path}))
+
+    def test_an_ordinary_script_path_is_still_capped(self):
+        self._tight()
+        path = os.path.join(self.home, "adhoc.js")
+        with open(path, "w", encoding="ascii") as f:
+            f.write(self._script())
+        out = self._run({"scriptPath": path})
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("cap of 2", out["permissionDecisionReason"])
+
+    def test_empty_resume_field_does_not_exempt(self):
+        self._tight()
+        out = self._run({"script": self._script(), "resumeFromRunId": ""})
+        self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_free_state_applies_no_cap_to_new_or_resumed_runs(self):
+        write_full_usage(self.usage_dir, five=45, seven=32)
+        self.assertIsNone(self._run({"script": self._script(9)}, env={"CBOX_BUDGET_LOW_7D": "20"}))
+        self.assertIsNone(self._run({"script": self._script(9), "resumeFromRunId": "wf_x-1"},
+                                    env={"CBOX_BUDGET_LOW_7D": "20"}))
+
+    def test_resume_keeps_the_local_first_label_rules(self):
+        write_agent(self.home, "hermes-local", model="haiku", effort="low")
+        self._tight()
+        out = self._run({"script": self._script(marked=False), "resumeFromRunId": "wf_a1fb4cd4-4ad"})
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("local-skip", out["permissionDecisionReason"])
+        self.assertNotIn("cap of", out["permissionDecisionReason"])
+
+    def test_resume_keeps_the_per_spawn_quota_floor(self):
+        write_agent(self.home, "hermes-local", model="haiku", effort="low")
+        write_full_usage(self.usage_dir, five=10, seven=97, seven_in=7 * 24 * 3600)
+        out = self._run({"script": self._script(), "resumeFromRunId": "wf_a1fb4cd4-4ad"})
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertTrue(out["permissionDecisionReason"].startswith("quota: B="))
+
+
+class SubscriptionProfileLowCapTests(unittest.TestCase):
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.usage_dir = tempfile.mkdtemp()
+        self._old_env = {}
+        self._env_stack = []
+
+    def tearDown(self):
+        while self._env_stack:
+            name, old = self._env_stack.pop()
+            if old is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = old
+
+    def _set_env(self, env):
+        for name in ("CBOX_USAGE_DIR", "CBOX_BUDGET_MODE",
+                     "CBOX_SUBSCRIPTION_PROFILE", "CLAUDE_CONFIG_DIR",
+                     "CBOX_BUDGET_LOW_7D"):
+            if name not in self._old_env:
+                self._old_env[name] = os.environ.get(name)
+                self._env_stack.append((name, self._old_env[name]))
+            if name in env:
+                os.environ[name] = env[name]
+            else:
+                os.environ.pop(name, None)
+
+    def _probe_guard(self, env):
+        import importlib.util
+        self._set_env(env)
+        spec = importlib.util.spec_from_file_location(
+            "agent_label_guard_probe_%d" % id(self), str(GUARD))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _workflow(self, env, calls):
+        mod = self._probe_guard(env)
+        script = WF_HEAD + "".join(
+            "agent(P%d, {label: 'worker: local-skip: edge-case-spec - implementation of specification number %d with edge cases', agentType: 'worker'})\n"
+            % (i, i) for i in range(calls))
+        return mod.workflow_violations(script)
+
+    def test_low_profile_mode_off_quota_is_one(self):
+        mod = self._probe_guard({"CBOX_USAGE_DIR": self.usage_dir,
+                                 "CBOX_BUDGET_MODE": "off",
+                                 "CBOX_SUBSCRIPTION_PROFILE": "low"})
+        self.assertEqual(mod.quota_n_claude(), 1)
+
+    def test_low_profile_n_zero_quota_is_zero(self):
+        write_override(self.usage_dir, b=0.0)
+        mod = self._probe_guard({"CBOX_USAGE_DIR": self.usage_dir,
+                                 "CBOX_SUBSCRIPTION_PROFILE": "low"})
+        self.assertEqual(mod.quota_n_claude(), 0)
+
+    def test_high_profile_mode_off_quota_is_none(self):
+        mod = self._probe_guard({"CBOX_USAGE_DIR": self.usage_dir,
+                                 "CBOX_BUDGET_MODE": "off",
+                                 "CBOX_SUBSCRIPTION_PROFILE": "high"})
+        self.assertIsNone(mod.quota_n_claude())
+
+    def test_max_profile_mode_off_quota_is_none(self):
+        mod = self._probe_guard({"CBOX_USAGE_DIR": self.usage_dir,
+                                 "CBOX_SUBSCRIPTION_PROFILE": "max"})
+        self.assertIsNone(mod.quota_n_claude())
+
+    def test_low_profile_mode_off_workflow_three_calls_is_refused(self):
+        problems = self._workflow({"CBOX_USAGE_DIR": self.usage_dir,
+                                   "CBOX_BUDGET_MODE": "off",
+                                   "CBOX_SUBSCRIPTION_PROFILE": "low"}, 3)
+        self.assertTrue(any("quota-aware cap" in p for p in problems), problems)
+
+    def test_low_profile_mode_off_workflow_one_call_is_allowed(self):
+        problems = self._workflow({"CBOX_USAGE_DIR": self.usage_dir,
+                                   "CBOX_BUDGET_MODE": "off",
+                                   "CBOX_SUBSCRIPTION_PROFILE": "low"}, 1)
+        self.assertEqual(problems, [])
+
+    def test_low_profile_free_usage_quota_is_one(self):
+        write_full_usage(self.usage_dir, five=10, seven=10)
+        mod = self._probe_guard({"CBOX_USAGE_DIR": self.usage_dir,
+                                 "CBOX_SUBSCRIPTION_PROFILE": "low"})
+        self.assertEqual(mod.quota_n_claude(), 1)
+
+    def test_low_profile_missing_usage_quota_is_one(self):
+        mod = self._probe_guard({"CBOX_USAGE_DIR": tempfile.mkdtemp(),
+                                 "CBOX_SUBSCRIPTION_PROFILE": "low"})
+        self.assertEqual(mod.quota_n_claude(), 1)
+
+    def test_low_profile_ok_brake_quota_is_one(self):
+        write_full_usage(self.usage_dir, five=10, seven=59, seven_in=7 * 24 * 3600)
+        mod = self._probe_guard({"CBOX_USAGE_DIR": self.usage_dir,
+                                 "CBOX_SUBSCRIPTION_PROFILE": "low",
+                                 "CBOX_BUDGET_LOW_7D": "101"})
+        self.assertEqual(mod.quota_n_claude(), 1)
 
 
 if __name__ == "__main__":

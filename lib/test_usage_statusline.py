@@ -18,6 +18,11 @@ SCRIPT = ROOT / "etc" / "hooks" / "usage_statusline.py"
 
 NETWORK_ENV_VARS = (
     "CBOX_USAGE_DIR",
+    "CBOX_BUDGET_MODE",
+    "CBOX_BUDGET_LOW_5H",
+    "CBOX_BUDGET_LOW_7D",
+    "CBOX_BUDGET_PACE_WINDOW_H",
+    "CBOX_BUDGET_PACE_SLACK_H",
     "CLAUDE_CONFIG_DIR",
     "CBOX_HERMES_DELEGATE_BASE_URL",
     "CBOX_HERMES_MODEL_URL",
@@ -1405,6 +1410,99 @@ class AgentsSegmentTests(unittest.TestCase):
         proc = run(json.dumps({}), self.usage_dir)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertNotIn("agents:", proc.stdout)
+
+    def test_budget_mode_off_shows_agents_inf(self):
+        proc = run(json.dumps({}), self.usage_dir, extra_env={"CBOX_BUDGET_MODE": "off"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("agents: inf", proc.stdout)
+
+    def test_no_data_no_budget_mode_omits_agents_segment(self):
+        proc = run(json.dumps({}), self.usage_dir)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("agents:", proc.stdout)
+
+    def test_no_budget_mode_numeric_shows_agents_three(self):
+        self._write_override(time.time() + 60, 2.9)
+        proc = run(json.dumps({}), self.usage_dir)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("agents: 3", proc.stdout)
+
+
+class AgentsBrakeSegmentTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.usage_dir = os.path.join(self._tmp.name, "cbox-usage")
+        os.makedirs(self.usage_dir, exist_ok=True)
+        self.now = time.time()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _claude(self, five, seven, five_in=600, seven_in=98 * 3600):
+        with open(os.path.join(self.usage_dir, "claude.json"), "w", encoding="utf-8") as f:
+            json.dump({
+                "captured_at": self.now,
+                "five_hour": {"used_percentage": five, "resets_at": self.now + five_in, "captured_at": self.now},
+                "seven_day": {"used_percentage": seven, "resets_at": self.now + seven_in, "captured_at": self.now},
+            }, f)
+
+    def _samples(self, rows):
+        with open(os.path.join(self.usage_dir, "samples.jsonl"), "w", encoding="utf-8") as f:
+            for ts, used in rows:
+                f.write(json.dumps({"ts": ts, "family": "claude", "five_hour": {"used": None},
+                                    "seven_day": {"used": used}}) + "\n")
+
+    def _line(self, extra_env=None):
+        proc = run(json.dumps({}), self.usage_dir, extra_env=extra_env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout.strip()
+
+    def test_free_state_shows_agents_inf_without_a_tag(self):
+        self._claude(45, 32)
+        line = self._line()
+        self.assertIn("agents: inf", line)
+        self.assertNotIn("(", line.split("agents:")[1])
+
+    def test_low_five_hour_brake_is_tagged(self):
+        self._claude(97, 20, five_in=3600)
+        line = self._line()
+        self.assertRegex(line, r"agents: \d \(low 5h\)")
+
+    def test_low_seven_day_brake_is_tagged(self):
+        self._claude(10, 95)
+        line = self._line()
+        self.assertRegex(line, r"agents: \d \(low 7d\)")
+
+    def test_pace_brake_is_tagged(self):
+        self._claude(20, 55, five_in=3 * 3600)
+        self._samples([(self.now - 3 * 3600 + 60 + 120 * i, 25.0 + 30.0 * i / 89.0) for i in range(90)])
+        line = self._line()
+        self.assertRegex(line, r"agents: \d \(pace\)")
+
+    def test_off_mode_stays_inf_with_a_brake_condition(self):
+        self._claude(97, 95)
+        line = self._line(extra_env={"CBOX_BUDGET_MODE": "off"})
+        self.assertIn("agents: inf", line)
+        self.assertNotIn("(low", line)
+
+    def test_threshold_env_reaches_the_segment(self):
+        self._claude(97, 20, five_in=3600)
+        self.assertIn("agents: inf", self._line(extra_env={"CBOX_BUDGET_LOW_5H": "1"}))
+
+    def test_override_shows_a_plain_number(self):
+        with open(os.path.join(self.usage_dir, "override.json"), "w", encoding="utf-8") as f:
+            json.dump({"until": self.now + 60, "b": 1.5}, f)
+        line = self._line()
+        self.assertIn("agents: 2", line)
+        self.assertNotIn("(", line.split("agents:")[1])
+
+    def test_unknown_usage_has_no_agents_segment(self):
+        self.assertNotIn("agents:", self._line())
+
+    def test_brake_tag_is_dropped_with_the_agents_segment_on_a_narrow_line(self):
+        self._claude(97, 20, five_in=3600)
+        proc = run(json.dumps({"columns": 10}), self.usage_dir)
+        self.assertNotIn("agents", proc.stdout)
 
 
 class ProfileSegmentTests(unittest.TestCase):

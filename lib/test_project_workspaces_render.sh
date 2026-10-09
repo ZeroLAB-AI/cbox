@@ -23,12 +23,10 @@ unset CBOX_PROFILE CBOX_RENDER_PROFILE CBOX_WORKSPACES
 
 BASE_REV="35eef5d"
 NEWGEN="$INSTALL_DIR/templates/generators.sh"
-BASEGEN="$TMPBASE/generators_base.sh"
-HAVE_BASE=0
-if git -C "$INSTALL_DIR" cat-file -e "$BASE_REV:cbox/templates/generators.sh" 2>/dev/null \
-  && git -C "$INSTALL_DIR" show "$BASE_REV:cbox/templates/generators.sh" > "$BASEGEN" 2>/dev/null; then
-  HAVE_BASE=1
-fi
+FIX="$INSTALL_DIR/lib/fixtures/render_baselines"
+_need_fixture() {
+  [ -f "$FIX/$1" ] || _fail "missing baseline fixture $FIX/$1 - the byte-identity baselines must ship with the package"
+}
 
 TB="$(cd "$TMPBASE" && pwd -P)"
 H="$TB/home"
@@ -74,6 +72,11 @@ for line in open(p).read().split("\n"):
     out.append(line)
     if line == "      - CBOX_CONTEXT_PROFILE=full":
         out.append("      - CBOX_REVIEW=ask")
+        out.append("      - CBOX_BUDGET_MODE=on")
+        out.append("      - CBOX_BUDGET_LOW_5H=15")
+        out.append("      - CBOX_BUDGET_LOW_7D=20")
+        out.append("      - CBOX_BUDGET_PACE_WINDOW_H=3")
+        out.append("      - CBOX_BUDGET_PACE_SLACK_H=8")
 open(p, "w").write("\n".join(out))
 PY
 }
@@ -99,23 +102,29 @@ _ws_binds() {
   _binds "$1" | grep -F -x -e "$ROOT" -e "$ROOT2" -e "$WSA" -e "$WSB" | tr '\n' ' '
 }
 
-if [ "$HAVE_BASE" = 1 ]; then
+ROOTHASH="$(. "$INSTALL_DIR/_common.sh"; _cbox_path_hash "$ROOT")"
+TBSLUG="$(printf '%s' "$TB" | sed 's|[/.]|-|g')"
+_norm() {
+  sed -e "s|$TBSLUG|@TMPSLUG@|g" -e "s|$TB|@TMP@|g" -e "s|$INSTALL_DIR|@INSTALL@|g" -e "s/$ROOTHASH/@ROOTHASH@/g"
+}
+
+if true; then
   n=0
   EID="$TB/eff_id"
   for ws in "$ROOT" "-unset-" ""; do
     n=$((n + 1))
     _render "$EID" default "$NEWGEN" "$ws" >/dev/null 2>"$TB/n.err" || _fail "new render failed: $(cat "$TB/n.err")"
-    cp "$EID/docker-compose.yml" "$TB/new_compose_$n.yml"
-    cp "$EID/codex/cbox-container.config.toml" "$TB/new_codex_$n.toml"
-    _render "$EID" default "$BASEGEN" "$ws" >/dev/null 2>"$TB/b.err" || _fail "base render failed: $(cat "$TB/b.err")"
-    _with_review "$EID/docker-compose.yml"
-    cmp -s "$TB/new_compose_$n.yml" "$EID/docker-compose.yml" || _fail "root-only compose differs from $BASE_REV for ws='$ws':
-$(diff "$EID/docker-compose.yml" "$TB/new_compose_$n.yml")"
-    cmp -s "$TB/new_codex_$n.toml" "$EID/codex/cbox-container.config.toml" || _fail "root-only codex profile differs from $BASE_REV for ws='$ws'"
+    _norm < "$EID/docker-compose.yml" > "$TB/new_compose_$n.yml"
+    _norm < "$EID/codex/cbox-container.config.toml" > "$TB/new_codex_$n.toml"
+    _need_fixture "workspaces_root_only_compose_$n.yml"
+    _need_fixture "workspaces_root_only_codex_$n.toml"
+    cp "$FIX/workspaces_root_only_compose_$n.yml" "$TB/base_compose_$n.yml"
+    _with_review "$TB/base_compose_$n.yml"
+    cmp -s "$TB/new_compose_$n.yml" "$TB/base_compose_$n.yml" || _fail "root-only compose differs from $BASE_REV for ws='$ws':
+$(diff "$TB/base_compose_$n.yml" "$TB/new_compose_$n.yml")"
+    cmp -s "$TB/new_codex_$n.toml" "$FIX/workspaces_root_only_codex_$n.toml" || _fail "root-only codex profile differs from $BASE_REV for ws='$ws'"
   done
-  _ok "root-only render byte-identical to $BASE_REV (CBOX_WORKSPACES equal root, unset, empty): compose and codex profile"
-else
-  echo "skip: baseline $BASE_REV not reachable from this checkout - byte-identity diff not run"
+  _ok "root-only render byte-identical to the baseline fixtures from $BASE_REV (CBOX_WORKSPACES equal root, unset, empty): compose and codex profile"
 fi
 
 E1="$TB/eff1"

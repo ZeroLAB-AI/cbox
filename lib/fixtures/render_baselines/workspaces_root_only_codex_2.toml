@@ -1,0 +1,17 @@
+model = "gpt-5.6-terra"
+model_reasoning_effort = "xhigh"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+hide_agent_reasoning = true
+check_for_update_on_startup = false
+project_doc_max_bytes = 65536
+notify = ["python3", "@TMP@/home/.claude/hooks/codex_notify.py"]
+
+[analytics]
+enabled = false
+
+[otel]
+log_user_prompt = false
+
+[projects."@TMP@/pw/root"]
+trust_level = "trusted"

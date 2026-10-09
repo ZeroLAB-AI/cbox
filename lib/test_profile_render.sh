@@ -66,6 +66,12 @@ for line in open(p).read().split("\n"):
     out.append(line)
     if line == "      - CBOX_CONTEXT_PROFILE=full":
         out.append("      - CBOX_REVIEW=ask")
+        out.append("      - CBOX_BUDGET_MODE=on")
+        out.append("      - CBOX_SUBSCRIPTION_PROFILE=high")
+        out.append("      - CBOX_BUDGET_LOW_5H=15")
+        out.append("      - CBOX_BUDGET_LOW_7D=20")
+        out.append("      - CBOX_BUDGET_PACE_WINDOW_H=3")
+        out.append("      - CBOX_BUDGET_PACE_SLACK_H=8")
     if line.startswith("      - CBOX_HERMES_DELEGATE="):
         out.append("      - CBOX_HERMES_DELEGATE_CONTEXT_LENGTH=65536")
 open(p, "w").write("\n".join(out))
@@ -73,12 +79,20 @@ PY
 }
 
 NEWGEN="$INSTALL_DIR/templates/generators.sh"
-BASEGEN="$TMPBASE/generators_base.sh"
-HAVE_BASE=0
-if git -C "$INSTALL_DIR" cat-file -e "$BASE_REV:cbox/templates/generators.sh" 2>/dev/null \
-  && git -C "$INSTALL_DIR" show "$BASE_REV:cbox/templates/generators.sh" > "$BASEGEN" 2>/dev/null; then
-  HAVE_BASE=1
-fi
+FIX="$INSTALL_DIR/lib/fixtures/render_baselines"
+_need_fixture() {
+  [ -f "$FIX/$1" ] || _fail "missing baseline fixture $FIX/$1 - the byte-identity baselines must ship with the package"
+}
+ROOTHASH="$(. "$INSTALL_DIR/_common.sh"; _cbox_path_hash "$ROOT")"
+TMPSLUG="$(printf '%s' "$TMPBASE" | sed 's|[/.]|-|g')"
+_norm() {
+  sed -e "s|$TMPSLUG|@TMPSLUG@|g" -e "s|$TMPBASE|@TMP@|g" -e "s|$INSTALL_DIR|@INSTALL@|g" -e "s/$ROOTHASH/@ROOTHASH@/g"
+}
+_baseline_with_review() {
+  _need_fixture "$1"
+  cp "$FIX/$1" "$2"
+  _with_review "$2"
+}
 
 DEFEFF="$TMPBASE/defeff"
 mkdir -p "$DEFEFF"
@@ -91,31 +105,52 @@ if grep -qF 'credentials-mask' "$TMPBASE/def_new.yml"; then _fail "default rende
 grep -qxF -- "      - $H/.claude:\${HOST_HOME}/.claude:rw" "$TMPBASE/def_new.yml" || _fail "default render lost the whole claude dir bind"
 grep -qxF -- "      - $H/.codex:\${HOST_HOME}/.codex:rw" "$TMPBASE/def_new.yml" || _fail "default render lost the whole codex dir bind"
 grep -qxF -- '      - CBOX_REVIEW=ask' "$TMPBASE/def_new.yml" || _fail "default render lacks the CBOX_REVIEW env line"
+grep -qxF -- '      - CBOX_BUDGET_MODE=on' "$TMPBASE/def_new.yml" || _fail "default render lacks the CBOX_BUDGET_MODE=on env line"
+grep -qxF -- '      - CBOX_SUBSCRIPTION_PROFILE=high' "$TMPBASE/def_new.yml" || _fail "default render lacks the CBOX_SUBSCRIPTION_PROFILE=high env line"
+for kv in CBOX_BUDGET_LOW_5H=15 CBOX_BUDGET_LOW_7D=20 CBOX_BUDGET_PACE_WINDOW_H=3 CBOX_BUDGET_PACE_SLACK_H=8; do
+  grep -qxF -- "      - $kv" "$TMPBASE/def_new.yml" || _fail "default render lacks the $kv env line"
+done
+BEFF="$TMPBASE/defeff_budget_off"
+mkdir -p "$BEFF"
+_render "$BEFF" default "$NEWGEN" CBOX_BUDGET_MODE=off >/dev/null 2>"$TMPBASE/boff.err" || _fail "budget off render failed: $(cat "$TMPBASE/boff.err")"
+grep -qxF -- '      - CBOX_BUDGET_MODE=off' "$BEFF/docker-compose.yml" || _fail "isolated render with CBOX_BUDGET_MODE=off lacks the off env line"
+if grep -qxF -- '      - CBOX_BUDGET_MODE=on' "$BEFF/docker-compose.yml"; then _fail "isolated render with CBOX_BUDGET_MODE=off still carries the on line"; fi
+[ "$(grep -c 'CBOX_BUDGET_MODE=' "$BEFF/docker-compose.yml")" = 1 ] || _fail "isolated render must carry exactly one CBOX_BUDGET_MODE line"
+[ "$(grep -c 'CBOX_SUBSCRIPTION_PROFILE=' "$BEFF/docker-compose.yml")" = 1 ] || _fail "isolated render must carry exactly one CBOX_SUBSCRIPTION_PROFILE line"
+_ok "isolated render: CBOX_BUDGET_MODE=on by default, off renders the off line exactly once"
+BTUNE="$TMPBASE/defeff_budget_tuned"
+mkdir -p "$BTUNE"
+_render "$BTUNE" default "$NEWGEN" CBOX_BUDGET_LOW_5H=10 CBOX_BUDGET_LOW_7D=25 CBOX_BUDGET_PACE_WINDOW_H=6 CBOX_BUDGET_PACE_SLACK_H=12 >/dev/null 2>"$TMPBASE/btune.err" || _fail "budget tuned render failed: $(cat "$TMPBASE/btune.err")"
+for kv in CBOX_BUDGET_LOW_5H=10 CBOX_BUDGET_LOW_7D=25 CBOX_BUDGET_PACE_WINDOW_H=6 CBOX_BUDGET_PACE_SLACK_H=12; do
+  grep -qxF -- "      - $kv" "$BTUNE/docker-compose.yml" || _fail "isolated render lacks the tuned $kv env line"
+  [ "$(grep -c "${kv%%=*}=" "$BTUNE/docker-compose.yml")" = 1 ] || _fail "isolated render must carry exactly one ${kv%%=*} line"
+done
+_ok "isolated render: the regulator thresholds default to 15/20/3/8 and follow the configured values exactly once"
 grep -qxF -- '      - CODEX_GUARD_AUDIT=${HOST_HOME}/.claude/codex_guard_audit.container.jsonl' "$TMPBASE/def_new.yml" || _fail "default render changed the codex guard audit path"
 if grep -qF 'cbox-audit' "$TMPBASE/def_new.yml"; then _fail "default render carries the profile audit dir"; fi
 grep -qF "name: cbox-p$(. "$INSTALL_DIR/_common.sh"; _cbox_path_hash "$ROOT")" "$TMPBASE/def_new.yml" || _fail "default compose name changed"
 grep -qF -- "- $H/.claude.json:\${HOST_HOME}/.claude.json:ro" "$TMPBASE/def_new.yml" || _fail "default render lost the host .claude.json seed bind"
 _ok "default render: no profile label, store, or mask; host .claude.json seed bind kept"
 
-if [ "$HAVE_BASE" = 1 ]; then
-  _render "$DEFEFF" default "$BASEGEN" >/dev/null 2>"$TMPBASE/defb.err" || _fail "baseline render failed: $(cat "$TMPBASE/defb.err")"
-  _with_review "$DEFEFF/docker-compose.yml"
-  cmp -s "$TMPBASE/def_new.yml" "$DEFEFF/docker-compose.yml" \
+if true; then
+  _norm < "$TMPBASE/def_new.yml" > "$TMPBASE/def_new.norm.yml"
+  _baseline_with_review profile_default_compose.yml "$TMPBASE/def_base.yml"
+  cmp -s "$TMPBASE/def_new.norm.yml" "$TMPBASE/def_base.yml" \
     || _fail "default render differs from baseline $BASE_REV:
-$(diff "$TMPBASE/def_new.yml" "$DEFEFF/docker-compose.yml")"
-  _ok "default render is byte-identical to baseline $BASE_REV except the one CBOX_REVIEW env line (and the CBOX_HERMES_DELEGATE_CONTEXT_LENGTH line next to the delegate env line when hermes is on)"
+$(diff "$TMPBASE/def_new.norm.yml" "$TMPBASE/def_base.yml")"
+  _ok "default render is byte-identical to the baseline fixtures from $BASE_REV except the CBOX_REVIEW and CBOX_BUDGET_MODE env lines (and the CBOX_HERMES_DELEGATE_CONTEXT_LENGTH line next to the delegate env line when hermes is on)"
 
   HEFF="$TMPBASE/defeff_h"
   mkdir -p "$HEFF"
   _render "$HEFF" default "$NEWGEN" CBOX_HERMES=on CBOX_GPU=1 >/dev/null 2>"$TMPBASE/h.err" || _fail "default hermes render failed: $(cat "$TMPBASE/h.err")"
   cp "$HEFF/docker-compose.yml" "$TMPBASE/def_h_new.yml"
-  _render "$HEFF" default "$BASEGEN" CBOX_HERMES=on CBOX_GPU=1 >/dev/null 2>"$TMPBASE/hb.err" || _fail "baseline hermes render failed: $(cat "$TMPBASE/hb.err")"
-  _with_review "$HEFF/docker-compose.yml"
-  cmp -s "$TMPBASE/def_h_new.yml" "$HEFF/docker-compose.yml" \
+  _norm < "$TMPBASE/def_h_new.yml" > "$TMPBASE/def_h_new.norm.yml"
+  _baseline_with_review profile_hermes_gpu_compose.yml "$TMPBASE/def_h_base.yml"
+  cmp -s "$TMPBASE/def_h_new.norm.yml" "$TMPBASE/def_h_base.yml" \
     || _fail "default hermes+gpu render differs from baseline $BASE_REV:
-$(diff "$TMPBASE/def_h_new.yml" "$HEFF/docker-compose.yml")"
+$(diff "$TMPBASE/def_h_new.norm.yml" "$TMPBASE/def_h_base.yml")"
   grep -qF 'name: cbox-p' "$TMPBASE/def_h_new.yml" && grep -q 'hermes-home:' "$TMPBASE/def_h_new.yml" || _fail "hermes variant did not render the hermes volume"
-  _ok "default render with hermes and gpu is byte-identical to baseline $BASE_REV except the one CBOX_REVIEW env line (and the CBOX_HERMES_DELEGATE_CONTEXT_LENGTH line next to the delegate env line when hermes is on)"
+  _ok "default render with hermes and gpu is byte-identical to the baseline fixtures from $BASE_REV except the CBOX_REVIEW and CBOX_BUDGET_MODE env lines (and the CBOX_HERMES_DELEGATE_CONTEXT_LENGTH line next to the delegate env line when hermes is on)"
   GLI="$TMPBASE/glinstall"
   mkdir -p "$GLI/generated/state" "$GLI/generated/claude-config" "$GLI/generated/hooks" "$GLI/home"
   cp -r "$INSTALL_DIR/etc" "$INSTALL_DIR/templates" "$INSTALL_DIR/lib" "$GLI/"
@@ -133,15 +168,28 @@ $(diff "$TMPBASE/def_h_new.yml" "$HEFF/docker-compose.yml")"
   }
   _render_global "$GLI/templates/generators.sh" >/dev/null 2>"$TMPBASE/gn.err" || _fail "global render failed: $(cat "$TMPBASE/gn.err")"
   cp "$GLI/docker-compose.yml" "$TMPBASE/glob_new.yml"
-  _render_global "$BASEGEN" >/dev/null 2>"$TMPBASE/gb.err" || _fail "baseline global render failed: $(cat "$TMPBASE/gb.err")"
-  _with_review "$GLI/docker-compose.yml"
-  cmp -s "$TMPBASE/glob_new.yml" "$GLI/docker-compose.yml" \
+  _norm < "$TMPBASE/glob_new.yml" > "$TMPBASE/glob_new.norm.yml"
+  _baseline_with_review profile_global_compose.yml "$TMPBASE/glob_base.yml"
+  cmp -s "$TMPBASE/glob_new.norm.yml" "$TMPBASE/glob_base.yml" \
     || _fail "global default render differs from baseline $BASE_REV:
-$(diff "$TMPBASE/glob_new.yml" "$GLI/docker-compose.yml")"
+$(diff "$TMPBASE/glob_new.norm.yml" "$TMPBASE/glob_base.yml")"
   grep -qxF -- '      - CBOX_REVIEW=ask' "$TMPBASE/glob_new.yml" || _fail "global render lacks the CBOX_REVIEW env line"
-  _ok "global default render is byte-identical to baseline $BASE_REV except the one CBOX_REVIEW env line (and the CBOX_HERMES_DELEGATE_CONTEXT_LENGTH line next to the delegate env line when hermes is on)"
-else
-  echo "skip: baseline $BASE_REV not reachable from this checkout - byte-identity diff not run"
+  grep -qxF -- '      - CBOX_BUDGET_MODE=on' "$TMPBASE/glob_new.yml" || _fail "global render lacks the CBOX_BUDGET_MODE=on env line"
+  grep -qxF -- '      - CBOX_SUBSCRIPTION_PROFILE=high' "$TMPBASE/glob_new.yml" || _fail "global render lacks the CBOX_SUBSCRIPTION_PROFILE=high env line"
+  for kv in CBOX_BUDGET_LOW_5H=15 CBOX_BUDGET_LOW_7D=20 CBOX_BUDGET_PACE_WINDOW_H=3 CBOX_BUDGET_PACE_SLACK_H=8; do
+    grep -qxF -- "      - $kv" "$TMPBASE/glob_new.yml" || _fail "global render lacks the $kv env line"
+  done
+  CBOX_BUDGET_LOW_5H=10 CBOX_BUDGET_PACE_SLACK_H=12 _render_global "$GLI/templates/generators.sh" >/dev/null 2>"$TMPBASE/gbtune.err" || _fail "global budget tuned render failed: $(cat "$TMPBASE/gbtune.err")"
+  grep -qxF -- '      - CBOX_BUDGET_LOW_5H=10' "$GLI/docker-compose.yml" || _fail "global render lacks the tuned CBOX_BUDGET_LOW_5H line"
+  grep -qxF -- '      - CBOX_BUDGET_PACE_SLACK_H=12' "$GLI/docker-compose.yml" || _fail "global render lacks the tuned CBOX_BUDGET_PACE_SLACK_H line"
+  _ok "global render: the regulator thresholds default to 15/20/3/8 and follow the configured values"
+  CBOX_BUDGET_MODE=off _render_global "$GLI/templates/generators.sh" >/dev/null 2>"$TMPBASE/gboff.err" || _fail "global budget off render failed: $(cat "$TMPBASE/gboff.err")"
+  grep -qxF -- '      - CBOX_BUDGET_MODE=off' "$GLI/docker-compose.yml" || _fail "global render with CBOX_BUDGET_MODE=off lacks the off env line"
+  [ "$(grep -c 'CBOX_BUDGET_MODE=' "$GLI/docker-compose.yml")" = 1 ] || _fail "global render must carry exactly one CBOX_BUDGET_MODE line"
+  grep -qxF -- '      - CBOX_SUBSCRIPTION_PROFILE=high' "$GLI/docker-compose.yml" || _fail "global render with CBOX_BUDGET_MODE=off lost the default CBOX_SUBSCRIPTION_PROFILE=high line"
+  [ "$(grep -c 'CBOX_SUBSCRIPTION_PROFILE=' "$GLI/docker-compose.yml")" = 1 ] || _fail "global render must carry exactly one CBOX_SUBSCRIPTION_PROFILE line"
+  _ok "global render: CBOX_BUDGET_MODE=off renders the off line exactly once"
+  _ok "global default render is byte-identical to the baseline fixtures from $BASE_REV except the CBOX_REVIEW and CBOX_BUDGET_MODE env lines (and the CBOX_HERMES_DELEGATE_CONTEXT_LENGTH line next to the delegate env line when hermes is on)"
 fi
 
 PHASH="$(. "$INSTALL_DIR/_common.sh"; _cbox_path_hash "$ROOT")"
@@ -214,6 +262,10 @@ grep -qxF -- '      - CBOX_LOCAL_MODEL_AUDIT=${HOST_HOME}/.claude/cbox-audit/loc
 grep -qxF -- '      - CBOX_HERMES_DELEGATE_AUDIT=${HOST_HOME}/.claude/cbox-audit/hermes_delegate_audit.container.jsonl' "$C" || _fail "profile hermes delegate audit path"
 grep -F 'CBOX_MANAGED_DIRS=' "$C" | grep -qF '${HOST_HOME}/.claude:' || _fail "profile managed dirs must own the intermediate claude dir"
 grep -qxF -- '      - CBOX_REVIEW=ask' "$C" || _fail "profile render lacks the CBOX_REVIEW env line"
+grep -qxF -- '      - CBOX_BUDGET_MODE=on' "$C" || _fail "profile render lacks the CBOX_BUDGET_MODE=on env line"
+for kv in CBOX_BUDGET_LOW_5H=15 CBOX_BUDGET_LOW_7D=20 CBOX_BUDGET_PACE_WINDOW_H=3 CBOX_BUDGET_PACE_SLACK_H=8; do
+  grep -qxF -- "      - $kv" "$C" || _fail "profile render lacks the $kv env line"
+done
 _ok "profile claude binds: explicit shared subpaths only - no whole-dir bind, no credentials file, no backups, no mask; audit logs per profile"
 
 grep -qxF -- "      - $STORE/claude:$STORE/claude:rw" "$C" || _fail "store claude dir bind missing"
@@ -449,5 +501,10 @@ _render "$EFFP" work "$NEWGEN" CBOX_HERMES=on >/dev/null 2>&1 || _fail "final pr
 C="$EFFP/docker-compose.yml"
 check_descriptor
 _ok "ratchet: the engines.json credentials descriptors agree with the profile render (claude file absent, codex home = store dir)"
+
+_render "$EFFP" work "$NEWGEN" CBOX_HERMES=on CBOX_BUDGET_MODE=off >/dev/null 2>"$TMPBASE/pboff.err" || _fail "profile budget off render failed: $(cat "$TMPBASE/pboff.err")"
+grep -qxF -- '      - CBOX_BUDGET_MODE=off' "$EFFP/docker-compose.yml" || _fail "profile render with CBOX_BUDGET_MODE=off lacks the off env line"
+[ "$(grep -c 'CBOX_BUDGET_MODE=' "$EFFP/docker-compose.yml")" = 1 ] || _fail "profile render must carry exactly one CBOX_BUDGET_MODE line"
+_ok "profile render: CBOX_BUDGET_MODE=off renders the off line exactly once"
 
 echo "PASS: all profile render checks"

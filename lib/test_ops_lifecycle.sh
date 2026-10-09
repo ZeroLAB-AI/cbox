@@ -544,10 +544,16 @@ run_compose_up_deadnet() {
     '"$CUP_FN"'
     docker() {
       case "$1 $2" in
-        "inspect --format") printf "netalive\nnetgone\n" ;;
+        "inspect --format")
+          case "$SCENARIO" in
+            idempty|idempty_alive) printf "netalive|idalive\nnetgone|\n" ;;
+            *) printf "netalive|idalive\nnetgone|idgone\n" ;;
+          esac
+          ;;
         "network inspect")
           case "$*" in
-            *netgone*) [ "$SCENARIO" = alive ] || return 1 ;;
+            *idgone*) [ "$SCENARIO" = alive ] || return 1 ;;
+            *netgone*) [ "$SCENARIO" = idempty_alive ] || return 1 ;;
           esac
           ;;
       esac
@@ -570,14 +576,18 @@ run_compose_up_deadnet() {
   ' deadnet 2>&1
 }
 
-DN_OUT="$(run_compose_up_deadnet gone)"
-grep -qx 'up -d --force-recreate' "$TMPBASE/deadnet-gone.up" || _fail "compose: a stopped container that references a removed network must be recreated (plain start fails with 'network <id> not found'): $DN_OUT"
+DN_OUT="$(run_compose_up_deadnet idgone)"
+grep -qx 'up -d --force-recreate' "$TMPBASE/deadnet-idgone.up" || _fail "compose: a stopped container whose network id is gone must be recreated (plain start fails with 'network <id> not found'): $DN_OUT"
 printf '%s\n' "$DN_OUT" | grep -q 'no longer exists' || _fail "compose: the dead-network recreate must say why: $DN_OUT"
+DN_OUT="$(run_compose_up_deadnet idempty)"
+grep -qx 'up -d --force-recreate' "$TMPBASE/deadnet-idempty.up" || _fail "compose: a stopped container that reports an empty network id and whose network name is gone must be recreated: $DN_OUT"
+run_compose_up_deadnet idempty_alive >/dev/null
+grep -qx 'up -d' "$TMPBASE/deadnet-idempty_alive.up" || _fail "compose: an empty network id with a network name that still exists must start plainly"
 run_compose_up_deadnet alive >/dev/null
 grep -qx 'up -d' "$TMPBASE/deadnet-alive.up" || _fail "compose: a stopped container whose networks all exist must start plainly, not be recreated"
 run_compose_up_deadnet running >/dev/null
 grep -qx 'up -d' "$TMPBASE/deadnet-running.up" || _fail "compose: a running container must never be recreated by the dead-network check (it would kill the live session)"
-_ok "compose: a stopped container pointing at a removed network is recreated; live networks or a running container start plainly"
+_ok "compose: a stopped container pointing at a removed network (by id, or by name when the id is empty) is recreated; live networks or a running container start plainly"
 
 run_compose_up_retry() {
   local scenario="$1" out

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import platform
@@ -69,6 +70,19 @@ def docker_json(docker_bin, args):
     if len(proc.stdout) > MAX_DOCKER_JSON:
         raise RuntimeError("docker response exceeds limit")
     return json.loads(proc.stdout.decode("utf-8", "replace"))
+
+
+def load_netaccess():
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "lib", "cbox_netaccess.py")
+    spec = importlib.util.spec_from_file_location("cbox_netaccess_shared", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def eligible_networks(docker_bin, project, netaccess=None):
+    module = netaccess or load_netaccess()
+    return module.eligible_network_names(docker_bin, project or None)
 
 
 def network_members(docker_bin, networks):
@@ -295,9 +309,11 @@ def audit(path, record):
 
 
 class Handler:
-    def __init__(self, docker_bin, networks, workspace_roots, timeout, max_bytes, audit_path):
+    def __init__(self, docker_bin, networks, workspace_roots, timeout, max_bytes, audit_path, all_networks=False, project=""):
         self.docker_bin = docker_bin
         self.networks = networks
+        self.all_networks = all_networks
+        self.project = project
         self.workspace_roots = workspace_roots
         self.timeout = timeout
         self.max_bytes = max_bytes
@@ -307,7 +323,14 @@ class Handler:
         if not isinstance(request, dict):
             raise ValueError("request must be an object")
         op = request.get("op")
-        items = scoped_containers(self.docker_bin, self.networks, self.workspace_roots)
+        networks = self.networks
+        if self.all_networks:
+            try:
+                networks = eligible_networks(self.docker_bin, self.project)
+            except Exception as exc:
+                audit(self.audit_path, {"op": safe_text(op)[:40], "outcome": "denied", "reason": "network resolution failed"})
+                raise RuntimeError("network resolution failed: %s" % safe_text(str(exc))[:200])
+        items = scoped_containers(self.docker_bin, networks, self.workspace_roots)
         if op == "list":
             audit(self.audit_path, {"op": "list", "outcome": "ok", "count": len(items)})
             return {"ok": True, "containers": sorted(items.values(), key=lambda x: x.get("name") or "")}
@@ -517,14 +540,22 @@ def main(argv=None):
     parser.add_argument("--parent-pid", type=int, required=True)
     parser.add_argument("--parent-start", required=True)
     parser.add_argument("--audit-path", required=True)
-    parser.add_argument("--networks", nargs="+", required=True)
+    parser.add_argument("--networks", nargs="+", default=[])
+    parser.add_argument("--all-networks", action="store_true")
+    parser.add_argument("--project", default="")
     parser.add_argument("--workspace-root", action="append", default=[])
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--max-bytes", type=int, default=10485760)
     parser.add_argument("--docker-bin", default="docker")
     args = parser.parse_args(argv)
+    if bool(args.networks) == bool(args.all_networks):
+        raise ValueError("exactly one of --networks or --all-networks is required")
     if not all(NAME_RE.fullmatch(x) for x in args.networks):
         raise ValueError("invalid network name")
+    if args.project and not NAME_RE.fullmatch(args.project):
+        raise ValueError("invalid project name")
+    if args.all_networks:
+        load_netaccess()
     if args.timeout < 1 or args.timeout > 3600 or args.max_bytes < 1024 or args.max_bytes > 16777216:
         raise ValueError("invalid bridge limit")
     if _is_darwin():
@@ -548,7 +579,7 @@ def main(argv=None):
     if args.audit_path != audit_path:
         raise ValueError("invalid audit path")
     safe_runtime_dir(os.path.dirname(audit_path))
-    handler = Handler(os.path.realpath(docker_bin), list(dict.fromkeys(args.networks)), list(dict.fromkeys(workspace_roots)), args.timeout, args.max_bytes, audit_path)
+    handler = Handler(os.path.realpath(docker_bin), list(dict.fromkeys(args.networks)), list(dict.fromkeys(workspace_roots)), args.timeout, args.max_bytes, audit_path, bool(args.all_networks), args.project)
     serve(sock_dir, args.parent_pid, args.parent_start, handler)
     return 0
 

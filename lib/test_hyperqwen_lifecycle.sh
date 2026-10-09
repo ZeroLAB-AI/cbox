@@ -38,7 +38,9 @@ for fn in \
   _cbox_hyperqwen_prepare_inline _cbox_hyperqwen_status_cmd _cbox_hyperqwen_ps_cmd _cbox_hyperqwen_reconcile_cmd \
   _cbox_hyperqwen_render_matches _cbox_hyperqwen_up_cmd _cbox_hyperqwen_down_cmd _cbox_hyperqwen_logs_cmd \
   _cbox_hyperqwen_gpu_check_base_image _cbox_hyperqwen_gpu_check_cmd _cbox_hyperqwen_owner_heal_impl hyperqwen_cmd \
-  _cbox_hyperqwen_container_running _cbox_hyperqwen_offload_preflight_warn
+  _cbox_hyperqwen_container_running _cbox_hyperqwen_offload_preflight_warn \
+  _cbox_hyperqwen_lock_file _cbox_hyperqwen_models_path_safe_fallback _cbox_hyperqwen_scope_networks \
+  _cbox_hyperqwen_validate_render _cbox_hyperqwen_prepare_args_safe _cbox_hyperqwen_owner_heal
 do
   _load_fn "$fn"
 done
@@ -78,6 +80,10 @@ _cbox_gpu_devices_overlap() {
 }
 gen_hyperqwen_owner_compose_into() {
   echo "gen $1" >> "$CALLS"
+  if [ -n "${T_GEN_ERR:-}" ]; then
+    echo "$T_GEN_ERR" >&2
+    return 1
+  fi
   mkdir -p "$1"
   if [ "${CBOX_HYPERQWEN_MODE:-off}" = on ]; then
     printf '%s' "${T_RENDER:-}" > "$1/docker-compose.yml"
@@ -123,7 +129,10 @@ docker() {
       ;;
     image) return "${T_IMAGE_RC:-0}" ;;
     volume)
-      case "$2" in inspect) return "${T_VOL_RC:-0}" ;; esac
+      case "$2" in
+        inspect) return "${T_VOL_RC:-0}" ;;
+        create) return "${T_VOLCREATE_RC:-0}" ;;
+      esac
       return 0
       ;;
     network)
@@ -148,7 +157,7 @@ OTHER_IMAGE="ghcr.io/syv-ai/hyperqwen:sha-0000000"
 
 _reset() {
   : > "$CALLS"
-  unset T_MANIFEST_OK T_INCONTAINER T_STAT_UID T_CID T_UP_ERR T_RUN_RC T_NETCREATE_RC T_PS_CID T_STATE T_LABELS T_PROJECT T_IMAGE
+  unset T_GEN_ERR T_VOLCREATE_RC T_MANIFEST_OK T_INCONTAINER T_STAT_UID T_CID T_UP_ERR T_RUN_RC T_NETCREATE_RC T_PS_CID T_STATE T_LABELS T_PROJECT T_IMAGE
   unset CBOX_HYPERQWEN_MODE CBOX_HYPERQWEN_IMAGE CBOX_HYPERQWEN_MODELS_PATH CBOX_HYPERQWEN_GPU_DEVICE
   unset CBOX_OLLAMA_MODE CBOX_OLLAMA_GPU CBOX_OLLAMA_GPU_DEVICE
   unset CBOX_HYPERQWEN_KV_OFFLOAD CBOX_HYPERQWEN_KV_OFFLOAD_MIB CBOX_HYPERQWEN_RAM_RESERVE_GIB T_MEM_KIB
@@ -610,7 +619,7 @@ _reset
 _offload_env
 _render
 printf '%s\n' "$IMAGE cbox-hyperqwen-u1000-models" > "$OWNER_DIR/prepared"
-export T_MEM_KIB="$(KIB_GIB 20)"
+export T_MEM_KIB="$(KIB_GIB 20)" T_MANIFEST_OK=0
 rc=0
 out="$( ( _cbox_hyperqwen_reconcile_cmd ) 2>&1)" || rc=$?
 [ "$rc" = 0 ] || _fail "reconcile must proceed after the WARN, rc=$rc: $out"
@@ -619,6 +628,26 @@ grep -q '^compose up -d' "$CALLS" || _fail "reconcile must still bring the serve
 [ "$(_meminfo_reads)" = 1 ] || _fail "reconcile must read meminfo once: $(cat "$CALLS")"
 case "$out" in *"still holds its own RAM"*) ;; *) _fail "a replaced running container must be mentioned in the WARN: $out" ;; esac
 _ok "reconcile: the WARN is printed once and the start still proceeds"
+
+_reset
+_offload_env
+_render
+printf '%s\n' "$IMAGE cbox-hyperqwen-u1000-models" > "$OWNER_DIR/prepared"
+export T_MEM_KIB="$(KIB_GIB 20)"
+rc=0
+out="$( ( _cbox_hyperqwen_reconcile_cmd ) 2>&1)" || rc=$?
+[ "$rc" = 0 ] || _fail "reconcile of an unchanged running server must succeed, rc=$rc: $out"
+[ "$(_meminfo_reads)" = 0 ] || _fail "reconcile of a running server with an unchanged config must not read meminfo: $(cat "$CALLS")"
+case "$out" in *"KV offload"*) _fail "reconcile of a running server with an unchanged config must not warn: $out" ;; esac
+_reset
+_offload_env
+_render
+printf '%s\n' "$IMAGE cbox-hyperqwen-u1000-models" > "$OWNER_DIR/prepared"
+export T_MEM_KIB="$(KIB_GIB 20)" T_CID=
+out="$( ( _cbox_hyperqwen_reconcile_cmd ) 2>&1)" || _fail "reconcile of a stopped server must succeed: $out"
+case "$out" in *"WARN - hyperqwen KV offload"*) ;; *) _fail "reconcile of a stopped server must still check the RAM: $out" ;; esac
+unset T_MEM_KIB T_CID
+_ok "reconcile: a running server with an unchanged config and manifest is not re-checked against its own RAM, a stopped one still is"
 
 _reset
 _offload_env
@@ -681,5 +710,197 @@ export T_MEM_KIB="$(KIB_GIB 20)"
 [ "$(_meminfo_reads)" = 0 ] || _fail "heal without prepared models must not read meminfo: $(cat "$CALLS")"
 unset T_MEM_KIB
 _ok "heal: the WARN precedes a start that still proceeds, nothing is read for a running or unprepared server"
+
+_reset
+export CBOX_HYPERQWEN_MODE=on
+_render
+T_GEN_ERR="cbox: refusing to render the hyperqwen owner compose - CBOX_HYPERQWEN_KV_OFFLOAD=on is supported only with mtp and long"
+export T_GEN_ERR
+rc=0
+out="$( ( _cbox_hyperqwen_reconcile_cmd ) 2>&1)" || rc=$?
+[ "$rc" != 0 ] || _fail "reconcile with an invalid config must be refused"
+case "$out" in *"KV_OFFLOAD=on is supported only"*) ;; *) _fail "the refusal must carry the generator message: $out" ;; esac
+! grep -qE '^(docker (run|volume create|network create)|compose (stop|up|down))' "$CALLS" || _fail "an invalid config must be refused before prepare stops or touches the running server: $(cat "$CALLS")"
+: > "$CALLS"
+rc=0
+( _cbox_hyperqwen_up_cmd ) >/dev/null 2>&1 || rc=$?
+[ "$rc" != 0 ] || _fail "up with an invalid config must be refused"
+! grep -qE '^(docker (run|volume create|network create)|compose (stop|up|down))' "$CALLS" || _fail "up with an invalid config must not touch docker or the running server: $(cat "$CALLS")"
+: > "$CALLS"
+rc=0
+( _cbox_hyperqwen_prepare_cmd ) >/dev/null 2>&1 || rc=$?
+[ "$rc" != 0 ] || _fail "the prepare verb with an invalid config must be refused"
+! grep -qE '^(docker |compose )' "$CALLS" || _fail "the prepare verb with an invalid config must not touch docker: $(cat "$CALLS")"
+_ok "validation: an invalid config is refused with the generator message before prepare, stop or any docker call, on reconcile, up and the prepare verb"
+
+_reset
+export CBOX_HYPERQWEN_MODE=on
+_render
+for bad_image in "-v" "--privileged"; do
+  : > "$CALLS"
+  rc=0
+  out="$( ( CBOX_HYPERQWEN_IMAGE="$bad_image" _cbox_hyperqwen_prepare_cmd ) 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || _fail "an image '$bad_image' starting with a dash must be refused"
+  ! grep -qE '^(docker |compose )' "$CALLS" || _fail "an image '$bad_image' must be refused before any docker call: $(cat "$CALLS")"
+done
+mkdir -p "$TMPBASE/colon:dir"
+: > "$CALLS"
+rc=0
+out="$( ( CBOX_HYPERQWEN_MODELS_PATH="$TMPBASE/colon:dir" _cbox_hyperqwen_prepare_cmd ) 2>&1)" || rc=$?
+[ "$rc" != 0 ] || _fail "a models path with a colon must be refused"
+case "$out" in *colon*) ;; *) _fail "the colon refusal must say why: $out" ;; esac
+! grep -qE '^(docker |compose )' "$CALLS" || _fail "a models path with a colon must be refused before any docker call: $(cat "$CALLS")"
+_ok "prepare: an image starting with a dash and a models path with a colon are refused before any docker call"
+
+_reset
+export CBOX_HYPERQWEN_MODE=on
+_render
+( _cbox_hyperqwen_prepare_cmd ) >/dev/null 2>&1 || _fail "the prepare verb must succeed"
+grep -q -- "-e HOME=/cache -- $IMAGE prepare\$" "$CALLS" || _fail "the image must follow -- in the prepare run: $(cat "$CALLS")"
+_ok "prepare: the image argument follows -- in docker run"
+
+_reset
+export CBOX_HYPERQWEN_MODE=on
+_render
+rc=0
+( T_VOL_RC=1 T_VOLCREATE_RC=1 _cbox_hyperqwen_prepare_cmd ) >/dev/null 2>&1 || rc=$?
+[ "$rc" != 0 ] || _fail "a failing volume create must fail the prepare"
+! grep -q '^compose stop' "$CALLS" || _fail "the serving container must not be stopped before the volumes exist: $(cat "$CALLS")"
+! grep -q '^docker run ' "$CALLS" || _fail "no prepare run after a volume failure: $(cat "$CALLS")"
+_ok "prepare: volumes are ensured before the serving container is stopped, a volume failure leaves the server running"
+
+_reset
+export CBOX_HYPERQWEN_MODE=on
+_render
+rc=0
+( T_NETCREATE_RC=1 _cbox_hyperqwen_prepare_cmd ) >/dev/null 2>&1 || rc=$?
+[ "$rc" != 0 ] || _fail "a failing temporary network create must fail the prepare"
+s_line="$(_line_of '^compose stop hyperqwen')"
+u_line="$(_line_of '^compose up -d hyperqwen$')"
+[ -n "$s_line" ] && [ -n "$u_line" ] && [ "$s_line" -lt "$u_line" ] || _fail "a failure after the stop must restart the serving container: $(cat "$CALLS")"
+_ok "prepare: a failure after the stop restarts the serving container that ran before"
+
+_reset
+mkdir -p "$HOME/.ssh/x" "$HOME/docs"
+export CBOX_HYPERQWEN_MODELS_PATH="$HOME"
+[ "$(_models_guard_rc)" = 1 ] || _fail "the home directory must be refused as a models path"
+grep -q 'protected' "$TMPBASE/guard.out" || _fail "the home refusal must say why: $(cat "$TMPBASE/guard.out")"
+export CBOX_HYPERQWEN_MODELS_PATH="$(dirname "$HOME")"
+[ "$(_models_guard_rc)" = 1 ] || _fail "an ancestor of the home directory must be refused as a models path"
+export CBOX_HYPERQWEN_MODELS_PATH="$HOME/.ssh/x"
+[ "$(_models_guard_rc)" = 1 ] || _fail "a directory under ~/.ssh must be refused as a models path"
+export CBOX_HYPERQWEN_MODELS_PATH="$HOME/.ssh"
+[ "$(_models_guard_rc)" = 1 ] || _fail "~/.ssh must be refused as a models path"
+export CBOX_HYPERQWEN_MODELS_PATH="$INSTALL_DIR"
+[ "$(_models_guard_rc)" = 1 ] || _fail "the cbox install directory must be refused as a models path"
+export CBOX_HYPERQWEN_MODELS_PATH="$HOME/docs"
+[ "$(_models_guard_rc)" = 0 ] || _fail "an ordinary directory under home must pass: $(cat "$TMPBASE/guard.out")"
+export CBOX_HYPERQWEN_MODELS_PATH="$TMPBASE/models-real"
+mkdir -p "$TMPBASE/models-real"
+[ "$(_models_guard_rc)" = 0 ] || _fail "a directory outside home must pass"
+_cbox_hyperqwen_models_path_safe() { return 1; }
+[ "$(_models_guard_rc)" = 1 ] || _fail "the generator helper, when present, must be able to refuse"
+_cbox_hyperqwen_models_path_safe() { return 0; }
+export CBOX_HYPERQWEN_MODELS_PATH="$HOME"
+[ "$(_models_guard_rc)" = 0 ] || _fail "when the generator helper is present it decides, the local fallback is not consulted"
+unset -f _cbox_hyperqwen_models_path_safe
+unset CBOX_HYPERQWEN_MODELS_PATH
+_ok "models path guard: home, its ancestors, credential and config directories and the install directory are refused, the generator helper wins when present"
+
+_reset
+export CBOX_HYPERQWEN_MODE=on
+_render
+ln -s "$TMPBASE/real" "$HOME/.config/cbox/infra/hyperqwen.lock"
+rc=0
+out="$( ( _cbox_hyperqwen_owner_heal ) 2>&1)" || rc=$?
+[ "$rc" = 1 ] || _fail "the heal must refuse a symlinked hyperqwen lock file"
+case "$out" in *"symlink"*) ;; *) _fail "the symlink refusal must say why: $out" ;; esac
+rm -f -- "$HOME/.config/cbox/infra/hyperqwen.lock"
+_ok "heal: a symlinked hyperqwen lock file is refused"
+
+_hold_lock() {
+  local file="$1" ready="$2"
+  python3 -I -c 'import fcntl,sys,time
+f=open(sys.argv[1],"a")
+fcntl.flock(f,fcntl.LOCK_EX)
+open(sys.argv[2],"w").write("held")
+time.sleep(60)' "$file" "$ready" &
+  HOLDER_PID=$!
+  local i
+  for i in $(seq 1 100); do
+    [ -f "$ready" ] && return 0
+    sleep 0.1
+  done
+  kill "$HOLDER_PID" 2>/dev/null || true
+  _fail "the lock holder did not start"
+}
+
+_release_lock() {
+  kill "$HOLDER_PID" 2>/dev/null || true
+  wait "$HOLDER_PID" 2>/dev/null || true
+}
+
+LOCKDIR="$HOME/.config/cbox/infra"
+_reset
+export CBOX_HYPERQWEN_MODE=on
+_render
+_hold_lock "$LOCKDIR/hyperqwen.lock" "$TMPBASE/ready1"
+t0=$SECONDS
+rc=0
+out="$( ( . "$INSTALL_DIR/lib/portable.sh"; _cbox_hyperqwen_owner_heal ) 2>&1)" || rc=$?
+elapsed=$((SECONDS - t0))
+_release_lock
+[ "$rc" = 0 ] || _fail "a busy hyperqwen lock must not fail the session, rc=$rc: $out"
+[ "$elapsed" -le 6 ] || _fail "the heal must not wait on a running prepare, waited ${elapsed}s"
+case "$out" in *"hyperqwen maintenance in progress - skipping the start check"*) ;; *) _fail "the heal must say the check was skipped: $out" ;; esac
+[ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || _fail "the heal must print exactly one line: $out"
+! grep -q '^compose \|^docker ' "$CALLS" || _fail "a skipped heal must not touch docker: $(cat "$CALLS")"
+_ok "heal: while another process holds the hyperqwen lock (real flock) the heal skips after a short wait with one line and rc 0"
+
+_reset
+export CBOX_HYPERQWEN_MODE=on
+_render
+printf '%s\n' "$IMAGE cbox-hyperqwen-u1000-models" > "$OWNER_DIR/prepared"
+T_STATE=exited
+rc=0
+( . "$INSTALL_DIR/lib/portable.sh"; _cbox_hyperqwen_owner_heal ) >/dev/null 2>&1 || rc=$?
+[ "$rc" = 0 ] || _fail "the heal with a free lock must succeed"
+grep -q '^compose up -d hyperqwen$' "$CALLS" || _fail "the heal with a free lock must start the stopped container: $(cat "$CALLS")"
+_ok "heal: with a free lock it still starts a stopped prepared container"
+
+_reset
+export CBOX_HYPERQWEN_MODE=on
+_render
+_hold_lock "$LOCKDIR/hyperqwen.lock" "$TMPBASE/ready2"
+t0=$SECONDS
+rc=0
+out="$( ( . "$INSTALL_DIR/lib/portable.sh"; _cbox_hyperqwen_scope_networks reconcile 5; _cbox_hyperqwen_scope_networks gc 5 ) 2>&1)" || rc=$?
+elapsed=$((SECONDS - t0))
+_release_lock
+[ "$rc" = 0 ] || _fail "the scope network steps must not wait on the hyperqwen lock, rc=$rc: $out"
+[ "$elapsed" -le 3 ] || _fail "the scope network steps took ${elapsed}s while only the hyperqwen lock was held"
+grep -q '^networks-reconcile$' "$CALLS" || _fail "the reconcile step must run: $(cat "$CALLS")"
+grep -q '^networks-gc$' "$CALLS" || _fail "the gc step must run: $(cat "$CALLS")"
+_reset
+export CBOX_HYPERQWEN_MODE=on
+_hold_lock "$LOCKDIR/ollama.lock" "$TMPBASE/ready3"
+rc=0
+out="$( ( . "$INSTALL_DIR/lib/portable.sh"; _cbox_hyperqwen_scope_networks reconcile 1 ) 2>&1)" || rc=$?
+_release_lock
+[ "$rc" = 1 ] || _fail "the scope network step must report a busy shared ollama lock"
+case "$out" in *"could not lock"*) ;; *) _fail "the busy refusal must say why: $out" ;; esac
+! grep -q '^networks-reconcile$' "$CALLS" || _fail "the step must not run without the shared lock: $(cat "$CALLS")"
+_ok "scope networks: the shared ollama lock is taken only for that step and is independent of the hyperqwen lock"
+
+for body_fn in _cbox_hyperqwen_owner_heal hyperqwen_cmd; do
+  body="$(_extract_fn "$INSTALL_DIR/cbox" "$body_fn")"
+  case "$body" in *_cbox_hyperqwen_lock_file*) ;; *) _fail "$body_fn must use the hyperqwen lock file" ;; esac
+  case "$body" in *_cbox_ollama_lock_file*) _fail "$body_fn must not hold the shared ollama lock" ;; esac
+done
+for body_fn in _cbox_hyperqwen_prepare_restore _cbox_hyperqwen_reconcile_cmd _cbox_hyperqwen_up_cmd _cbox_hyperqwen_down_cmd _cbox_hyperqwen_prepare_run; do
+  body="$(_extract_fn "$INSTALL_DIR/cbox" "$body_fn")"
+  case "$body" in *_cbox_ollama_reconcile_networks_impl*|*_cbox_ollama_gc_scope_networks_impl*) _fail "$body_fn must reach the scope networks through _cbox_hyperqwen_scope_networks only" ;; esac
+done
+_ok "lock wiring: lifecycle and heal use the hyperqwen lock, the shared ollama lock only inside the scope network step"
 
 echo "PASS: all hyperqwen lifecycle checks"

@@ -1259,5 +1259,448 @@ class CJKRootRenderTests(unittest.TestCase):
         self.assertEqual(screens.display_width(hint_row[:hint_row.index("zzzz")]), 20)
 
 
+def _fake_docker(tmp, body):
+    path = os.path.join(tmp, "docker")
+    with open(path, "w", encoding="ascii") as fh:
+        fh.write("#!/bin/sh\n" + body)
+    os.chmod(path, 0o755)
+    return path
+
+
+class _PathShim(object):
+    def __init__(self, directory):
+        self.directory = directory
+
+    def __enter__(self):
+        self.saved = os.environ.get("PATH", "")
+        os.environ["PATH"] = self.directory + os.pathsep + self.saved
+        return self
+
+    def __exit__(self, *exc):
+        os.environ["PATH"] = self.saved
+
+
+class SingleExecProbeTests(unittest.TestCase):
+    def _probe(self, names=("claude", "codex", "hermes")):
+        ctx = {"compose_argv": ["docker", "compose"], "service": "cbox"}
+        return MOD.Probe(ctx, ROOT), list(names)
+
+    def test_one_exec_covers_every_engine(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "calls.log")
+            args = os.path.join(tmp, "args.log")
+            _fake_docker(tmp, 'echo CALL >> ' + log + '\n'
+                         'printf "%s\\n" "$@" > ' + args + '\n'
+                         'case "$1" in exec) printf "claude\\n/opt/hermes/bin/hermes\\n";; esac\n')
+            probe, names = self._probe()
+            with _PathShim(tmp):
+                result = probe.running_engines("cid9", names)
+            self.assertEqual(result, {"claude": "running", "codex": "down", "hermes": "running"})
+            with open(log, encoding="ascii") as fh:
+                self.assertEqual(fh.read().splitlines(), ["CALL"])
+            with open(args, encoding="ascii") as fh:
+                seen = fh.read().splitlines()
+            self.assertEqual(seen[:4], ["exec", "cid9", "sh", "-c"])
+            self.assertEqual(seen[-4:], ["sh", "/opt/hermes/bin/hermes", "claude", "codex"])
+
+    def test_scan_failure_marks_all_down_and_missing_docker_marks_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _fake_docker(tmp, "exit 125\n")
+            probe, names = self._probe(("claude", "codex"))
+            with _PathShim(tmp):
+                self.assertEqual(probe.running_engines("cid9", names), {"claude": "down", "codex": "down"})
+        with tempfile.TemporaryDirectory() as empty:
+            probe, names = self._probe(("claude", "codex"))
+            saved = os.environ["PATH"]
+            os.environ["PATH"] = empty
+            try:
+                self.assertEqual(probe.running_engines("cid9", names), {"claude": "unknown", "codex": "unknown"})
+            finally:
+                os.environ["PATH"] = saved
+
+    def test_no_container_is_unknown_without_any_exec(self):
+        probe, names = self._probe(("claude",))
+        self.assertEqual(probe.running_engines(None, names), {"claude": "unknown"})
+
+    def test_parse_scan_output(self):
+        argv1s = {"claude": "claude", "codex": "codex", "hermes": "/opt/hermes/bin/hermes"}
+        text = "claude\nclaude\n/opt/hermes/bin/hermes\n\n"
+        self.assertEqual(MOD.parse_scan_output(text, argv1s),
+                         {"claude": "running", "codex": "down", "hermes": "running"})
+        self.assertEqual(MOD.parse_scan_output("", argv1s),
+                         {"claude": "down", "codex": "down", "hermes": "down"})
+
+    @unittest.skipUnless(os.path.isdir("/proc/self"), "needs a Linux proc filesystem")
+    def test_scan_script_matches_entrypoint_argv1_and_plain_argv0(self):
+        sleeper = None
+        try:
+            sleeper = subprocess.Popen(["/x/entrypoint.sh", "31"], executable="/bin/sleep")
+            time.sleep(0.2)
+            out = subprocess.run(["sh", "-c", MOD.SCAN_SCRIPT, "sh", "31", "32", "/x/entrypoint.sh"],
+                                 stdout=subprocess.PIPE, timeout=15)
+            found = set(out.stdout.decode().split())
+            self.assertIn("31", found)
+            self.assertNotIn("32", found)
+            self.assertEqual(out.returncode, 0)
+        finally:
+            if sleeper is not None:
+                sleeper.kill()
+                sleeper.wait()
+
+
+class ConcurrentProbeTests(unittest.TestCase):
+    def test_inspect_and_exec_run_concurrently(self):
+        barrier = threading.Barrier(2, timeout=3)
+
+        class Probe(object):
+            def container_id(self):
+                return "cid"
+
+            def container_state(self, cid):
+                barrier.wait()
+                return "up (since 2026-10-07T10:00:00)"
+
+            def running_engines(self, cid, names):
+                barrier.wait()
+                return dict((n, "running") for n in names)
+
+        status = MOD.gather_status(Probe(), ["claude", "codex"], budget=5.0)
+        self.assertEqual(status["container_state"], "up (since 2026-10-07T10:00:00)")
+        self.assertEqual(status["engine_state"], {"claude": "running", "codex": "running"})
+
+
+class StatusCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = os.path.join(self.tmp.name, "hub-cache")
+        self.now = [1000.0]
+        self.cache = MOD.StatusCache(self.dir, "scopea", clock=lambda: self.now[0])
+        self.snap = {"container_state": "up (since 2026-10-07T10:00:00)",
+                     "engine_state": {"claude": "running", "codex": "down"}}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_roundtrip_is_private_and_atomic(self):
+        self.assertTrue(self.cache.store(self.snap))
+        names = sorted(os.listdir(self.dir))
+        self.assertEqual(names, ["status-scopea.json"])
+        self.assertEqual(os.stat(os.path.join(self.dir, names[0])).st_mode & 0o777, 0o600)
+        self.assertEqual(os.stat(self.dir).st_mode & 0o777, 0o700)
+        self.now[0] = 1042.0
+        loaded = self.cache.load(["claude", "codex"])
+        self.assertEqual(loaded["container_state"], self.snap["container_state"])
+        self.assertEqual(loaded["engine_state"], self.snap["engine_state"])
+        self.assertTrue(loaded["from_cache"])
+        self.assertAlmostEqual(loaded["cached_age"], 42.0)
+
+    def test_store_replaces_and_leaves_no_temp_files(self):
+        self.cache.store(self.snap)
+        newer = {"container_state": "down", "engine_state": {"claude": "down", "codex": "down"}}
+        self.cache.store(newer)
+        self.assertEqual(sorted(os.listdir(self.dir)), ["status-scopea.json"])
+        self.assertEqual(self.cache.load(["claude", "codex"])["container_state"], "down")
+
+    def test_expiry(self):
+        self.cache.store(self.snap)
+        self.now[0] = 1000.0 + MOD.CACHE_MAX_AGE_SECONDS
+        self.assertIsNotNone(self.cache.load(["claude", "codex"]))
+        self.now[0] = 1000.0 + MOD.CACHE_MAX_AGE_SECONDS + 1
+        self.assertIsNone(self.cache.load(["claude", "codex"]))
+
+    def test_future_timestamp_is_ignored(self):
+        self.cache.store(self.snap)
+        self.now[0] = 900.0
+        self.assertIsNone(self.cache.load(["claude", "codex"]))
+
+    def test_scope_mismatch_is_ignored(self):
+        self.cache.store(self.snap)
+        other = MOD.StatusCache(self.dir, "scopeb", clock=lambda: self.now[0])
+        self.assertIsNone(other.load(["claude", "codex"]))
+        os.rename(os.path.join(self.dir, "status-scopea.json"), os.path.join(self.dir, "status-scopeb.json"))
+        self.assertIsNone(other.load(["claude", "codex"]))
+
+    def test_scope_key_follows_compose_argv_and_service(self):
+        a = MOD.cache_scope({"compose_argv": ["docker", "compose", "-f", "/a"], "service": "cbox"})
+        b = MOD.cache_scope({"compose_argv": ["docker", "compose", "-f", "/b"], "service": "cbox"})
+        c = MOD.cache_scope({"compose_argv": ["docker", "compose", "-f", "/a"], "service": "other"})
+        self.assertEqual(len(set([a, b, c])), 3)
+        self.assertEqual(a, MOD.cache_scope({"compose_argv": ["docker", "compose", "-f", "/a"], "service": "cbox"}))
+
+    def test_engine_set_mismatch_is_ignored(self):
+        self.cache.store(self.snap)
+        self.assertIsNone(self.cache.load(["claude", "codex", "hermes"]))
+        self.assertIsNone(self.cache.load(["claude"]))
+
+    def test_corrupt_or_hostile_content_is_ignored(self):
+        self.cache.store(self.snap)
+        path = os.path.join(self.dir, "status-scopea.json")
+        for body in ("not json", "[]", json.dumps({"v": 2}),
+                     json.dumps({"v": 1, "scope": "scopea", "ts": 1000.0,
+                                 "container_state": "up\x1b[2J", "engine_state": {"claude": "running", "codex": "down"}}),
+                     json.dumps({"v": 1, "scope": "scopea", "ts": 1000.0,
+                                 "container_state": "unknown", "engine_state": {"claude": "running", "codex": "down"}}),
+                     json.dumps({"v": 1, "scope": "scopea", "ts": 1000.0,
+                                 "container_state": "down", "engine_state": {"claude": "...", "codex": "down"}}),
+                     "x" * (MOD.CACHE_MAX_BYTES + 10)):
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(body)
+            os.chmod(path, 0o600)
+            self.assertIsNone(self.cache.load(["claude", "codex"]), body[:40])
+
+    def test_loose_file_mode_is_refused(self):
+        self.cache.store(self.snap)
+        os.chmod(os.path.join(self.dir, "status-scopea.json"), 0o644)
+        self.assertIsNone(self.cache.load(["claude", "codex"]))
+
+    def test_symlinked_cache_file_is_refused(self):
+        self.cache.store(self.snap)
+        real = os.path.join(self.tmp.name, "elsewhere.json")
+        path = os.path.join(self.dir, "status-scopea.json")
+        os.rename(path, real)
+        os.symlink(real, path)
+        self.assertIsNone(self.cache.load(["claude", "codex"]))
+
+    def test_symlinked_cache_dir_is_refused_for_load_and_store(self):
+        self.cache.store(self.snap)
+        real = os.path.join(self.tmp.name, "real-dir")
+        os.rename(self.dir, real)
+        os.symlink(real, self.dir)
+        self.assertIsNone(self.cache.load(["claude", "codex"]))
+        before = sorted(os.listdir(real))
+        self.assertFalse(self.cache.store(self.snap))
+        self.assertEqual(sorted(os.listdir(real)), before)
+
+    def test_store_never_writes_through_a_planted_symlink_target(self):
+        self.cache.store(self.snap)
+        victim = os.path.join(self.tmp.name, "victim.txt")
+        with open(victim, "w", encoding="ascii") as fh:
+            fh.write("keep")
+        path = os.path.join(self.dir, "status-scopea.json")
+        os.unlink(path)
+        os.symlink(victim, path)
+        self.cache.store(self.snap)
+        with open(victim, encoding="ascii") as fh:
+            self.assertEqual(fh.read(), "keep")
+        self.assertFalse(os.path.islink(path))
+        self.assertIsNotNone(self.cache.load(["claude", "codex"]))
+
+    def test_group_writable_dir_is_refused(self):
+        self.cache.store(self.snap)
+        os.chmod(self.dir, 0o770)
+        self.assertIsNone(self.cache.load(["claude", "codex"]))
+        self.assertFalse(self.cache.store(self.snap))
+
+    def test_missing_dir_loads_none_without_creating_it(self):
+        self.assertIsNone(self.cache.load(["claude", "codex"]))
+        self.assertFalse(os.path.exists(self.dir))
+
+    def test_unwritable_location_never_raises(self):
+        blocker = os.path.join(self.tmp.name, "blocker")
+        with open(blocker, "w", encoding="ascii") as fh:
+            fh.write("x")
+        bad = MOD.StatusCache(os.path.join(blocker, "sub"), "scopea")
+        self.assertFalse(bad.store(self.snap))
+        self.assertIsNone(bad.load(["claude", "codex"]))
+
+    def test_age_formatting(self):
+        self.assertEqual(MOD.format_age(0.4), "0s")
+        self.assertEqual(MOD.format_age(59.9), "59s")
+        self.assertEqual(MOD.format_age(61), "1m")
+        self.assertEqual(MOD.format_age(599), "9m")
+
+
+class CachedStatusFlowTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cache = MOD.StatusCache(os.path.join(self.tmp.name, "c"), "s")
+        self.cache.store({"container_state": "up (since 2026-10-07T09:00:00)",
+                          "engine_state": {"claude": "running"}})
+        self.registry_cache = MOD.StatusCache(os.path.join(self.tmp.name, "r"), "s")
+        self.registry_cache.store({
+            "container_state": "up (since 2026-10-07T09:00:00)",
+            "engine_state": dict((n, "running") for n in MOD.engines_from_registry(ROOT))})
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _gated_probe(self):
+        class Gated(object):
+            def __init__(self):
+                self.release = threading.Event()
+                self.calls = 0
+
+            def container_id(self):
+                self.calls += 1
+                self.release.wait(5)
+                return "cid"
+
+            def container_state(self, cid):
+                return "up (since 2026-10-07T10:00:00)"
+
+            def running_engines(self, cid, names):
+                return dict((n, "down") for n in names)
+
+        return Gated()
+
+    def test_cached_status_is_returned_without_waiting_for_the_probe(self):
+        probe = self._gated_probe()
+        started = time.time()
+        status = MOD.initial_status(probe, ["claude"], self.cache, budget=5.0)
+        self.assertLess(time.time() - started, 1.0)
+        self.assertTrue(status["from_cache"])
+        self.assertEqual(status["engine_state"]["claude"], "running")
+        shown = MOD.display_status(status)
+        self.assertRegex(shown["container_state"], r"^up \(since 2026-10-07T09:00:00\) \(cached \d+s ago\)$")
+        probe.release.set()
+        probe._hub_probe_state["thread"].join(5)
+        self.assertEqual(probe.calls, 1)
+
+    def test_fresh_probe_replaces_the_cached_status_and_is_written_back(self):
+        probe = self._gated_probe()
+        status = MOD.initial_status(probe, ["claude"], self.cache, budget=5.0)
+        self.assertEqual(MOD.settle_cached(probe, status), status)
+        probe.release.set()
+        probe._hub_probe_state["thread"].join(5)
+        fresh = MOD.settle_cached(probe, status)
+        self.assertNotIn("from_cache", fresh)
+        self.assertEqual(fresh["container_state"], "up (since 2026-10-07T10:00:00)")
+        self.assertEqual(fresh["engine_state"], {"claude": "down"})
+        self.assertEqual(MOD.display_status(fresh), fresh)
+        stored = self.cache.load(["claude"])
+        self.assertEqual(stored["engine_state"], {"claude": "down"})
+
+    def test_settle_can_wait_for_the_fresh_probe(self):
+        probe = self._gated_probe()
+        status = MOD.initial_status(probe, ["claude"], self.cache, budget=5.0)
+        timer = threading.Timer(0.1, probe.release.set)
+        timer.start()
+        fresh = MOD.settle_cached(probe, status, budget=5.0, wait=True)
+        timer.join()
+        self.assertEqual(fresh["engine_state"], {"claude": "down"})
+
+    def test_refresh_during_the_background_probe_keeps_the_cached_view(self):
+        probe = self._gated_probe()
+        MOD.initial_status(probe, ["claude"], self.cache, budget=5.0)
+        thread = probe._hub_probe_state["thread"]
+        status = MOD.gather_status(probe, ["claude"], budget=0.05, cache=self.cache)
+        self.assertIs(probe._hub_probe_state["thread"], thread)
+        self.assertEqual(status["container_state"], "up (since 2026-10-07T09:00:00)")
+        probe.release.set()
+        thread.join(5)
+
+    def test_miss_falls_back_to_the_budgeted_probe(self):
+        empty = MOD.StatusCache(os.path.join(self.tmp.name, "none"), "s")
+        status = MOD.initial_status(StubProbeUp(), ["claude"], empty, budget=2.0)
+        self.assertNotIn("from_cache", status)
+        self.assertEqual(status["engine_state"], {"claude": "running"})
+
+    def test_unknown_results_are_never_cached(self):
+        empty = MOD.StatusCache(os.path.join(self.tmp.name, "none"), "s")
+        probe = StubProbeDown()
+        MOD.initial_status(probe, ["claude"], empty, budget=2.0)
+        probe._hub_probe_state["thread"].join(5)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "none")))
+
+    def test_hub_loop_shows_cached_marker_then_fresh_after_refresh(self):
+        probe = self._gated_probe()
+        out = io.StringIO()
+        started = time.time()
+        stdin = io.StringIO("r\nq\n")
+        timer = threading.Timer(0.2, probe.release.set)
+        timer.start()
+        rc = MOD.hub_loop(ROOT, CBOX_PATH, ISOLATED_CTX, probe, stdin, out.write, cache=self.registry_cache)
+        timer.join()
+        self.assertEqual(rc, 0)
+        text = out.getvalue()
+        self.assertEqual(text.count("(cached "), 1)
+        self.assertLess(text.index("(cached "), text.index("up (since 2026-10-07T10:00:00)"))
+        self.assertLess(time.time() - started, 5.0)
+
+    def test_hub_loop_without_cache_is_unchanged(self):
+        out = io.StringIO()
+        rc = MOD.hub_loop(ROOT, CBOX_PATH, ISOLATED_CTX, StubProbeUp(), io.StringIO("q\n"), out.write)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("cached", out.getvalue())
+
+
+class TimingSwitchTests(unittest.TestCase):
+    def tearDown(self):
+        MOD.timing_setup({})
+
+    def _capture(self, fn):
+        import contextlib
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            fn()
+        return err.getvalue()
+
+    def test_off_by_default_prints_nothing_and_takes_no_clock_reading(self):
+        def run():
+            MOD.timing_setup({})
+            started = MOD.tstart()
+            self.assertEqual(started, 0.0)
+            MOD.tend("x", started)
+            MOD.tcumulative("y")
+            MOD.gather_status(StubProbeUp(), ["claude"], budget=1.0)
+        self.assertEqual(self._capture(run), "")
+
+    def test_only_the_value_one_enables_it(self):
+        for value in ("0", "", "yes", "true"):
+            def run():
+                MOD.timing_setup({"CBOX_HUB_TIMING": value})
+                MOD.tend("x", MOD.tstart())
+            self.assertEqual(self._capture(run), "", value)
+
+    def test_enabled_reports_start_import_and_probe_phases_on_stderr(self):
+        def run():
+            MOD.timing_setup({"CBOX_HUB_TIMING": "1", "CBOX_HUB_T0": str(int((MOD._T_START - 0.05) * 1000000))})
+            MOD.gather_status(StubProbeUp(), ["claude"], budget=1.0)
+            MOD.tcumulative("first screen shown")
+        text = self._capture(run)
+        for label in ("bash plus interpreter start", "python imports", "probe compose ps",
+                      "probe inspect (concurrent)", "probe exec scan (concurrent)", "probe total",
+                      "first screen shown"):
+            self.assertIn("cbox-hub-timing: " + label, text)
+        self.assertRegex(text, r"bash plus interpreter start \d+ ms")
+
+    def test_enabled_without_origin_skips_the_bash_line(self):
+        text = self._capture(lambda: MOD.timing_setup({"CBOX_HUB_TIMING": "1"}))
+        self.assertNotIn("bash plus interpreter start", text)
+        self.assertIn("python imports", text)
+
+
+class LauncherTests(unittest.TestCase):
+    def _run(self, hub_source):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("cbox_hub_launch.py",):
+                with open(os.path.join(LIB, name), encoding="utf-8") as src:
+                    with open(os.path.join(tmp, name), "w", encoding="utf-8") as dst:
+                        dst.write(src.read())
+            with open(os.path.join(tmp, "cbox_hub.py"), "w", encoding="utf-8") as fh:
+                fh.write(hub_source)
+            return subprocess.run([sys.executable, os.path.join(tmp, "cbox_hub_launch.py"), "i", "c"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30).returncode
+
+    def test_syntax_error_in_the_hub_maps_to_the_reserved_failure_exit(self):
+        self.assertEqual(self._run("def broken(((\n"), 97)
+
+    def test_import_error_maps_to_the_reserved_failure_exit(self):
+        self.assertEqual(self._run("import module_that_does_not_exist_anywhere\ndef main(argv):\n    return 0\n"), 97)
+
+    def test_runtime_crash_maps_to_the_reserved_failure_exit(self):
+        self.assertEqual(self._run("def main(argv):\n    raise RuntimeError('x')\n"), 97)
+
+    def test_return_codes_pass_through(self):
+        self.assertEqual(self._run("def main(argv):\n    return 96\n"), 96)
+        self.assertEqual(self._run("def main(argv):\n    return 0\n"), 0)
+        self.assertEqual(self._run("import sys\ndef main(argv):\n    sys.exit(5)\n"), 5)
+
+    def test_real_hub_module_imports_cleanly_through_the_launcher_path(self):
+        code = ("import sys; sys.path.insert(0, %r); import cbox_hub_launch, cbox_hub; "
+                "assert callable(cbox_hub.main)") % LIB
+        self.assertEqual(subprocess.run([sys.executable, "-c", code], timeout=30).returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

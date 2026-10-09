@@ -138,7 +138,7 @@ sec_get() {
           printf '%s\n' 'Redirect selected host /etc/hosts names (mapped to 127.0.0.1/::1) through the netaccess SOCKS proxy to a docker container publishing a matching host port, so curl https://name works natively inside cbox with no proxy flags. Off by default; requires netaccess to be on to actually forward anything.'
           ;;
         netaccess)
-          printf '%s\n' 'Reach Docker networks through Dante SOCKS; optional host-side exec bridge runs tests only in containers on explicit scope=list networks and never mounts docker.sock into cbox.'
+          printf '%s\n' 'Reach Docker networks through Dante SOCKS; optional host-side exec bridge runs tests only in containers on the networks netaccess reaches (explicit scope=list networks for scoped, every eligible network for all) and never mounts docker.sock into cbox.'
           ;;
         hostroute)
           printf '%s\n' 'Route container egress through a host-managed forward proxy so host /etc/hosts and host DNS resolution are honored; optional host-gateway alias maps host.docker.internal for direct host-side endpoints.'
@@ -286,7 +286,7 @@ sec_get() {
           printf '%s\n' 'CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE CBOX_WG_FORWARDS CBOX_WG_CLIENT_ATTACH'
           ;;
         autoresume)
-          printf '%s\n' 'CBOX_LIMIT_AUTORESUME CBOX_REGULATOR_AUTORESUME CBOX_SESSION_MULTIPLEX CBOX_SAFEGUARD_AUTOCONFIRM CBOX_SESSION_BROKER_MODE CBOX_SSHD_LISTEN_ADDR CBOX_SSHD_PORT CBOX_LIMIT_RESUME_DELAY CBOX_LIMIT_RESUME_PROMPT CBOX_LIMIT_RESUME_STAGGER CBOX_LIMIT_RESUME_MAX_PER_DAY'
+          printf '%s\n' 'CBOX_LIMIT_AUTORESUME CBOX_REGULATOR_AUTORESUME CBOX_BUDGET_MODE CBOX_SUBSCRIPTION_PROFILE CBOX_BUDGET_LOW_5H CBOX_BUDGET_LOW_7D CBOX_BUDGET_PACE_WINDOW_H CBOX_BUDGET_PACE_SLACK_H CBOX_SESSION_MULTIPLEX CBOX_SAFEGUARD_AUTOCONFIRM CBOX_SESSION_BROKER_MODE CBOX_SSHD_LISTEN_ADDR CBOX_SSHD_PORT CBOX_LIMIT_RESUME_DELAY CBOX_LIMIT_RESUME_PROMPT CBOX_LIMIT_RESUME_STAGGER CBOX_LIMIT_RESUME_MAX_PER_DAY'
           ;;
         agents)
           printf '%s\n' 'CBOX_AGENTS'

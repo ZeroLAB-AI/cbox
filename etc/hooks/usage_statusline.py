@@ -519,9 +519,18 @@ def _display_window(window_key, now, session, snapshot_windows, stdin_entry):
         used, resets, now, _cbox_budget_mod().WINDOW_SECONDS[window_key])
 
 
-def _agents_value():
+AGENTS_BRAKE_TAGS = {"low_5h": "low 5h", "low_7d": "low 7d", "pace_7d": "pace"}
+
+
+def _agents_info():
     info = _cbox_budget_mod().budget_for_family("claude")
-    return info.get("n")
+    if info.get("status") == "off" or info.get("free"):
+        return "inf", None
+    return info.get("n"), AGENTS_BRAKE_TAGS.get(info.get("brake"))
+
+
+def _agents_value():
+    return _agents_info()[0]
 
 
 def _read_codex_snapshot():
@@ -877,10 +886,16 @@ def _run(data, now):
         hermes_text = None
 
     try:
-        agents_val = _agents_value()
+        agents_val, agents_tag = _agents_info()
     except Exception:
-        agents_val = None
-    agents_text = ("agents: %d" % agents_val) if agents_val is not None else None
+        agents_val, agents_tag = None, None
+    agents_text = None
+    if agents_val == "inf":
+        agents_text = "agents: inf"
+    elif agents_val is not None:
+        agents_text = "agents: %d" % agents_val
+        if agents_tag:
+            agents_text += " (%s)" % agents_tag
 
     width = _terminal_width(data)
 

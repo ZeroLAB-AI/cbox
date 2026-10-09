@@ -81,7 +81,7 @@
     {
       "id": "netaccess",
       "title": "Container network access",
-      "description": "Reach Docker networks through Dante SOCKS; optional host-side exec bridge runs tests only in containers on explicit scope=list networks and never mounts docker.sock into cbox.",
+      "description": "Reach Docker networks through Dante SOCKS; optional host-side exec bridge runs tests only in containers on the networks netaccess reaches (explicit scope=list networks for scoped, every eligible network for all) and never mounts docker.sock into cbox.",
       "apply_class": "topology",
       "profile": "skip",
       "scope": "project",
@@ -792,8 +792,7 @@
         "values": [
           "all",
           "list"
-        ],
-        "escape_hatch": "unvalidated-legacy-gap"
+        ]
       },
       "default": "",
       "role": "setting",
@@ -849,14 +848,15 @@
         "kind": "enum",
         "values": [
           "off",
-          "scoped"
+          "scoped",
+          "all"
         ]
       },
       "default": "off",
       "role": "setting",
       "export": false,
-      "prompt": "setup: direct test execution inside scoped containers",
-      "help": "Optional direct test execution (CBOX_NETACCESS_EXEC_MODE=scoped) is available only with scope=list and at least one explicit Docker network.",
+      "prompt": "setup: direct test execution inside containers",
+      "help": "Optional direct test execution through the host exec bridge. scoped works only with scope=list and at least one explicit Docker network. all works whenever netaccess is active and reaches exactly what netaccess reaches: the listed networks under scope=list (at least one required), every eligible Docker network under scope=all, resolved per request. The workspace guard is the same opt-in as for scoped.",
       "validator": null
     },
     {
@@ -920,7 +920,7 @@
       "role": "setting",
       "export": true,
       "prompt": "setup: expose the scoped exec bridge to agents as an MCP tool",
-      "help": "Off by default. Registers the container-exec MCP tool (container_list, container_exec) so an agent can call the already-enabled host exec bridge itself, instead of only a human running cbox-container by hand. A separate, stricter permission from CBOX_NETACCESS_EXEC_MODE: an operator may want the bridge for their own use without exposing it as agent-callable.",
+      "help": "Off by default. Registers the container-exec MCP tool (container_list, container_exec) so an agent can call the already-enabled host exec bridge itself, instead of only a human running cbox-container by hand. A separate, stricter permission from CBOX_NETACCESS_EXEC_MODE: an operator may want the bridge for their own use without exposing it as agent-callable. The tool and its injected context paragraph are rendered only while exec is active; both gates must hold.",
       "validator": null
     },
     {
@@ -938,6 +938,23 @@
       "export": false,
       "prompt": null,
       "help": "Internal: derived, not a stored setting. Computed fresh at every render_mcp.py call site from _cbox_netaccess_active (CBOX_NETACCESS_MODE != off and CBOX_NETACCESS_APPLIED = 1) and passed as that command's env prefix. Gates the cbox-net MCP tool (net_map, net_probe) for claude, codex and hermes.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_CONTAINER_EXEC_ACTIVE",
+      "section": "netaccess",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "off",
+      "role": "internal",
+      "export": false,
+      "prompt": null,
+      "help": "Internal: derived, not a stored setting. Computed fresh at every render_mcp.py call site from _cbox_netaccess_exec_active (netaccess active and a usable exec mode) and passed as that command's env prefix. Together with CBOX_CONTAINER_EXEC_TOOL it gates the container-exec MCP tool, so the tool is never rendered while the bridge cannot exist.",
       "validator": null
     },
     {
@@ -1684,11 +1701,11 @@
         "kind": "ollama-image",
         "escape_hatch": "ollama-image"
       },
-      "default": "ghcr.io/syv-ai/hyperqwen:sha-53557bc",
+      "default": "ghcr.io/syv-ai/hyperqwen:sha-53557bc@sha256:25bfa39ca4b71d5ba5ea32e5486c841dd4fb8b6429846c012ec5d1b06b2457a6",
       "role": "setting",
       "export": true,
       "prompt": "setup: hyperqwen image reference (pinned tag or digest)",
-      "help": "Pinned hyperqwen image reference.",
+      "help": "Pinned hyperqwen image reference; the default is the immutable per-commit tag pinned by its sha256 index digest.",
       "validator": null
     },
     {
@@ -2027,6 +2044,101 @@
       "export": false,
       "prompt": null,
       "help": "Resume a session automatically at the reset of the window that caused a quota-regulator deny; needs the limit watchdog.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_BUDGET_MODE",
+      "section": "autoresume",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "on",
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Paid-agent concurrency regulator. on = no throttling while the quota is healthy (status line 'agents: inf'); it brakes only when a window is nearly spent (CBOX_BUDGET_LOW_5H, CBOX_BUDGET_LOW_7D) or the seven-day window drains too fast (CBOX_BUDGET_PACE_WINDOW_H, CBOX_BUDGET_PACE_SLACK_H), then the status line shows 'agents: N (reason)' and the paid-spawn guard refuses spawns when the claude or codex budget runs below the floor. off = no quota gating at all and the status line shows 'agents: inf'; use it when quota is effectively unlimited. Rendered into the container environment, applies on container recreate.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_SUBSCRIPTION_PROFILE",
+      "section": "autoresume",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      "default": "high",
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Subscription profile for quota use. high = current behavior (budget regulator per CBOX_BUDGET_MODE, normal fan-out). low = small subscription: hermes-local carries the work, at most one paid Claude or Codex agent at a time, no fan-out to paid tiers, paid order codex-luna, codex-sol, worker. max = no quota gating at all (as CBOX_BUDGET_MODE=off) while hermes-local stays first when present. Rendered into the container environment, applies on container recreate.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_BUDGET_LOW_5H",
+      "section": "autoresume",
+      "type": {
+        "kind": "uint-range",
+        "min": 0,
+        "max": 100
+      },
+      "default": 15,
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Quota regulator low-remaining brake for the five-hour window: brake when fewer than this many percentage points of the window remain (default 15, 0 never brakes on this window). Rendered into the container environment, applies on container recreate.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_BUDGET_LOW_7D",
+      "section": "autoresume",
+      "type": {
+        "kind": "uint-range",
+        "min": 0,
+        "max": 100
+      },
+      "default": 20,
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Quota regulator low-remaining brake for the seven-day window: brake when fewer than this many percentage points of the window remain (default 20, 0 never brakes on this window). Rendered into the container environment, applies on container recreate.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_BUDGET_PACE_WINDOW_H",
+      "section": "autoresume",
+      "type": {
+        "kind": "uint-range",
+        "min": 1,
+        "max": 168
+      },
+      "default": 3,
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Quota regulator pace brake: how many hours of recent usage samples measure the seven-day burn rate (default 3). Rendered into the container environment, applies on container recreate.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_BUDGET_PACE_SLACK_H",
+      "section": "autoresume",
+      "type": {
+        "kind": "uint-range",
+        "min": 0,
+        "max": 168
+      },
+      "default": 8,
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Quota regulator pace brake: brake when the seven-day budget would run out this many active hours or more before its reset at the measured burn rate (default 8, about one working day; a large value disables the pace brake). Rendered into the container environment, applies on container recreate.",
       "validator": null
     },
     {

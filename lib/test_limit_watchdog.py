@@ -93,6 +93,12 @@ class RegulatorTests(unittest.TestCase):
         injected.assert_called_once_with("%1", "cbox: quota reset at 22:13:18Z, agents: 3; continue the blocked step")
         self.assertFalse(os.path.exists(self.path))
 
+    def test_free_state_resumes_with_unlimited_agents(self):
+        self._marker()
+        injected = self._pass({"status": "ok", "b": None, "n": None, "free": True, "brake": "none"})
+        injected.assert_called_once_with("%1", "cbox: quota reset at 22:13:18Z, agents: inf; continue the blocked step")
+        self.assertFalse(os.path.exists(self.path))
+
     def test_human_prompt_after_offset_cancels(self):
         self._marker()
         self._append({"type": "user", "message": {"content": "continue"}})

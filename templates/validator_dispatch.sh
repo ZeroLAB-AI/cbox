@@ -78,7 +78,7 @@ _cbox_reg_validate_var_dispatch() {
       _cbox_val_kind_enum "$val" '0' '1' || return 1
       ;;
     CBOX_NETACCESS_SCOPE)
-      _cbox_val_named_unvalidated_legacy_gap "$key" || return 1
+      _cbox_val_kind_enum_or_empty "$val" 'all' 'list' || return 1
       ;;
     CBOX_NETACCESS_NETWORKS)
       _cbox_val_kind_network_name_list "$val" || return 1
@@ -90,7 +90,7 @@ _cbox_reg_validate_var_dispatch() {
       _cbox_val_kind_port "$val" || return 1
       ;;
     CBOX_NETACCESS_EXEC_MODE)
-      _cbox_val_kind_enum "$val" 'off' 'scoped' || return 1
+      _cbox_val_kind_enum "$val" 'off' 'scoped' 'all' || return 1
       ;;
     CBOX_NETACCESS_EXEC_WORKSPACE_GUARD)
       _cbox_val_kind_enum "$val" 'off' 'on' || return 1
@@ -105,6 +105,9 @@ _cbox_reg_validate_var_dispatch() {
       _cbox_val_kind_enum "$val" 'off' 'on' || return 1
       ;;
     CBOX_NETMAP_ACTIVE)
+      _cbox_val_kind_enum "$val" 'off' 'on' || return 1
+      ;;
+    CBOX_CONTAINER_EXEC_ACTIVE)
       _cbox_val_kind_enum "$val" 'off' 'on' || return 1
       ;;
     CBOX_HOST_ROUTE_MODE)
@@ -319,6 +322,24 @@ _cbox_reg_validate_var_dispatch() {
       ;;
     CBOX_REGULATOR_AUTORESUME)
       _cbox_val_kind_enum_or_empty "$val" 'off' 'on' || return 1
+      ;;
+    CBOX_BUDGET_MODE)
+      _cbox_val_kind_enum "$val" 'off' 'on' || return 1
+      ;;
+    CBOX_SUBSCRIPTION_PROFILE)
+      _cbox_val_kind_enum "$val" 'low' 'high' 'max' || return 1
+      ;;
+    CBOX_BUDGET_LOW_5H)
+      _cbox_val_kind_uint_range "$val" 0 100 || return 1
+      ;;
+    CBOX_BUDGET_LOW_7D)
+      _cbox_val_kind_uint_range "$val" 0 100 || return 1
+      ;;
+    CBOX_BUDGET_PACE_WINDOW_H)
+      _cbox_val_kind_uint_range "$val" 1 168 || return 1
+      ;;
+    CBOX_BUDGET_PACE_SLACK_H)
+      _cbox_val_kind_uint_range "$val" 0 168 || return 1
       ;;
     CBOX_SESSION_MULTIPLEX)
       _cbox_val_kind_enum "$val" 'off' 'on' || return 1

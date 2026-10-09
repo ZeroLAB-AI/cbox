@@ -65,9 +65,10 @@ mcp_all_names() {
   local etc="${ETC_DIR:-$INSTALL_DIR/etc}"
   [ -f "$etc/mcp/delegates.json" ] || return 0
   local user_dir="${CBOX_USER_DIR-$HOME/.config/cbox/user}"
-  local rendered netmap_active="off"
+  local rendered netmap_active="off" exec_active="off"
   _cbox_netaccess_active && netmap_active="on"
-  rendered="$(CBOX_NETMAP_ACTIVE="$netmap_active" python3 "$etc/mcp/render_mcp.py" "$etc/mcp/delegates.json" all "$HOME/.claude/hooks" off "$target" "$user_dir")" \
+  if declare -F _cbox_netaccess_exec_active >/dev/null 2>&1 && _cbox_netaccess_exec_active; then exec_active="on"; fi
+  rendered="$(CBOX_NETMAP_ACTIVE="$netmap_active" CBOX_CONTAINER_EXEC_ACTIVE="$exec_active" python3 "$etc/mcp/render_mcp.py" "$etc/mcp/delegates.json" all "$HOME/.claude/hooks" off "$target" "$user_dir")" \
     || die "mcp_all_names: render_mcp.py rejected $etc/mcp/delegates.json (malformed registry entry - see stderr above)"
   python3 -c '
 import json

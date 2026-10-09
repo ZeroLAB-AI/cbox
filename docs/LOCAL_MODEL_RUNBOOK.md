@@ -83,8 +83,12 @@ Host steps:
 2. Enable hyperqwen: `cbox config set CBOX_HYPERQWEN_MODE=on`. Optionally set
    `CBOX_HYPERQWEN_SPEC` (mtp/dflash2, default mtp), `CBOX_HYPERQWEN_CTX`
    (fast/long/huge, default long), `CBOX_HYPERQWEN_MAX_LEN`, `CBOX_HYPERQWEN_GPU_DEVICE`,
-   or `CBOX_HYPERQWEN_MODELS_PATH` (see cbox/MANUAL.md section "hyperqwen" for
-   full configuration).
+   or `CBOX_HYPERQWEN_MODELS_PATH` (a dedicated directory such as `~/models`; your home,
+   its ancestors, `~/.ssh`, `~/.config`, `~/.claude*`, `~/.codex`, `~/.gnupg`,
+   `~/.local/share/docker` and the cbox install dir are refused; see cbox/MANUAL.md
+   section "hyperqwen" for full configuration). The default image is pinned by tag
+   and sha256 digest; after the pin changed, the next `cbox hyperqwen up` reruns the
+   idempotent prepare once (seconds when the model is already there).
 
 3. If ollama is running on the same card: `cbox config set CBOX_OLLAMA_MODE=off`
    then `cbox ollama reconcile` to free the GPU.

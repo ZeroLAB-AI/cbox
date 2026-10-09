@@ -60,6 +60,27 @@ REVIEW_FLOOR_TEXT = {
     ),
 }
 
+FANOUT_TOKEN = "{{FANOUT}}"
+FANOUT_MODES = ("low", "high", "max")
+FANOUT_DEFAULT = "high"
+
+FANOUT_TEXT = {
+    "high": (
+        "FAN-OUT vs WORKFLOW: default to a plain agent fan-out for peer, independent tasks - when the work splits, launch ~5 peers as multiple Agent tool uses in a SINGLE message so they run concurrently, then collect their distillates yourself (sequential one-at-a-time calls degrade a fan-out into a slow pipeline). Reach for a Workflow ONLY for genuine inter-step dependencies (a later step consumes an earlier step's output); equal-rank volume alone never justifies one - fan out instead."
+    ),
+    "max": (
+        "FAN-OUT vs WORKFLOW: default to a plain agent fan-out for peer, independent tasks - when the work splits, launch ~5 peers as multiple Agent tool uses in a SINGLE message so they run concurrently, then collect their distillates yourself (sequential one-at-a-time calls degrade a fan-out into a slow pipeline). Reach for a Workflow ONLY for genuine inter-step dependencies (a later step consumes an earlier step's output); equal-rank volume alone never justifies one - fan out instead."
+    ),
+    "low": (
+        "SUBSCRIPTION PROFILE low (overrides FAN-OUT and SUBAGENT ROUTING): Claude quota is scarce. "
+        "hermes-local carries the work - up to 2 hermes calls in parallel; split work into hermes-sized branches first. "
+        "No fan-out to Claude or Codex: at most one paid agent at a time (Workflow cap enforces it; keep plain Agent spawns to one too). "
+        "Paid order: codex-luna (routine), codex-sol (hard), worker only for Claude-only tooling; debugger, alien and codex-astra only on the owner's request. "
+        "As driver, plan and verify; have hermes extract large files, logs and diffs instead of reading them yourself. "
+        "Workflow only for genuine inter-step dependencies."
+    ),
+}
+
 SESSION_CORE_VERSION_RE = re.compile(r"^Version:\s*(session-core v[0-9A-Za-z.]+)\s*$", re.MULTILINE)
 
 LIGHT_CORE = """SESSION CORE (light profile) - minimal driver floor.
@@ -285,16 +306,20 @@ def _derive_core_version(core_text):
     return SESSION_CORE_VERSION
 
 
+def _degraded_core_body():
+    body = _render_review(LIGHT_CORE, REVIEW_FLOOR_TEXT)
+    return body.replace(FANOUT_TOKEN, "")
+
+
 def _read_session_core(path):
+    warning = "WARNING: session-core.txt missing - degraded core\n\n"
     if not os.path.isfile(path):
-        warning = "WARNING: session-core.txt missing - degraded core\n\n"
-        return warning + _render_review(LIGHT_CORE, REVIEW_FLOOR_TEXT)
+        return warning + _degraded_core_body()
     try:
         with open(path, "r", encoding="utf-8") as f:
             return f.read()
     except Exception:
-        warning = "WARNING: session-core.txt missing - degraded core\n\n"
-        return warning + _render_review(LIGHT_CORE, REVIEW_FLOOR_TEXT)
+        return warning + _degraded_core_body()
 
 
 def _hooks_dir():
@@ -332,6 +357,13 @@ def _review_mode():
     v = os.environ.get("CBOX_REVIEW", REVIEW_DEFAULT).strip().lower()
     if v not in REVIEW_MODES:
         v = REVIEW_DEFAULT
+    return v
+
+
+def _subscription_profile():
+    v = os.environ.get("CBOX_SUBSCRIPTION_PROFILE", FANOUT_DEFAULT).strip().lower()
+    if v not in FANOUT_MODES:
+        v = FANOUT_DEFAULT
     return v
 
 
@@ -461,20 +493,30 @@ def main():
     if "core" in sections:
         payload_cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
         local_present = _local_tier_present(payload_cwd)
+        sub_profile = _subscription_profile()
         if profile == "light":
             core_label = "SESSION CORE"
             core_version = "%s light" % SESSION_CORE_VERSION
             core_body = _render_review(LIGHT_CORE, REVIEW_FLOOR_TEXT)
+            if sub_profile == "low":
+                core_body = core_body + "\n\n" + FANOUT_TEXT["low"]
         elif source in ("startup", "clear"):
             session_core_path = os.path.join(hooks_dir, "session-core.txt")
             core_text = _read_session_core(session_core_path)
             core_label = "SESSION CORE"
             core_version = _derive_core_version(core_text)
             core_body = _render_review(core_text, REVIEW_ROUTING_TEXT)
+            if FANOUT_TOKEN in core_body:
+                core_body = core_body.replace(FANOUT_TOKEN, FANOUT_TEXT[sub_profile])
+            elif sub_profile == "low":
+                core_body = core_body + "\n\n" + FANOUT_TEXT["low"]
         else:
             core_label = "SESSION CORE"
             core_version = "%s resume" % SESSION_CORE_VERSION
             core_body = _render_review(RESUME_KERNEL, REVIEW_FLOOR_TEXT)
+            if sub_profile == "low":
+                core_body = core_body + "\n\n" + FANOUT_TEXT["low"]
+        core_body = core_body.replace(FANOUT_TOKEN, "")
 
         if not local_present:
             core_body = _strip_local_first(core_body)

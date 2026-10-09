@@ -137,9 +137,6 @@ _case CBOX_NETACCESS_APPLIED 0
 _case CBOX_NETACCESS_APPLIED 1
 _case CBOX_NETACCESS_APPLIED bogus
 
-_case CBOX_NETACCESS_SCOPE all
-_case CBOX_NETACCESS_SCOPE list
-_case CBOX_NETACCESS_SCOPE ""
 _case CBOX_NETACCESS_SCOPE bogus
 
 _case CBOX_NETACCESS_NETWORKS "mynet"
@@ -415,6 +412,16 @@ _new_case() {
 }
 : > "$NEW_CASES_FILE"
 
+_new_case CBOX_NETACCESS_EXEC_MODE all accept
+_new_case CBOX_CONTAINER_EXEC_ACTIVE off accept
+_new_case CBOX_CONTAINER_EXEC_ACTIVE on accept
+_new_case CBOX_CONTAINER_EXEC_ACTIVE bogus reject
+
+_new_case CBOX_NETACCESS_SCOPE all accept
+_new_case CBOX_NETACCESS_SCOPE list accept
+_new_case CBOX_NETACCESS_SCOPE "" accept
+_new_case CBOX_NETACCESS_SCOPE bogus reject
+
 _new_case CBOX_NAME "cbox" accept
 _new_case CBOX_NAME "myprofile" accept
 _new_case CBOX_NAME "" reject
@@ -472,6 +479,38 @@ _new_case CBOX_REGULATOR_AUTORESUME on accept
 _new_case CBOX_REGULATOR_AUTORESUME off accept
 _new_case CBOX_REGULATOR_AUTORESUME "" accept
 _new_case CBOX_REGULATOR_AUTORESUME bogus reject
+
+_new_case CBOX_BUDGET_MODE on accept
+_new_case CBOX_BUDGET_MODE off accept
+_new_case CBOX_BUDGET_MODE "" reject
+_new_case CBOX_BUDGET_MODE bogus reject
+_new_case CBOX_BUDGET_MODE ON reject
+
+_new_case CBOX_SUBSCRIPTION_PROFILE low accept
+_new_case CBOX_SUBSCRIPTION_PROFILE high accept
+_new_case CBOX_SUBSCRIPTION_PROFILE max accept
+_new_case CBOX_SUBSCRIPTION_PROFILE "" reject
+_new_case CBOX_SUBSCRIPTION_PROFILE bogus reject
+
+_new_case CBOX_BUDGET_LOW_5H 15 accept
+_new_case CBOX_BUDGET_LOW_5H 0 accept
+_new_case CBOX_BUDGET_LOW_5H 100 accept
+_new_case CBOX_BUDGET_LOW_5H 101 reject
+_new_case CBOX_BUDGET_LOW_5H "" reject
+_new_case CBOX_BUDGET_LOW_5H 1.5 reject
+_new_case CBOX_BUDGET_LOW_5H -1 reject
+_new_case CBOX_BUDGET_LOW_7D 20 accept
+_new_case CBOX_BUDGET_LOW_7D 100 accept
+_new_case CBOX_BUDGET_LOW_7D 101 reject
+_new_case CBOX_BUDGET_LOW_7D bogus reject
+_new_case CBOX_BUDGET_PACE_WINDOW_H 3 accept
+_new_case CBOX_BUDGET_PACE_WINDOW_H 168 accept
+_new_case CBOX_BUDGET_PACE_WINDOW_H 0 reject
+_new_case CBOX_BUDGET_PACE_WINDOW_H 169 reject
+_new_case CBOX_BUDGET_PACE_SLACK_H 8 accept
+_new_case CBOX_BUDGET_PACE_SLACK_H 0 accept
+_new_case CBOX_BUDGET_PACE_SLACK_H 169 reject
+_new_case CBOX_BUDGET_PACE_SLACK_H "" reject
 
 _new_case CBOX_SAFEGUARD_AUTOCONFIRM off accept
 _new_case CBOX_SAFEGUARD_AUTOCONFIRM on accept
@@ -710,6 +749,10 @@ _new_case CBOX_HYPERQWEN_MODE off accept
 _new_case CBOX_HYPERQWEN_MODE on accept
 _new_case CBOX_HYPERQWEN_MODE bogus reject
 _new_case CBOX_HYPERQWEN_IMAGE "ghcr.io/syv-ai/hyperqwen:sha-53557bc" accept
+_new_case CBOX_HYPERQWEN_IMAGE "ghcr.io/syv-ai/hyperqwen:sha-53557bc@sha256:25bfa39ca4b71d5ba5ea32e5486c841dd4fb8b6429846c012ec5d1b06b2457a6" accept
+_new_case CBOX_HYPERQWEN_IMAGE "ghcr.io/syv-ai/hyperqwen@sha256:25bfa39ca4b71d5ba5ea32e5486c841dd4fb8b6429846c012ec5d1b06b2457a6" accept
+_new_case CBOX_HYPERQWEN_IMAGE "ghcr.io/syv-ai/hyperqwen:sha-53557bc@sha256:25bfa39ca4b71d5ba5ea32e5486c841dd4fb8b6429846c012ec5d1b06b2457a6 x" reject
+_new_case CBOX_HYPERQWEN_IMAGE "ghcr.io/syv-ai/hyperqwen:sha-53557bc@sha256:25bfa39ca4b71d5ba5ea32e5486c841dd4fb8b6429846c012ec5d1b06b2457a6;x" reject
 _new_case CBOX_HYPERQWEN_IMAGE "" reject
 _new_case CBOX_HYPERQWEN_IMAGE "bad image ref" reject
 _new_case CBOX_HYPERQWEN_IMAGE "-evil" reject

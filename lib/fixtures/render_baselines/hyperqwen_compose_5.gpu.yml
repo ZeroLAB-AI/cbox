@@ -1,0 +1,12 @@
+services:
+  hyperqwen:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: cdi
+              device_ids:
+                - nvidia.com/gpu=0
+                - nvidia.com/gpu=1
+              capabilities:
+                - gpu

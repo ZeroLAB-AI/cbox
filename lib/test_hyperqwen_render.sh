@@ -21,6 +21,7 @@ while IFS='=' read -r _cbox_env_name _; do
 done < <(env)
 
 BASE_REV="1ee9547"
+HQ_BASE_REV="031ab62"
 
 bash -n "$INSTALL_DIR/templates/generators.sh" || _fail "generators.sh fails bash -n"
 bash -n "$INSTALL_DIR/templates/validator_lib.sh" || _fail "validator_lib.sh fails bash -n"
@@ -63,6 +64,17 @@ gen_eval() {
 
 UID_NOW="$(id -u)"
 
+FIX="$INSTALL_DIR/lib/fixtures/render_baselines"
+_need_fixture() {
+  [ -f "$FIX/$1" ] || _fail "missing baseline fixture $FIX/$1 - the byte-identity baselines must ship with the package"
+}
+_norm() {
+  sed -E -e "s|$TMPBASE|@TMP@|g" -e "s|$INSTALL_DIR|@INSTALL@|g" -e "s/-u$UID_NOW([^0-9A-Za-z_]|\$)/-u@UID@\1/g" -e "s/^uid=$UID_NOW\$/uid=@UID@/"
+}
+_denorm() {
+  sed -e "s/@UID@/$UID_NOW/g" -e "s|@TMP@|$TMPBASE|g" -e "s|@INSTALL@|$INSTALL_DIR|g"
+}
+
 D1="$TMPBASE/default"
 render_hq "$D1"
 C1="$D1/docker-compose.yml"
@@ -70,7 +82,7 @@ G1="$D1/docker-compose.gpu.yml"
 [ -f "$C1" ] || _fail "default render: docker-compose.yml missing"
 [ -f "$G1" ] || _fail "default render: docker-compose.gpu.yml must always be rendered while hyperqwen is on"
 grep -qxF "name: \"cbox-infra-u$UID_NOW-hyperqwen\"" "$C1" || _fail "owner project name wrong"
-grep -qxF '    image: "ghcr.io/syv-ai/hyperqwen:sha-53557bc"' "$C1" || _fail "default image pin missing"
+grep -qxF '    image: "ghcr.io/syv-ai/hyperqwen:sha-53557bc@sha256:25bfa39ca4b71d5ba5ea32e5486c841dd4fb8b6429846c012ec5d1b06b2457a6"' "$C1" || _fail "default image digest pin missing"
 grep -qxF '    command: ["single"]' "$C1" || _fail "command single missing"
 grep -qxF '    restart: "unless-stopped"' "$C1" || _fail "restart policy missing"
 grep -qxF '      cbox.kind: infra' "$C1" || _fail "cbox.kind label missing"
@@ -137,6 +149,42 @@ D2C="$TMPBASE/bind-symlink"
 if render_hq "$D2C" "CBOX_HYPERQWEN_MODELS_PATH=$TMPBASE/models-link" 2>/dev/null; then _fail "a symlink MODELS_PATH must refuse the render"; fi
 [ ! -f "$D2C/docker-compose.yml" ] || _fail "symlink refusal still rendered"
 _ok "MODELS_PATH: a missing directory and a symlink both refuse the render"
+
+safe_rc() {
+  ( set -e
+    source "$INSTALL_DIR/templates/generators.sh"
+    export HOME="$H"
+    _cbox_hyperqwen_models_path_safe "$1"
+  )
+}
+mkdir -p "$H/models" "$H/.ssh/models" "$H/.config/x" "$H/.claude/x" "$H/.claude-cbox/x" "$H/.codex/x" "$H/.gnupg/x" "$H/.local/share/docker/volumes"
+ln -s "$H/.ssh" "$TMPBASE/ssh-link"
+for unsafe in "$H" "/" "$TMPBASE" "$H/.ssh/models" "$H/.config/x" "$H/.claude/x" "$H/.claude-cbox/x" "$H/.codex/x" "$H/.gnupg/x" "$H/.local/share/docker/volumes" "$INSTALL_DIR/x" "$INSTALL_DIR" "$H/./.ssh/../.ssh/models" "$TMPBASE/ssh-link/models"; do
+  if safe_rc "$unsafe" 2>"$TMPBASE/safe.err"; then _fail "models path '$unsafe' must be refused"; fi
+  grep -q "refusing CBOX_HYPERQWEN_MODELS_PATH" "$TMPBASE/safe.err" || _fail "refusal for '$unsafe' lacks the clear message: $(cat "$TMPBASE/safe.err")"
+done
+for safe in "$H/models" "$MP" "$TMPBASE/not-yet-created/models" "$H/.claudeless-not-matching-but-fine/../models"; do
+  safe_rc "$safe" 2>"$TMPBASE/safe.err" || _fail "models path '$safe' must be accepted: $(cat "$TMPBASE/safe.err")"
+done
+if safe_rc "" 2>/dev/null; then _fail "an empty models path must be refused"; fi
+for unsafe in "$H" "/" "$H/.ssh/models" "$H/.config/x" "$INSTALL_DIR/x"; do
+  DU="$TMPBASE/unsafe-render"
+  if render_hq "$DU" "CBOX_HYPERQWEN_MODELS_PATH=$unsafe" 2>"$TMPBASE/safe.err"; then _fail "render with unsafe models path '$unsafe' must be refused"; fi
+  grep -q "refusing CBOX_HYPERQWEN_MODELS_PATH" "$TMPBASE/safe.err" || _fail "render refusal for '$unsafe' lacks the safety message"
+  [ ! -f "$DU/docker-compose.yml" ] || _fail "unsafe models path '$unsafe' still rendered"
+done
+DS="$TMPBASE/safe-render"
+render_hq "$DS" "CBOX_HYPERQWEN_MODELS_PATH=$H/models"
+grep -qxF "      - '$H/models:/app/models'" "$DS/docker-compose.yml" || _fail "a normal models directory must still bind"
+_ok "MODELS_PATH safety: home, its ancestors, ssh, config, claude, codex, gnupg, docker data, the install dir and symlink detours are refused; a normal directory is accepted"
+
+grep -q 'CBOX_HYPERQWEN_SPEC=mtp CBOX_HYPERQWEN_CTX=long CBOX_HYPERQWEN_MAX_LEN=' "$INSTALL_DIR/templates/generators.sh" || _fail "validate_all must validate the real defaults mtp/long"
+if grep -q 'CBOX_HYPERQWEN_SPEC=dflash2 CBOX_HYPERQWEN_CTX=fast' "$INSTALL_DIR/templates/generators.sh"; then _fail "validate_all still validates the stale dflash2/fast defaults"; fi
+HQ_DEFAULT_IMAGE="ghcr.io/syv-ai/hyperqwen:sha-53557bc@sha256:25bfa39ca4b71d5ba5ea32e5486c841dd4fb8b6429846c012ec5d1b06b2457a6"
+[ "$(grep -c "$HQ_DEFAULT_IMAGE" "$INSTALL_DIR/templates/generators.sh")" -ge 4 ] || _fail "generators.sh must carry the digest-pinned default image in every fallback"
+if grep -n 'hyperqwen:sha-53557bc[^@]' "$INSTALL_DIR/templates/generators.sh" "$INSTALL_DIR/templates/conf_lib.sh" "$INSTALL_DIR/etc/registry/settings.json" | grep -v '@sha256' >/dev/null; then _fail "an unpinned default hyperqwen image remains"; fi
+grep -q "CBOX_HYPERQWEN_IMAGE:=$HQ_DEFAULT_IMAGE" "$INSTALL_DIR/templates/conf_lib.sh" || _fail "conf_lib default image is not the digest pin"
+_ok "validate_all uses the real defaults and every default image is the digest pin"
 
 D3="$TMPBASE/gpu0"
 render_hq "$D3" CBOX_HYPERQWEN_GPU_DEVICE=0
@@ -368,13 +416,6 @@ delegate_render "$TMPBASE/del3" off CBOX_HERMES_DELEGATE=on
 if grep -q 'CBOX_HERMES_DELEGATE_CONTEXT_LENGTH' "$TMPBASE/del3/docker-compose.yml"; then _fail "no delegate env line may render while hermes is off"; fi
 _ok "isolated compose: CBOX_HERMES_DELEGATE_CONTEXT_LENGTH rendered next to the delegate env line only with hermes on"
 
-HAVE_BASE=0
-BASEGEN="$TMPBASE/generators_base.sh"
-if git -C "$INSTALL_DIR" cat-file -e "$BASE_REV:cbox/templates/generators.sh" 2>/dev/null \
-  && git -C "$INSTALL_DIR" show "$BASE_REV:cbox/templates/generators.sh" > "$BASEGEN" 2>/dev/null; then
-  HAVE_BASE=1
-fi
-
 render_ollama() {
   local gen="$1" dir="$2"
   shift 2
@@ -388,46 +429,50 @@ render_ollama() {
   )
 }
 
-if [ "$HAVE_BASE" = 1 ]; then
-  VARIANTS=(
-    "CBOX_OLLAMA_GPU=off"
-    "CBOX_OLLAMA_GPU=cdi"
-    "CBOX_OLLAMA_GPU=cdi CBOX_OLLAMA_STORE=shared CBOX_OLLAMA_STORE_PATH=$MP"
-  )
-  for variant in "${VARIANTS[@]}"; do
-    read -r -a vargs <<< "$variant"
-    render_ollama "$BASEGEN" "$TMPBASE/ob" "${vargs[@]}"
-    render_ollama "$INSTALL_DIR/templates/generators.sh" "$TMPBASE/on" "${vargs[@]}"
-    cmp -s "$TMPBASE/ob/docker-compose.yml" "$TMPBASE/on/docker-compose.yml" || _fail "ollama compose changed for [$variant]: $(diff "$TMPBASE/ob/docker-compose.yml" "$TMPBASE/on/docker-compose.yml")"
-    if [ -f "$TMPBASE/ob/docker-compose.gpu.yml" ] || [ -f "$TMPBASE/on/docker-compose.gpu.yml" ]; then
-      cmp -s "$TMPBASE/ob/docker-compose.gpu.yml" "$TMPBASE/on/docker-compose.gpu.yml" || _fail "ollama gpu overlay changed for [$variant]"
-    fi
-    rm -rf "$TMPBASE/ob" "$TMPBASE/on"
-  done
-  _ok "ollama owner compose and gpu overlay with default CBOX_OLLAMA_GPU_DEVICE are byte-identical to baseline $BASE_REV"
+VARIANTS=(
+  "CBOX_OLLAMA_GPU=off"
+  "CBOX_OLLAMA_GPU=cdi"
+  "CBOX_OLLAMA_GPU=cdi CBOX_OLLAMA_STORE=shared CBOX_OLLAMA_STORE_PATH=$MP"
+)
+n=0
+for variant in "${VARIANTS[@]}"; do
+  n=$((n + 1))
+  read -r -a vargs <<< "$variant"
+  _need_fixture "ollama_compose_$n.yml"
+  render_ollama "$INSTALL_DIR/templates/generators.sh" "$TMPBASE/on$n" "${vargs[@]}"
+  _norm < "$TMPBASE/on$n/docker-compose.yml" > "$TMPBASE/on$n.norm.yml"
+  cmp -s "$FIX/ollama_compose_$n.yml" "$TMPBASE/on$n.norm.yml" || _fail "ollama compose changed for [$variant]: $(diff "$FIX/ollama_compose_$n.yml" "$TMPBASE/on$n.norm.yml")"
+  if [ -f "$FIX/ollama_compose_$n.gpu.yml" ] || [ -f "$TMPBASE/on$n/docker-compose.gpu.yml" ]; then
+    _need_fixture "ollama_compose_$n.gpu.yml"
+    [ -f "$TMPBASE/on$n/docker-compose.gpu.yml" ] || _fail "ollama gpu overlay no longer rendered for [$variant]"
+    _norm < "$TMPBASE/on$n/docker-compose.gpu.yml" > "$TMPBASE/on$n.norm.gpu.yml"
+    cmp -s "$FIX/ollama_compose_$n.gpu.yml" "$TMPBASE/on$n.norm.gpu.yml" || _fail "ollama gpu overlay changed for [$variant]"
+  fi
+done
+_ok "ollama owner compose and gpu overlay with default CBOX_OLLAMA_GPU_DEVICE are byte-identical to the baseline fixtures from $BASE_REV"
 
-  MFB="$TMPBASE/mfb"
-  MFN="$TMPBASE/mfn"
-  mkdir -p "$MFB" "$MFN"
-  ( set -e; source "$INSTALL_DIR/_common.sh"; source "$BASEGEN"; export HOME="$H" CBOX_OLLAMA_MODE=on; _cbox_ollama_manifest_write "$MFB" )
-  ( set -e; source "$INSTALL_DIR/_common.sh"; source "$INSTALL_DIR/templates/generators.sh"; export HOME="$H" CBOX_OLLAMA_MODE=on; _cbox_ollama_manifest_write "$MFN" )
-  [ "$(grep -v '^gpu_device=' "$MFN/ownership.manifest")" = "$(cat "$MFB/ownership.manifest")" ] || _fail "ollama manifest changed beyond the gpu_device line"
-  grep -qx 'gpu_device=all' "$MFN/ownership.manifest" || _fail "ollama manifest lacks gpu_device=all"
-  gen_eval "source \"$INSTALL_DIR/_common.sh\"; _cbox_ollama_manifest_matches_current \"$MFB\"" CBOX_OLLAMA_MODE=on || _fail "an old ollama manifest without gpu_device must keep matching the default"
-  if gen_eval "source \"$INSTALL_DIR/_common.sh\"; _cbox_ollama_manifest_matches_current \"$MFB\"" CBOX_OLLAMA_MODE=on CBOX_OLLAMA_GPU_DEVICE=1; then _fail "an old ollama manifest must stop matching a non-default gpu device"; fi
-  if gen_eval "source \"$INSTALL_DIR/_common.sh\"; _cbox_ollama_manifest_matches_current \"$MFN\"" CBOX_OLLAMA_MODE=on CBOX_OLLAMA_GPU_DEVICE=1; then _fail "a new ollama manifest must stop matching a changed gpu device"; fi
-  _ok "ollama manifest: gpu_device added, a missing field counts as all"
+_need_fixture "ollama_ownership_manifest.txt"
+MFB="$TMPBASE/mfb"
+MFN="$TMPBASE/mfn"
+mkdir -p "$MFB" "$MFN"
+_denorm < "$FIX/ollama_ownership_manifest.txt" > "$MFB/ownership.manifest"
+( set -e; source "$INSTALL_DIR/_common.sh"; source "$INSTALL_DIR/templates/generators.sh"; export HOME="$H" CBOX_OLLAMA_MODE=on; _cbox_ollama_manifest_write "$MFN" )
+[ "$(grep -v '^gpu_device=' "$MFN/ownership.manifest")" = "$(cat "$MFB/ownership.manifest")" ] || _fail "ollama manifest changed beyond the gpu_device line"
+grep -qx 'gpu_device=all' "$MFN/ownership.manifest" || _fail "ollama manifest lacks gpu_device=all"
+gen_eval "source \"$INSTALL_DIR/_common.sh\"; _cbox_ollama_manifest_matches_current \"$MFB\"" CBOX_OLLAMA_MODE=on || _fail "an old ollama manifest without gpu_device must keep matching the default"
+if gen_eval "source \"$INSTALL_DIR/_common.sh\"; _cbox_ollama_manifest_matches_current \"$MFB\"" CBOX_OLLAMA_MODE=on CBOX_OLLAMA_GPU_DEVICE=1; then _fail "an old ollama manifest must stop matching a non-default gpu device"; fi
+if gen_eval "source \"$INSTALL_DIR/_common.sh\"; _cbox_ollama_manifest_matches_current \"$MFN\"" CBOX_OLLAMA_MODE=on CBOX_OLLAMA_GPU_DEVICE=1; then _fail "a new ollama manifest must stop matching a changed gpu device"; fi
+_ok "ollama manifest: gpu_device added, a missing field counts as all"
 
-  for hosts_env in "CBOX_OLLAMA_MODE=on" "CBOX_OLLAMA_MODE=off" "CBOX_OLLAMA_MODE=on CBOX_LOCAL_MODEL_URL=http://example.com:1"; do
-    read -r -a hargs <<< "$hosts_env"
-    b="$(env -i HOME="$H" PATH="$PATH" "${hargs[@]}" bash -c 'source "$0"; _cbox_no_proxy_hosts' "$BASEGEN")"
-    n="$(env -i HOME="$H" PATH="$PATH" "${hargs[@]}" bash -c 'source "$0/templates/generators.sh"; _cbox_no_proxy_hosts' "$INSTALL_DIR")"
-    [ "$b" = "$n" ] || _fail "no_proxy hosts changed for [$hosts_env]: base=$b new=$n"
-  done
-  _ok "no_proxy hosts with hyperqwen off are identical to baseline $BASE_REV"
-else
-  echo "skip: baseline revision $BASE_REV not available, byte-identity checks skipped"
-fi
+n=0
+for hosts_env in "CBOX_OLLAMA_MODE=on" "CBOX_OLLAMA_MODE=off" "CBOX_OLLAMA_MODE=on CBOX_LOCAL_MODEL_URL=http://example.com:1"; do
+  n=$((n + 1))
+  read -r -a hargs <<< "$hosts_env"
+  _need_fixture "no_proxy_hosts_$n.txt"
+  nh="$(env -i HOME="$H" PATH="$PATH" "${hargs[@]}" bash -c 'source "$0/templates/generators.sh"; _cbox_no_proxy_hosts' "$INSTALL_DIR")"
+  [ "$(cat "$FIX/no_proxy_hosts_$n.txt")" = "$nh" ] || _fail "no_proxy hosts changed for [$hosts_env]: base=$(cat "$FIX/no_proxy_hosts_$n.txt") new=$nh"
+done
+_ok "no_proxy hosts with hyperqwen off are identical to the baseline fixtures from $BASE_REV"
 
 render_ollama "$INSTALL_DIR/templates/generators.sh" "$TMPBASE/og0" CBOX_OLLAMA_GPU=cdi CBOX_OLLAMA_GPU_DEVICE=1
 grep -qxF '                - nvidia.com/gpu=1' "$TMPBASE/og0/docker-compose.gpu.yml" || _fail "CBOX_OLLAMA_GPU_DEVICE=1 must reserve nvidia.com/gpu=1"
@@ -460,47 +505,27 @@ _ok "no HOST line: the launcher picks 0.0.0.0 from /.dockerenv and verify.sh onl
 [ "$(grep -c '^    external: true$' "$D2/docker-compose.yml")" = 1 ] || _fail "with a models bind path only the cache volume is external"
 _ok "named volumes are external: compose down -v cannot remove the model or the compile cache"
 
-HQ_BASE_REV="031ab62"
-HQ_BASEGEN="$TMPBASE/generators_hq_base.sh"
-if git -C "$INSTALL_DIR" cat-file -e "$HQ_BASE_REV:cbox/templates/generators.sh" 2>/dev/null \
-  && git -C "$INSTALL_DIR" show "$HQ_BASE_REV:cbox/templates/generators.sh" > "$HQ_BASEGEN" 2>/dev/null; then
-  render_hq_gen() {
-    local gen="$1" dir="$2"
-    shift 2
-    mkdir -p "$dir"
-    ( set -e
-      source "$INSTALL_DIR/templates/validator_lib.sh"
-      source "$INSTALL_DIR/templates/validator_dispatch.sh"
-      _cbox_config_validate_var() { _cbox_reg_validate_var "$@"; }
-      source "$gen"
-      export HOME="$H"
-      export CBOX_HYPERQWEN_MODE=on
-      export "$@"
-      gen_hyperqwen_owner_compose_into "$dir"
-    )
-  }
-  HQ_VARIANTS=(
-    "CBOX_HYPERQWEN_SPEC=mtp"
-    "CBOX_HYPERQWEN_SHM_SIZE=16g"
-    "CBOX_HYPERQWEN_SPEC=dflash2 CBOX_HYPERQWEN_CTX=huge"
-    "CBOX_HYPERQWEN_SPEC=mtp CBOX_HYPERQWEN_CTX=huge CBOX_HYPERQWEN_MAX_LEN=100000"
-    "CBOX_HYPERQWEN_GPU_DEVICE=0,1 CBOX_HYPERQWEN_MODELS_PATH=$MP"
-    "CBOX_HYPERQWEN_KV_OFFLOAD=off CBOX_HYPERQWEN_KV_OFFLOAD_MIB=24576 CBOX_HYPERQWEN_RAM_RESERVE_GIB=24"
-  )
-  HQ_BASE_OUT="$TMPBASE/hq-base-out"
-  HQ_NEW_OUT="$TMPBASE/hq-new-out"
-  for variant in "${HQ_VARIANTS[@]}"; do
-    read -r -a vargs <<< "$variant"
-    rm -rf -- "$HQ_BASE_OUT" "$HQ_NEW_OUT"
-    render_hq_gen "$HQ_BASEGEN" "$HQ_BASE_OUT" "${vargs[@]}"
-    render_hq_gen "$INSTALL_DIR/templates/generators.sh" "$HQ_NEW_OUT" "${vargs[@]}"
-    cmp -s "$HQ_BASE_OUT/docker-compose.yml" "$HQ_NEW_OUT/docker-compose.yml" || _fail "hyperqwen compose with offload off changed for [$variant]: $(diff "$HQ_BASE_OUT/docker-compose.yml" "$HQ_NEW_OUT/docker-compose.yml")"
-    cmp -s "$HQ_BASE_OUT/docker-compose.gpu.yml" "$HQ_NEW_OUT/docker-compose.gpu.yml" || _fail "hyperqwen gpu overlay with offload off changed for [$variant]"
-  done
-  _ok "offload off: hyperqwen compose and gpu overlay are byte-identical to baseline $HQ_BASE_REV for every variant"
-else
-  echo "skip: baseline revision $HQ_BASE_REV not available, hyperqwen byte-identity check skipped"
-fi
+HQ_VARIANTS=(
+  "CBOX_HYPERQWEN_SPEC=mtp"
+  "CBOX_HYPERQWEN_SHM_SIZE=16g"
+  "CBOX_HYPERQWEN_SPEC=dflash2 CBOX_HYPERQWEN_CTX=huge"
+  "CBOX_HYPERQWEN_SPEC=mtp CBOX_HYPERQWEN_CTX=huge CBOX_HYPERQWEN_MAX_LEN=100000"
+  "CBOX_HYPERQWEN_GPU_DEVICE=0,1 CBOX_HYPERQWEN_MODELS_PATH=$MP"
+  "CBOX_HYPERQWEN_KV_OFFLOAD=off CBOX_HYPERQWEN_KV_OFFLOAD_MIB=24576 CBOX_HYPERQWEN_RAM_RESERVE_GIB=24"
+)
+n=0
+for variant in "${HQ_VARIANTS[@]}"; do
+  n=$((n + 1))
+  read -r -a vargs <<< "$variant"
+  _need_fixture "hyperqwen_compose_$n.yml"
+  _need_fixture "hyperqwen_compose_$n.gpu.yml"
+  render_hq "$TMPBASE/hq-new-$n" "${vargs[@]}"
+  _norm < "$TMPBASE/hq-new-$n/docker-compose.yml" > "$TMPBASE/hq-new-$n.norm.yml"
+  _norm < "$TMPBASE/hq-new-$n/docker-compose.gpu.yml" > "$TMPBASE/hq-new-$n.norm.gpu.yml"
+  cmp -s "$FIX/hyperqwen_compose_$n.yml" "$TMPBASE/hq-new-$n.norm.yml" || _fail "hyperqwen compose with offload off changed for [$variant]: $(diff "$FIX/hyperqwen_compose_$n.yml" "$TMPBASE/hq-new-$n.norm.yml")"
+  cmp -s "$FIX/hyperqwen_compose_$n.gpu.yml" "$TMPBASE/hq-new-$n.norm.gpu.yml" || _fail "hyperqwen gpu overlay with offload off changed for [$variant]"
+done
+_ok "offload off: hyperqwen compose and gpu overlay are byte-identical to the baseline fixtures from $HQ_BASE_REV (default image line is the digest pin) for every variant"
 
 KO="$TMPBASE/offload-on"
 render_hq "$KO" CBOX_HYPERQWEN_KV_OFFLOAD=on

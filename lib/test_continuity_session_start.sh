@@ -8,7 +8,7 @@ trap 'rm -rf "$TMPBASE"' EXIT
 
 : > "$TMPBASE/mountinfo_hermetic"
 export CBOX_MOUNTINFO="$TMPBASE/mountinfo_hermetic"
-unset CBOX_CONTEXT_PROFILE CBOX_HERMES_DELEGATE CBOX_REVIEW
+unset CBOX_CONTEXT_PROFILE CBOX_HERMES_DELEGATE CBOX_REVIEW CBOX_SUBSCRIPTION_PROFILE
 CFG_PRESENT="$TMPBASE/cfg_present"
 CFG_ABSENT="$TMPBASE/cfg_absent"
 mkdir -p "$CFG_PRESENT" "$CFG_ABSENT"
@@ -788,6 +788,109 @@ JSON
   fi
 }
 
+_core_sub() {
+  local sub="$1" source="$2" profile="$3" d="$4"
+  CBOX_SUBSCRIPTION_PROFILE="$sub" CBOX_CONTEXT_PROFILE="${profile:-full}" python3 "$HOOK" --section core <<JSON
+{"source":"$source","cwd":"$d"}
+JSON
+}
+
+LOW_FANOUT_TEXT='SUBSCRIPTION PROFILE low (overrides FAN-OUT and SUBAGENT ROUTING): Claude quota is scarce. hermes-local carries the work - up to 2 hermes calls in parallel; split work into hermes-sized branches first. No fan-out to Claude or Codex: at most one paid agent at a time (Workflow cap enforces it; keep plain Agent spawns to one too). Paid order: codex-luna (routine), codex-sol (hard), worker only for Claude-only tooling; debugger, alien and codex-astra only on the owner'"'"'s request. As driver, plan and verify; have hermes extract large files, logs and diffs instead of reading them yourself. Workflow only for genuine inter-step dependencies.'
+
+test_subscription_profile_full_core() {
+  local d="$TMPBASE/sub_full" high low max bogus
+  _make_repo "$d"
+  high="$(_core_sub high startup full "$d")"
+  max="$(_core_sub max startup full "$d")"
+  low="$(_core_sub low startup full "$d")"
+  bogus="$(_core_sub bogus startup full "$d")"
+  case "$high" in
+    *"FAN-OUT vs WORKFLOW: default to a plain agent fan-out"*"equal-rank volume alone never justifies one - fan out instead."*) : ;;
+    *) _fail "high full core lost the original FAN-OUT line" ;;
+  esac
+  case "$high" in
+    *"{{FANOUT}}"*) _fail "high full core leaks the raw FANOUT token" ;;
+    *"SUBSCRIPTION PROFILE low"*) _fail "high full core carries the low text" ;;
+  esac
+  case "$max" in
+    *"FAN-OUT vs WORKFLOW: default to a plain agent fan-out"*"equal-rank volume alone never justifies one - fan out instead."*) : ;;
+    *) _fail "max full core lost the original FAN-OUT line" ;;
+  esac
+  case "$max" in
+    *"{{FANOUT}}"*) _fail "max full core leaks the raw FANOUT token" ;;
+  esac
+  case "$low" in
+    *"$LOW_FANOUT_TEXT"*) : ;;
+    *) _fail "low full core lacks the SUBSCRIPTION PROFILE low text" ;;
+  esac
+  case "$low" in
+    *"FAN-OUT vs WORKFLOW: default to a plain agent fan-out"*"equal-rank volume alone never justifies one - fan out instead."*) _fail "low full core still carries the original FAN-OUT line" ;;
+  esac
+  case "$low" in
+    *"{{FANOUT}}"*) _fail "low full core leaks the raw FANOUT token" ;;
+  esac
+  [ "$bogus" = "$high" ] || _fail "an invalid CBOX_SUBSCRIPTION_PROFILE must behave as high"
+  echo "PASS: full core is profile-driven (high/max keep the FAN-OUT line, low swaps in the low text, invalid falls back to high, no raw token)"
+}
+
+test_subscription_profile_low_light_and_resume() {
+  local d="$TMPBASE/sub_kernels" light resume
+  _make_repo "$d"
+  light="$(_core_sub low startup light "$d")"
+  resume="$(_core_sub low resume full "$d")"
+  case "$light" in
+    *"$LOW_FANOUT_TEXT"*) : ;;
+    *) _fail "low light core lacks the SUBSCRIPTION PROFILE low text" ;;
+  esac
+  case "$resume" in
+    *"$LOW_FANOUT_TEXT"*) : ;;
+    *) _fail "low resume core lacks the SUBSCRIPTION PROFILE low text" ;;
+  esac
+  case "$light$resume" in
+    *"{{FANOUT}}"*) _fail "low light or resume core leaks the raw FANOUT token" ;;
+  esac
+  echo "PASS: low subscription profile appends the low text to the light and resume kernels"
+}
+
+test_subscription_profile_high_light_and_resume_unchanged() {
+  local d="$TMPBASE/sub_kernels_hi" light resume
+  _make_repo "$d"
+  light="$(_core_sub high startup light "$d")"
+  resume="$(_core_sub high resume full "$d")"
+  case "$light$resume" in
+    *"SUBSCRIPTION PROFILE low"*) _fail "high light or resume core carries the low text" ;;
+  esac
+  case "$light$resume" in
+    *"{{FANOUT}}"*) _fail "high light or resume core leaks the raw FANOUT token" ;;
+  esac
+  echo "PASS: high/max subscription profile leaves the light and resume kernels unchanged"
+}
+
+test_subscription_profile_low_core_size_and_tail() {
+  local d="$TMPBASE/sub_size" low last_line bytes
+  _make_repo "$d"
+  low="$(_core_sub low startup full "$d")"
+  last_line="$(grep -v '^[[:space:]]*$' "$INSTALL_DIR/etc/hooks/session-core.txt" | tail -n 1)"
+  bytes="$(_body_bytes core "$low")" || _fail "low: missing core payload"
+  [ "$bytes" -le 10000 ] || _fail "low core body is $bytes B, exceeds the 10000 B core cap"
+  case "$low" in
+    *"(remainder on disk, not injected)"*) _fail "low core carries a truncation marker" ;;
+  esac
+  case "$low" in
+    *"ONE-ACTIVE-WRITER: Exactly one human-driven engine writes the shared brain at a time."*"This is an invariant, not a lock: do not add file locking."*"Version: session-core v8"*) : ;;
+    *) _fail "low core lost its tail (ONE-ACTIVE-WRITER paragraph or version line)" ;;
+  esac
+  case "$low" in
+    *"$last_line"*) : ;;
+    *) _fail "low core lacks the last non-empty line of session-core.txt" ;;
+  esac
+  case "$low" in
+    *"$LOW_FANOUT_TEXT"*) : ;;
+    *) _fail "low core lacks the low text" ;;
+  esac
+  echo "PASS: low full core stays within the 10000 B cap, keeps its ONE-ACTIVE-WRITER tail, and carries the low text"
+}
+
 test_review_mode_full_core() {
   local d="$TMPBASE/review_full" ask auto dflt bogus
   _make_repo "$d"
@@ -947,4 +1050,8 @@ test_tests_run_as_commands_in_core
 test_review_mode_core_size_and_tail
 test_review_mode_light_and_resume
 test_review_placeholder_never_leaks_on_degraded_core
+test_subscription_profile_full_core
+test_subscription_profile_low_light_and_resume
+test_subscription_profile_high_light_and_resume_unchanged
+test_subscription_profile_low_core_size_and_tail
 echo "all continuity_session_start tests passed"

@@ -15,7 +15,7 @@ _ok() {
 }
 
 _render_codex_agents() {
-  local outdir="$1" gate="$2"
+  local outdir="$1" gate="$2" active="${3:-0}"
   mkdir -p "$outdir"
   (
     INSTALL_DIR="$INSTALL_DIR"
@@ -24,6 +24,9 @@ _render_codex_agents() {
     export HOME
     mkdir -p "$HOME"
     export CBOX_CONTAINER_EXEC_TOOL="$gate"
+    if [ "$active" = 1 ]; then
+      export CBOX_NETACCESS_MODE=socks CBOX_NETACCESS_APPLIED=1 CBOX_NETACCESS_EXEC_MODE=all CBOX_NETACCESS_SCOPE=all
+    fi
     source "$INSTALL_DIR/_common.sh"
     source "$INSTALL_DIR/templates/generators.sh"
     gen_codex_agents_into "$outdir"
@@ -38,13 +41,19 @@ $(cat "$OFF_AGENTS/AGENTS.override.md")"
 _ok "inert: AGENTS.override.md carries no container-exec paragraph when the gate is off"
 
 ON_AGENTS="$TMPBASE/agents_on"
-_render_codex_agents "$ON_AGENTS" on
+_render_codex_agents "$ON_AGENTS" on 1
 grep -q "container-exec MCP tool" "$ON_AGENTS/AGENTS.override.md" \
   || _fail "AGENTS.override.md is missing the container-exec paragraph with CBOX_CONTAINER_EXEC_TOOL=on"
-_ok "active: AGENTS.override.md carries the container-exec paragraph when the gate is on"
+_ok "active: AGENTS.override.md carries the container-exec paragraph when the gate is on and exec is active"
+
+INACTIVE_AGENTS="$TMPBASE/agents_inactive"
+_render_codex_agents "$INACTIVE_AGENTS" on 0
+grep -qi "container-exec\|container_list\|container_exec" "$INACTIVE_AGENTS/AGENTS.override.md" \
+  && _fail "AGENTS.override.md mentions container-exec with the tool gate on but exec inactive"
+_ok "inert: AGENTS.override.md carries no container-exec paragraph when the gate is on but exec is inactive"
 
 _render_claude_kernel_block() {
-  local out="$1" gate="$2"
+  local out="$1" gate="$2" active="${3:-0}"
   (
     ETC_DIR="$INSTALL_DIR/etc"
     export ETC_DIR
@@ -52,6 +61,9 @@ _render_claude_kernel_block() {
     CLAUDE_MD_KERNEL_MARK_END="<!-- cbox:conduct-kernel:end -->"
     export CLAUDE_MD_KERNEL_MARK_START CLAUDE_MD_KERNEL_MARK_END
     export CBOX_CONTAINER_EXEC_TOOL="$gate"
+    if [ "$active" = 1 ]; then
+      export CBOX_NETACCESS_MODE=socks CBOX_NETACCESS_APPLIED=1 CBOX_NETACCESS_EXEC_MODE=all CBOX_NETACCESS_SCOPE=all
+    fi
     source "$INSTALL_DIR/lib/portable.sh"
     source "$INSTALL_DIR/templates/generators.sh"
     die() { echo "die: $*" >&2; exit 1; }
@@ -101,10 +113,16 @@ $(cat "$OFF_KERNEL")"
 _ok "inert: CLAUDE.md kernel block carries no container-exec paragraph when the gate is off"
 
 ON_KERNEL="$TMPBASE/kernel_on.txt"
-_render_claude_kernel_block "$ON_KERNEL" on
+_render_claude_kernel_block "$ON_KERNEL" on 1
 grep -q "container-exec MCP tool" "$ON_KERNEL" \
   || _fail "CLAUDE.md kernel block is missing the container-exec paragraph with CBOX_CONTAINER_EXEC_TOOL=on"
-_ok "active: CLAUDE.md kernel block carries the container-exec paragraph when the gate is on"
+_ok "active: CLAUDE.md kernel block carries the container-exec paragraph when the gate is on and exec is active"
+
+INACTIVE_KERNEL="$TMPBASE/kernel_inactive.txt"
+_render_claude_kernel_block "$INACTIVE_KERNEL" on 0
+grep -qi "container-exec\|container_list\|container_exec" "$INACTIVE_KERNEL" \
+  && _fail "CLAUDE.md kernel block mentions container-exec with the tool gate on but exec inactive"
+_ok "inert: CLAUDE.md kernel block carries no container-exec paragraph when the gate is on but exec is inactive"
 
 RENDERED_OFF="$TMPBASE/mcp_off.json"
 env -u CBOX_CONTAINER_EXEC_TOOL \

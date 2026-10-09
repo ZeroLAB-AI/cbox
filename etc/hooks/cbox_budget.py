@@ -147,6 +147,27 @@ CONCURRENCY_CAP_P = 3.0
 H_FLOOR_HOURS = 0.25
 DRIVER_RESERVE_RATE = {"five_hour": 8.0, "seven_day": 1.0}
 HYSTERESIS_MARGIN = 0.2
+
+BRAKE_DEFAULTS = {
+    "low_5h": 15.0,
+    "low_7d": 20.0,
+    "pace_window_h": 3.0,
+    "pace_slack_h": 8.0,
+}
+BRAKE_ENV = {
+    "low_5h": "CBOX_BUDGET_LOW_5H",
+    "low_7d": "CBOX_BUDGET_LOW_7D",
+    "pace_window_h": "CBOX_BUDGET_PACE_WINDOW_H",
+    "pace_slack_h": "CBOX_BUDGET_PACE_SLACK_H",
+}
+BRAKE_LOW_LABEL = {"five_hour": "low_5h", "seven_day": "low_7d"}
+BRAKE_PRIORITY = ("low_5h", "low_7d", "pace_7d")
+PACE_MIN_SPAN_SECONDS = 30 * 60
+PACE_MIN_SAMPLES = 2
+PACE_MIN_ACTIVE_HOURS = 0.01
+PACE_MAX_GAP_SECONDS = 1200
+SAMPLES_FILENAME = "samples.jsonl"
+SAMPLES_TAIL_BYTES = 262144
 HERMES_UNKNOWN_AFTER_SECONDS = 120
 
 STATE_FILENAME = "state.json"
@@ -549,14 +570,134 @@ def _cost_prior(family, window_key):
     return 1.0
 
 
+def brake_threshold(name):
+    default = BRAKE_DEFAULTS[name]
+    raw = os.environ.get(BRAKE_ENV[name])
+    if not raw:
+        return default
+    try:
+        val = float(raw)
+    except ValueError:
+        return default
+    if not math.isfinite(val) or val < 0:
+        return default
+    if name == "pace_window_h" and val <= 0:
+        return default
+    return val
+
+
+def _read_tail_text(path, cap):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        start = max(0, st.st_size - cap)
+        if start:
+            os.lseek(fd, start, os.SEEK_SET)
+        chunks = []
+        total = 0
+        while total < cap:
+            chunk = os.read(fd, min(65536, cap - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        text = b"".join(chunks).decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if start:
+        nl = text.find("\n")
+        text = text[nl + 1:] if nl >= 0 else ""
+    return text
+
+
+def _pace_points(family, now, window_hours):
+    text = _read_tail_text(os.path.join(usage_dir(), SAMPLES_FILENAME), SAMPLES_TAIL_BYTES)
+    if not text:
+        return []
+    cutoff = now - window_hours * 3600.0
+    points = []
+    for line in text.splitlines():
+        try:
+            row = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(row, dict) or row.get("family") != family:
+            continue
+        ts = _num(row.get("ts"))
+        seven = row.get("seven_day")
+        used = _num(seven.get("used")) if isinstance(seven, dict) else None
+        if ts is None or used is None or ts > now + CAPTURED_AT_FUTURE_TOLERANCE_SECONDS:
+            continue
+        points.append((ts, used))
+    points.sort(key=lambda p: p[0])
+    run = []
+    for pt in points:
+        if run and pt[1] < run[-1][1]:
+            run = []
+        run.append(pt)
+    return [pt for pt in run if pt[0] >= cutoff]
+
+
+def seven_day_burn_rate(family, now):
+    points = _pace_points(family, now, brake_threshold("pace_window_h"))
+    if len(points) < PACE_MIN_SAMPLES:
+        return None
+    first, last = points[0], points[-1]
+    if last[0] - first[0] < PACE_MIN_SPAN_SECONDS:
+        return None
+    numerator = 0.0
+    denominator = 0.0
+    for (t0, u0), (t1, u1) in zip(points, points[1:]):
+        d = t1 - t0
+        g = max(0.0, u1 - u0)
+        if 0.0 < d <= PACE_MAX_GAP_SECONDS:
+            numerator += g
+            denominator += d
+        elif d > PACE_MAX_GAP_SECONDS and g > 0:
+            numerator += g
+            denominator += d
+    if denominator / 3600.0 < PACE_MIN_ACTIVE_HOURS:
+        return None
+    return max(0.0, numerator / (denominator / 3600.0))
+
+
+def pace_brake(family, q, resets_at, now):
+    rate = seven_day_burn_rate(family, now)
+    if rate is None:
+        return False, None
+    time_hours = max(resets_at - now, 0.0) / 3600.0
+    spendable = q - _driver_reserve(family, q, time_hours, "seven_day")
+    hours_left = active_hours_between(now, resets_at)
+    info = {"rate": rate, "spendable": spendable, "active_hours_left": hours_left}
+    if rate <= 0:
+        info["hours_to_exhaust"] = None
+        return False, info
+    hours_to_exhaust = max(0.0, spendable) / rate
+    info["hours_to_exhaust"] = hours_to_exhaust
+    return hours_to_exhaust < hours_left - brake_threshold("pace_slack_h"), info
+
+
 def _window_stale(window_key, age_seconds):
     if window_key == "five_hour":
         return age_seconds > FIVE_HOUR_STALE_SECONDS
     return age_seconds > STALE_AFTER_SECONDS
 
 
+def _subscription_profile():
+    val = os.environ.get("CBOX_SUBSCRIPTION_PROFILE", "")
+    val = val.strip().lower()
+    return val if val in ("low", "high", "max") else "high"
+
+
 def _mode_off():
-    return os.environ.get("CBOX_BUDGET_MODE", "").strip().lower() == "off"
+    return os.environ.get("CBOX_BUDGET_MODE", "").strip().lower() == "off" or _subscription_profile() == "max"
 
 
 def _read_override(now):
@@ -630,10 +771,13 @@ def _unknown_result(five_used=None, seven_used=None):
         "five_hour_used": five_used,
         "seven_day_used": seven_used,
         "resets_at": None,
+        "free": False,
+        "brake": "none",
+        "brakes": [],
     }
 
 
-def budget_for_family(family, now=None):
+def _budget_for_family_raw(family, now=None):
     now = time.time() if now is None else now
     if _mode_off():
         return {
@@ -643,6 +787,9 @@ def budget_for_family(family, now=None):
             "five_hour_used": None,
             "seven_day_used": None,
             "resets_at": None,
+            "free": False,
+            "brake": "none",
+            "brakes": [],
         }
     sm = source_metrics(family, now)
     five_used = None
@@ -665,6 +812,9 @@ def budget_for_family(family, now=None):
             "seven_day_used": seven_used,
             "resets_at": _soonest_resets(sm),
             "override_until": override_until,
+            "free": False,
+            "brake": "override",
+            "brakes": [],
         }
 
     if sm is None:
@@ -690,8 +840,35 @@ def budget_for_family(family, now=None):
     if not used_windows:
         return _unknown_result(five_used, seven_used)
 
-    vals = []
+    braked = {}
+    pace_info = None
     for wk, (used, resets_at) in used_windows.items():
+        q = max(0.0, 100.0 - used)
+        if q < brake_threshold("low_5h" if wk == "five_hour" else "low_7d"):
+            braked.setdefault(wk, []).append(BRAKE_LOW_LABEL[wk])
+    if "seven_day" in used_windows:
+        used7, resets7 = used_windows["seven_day"]
+        fired, pace_info = pace_brake(family, max(0.0, 100.0 - used7), resets7, now)
+        if fired:
+            braked.setdefault("seven_day", []).append("pace_7d")
+
+    if not braked:
+        return {
+            "status": "ok",
+            "b": None,
+            "n": None,
+            "five_hour_used": five_used,
+            "seven_day_used": seven_used,
+            "resets_at": min(r for _, r in used_windows.values()),
+            "free": True,
+            "brake": "none",
+            "brakes": [],
+            "pace": pace_info,
+        }
+
+    vals = []
+    for wk, labels in braked.items():
+        used, resets_at = used_windows[wk]
         q = max(0.0, 100.0 - used)
         time_to_reset = max(resets_at - now, 0.0)
         reserve = _driver_reserve(family, q, time_to_reset / 3600.0, wk)
@@ -703,11 +880,13 @@ def budget_for_family(family, now=None):
         h_eff = max(h_hours, H_FLOOR_HOURS)
         raw = (q - reserve) / (cost * h_eff)
         capped = min(CONCURRENCY_CAP_P, raw)
-        vals.append((capped, resets_at))
+        label = min(labels, key=BRAKE_PRIORITY.index)
+        vals.append((capped, resets_at, label))
 
-    b, resets_at = min(vals, key=lambda item: item[0])
+    b, resets_at, label = min(vals, key=lambda item: (item[0], BRAKE_PRIORITY.index(item[2])))
     b = max(0.0, b)
     n = apply_hysteresis(family, b, now)
+    all_labels = sorted({lb for labels in braked.values() for lb in labels}, key=BRAKE_PRIORITY.index)
     return {
         "status": "ok",
         "b": b,
@@ -715,7 +894,24 @@ def budget_for_family(family, now=None):
         "five_hour_used": five_used,
         "seven_day_used": seven_used,
         "resets_at": resets_at,
+        "free": False,
+        "brake": label,
+        "brakes": all_labels,
+        "pace": pace_info,
     }
+
+
+def budget_for_family(family, now=None):
+    result = _budget_for_family_raw(family, now)
+    if _subscription_profile() == "low" and result is not None and "n" in result:
+        n = result["n"]
+        if n is None:
+            result["n"] = 1
+            result["brake"] = "low profile"
+        elif n > 1:
+            result["n"] = 1
+            result["brake"] = "low profile"
+    return result
 
 
 def hermes_state(now=None):

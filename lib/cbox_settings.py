@@ -285,7 +285,7 @@ def cbox_config_diff(cbox_path, cwd):
 
 
 def hub_context(cbox_path, cwd):
-    text = _run_capture([cbox_path, "__hub_context"], cwd)
+    text = _run_capture([cbox_path, "__hub_context", "--full"], cwd)
     if text is None:
         return None
     try:
