@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${1:-}" = acp-hermes ] || [ "${1:-}" = acp-claude ] || [ "${1:-}" = acp-codex ]; then
+  exec 3>&1
+  exec 1>&2
+fi
 : "${HOST_USER:?}"; : "${HOST_UID:?}"; : "${HOST_GID:?}"; : "${HOST_HOME:?}"
 : "${CBOX_CLAUDE_TARGET:?}"; : "${CBOX_CODEX_VERSION:?}"
 CBOX_CODEX_TARGET="${CBOX_CODEX_TARGET:-}"
@@ -805,6 +809,12 @@ _hermes_netaccess_line() {
   printf '%s' "Docker networks here are reachable only through the cbox SOCKS gateway: call cbox-net net_map first, then net_probe; target containers by name over socks5h; never guess IPs or set ALL_PROXY; a down gateway is a host-side fix."
 }
 
+_hermes_manual_line() {
+  local manual="$HOST_HOME/.claude/cbox-docs/MANUAL.md"
+  [ -f "$manual" ] && [ ! -L "$manual" ] || return 0
+  printf '%s' "For cbox setup, config, features or troubleshooting, read $manual: grep '^#' for sections, then read the section; cbox commands run on the host."
+}
+
 _host_alias_forwarder_start() {
   local script=/opt/cbox/host_alias_forwarder.py
   [ -f "$script" ] || return 0
@@ -817,6 +827,44 @@ _guard_socks_proxy
 _host_alias_forwarder_start
 
 case "${1:-}" in
+  acp-codex)
+    if ! _resolved="$(_bins_ready codex)" && ! _resolved="$(_bins_start_fallback codex)"; then
+      echo "entrypoint: codex not installed or stale - run 'cbox reinstall-bins' on the host" >&2
+      exit 1
+    fi
+    _codex_profile_preflight || exit 1
+    _ensure_scope_services
+    _acp_node="$HOST_HOME/.local/acp-claude/node/bin/node"
+    _acp_pkg="$HOST_HOME/.local/acp-codex/adapter/node_modules/@agentclientprotocol/codex-acp/package.json"
+    _acp_entry="$HOST_HOME/.local/acp-codex/adapter/node_modules/@agentclientprotocol/codex-acp/dist/index.js"
+    if [ ! -x "$_acp_node" ] || [ "$("$_acp_node" --version 2>/dev/null)" != v22.23.3 ] \
+        || [ ! -f "$_acp_entry" ] \
+        || [ "$("$_acp_node" -p 'require(process.argv[1]).version' "$_acp_pkg" 2>/dev/null)" != 2.2.2 ]; then
+      echo "entrypoint: codex ACP dependencies are missing or stale - run 'cbox reinstall-bins' on the host" >&2
+      exit 1
+    fi
+    _acp_config="$(python3 /opt/cbox/codex_acp_config.py "$HOST_HOME/.codex/cbox-container.config.toml" "$HOST_HOME/.codex/hooks.json")" || exit 1
+    _run_as_user env CODEX_PATH=/opt/cbox/codex-acp-exec.sh CBOX_CODEX_ACP_BIN="$_resolved" CODEX_CONFIG="$_acp_config" "$_acp_node" "$_acp_entry" 1>&3 3>&-
+    ;;
+  acp-claude)
+    if ! _resolved="$(_bins_ready claude)" && ! _resolved="$(_bins_start_fallback claude)"; then
+      echo "entrypoint: claude not installed or stale - run 'cbox reinstall-bins' on the host" >&2
+      exit 1
+    fi
+    _check_codex_mcp_shim_seed || exit 1
+    _ensure_scope_services
+    _acp_root="$HOST_HOME/.local/acp-claude"
+    _acp_node="$_acp_root/node/bin/node"
+    _acp_pkg="$_acp_root/adapter/node_modules/@agentclientprotocol/claude-agent-acp/package.json"
+    _acp_entry="$_acp_root/adapter/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js"
+    if [ ! -x "$_acp_node" ] || [ "$("$_acp_node" --version 2>/dev/null)" != v22.23.3 ] \
+        || [ ! -f "$_acp_entry" ] \
+        || [ "$("$_acp_node" -p 'require(process.argv[1]).version' "$_acp_pkg" 2>/dev/null)" != 0.90.0 ]; then
+      echo "entrypoint: claude ACP dependencies are missing or stale - run 'cbox reinstall-bins' on the host" >&2
+      exit 1
+    fi
+    _run_as_user env CLAUDE_CODE_EXECUTABLE="$_resolved" "$_acp_node" "$_acp_entry" 1>&3 3>&-
+    ;;
   claude|codex)
     _verb="$1"
     if ! _resolved="$(_bins_ready "$1")" && ! _resolved="$(_bins_start_fallback "$1")"; then
@@ -856,7 +904,11 @@ case "${1:-}" in
     fi
     _run_as_user "$_resolved" "$@"
     ;;
+  acp-hermes)
+    ;&
   hermes)
+    _hermes_acp=0
+    [ "$1" = acp-hermes ] && _hermes_acp=1
     : "${CBOX_HERMES:?entrypoint: CBOX_HERMES is off - enable and rebuild first: cbox setup update hermes}"
     [ "$CBOX_HERMES" = on ] \
       || { echo "entrypoint: hermes is disabled (CBOX_HERMES=$CBOX_HERMES) - run 'cbox setup update hermes' on the host, then rebuild" >&2; exit 1; }
@@ -870,6 +922,13 @@ case "${1:-}" in
     if [ "$_hermes_want" != "$CBOX_HERMES_VERSION" ] || [ -z "$_hermes_have" ]; then
       echo "entrypoint: the hermes volume is stale - it was installed for target ${_hermes_want:-none} (installed version ${_hermes_have:-none}) but this container wants $CBOX_HERMES_VERSION; run 'cbox reinstall-bins' on the host. This is a staleness check, not an integrity check - the volume content is trusted." >&2
       exit 1
+    fi
+    if [ "$_hermes_acp" = 1 ]; then
+      if ! /opt/hermes/bin/python3 -c 'import importlib.metadata as m; assert m.version("agent-client-protocol") == "0.9.0"; assert m.version("mcp") == "1.26.0"; assert m.version("starlette") == "1.0.1"' 2>/dev/null; then
+        echo "entrypoint: hermes ACP dependencies are missing or stale - run 'cbox reinstall-bins' on the host" >&2
+        exit 1
+      fi
+      [ -f "$HOST_HOME/.claude/hooks/cbox_hermes_acp.py" ] || { echo "entrypoint: hermes ACP wrapper is missing - run 'cbox setup update hooks' on the host" >&2; exit 1; }
     fi
     shift
     HERMES_HOME="${HERMES_HOME:-$HOST_HOME/.hermes-cbox}"
@@ -897,6 +956,10 @@ case "${1:-}" in
     if [ -n "$_hermes_netaccess_line" ]; then
       _hermes_session_prompt="${_hermes_session_prompt:+$_hermes_session_prompt$'\n\n'}$_hermes_netaccess_line"
     fi
+    _hermes_manual_line="$(_hermes_manual_line)"
+    if [ -n "$_hermes_manual_line" ]; then
+      _hermes_session_prompt="${_hermes_session_prompt:+$_hermes_session_prompt$'\n\n'}$_hermes_manual_line"
+    fi
     if [ -n "${HERMES_EPHEMERAL_SYSTEM_PROMPT:-}" ]; then
       _hermes_session_prompt="${_hermes_session_prompt:+$_hermes_session_prompt$'\n\n'}$HERMES_EPHEMERAL_SYSTEM_PROMPT"
     fi
@@ -908,6 +971,9 @@ case "${1:-}" in
       fi
     else
       echo "entrypoint: $_cbox_loader missing - hermes starts this session without the session core or brain payloads; run 'cbox setup update hooks' on the host" >&2
+    fi
+    if [ "$_hermes_acp" = 1 ]; then
+      _run_as_user env HERMES_HOME="$HERMES_HOME" HERMES_EPHEMERAL_SYSTEM_PROMPT="$_hermes_session_prompt" /opt/hermes/bin/python3 "$HOST_HOME/.claude/hooks/cbox_hermes_acp.py" 1>&3 3>&-
     fi
     if [ -t 0 ] && [ -t 1 ] && [ "${CBOX_SESSION_MULTIPLEX:-off}" = on ]; then
       if command -v tmux >/dev/null 2>&1; then

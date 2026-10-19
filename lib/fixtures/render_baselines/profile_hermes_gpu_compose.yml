@@ -55,7 +55,8 @@ services:
       - CBOX_LIMIT_RESUME_STAGGER=3
       - CBOX_LIMIT_RESUME_MAX_PER_DAY=10
       - CBOX_CLIP_SOCK=/run/cbox-clip/clip.sock
-      - 'ANTHROPIC_DEFAULT_FABLE_MODEL=claude-fable-5[1m]'
+      - 'ANTHROPIC_DEFAULT_FABLE_MODEL=claude-opus-5-5[1m]'
+      - 'ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-5-5'
       - 'ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5-5[1m]'
       - 'CBOX_AGENT_MODEL_BAN=fable-5-1'
       - 'CBOX_AGENT_MODEL_DENY=opus-4'
@@ -76,6 +77,7 @@ services:
       - @TMP@/home/.claude/agents:${HOST_HOME}/.claude/agents:ro
       - @TMP@/home/.claude/policies:${HOST_HOME}/.claude/policies:ro
       - @TMP@/home/.claude/templates:${HOST_HOME}/.claude/templates:ro
+      - @TMP@/home/.claude/cbox-docs:${HOST_HOME}/.claude/cbox-docs:ro
       - @TMP@/defeff_h/claude-config:${HOST_HOME}/.claude-cbox:rw
       - @TMP@/home/.claude/commands:${HOST_HOME}/.claude-cbox/commands:ro
       - @TMP@/home/.claude/skills:${HOST_HOME}/.claude-cbox/skills:ro
@@ -92,6 +94,7 @@ services:
       - @TMP@/home/.claude/agents:${HOST_HOME}/.claude-cbox/agents:ro
       - @TMP@/home/.claude/policies:${HOST_HOME}/.claude-cbox/policies:ro
       - @TMP@/home/.claude/templates:${HOST_HOME}/.claude-cbox/templates:ro
+      - @TMP@/home/.claude/cbox-docs:${HOST_HOME}/.claude-cbox/cbox-docs:ro
       - @TMP@/home/.claude/projects/@TMPSLUG@-proj:${HOST_HOME}/.claude/projects/@TMPSLUG@-proj:rw
       - @TMP@/home/.claude/projects:${HOST_HOME}/.claude-cbox/.host-projects:rw
       - @TMP@/home/.claude/tasks:${HOST_HOME}/.claude-cbox/.host-tasks:rw

@@ -25,7 +25,8 @@ services:
       - CBOX_PROFILE=default
       - CLAUDE_CONFIG_DIR=${HOST_HOME}/.claude-cbox
       - CLAUDE_SECURESTORAGE_CONFIG_DIR=${HOST_HOME}/.claude
-      - 'ANTHROPIC_DEFAULT_FABLE_MODEL=claude-fable-5[1m]'
+      - 'ANTHROPIC_DEFAULT_FABLE_MODEL=claude-opus-5-5[1m]'
+      - 'ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-5-5'
       - 'ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5-5[1m]'
       - 'CBOX_AGENT_MODEL_BAN=fable-5-1'
       - 'CBOX_AGENT_MODEL_DENY=opus-4'
@@ -44,6 +45,7 @@ services:
       - @TMP@/home/.claude/agents:${HOST_HOME}/.claude/agents:ro
       - @TMP@/home/.claude/policies:${HOST_HOME}/.claude/policies:ro
       - @TMP@/home/.claude/templates:${HOST_HOME}/.claude/templates:ro
+      - @TMP@/home/.claude/cbox-docs:${HOST_HOME}/.claude/cbox-docs:ro
       - @TMP@/glinstall/generated/claude-config:${HOST_HOME}/.claude-cbox:rw
       - @TMP@/home/.claude/projects:${HOST_HOME}/.claude-cbox/projects:rw
       - @TMP@/home/.claude/jobs:${HOST_HOME}/.claude-cbox/jobs:rw
@@ -63,6 +65,7 @@ services:
       - @TMP@/home/.claude/agents:${HOST_HOME}/.claude-cbox/agents:ro
       - @TMP@/home/.claude/policies:${HOST_HOME}/.claude-cbox/policies:ro
       - @TMP@/home/.claude/templates:${HOST_HOME}/.claude-cbox/templates:ro
+      - @TMP@/home/.claude/cbox-docs:${HOST_HOME}/.claude-cbox/cbox-docs:ro
       - @TMP@/home/.codex:${HOST_HOME}/.codex:rw
       - @TMP@/home/.codex/config.toml:${HOST_HOME}/.codex/config.toml:ro
       - @TMP@/home/.codex/AGENTS.md:${HOST_HOME}/.codex/AGENTS.md:ro

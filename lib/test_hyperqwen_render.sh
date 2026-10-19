@@ -81,6 +81,16 @@ C1="$D1/docker-compose.yml"
 G1="$D1/docker-compose.gpu.yml"
 [ -f "$C1" ] || _fail "default render: docker-compose.yml missing"
 [ -f "$G1" ] || _fail "default render: docker-compose.gpu.yml must always be rendered while hyperqwen is on"
+DOFF="$TMPBASE/offline-off"
+render_hq "$DOFF" CBOX_HYPERQWEN_OFFLINE=off
+cmp -s "$C1" "$DOFF/docker-compose.yml" || _fail "explicit offline off must keep the default compose byte-identical"
+cmp -s "$G1" "$DOFF/docker-compose.gpu.yml" || _fail "explicit offline off must keep the GPU overlay byte-identical"
+DON="$TMPBASE/offline-on"
+render_hq "$DON" CBOX_HYPERQWEN_OFFLINE=on
+grep -qxF '    pull_policy: never' "$DON/docker-compose.yml" || _fail "offline on must set pull_policy never"
+diff -u "$C1" <(grep -v '^    pull_policy: never$' "$DON/docker-compose.yml") >/dev/null || _fail "offline on must add only pull_policy to the owner compose"
+cmp -s "$G1" "$DON/docker-compose.gpu.yml" || _fail "offline on must not change the GPU overlay"
+_ok "offline off renders byte-identically; offline on adds only pull_policy never"
 grep -qxF "name: \"cbox-infra-u$UID_NOW-hyperqwen\"" "$C1" || _fail "owner project name wrong"
 grep -qxF '    image: "ghcr.io/syv-ai/hyperqwen:sha-53557bc@sha256:25bfa39ca4b71d5ba5ea32e5486c841dd4fb8b6429846c012ec5d1b06b2457a6"' "$C1" || _fail "default image digest pin missing"
 grep -qxF '    command: ["single"]' "$C1" || _fail "command single missing"
@@ -595,6 +605,7 @@ refuse offload-high CBOX_HYPERQWEN_KV_OFFLOAD=on CBOX_HYPERQWEN_KV_OFFLOAD_MIB=4
 refuse offload-text CBOX_HYPERQWEN_KV_OFFLOAD=on 'CBOX_HYPERQWEN_KV_OFFLOAD_MIB=1024 --evil'
 refuse offload-injection CBOX_HYPERQWEN_KV_OFFLOAD=on 'CBOX_HYPERQWEN_KV_OFFLOAD_MIB=2048;touch x'
 refuse offload-mode CBOX_HYPERQWEN_KV_OFFLOAD=maybe
+refuse offline-mode CBOX_HYPERQWEN_OFFLINE=maybe
 refuse offload-off-bad-size CBOX_HYPERQWEN_KV_OFFLOAD=off CBOX_HYPERQWEN_KV_OFFLOAD_MIB=5
 refuse reserve-low CBOX_HYPERQWEN_RAM_RESERVE_GIB=7
 refuse reserve-high CBOX_HYPERQWEN_RAM_RESERVE_GIB=33
@@ -641,6 +652,8 @@ reg = json.load(open(sys.argv[1]))
 vs = {v["key"]: v for v in reg["variables"]}
 sec = [s for s in reg["sections"] if s["id"] == "hyperqwen"][0]
 assert sec["scope"] == "machine" and sec["apply_class"] == "infra-reconcile" and sec["profile"] == "skip"
+offline = vs["CBOX_HYPERQWEN_OFFLINE"]
+assert offline["section"] == "hyperqwen" and offline["default"] == "off" and offline["type"] == {"kind": "enum", "values": ["off", "on"]}
 k = vs["CBOX_HYPERQWEN_KV_OFFLOAD"]
 assert k["section"] == "hyperqwen" and k["default"] == "off" and k["type"]["values"] == ["off", "on"]
 m = vs["CBOX_HYPERQWEN_KV_OFFLOAD_MIB"]

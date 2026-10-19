@@ -1,6 +1,3 @@
 # Coding policy
 
-- NEVER add any comments to code, rather write separated docs
-- write scripts and code without any mentioning claude models
-- Every file you modify must live in a git work-tree; if a workspace is not a repo, propose `git init` before large edits. Commit completed, verified chunks as you go so any change stays revertable.
-- Keep main-only history: work may use temporary branches/worktrees, but after merging fold them and delete the branches with their commits - main is the only branch that persists.
+The rules live once in the numbered canon: K3 and K4 (conduct kernel). The conduct kernel in CLAUDE.md reaches every agent; the session core reaches the main driver. Old-to-new map: docs/CONTEXT_CANON.md in the cbox package. This file stays only so existing imports resolve.

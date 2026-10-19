@@ -1649,12 +1649,27 @@ _cbox_hyperqwen_image() {
   printf '%s' "${CBOX_HYPERQWEN_IMAGE:-ghcr.io/syv-ai/hyperqwen:sha-53557bc}"
 }
 
+_cbox_hyperqwen_offline_image_guard() {
+  [ "${CBOX_HYPERQWEN_OFFLINE:-off}" = on ] || return 0
+  local image
+  image="$(_cbox_hyperqwen_image)"
+  if ! docker image inspect -- "$image" >/dev/null 2>&1; then
+    echo "cbox: hyperqwen offline: image $image is not present locally. Restore it with scripts/hyperqwen-restore.sh (see docs/HYPERQWEN_BACKUP.md). If docker load dropped RepoDigests, set CBOX_HYPERQWEN_IMAGE to the plain tag; or set CBOX_HYPERQWEN_OFFLINE=off." >&2
+    return 1
+  fi
+}
+
 _cbox_hyperqwen_owner_compose() {
-  local dir
+  local dir verb="${1:-}"
   dir="$(_cbox_hyperqwen_owner_dir)"
   local -a cmd=(docker compose --project-directory "$dir" -f "$dir/docker-compose.yml")
   if [ -f "$dir/docker-compose.gpu.yml" ]; then
     cmd+=(-f "$dir/docker-compose.gpu.yml")
+  fi
+  if [ "$verb" = up ] && [ "${CBOX_HYPERQWEN_OFFLINE:-off}" = on ]; then
+    shift
+    "${cmd[@]}" up --pull never "$@"
+    return $?
   fi
   "${cmd[@]}" "$@"
 }
@@ -1891,6 +1906,7 @@ _cbox_hyperqwen_offload_preflight_warn() {
 
 _cbox_hyperqwen_owner_up() {
   local out
+  _cbox_hyperqwen_offline_image_guard || return 1
   _cbox_hyperqwen_volumes_ensure || return 1
   _cbox_hyperqwen_gpu_preflight
   if out="$(_cbox_hyperqwen_owner_compose up -d --remove-orphans 2>&1)"; then
@@ -1987,7 +2003,9 @@ _cbox_hyperqwen_prepare_restore() {
   [ "${_CBOX_HQ_PREPARE_ACTIVE:-0}" = 1 ] || return 0
   _CBOX_HQ_PREPARE_ACTIVE=0
   docker rm -f -- "$_CBOX_HQ_PREPARE_CONTAINER" >/dev/null 2>&1 || true
-  docker network rm -- "$_CBOX_HQ_PREPARE_NET" >/dev/null 2>&1 || true
+  if [ -n "$_CBOX_HQ_PREPARE_NET" ]; then
+    docker network rm -- "$_CBOX_HQ_PREPARE_NET" >/dev/null 2>&1 || true
+  fi
   if [ "$_CBOX_HQ_PREPARE_RESTART" = 1 ]; then
     _cbox_hyperqwen_gpu_preflight >/dev/null 2>&1 || true
     _cbox_hyperqwen_owner_compose up -d hyperqwen >/dev/null 2>&1 || true
@@ -1999,6 +2017,7 @@ _cbox_hyperqwen_prepare_run() {
   local inline="${1:-0}" dir was_running=0 has_container=0 cid state models_src image rc=0
   dir="$(_cbox_hyperqwen_owner_dir)"
   image="$(_cbox_hyperqwen_image)"
+  _cbox_hyperqwen_offline_image_guard || return 1
   _cbox_hyperqwen_models_guard || return 1
   models_src="${CBOX_HYPERQWEN_MODELS_PATH:-$(_cbox_hyperqwen_models_volume)}"
   _cbox_hyperqwen_prepare_args_safe "$image" "$models_src" || return 1
@@ -2014,7 +2033,10 @@ _cbox_hyperqwen_prepare_run() {
       fi
     fi
   fi
-  _CBOX_HQ_PREPARE_NET="cbox-hyperqwen-prepare-$(id -u)-$$-$(date +%s%N 2>/dev/null || echo 0)"
+  _CBOX_HQ_PREPARE_NET=""
+  if [ "${CBOX_HYPERQWEN_OFFLINE:-off}" != on ]; then
+    _CBOX_HQ_PREPARE_NET="cbox-hyperqwen-prepare-$(id -u)-$$-$(date +%s%N 2>/dev/null || echo 0)"
+  fi
   _CBOX_HQ_PREPARE_CONTAINER="cbox-hyperqwen-prepare-$(id -u)-$$"
   _CBOX_HQ_PREPARE_RESTART="$was_running"
   _CBOX_HQ_PREPARE_ACTIVE=1
@@ -2024,19 +2046,28 @@ _cbox_hyperqwen_prepare_run() {
     echo "cbox: hyperqwen prepare: stopping the serving container for the duration of the prepare (serving never has egress)" >&2
     _cbox_hyperqwen_owner_compose stop hyperqwen >/dev/null 2>&1 || true
   fi
-  if ! docker network create --label cbox.kind=infra --label cbox.component=hyperqwen-prepare -- "$_CBOX_HQ_PREPARE_NET" >/dev/null 2>&1; then
-    echo "cbox: failed to create the temporary prepare network $_CBOX_HQ_PREPARE_NET" >&2
-    trap - EXIT INT TERM
-    _cbox_hyperqwen_prepare_restore
-    return 1
+  if [ -n "$_CBOX_HQ_PREPARE_NET" ]; then
+    if ! docker network create --label cbox.kind=infra --label cbox.component=hyperqwen-prepare -- "$_CBOX_HQ_PREPARE_NET" >/dev/null 2>&1; then
+      echo "cbox: failed to create the temporary prepare network $_CBOX_HQ_PREPARE_NET" >&2
+      trap - EXIT INT TERM
+      _cbox_hyperqwen_prepare_restore
+      return 1
+    fi
   fi
-  echo "cbox: hyperqwen prepare: running '$image prepare' (the first run downloads about 20 GB from Hugging Face and requantizes on the CPU; later runs are idempotent)" >&2
-  if ! docker image inspect -- "$image" >/dev/null 2>&1; then
+  if [ "${CBOX_HYPERQWEN_OFFLINE:-off}" = on ]; then
+    echo "cbox: hyperqwen prepare: running '$image prepare' without network" >&2
+    docker run --rm --pull never --name "$_CBOX_HQ_PREPARE_CONTAINER" --network none \
+      -v "$models_src:/app/models" -v "$(_cbox_hyperqwen_cache_volume):/cache" \
+      -e HOME=/cache -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -- "$image" prepare || rc=$?
+  else
+    echo "cbox: hyperqwen prepare: running '$image prepare' (the first run downloads about 20 GB from Hugging Face and requantizes on the CPU; later runs are idempotent)" >&2
+  if [ "${CBOX_HYPERQWEN_OFFLINE:-off}" != on ] && ! docker image inspect -- "$image" >/dev/null 2>&1; then
     echo "cbox: hyperqwen prepare: pulling $image first (about 4.6 GB compressed, 9.5 GB unpacked; one layer alone is 4 GB, so its line can sit on 'Pulling fs layer' or 'Downloading' for minutes)" >&2
   fi
   docker run --rm --name "$_CBOX_HQ_PREPARE_CONTAINER" --network "$_CBOX_HQ_PREPARE_NET" \
     -v "$models_src:/app/models" -v "$(_cbox_hyperqwen_cache_volume):/cache" \
     -e HOME=/cache -- "$image" prepare || rc=$?
+  fi
   trap - EXIT INT TERM
   if [ "$rc" = 0 ]; then
     _cbox_hyperqwen_prepared_write || rc=1
@@ -2047,6 +2078,9 @@ _cbox_hyperqwen_prepare_run() {
   _cbox_hyperqwen_prepare_restore
   if [ "$rc" != 0 ]; then
     echo "cbox: hyperqwen prepare failed (rc=$rc) - the prepared marker was not written" >&2
+    if [ "${CBOX_HYPERQWEN_OFFLINE:-off}" = on ]; then
+      echo "cbox: offline prepare needs the downloaded model files in the models and cache volumes; restore them from the backup before retrying" >&2
+    fi
   fi
   return "$rc"
 }
@@ -2071,6 +2105,9 @@ _cbox_hyperqwen_prepare_inline() {
 _cbox_hyperqwen_status_cmd() {
   local dir cid state prepared=no
   dir="$(_cbox_hyperqwen_owner_dir)"
+  if [ "${CBOX_HYPERQWEN_OFFLINE:-off}" = on ]; then
+    echo "hyperqwen: offline=on"
+  fi
   if [ "${CBOX_HYPERQWEN_MODE:-off}" != on ]; then
     echo "hyperqwen: OFF (CBOX_HYPERQWEN_MODE=off)"
     return 0
@@ -2138,6 +2175,7 @@ _cbox_hyperqwen_reconcile_cmd() {
     echo "cbox: hyperqwen reconcile: mode is off - owner project torn down and de-rendered"
     return 0
   fi
+  _cbox_hyperqwen_offline_image_guard || return 1
   _cbox_hyperqwen_models_guard || return 1
   _cbox_hyperqwen_validate_render || return 1
   _cbox_hyperqwen_adopt_or_refuse "$dir" || return 1
@@ -2176,6 +2214,7 @@ _cbox_hyperqwen_render_matches() {
 _cbox_hyperqwen_up_cmd() {
   local dir
   dir="$(_cbox_hyperqwen_owner_dir)"
+  _cbox_hyperqwen_offline_image_guard || return 1
   _cbox_hyperqwen_validate_render || return 1
   if [ ! -f "$dir/docker-compose.yml" ] || ! _cbox_hyperqwen_manifest_matches_current "$dir"; then
     _cbox_hyperqwen_reconcile_cmd || return 1
@@ -2229,14 +2268,21 @@ _cbox_hyperqwen_gpu_check_base_image() {
 _cbox_hyperqwen_gpu_check_cmd() {
   local image dev out cuda major
   image="$(_cbox_hyperqwen_image)"
-  if ! docker image inspect -- "$image" >/dev/null 2>&1; then
+  _cbox_hyperqwen_offline_image_guard || return 1
+  if [ "${CBOX_HYPERQWEN_OFFLINE:-off}" != on ] && ! docker image inspect -- "$image" >/dev/null 2>&1; then
     echo "cbox: gpu-check: $image is not pulled yet (about 9.5 GB) - checking with its CUDA base image $(_cbox_hyperqwen_gpu_check_base_image) instead (about 100 MB, its layers are shared with the real image); 'cbox hyperqwen up' pulls the real one" >&2
     image="$(_cbox_hyperqwen_gpu_check_base_image)"
   fi
   dev="$(_cbox_gpu_device_ids "${CBOX_HYPERQWEN_GPU_DEVICE:-all}" | head -n1)"
   [ -n "$dev" ] || dev="nvidia.com/gpu=all"
-  echo "cbox: gpu-check: running 'docker run --rm --entrypoint nvidia-smi --device $dev -- $image' as a CDI smoke test" >&2
-  if out="$(docker run --rm --entrypoint nvidia-smi --device "$dev" -- "$image" 2>&1)"; then
+  local -a pull_args=()
+  local pull_text=""
+  if [ "${CBOX_HYPERQWEN_OFFLINE:-off}" = on ]; then
+    pull_args=(--pull never)
+    pull_text="--pull never "
+  fi
+  echo "cbox: gpu-check: running 'docker run --rm ${pull_text}--entrypoint nvidia-smi --device $dev -- $image' as a CDI smoke test" >&2
+  if out="$(docker run --rm "${pull_args[@]}" --entrypoint nvidia-smi --device "$dev" -- "$image" 2>&1)"; then
     printf '%s\n' "$out"
     cuda="$(printf '%s\n' "$out" | sed -n 's/.*CUDA Version: *\([0-9][0-9]*\)\.[0-9].*/\1/p' | head -n1)"
     major="${cuda:-0}"
@@ -2275,6 +2321,7 @@ _cbox_hyperqwen_owner_heal_impl() {
     return 0
   fi
   _cbox_hyperqwen_volumes_ensure || return 1
+  _cbox_hyperqwen_offline_image_guard || return 1
   _cbox_hyperqwen_offload_preflight_warn
   _cbox_hyperqwen_gpu_preflight
   if out="$(_cbox_hyperqwen_owner_compose up -d hyperqwen 2>&1)"; then
@@ -3991,7 +4038,9 @@ _run_global() {
       "$w"|"$w"/*) workdir="$root" ;;
     esac
   done
-  if [ -t 0 ] && [ -t 1 ]; then
+  if [ "${_CBOX_ACP_BACKEND:-0}" = 1 ]; then
+    exec "${COMPOSE[@]}" exec -T "${CBOX_CONTAINER_EXEC_ENV[@]}" "${CBOX_SOCKS_EXEC_ENV[@]}" -w "$workdir" "$SERVICE" /entrypoint.sh "$bin" "$@" 1>&3
+  elif [ -t 0 ] && [ -t 1 ]; then
     exec "${COMPOSE[@]}" exec -it "${CBOX_CONTAINER_EXEC_ENV[@]}" "${CBOX_SOCKS_EXEC_ENV[@]}" -w "$workdir" "$SERVICE" /entrypoint.sh "$bin" "$@"
   else
     exec "${COMPOSE[@]}" exec -T "${CBOX_CONTAINER_EXEC_ENV[@]}" "${CBOX_SOCKS_EXEC_ENV[@]}" -w "$workdir" "$SERVICE" /entrypoint.sh "$bin" "$@"
@@ -4035,6 +4084,12 @@ _gen_effective() {
   digest="$(_cbox_resolve_base_digest ubuntu:24.04)" || die "cannot resolve base image digest and no local image - network required for first build"
   cp "$INSTALL_DIR/entrypoint.sh" "$eff/entrypoint.sh"
   cp "$INSTALL_DIR/install-bins.sh" "$eff/install-bins.sh"
+  cp "$INSTALL_DIR/lib/codex-acp-exec.sh" "$eff/codex-acp-exec.sh"
+  cp "$INSTALL_DIR/lib/codex_acp_config.py" "$eff/codex_acp_config.py"
+  mkdir -p "$eff/acp-claude"
+  cp "$INSTALL_DIR/acp-claude/package.json" "$INSTALL_DIR/acp-claude/package-lock.json" "$eff/acp-claude/"
+  mkdir -p "$eff/acp-codex"
+  cp "$INSTALL_DIR/acp-codex/package.json" "$INSTALL_DIR/acp-codex/package-lock.json" "$eff/acp-codex/"
   cp "$INSTALL_DIR/.dockerignore" "$eff/.dockerignore"
   gen_session_entry_into "$eff"
   gen_image_inputs "$eff" "$digest"
@@ -4322,9 +4377,9 @@ _bins_doctor_next_check() {
 _bins_want() {
   local tool="$1"
   case "$tool" in
-    claude) printf '%s' "${CBOX_CLAUDE_TARGET:-stable}" ;;
-    codex) printf '%s' "${CBOX_CODEX_VERSION:-latest}" ;;
-    hermes) printf '%s' "${CBOX_HERMES_VERSION:-latest}" ;;
+    claude) printf '%s+acp0.90.0' "${CBOX_CLAUDE_TARGET:-stable}" ;;
+    codex) printf '%s+acp2.2.2' "${CBOX_CODEX_VERSION:-latest}" ;;
+    hermes) printf '%s+acp0.9.0' "${CBOX_HERMES_VERSION:-latest}" ;;
   esac
 }
 
@@ -5694,7 +5749,9 @@ _session_run() {
     "$root"|"$root"/*) ;;
     *) wd="$root" ;;
   esac
-  if [ -t 0 ] && [ -t 1 ]; then
+  if [ "${_CBOX_ACP_BACKEND:-0}" = 1 ]; then
+    _compose_p "$eff" exec -T "${extra_env[@]}" -w "$wd" cbox /entrypoint.sh "$bin" "$@" 1>&3 || rc=$?
+  elif [ -t 0 ] && [ -t 1 ]; then
     _compose_p "$eff" exec -it "${extra_env[@]}" -w "$wd" cbox /entrypoint.sh "$bin" "$@" || rc=$?
   else
     _compose_p "$eff" exec -T "${extra_env[@]}" -w "$wd" cbox /entrypoint.sh "$bin" "$@" || rc=$?
@@ -5965,6 +6022,102 @@ _cbox_run_dispatch() {
   _run_isolated "$bin" "$@"
 }
 
+acp() {
+  local engine="${1:-}" root eff mode w cwd
+  local -a roots=() workspaces=()
+  [ "$#" -eq 1 ] || { echo "cbox: usage: $0 acp {hermes|claude|codex}" >&2; return 2; }
+  case "$engine" in
+    hermes|claude|codex) ;;
+    *) echo "cbox: unknown acp engine: $engine" >&2; return 2 ;;
+  esac
+  root="$(_cbox_workspace_root 2>/dev/null)" || { echo "cbox: acp: cwd is not inside a cbox project or workspace" >&2; return 2; }
+  mode="$(_cbox_effective_mode)"
+  case "$mode" in
+    isolated)
+      eff="$(_cbox_local_effdir_for "$root")"
+      [ -f "$eff/cbox.conf" ] || { echo "cbox: acp: cwd is not inside a configured cbox project" >&2; return 2; }
+      roots+=(--root "$root")
+      while IFS= read -r w; do
+        [ -n "$w" ] || continue
+        w="$(_cbox_realpath "$w" 2>/dev/null)" || return 2
+        roots+=(--root "$w")
+      done < <(_cbox_project_extra_workspaces "$eff/cbox.conf" "$root")
+      ;;
+    global)
+      eff="$INSTALL_DIR"
+      cwd="$(_cbox_realpath "$PWD")" || return 2
+      read -r -a workspaces <<< "$(_cbox_global_workspaces)"
+      mode=none
+      for w in "${workspaces[@]}"; do
+        w="$(_cbox_realpath "$w" 2>/dev/null)" || return 2
+        roots+=(--root "$w")
+        case "$cwd" in "$w"|"$w"/*) mode=bound ;; esac
+      done
+      [ "$mode" = bound ] || { echo "cbox: acp: cwd is not inside a configured cbox workspace" >&2; return 2; }
+      ;;
+    *) echo "cbox: acp: cwd is not inside a cbox project or workspace" >&2; return 2 ;;
+  esac
+  exec python3 "$INSTALL_DIR/lib/cbox_acp_proxy.py" "${roots[@]}" --project-root "$root" --engine "$engine" --log "$eff/acp-blocked.log" -- "$INSTALL_DIR/cbox" acp-backend "$engine"
+}
+
+acp_backend() {
+  local engine="${1:-}"
+  [ "$#" -eq 1 ] || { echo "cbox: usage: $0 acp-backend {hermes|claude|codex}" >&2; return 2; }
+  case "$engine" in
+    hermes|claude|codex) ;;
+    *) echo "cbox: unknown acp engine: $engine" >&2; return 2 ;;
+  esac
+  exec 3>&1
+  exec 1>&2
+  _CBOX_ACP_BACKEND=1
+  run "acp-$engine"
+}
+
+_cbox_models_hook() {
+  local mode="$1" cmode root eff conf
+  local -a prefix=()
+  command -v python3 >/dev/null 2>&1 || return 0
+  [ -f "$INSTALL_DIR/lib/cbox_model_check.py" ] || return 0
+  cmode="$(_cbox_effective_mode 2>/dev/null)" || return 0
+  case "$cmode" in
+    isolated)
+      root="$(_cbox_workspace_root 2>/dev/null)" || return 0
+      eff="$(_cbox_local_effdir_for "$root")"
+      conf="$eff/cbox.conf"
+      if [ -f "$eff/docker-compose.yml" ]; then
+        prefix=(docker compose --project-directory "$eff" -f "$eff/docker-compose.yml")
+      fi
+      ;;
+    global)
+      conf="$CONF"
+      prefix=("${COMPOSE[@]}")
+      ;;
+    *) return 0 ;;
+  esac
+  [ -f "$conf" ] || return 0
+  (
+    unset CBOX_MODEL_CHECK CBOX_MODEL_FABLE CBOX_MODEL_OPUS CBOX_MODEL_HAIKU CBOX_MODEL_CODEX_SOL CBOX_MODEL_CODEX_LUNA CBOX_MODEL_CODEX_ASTRA CBOX_CLAUDE_MODE
+    . "$conf" >/dev/null 2>&1 || exit 0
+    export CBOX_MODEL_CHECK CBOX_MODEL_FABLE CBOX_MODEL_OPUS CBOX_MODEL_HAIKU CBOX_MODEL_CODEX_SOL CBOX_MODEL_CODEX_LUNA CBOX_MODEL_CODEX_ASTRA CBOX_CLAUDE_MODE
+    exec python3 "$INSTALL_DIR/lib/cbox_model_check.py" "$mode" --cbox "$INSTALL_DIR/cbox" -- ${prefix[@]+"${prefix[@]}"}
+  )
+}
+
+models_cmd() {
+  case "${1:-}" in
+    check)
+      [ "$#" -eq 1 ] || usage
+      ! _cbox_config_in_container || die "cbox models is host-only - run it from a host shell, not inside the container"
+      case "$(_cbox_effective_mode)" in
+        isolated|global) ;;
+        *) die_no_conf ;;
+      esac
+      _cbox_models_hook check
+      ;;
+    *) usage ;;
+  esac
+}
+
 run() {
   local session_id="" prc=0 rrc=0
   _CBOX_RUN_PROFILE=""
@@ -6003,6 +6156,9 @@ run() {
   _cbox_profile_select "$_CBOX_PF_NAME" || return 1
   _CBOX_RUN_PROFILE="$_CBOX_VERB_PROFILE"
   _CBOX_RUN_PROFILE_SET=1
+  case "$bin" in
+    claude|codex|hermes) _cbox_models_hook start || true ;;
+  esac
   _cbox_run_dispatch "$session_id" "$bin" "$@" || rrc=$?
   _CBOX_RUN_PROFILE=""
   _CBOX_RUN_PROFILE_SET=0
@@ -6516,13 +6672,14 @@ logs() {
 install_hooks() {
   require_global_conf
   [ -t 0 ] || { echo "cbox: install-hooks requires a TTY"; return 1; }
-  local files=(codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py orchestrator-global.txt conduct-kernel.txt session-core.txt codex_scope.container.json ask_claude_mcp.py codex_notify.py codex_bump_probe.sh codex_mcp_shim.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py continuity_session_start.py session_scope_farm.py limit_watchdog.py session_pane_map.py usage_statusline.py codex_usage_refresh.py claude_usage_refresh.py cbox_budget.py)
+  local files=(codex_mode_guard.py agent_label_guard.py paid_agent_tracker.py code_hygiene_guard.py commit_guard.py cbox_hermes_acp.py conduct-kernel.txt session-core.txt codex_scope.container.json ask_claude_mcp.py codex_notify.py codex_bump_probe.sh codex_mcp_shim.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py continuity_session_start.py session_scope_farm.py limit_watchdog.py session_pane_map.py usage_statusline.py codex_usage_refresh.py claude_usage_refresh.py cbox_budget.py)
   local srcs=(
     "$INSTALL_DIR/etc/hooks/codex_mode_guard.py"
     "$INSTALL_DIR/etc/hooks/agent_label_guard.py"
+    "$INSTALL_DIR/etc/hooks/paid_agent_tracker.py"
     "$INSTALL_DIR/etc/hooks/code_hygiene_guard.py"
     "$INSTALL_DIR/etc/hooks/commit_guard.py"
-    "$INSTALL_DIR/etc/hooks/orchestrator-global.txt"
+    "$INSTALL_DIR/etc/hooks/cbox_hermes_acp.py"
     "$INSTALL_DIR/generated/hooks/conduct-kernel.txt"
     "$INSTALL_DIR/etc/hooks/session-core.txt"
     "$INSTALL_DIR/generated/hooks/codex_scope.container.json"
@@ -7406,6 +7563,14 @@ _cbox_verify_engines_registry() {
   local IFS_bak="$IFS"; IFS='|'
   for tok in $ep_arm; do
     [ -n "$tok" ] || continue
+    case "$tok" in
+      acp-*)
+        if [ "$(python3 "$py" get "$reg" "${tok#acp-}" acp_entry 2>/dev/null)" != "$tok" ]; then
+          unreg="$unreg entrypoint-arm:$tok"
+        fi
+        continue
+        ;;
+    esac
     case "$names_bar" in *"|$tok|"*) ;; *) unreg="$unreg entrypoint-arm:$tok" ;; esac
   done
   for tok in $ib_allow; do
@@ -8359,17 +8524,21 @@ doctor() {
   if [ "$in_container" = 1 ]; then
     _cbox_doctor_row "hyperqwen" HOST-CHECK "machine-scoped - CBOX_HYPERQWEN_* is decided by the host owner project, not this container"
   else
-    local hq_conf="$INSTALL_DIR/cbox.conf" hq_mode hq_dev ol_mode ol_gpu ol_dev hq_overlap
+    local hq_conf="$INSTALL_DIR/cbox.conf" hq_mode hq_dev ol_mode ol_gpu ol_dev hq_overlap hq_offline hq_note=""
     hq_mode="$(_cbox_machine_conf_value "$hq_conf" CBOX_HYPERQWEN_MODE off)"
     if [ "$hq_mode" = on ]; then
+      hq_offline="$(_cbox_machine_conf_value "$hq_conf" CBOX_HYPERQWEN_OFFLINE off)"
+      if [ "$hq_offline" = on ]; then
+        hq_note="; CBOX_HYPERQWEN_OFFLINE=on - restore the image, models and cache before prepare"
+      fi
       hq_dev="$(_cbox_machine_conf_value "$hq_conf" CBOX_HYPERQWEN_GPU_DEVICE all)"
       ol_mode="$(_cbox_machine_conf_value "$hq_conf" CBOX_OLLAMA_MODE off)"
       ol_gpu="$(_cbox_machine_conf_value "$hq_conf" CBOX_OLLAMA_GPU off)"
       ol_dev="$(_cbox_machine_conf_value "$hq_conf" CBOX_OLLAMA_GPU_DEVICE all)"
       if hq_overlap="$(_cbox_local_backends_gpu_overlap_text "$ol_mode" "$ol_gpu" "$ol_dev" "$hq_mode" "$hq_dev")"; then
-        _cbox_doctor_row "hyperqwen" WARN "CBOX_HYPERQWEN_MODE=on (machine-scoped) - $hq_overlap"
+        _cbox_doctor_row "hyperqwen" WARN "CBOX_HYPERQWEN_MODE=on (machine-scoped) - $hq_overlap$hq_note"
       else
-        _cbox_doctor_row "hyperqwen" CONFIG-ONLY "CBOX_HYPERQWEN_MODE=on (machine-scoped) - verify the owner project with cbox hyperqwen status, run cbox hyperqwen gpu-check first and cbox hyperqwen prepare once"
+        _cbox_doctor_row "hyperqwen" CONFIG-ONLY "CBOX_HYPERQWEN_MODE=on (machine-scoped) - verify the owner project with cbox hyperqwen status, run cbox hyperqwen gpu-check first and cbox hyperqwen prepare once$hq_note"
       fi
     else
       _cbox_doctor_row "hyperqwen" OFF "CBOX_HYPERQWEN_MODE=off (default, machine-scoped)"
@@ -10379,13 +10548,15 @@ print(json.dumps(out))
 }
 
 usage() {
-  echo "usage: $0 {run [--session <id>] [--profile <name>|--new-profile <name>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force] [--profile <name>]|restart [--gpu]|shell [--profile <name>]|logs [--profile <name>] [args]|update|reinstall-bins [--fresh|--force|--if-stale]|bins {status|history [tool]|rollback [tool]}|install-hooks|profile {add <name>|list|ls|rm <name> [--yes]}|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|unset|diff|pending}|netaccess {status|allow|deny}|ollama {status|ps|up|down|pull <model>|reconcile|gpu-check}|hyperqwen {status|ps|up|down|prepare|reconcile|logs [-f]|gpu-check}|llm {status|use <ollama|hyperqwen> [--model <name>]}|wg {status|up [--yes]|down|keygen|peer {add|rm|list|config}|server add-client <name> [<pubkey>] [--endpoint host:port] [--plain] [--yes]|client join <token> [--yes]}|session-broker {status|access {disabled|viewer|full-attach}|window {off|<minutes>}|key {add <pubkey-file> [comment]|rm <fingerprint>|fingerprints}}|backup|login [--profile <name>] [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}"
+  echo "usage: $0 {acp <hermes|claude|codex>|run [--session <id>] [--profile <name>|--new-profile <name>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force] [--profile <name>]|restart [--gpu]|shell [--profile <name>]|logs [--profile <name>] [args]|update|reinstall-bins [--fresh|--force|--if-stale]|bins {status|history [tool]|rollback [tool]}|models check|install-hooks|profile {add <name>|list|ls|rm <name> [--yes]}|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|unset|diff|pending}|netaccess {status|allow|deny}|ollama {status|ps|up|down|pull <model>|reconcile|gpu-check}|hyperqwen {status|ps|up|down|prepare|reconcile|logs [-f]|gpu-check}|llm {status|use <ollama|hyperqwen> [--model <name>]}|wg {status|up [--yes]|down|keygen|peer {add|rm|list|config}|server add-client <name> [<pubkey>] [--endpoint host:port] [--plain] [--yes]|client join <token> [--yes]}|session-broker {status|access {disabled|viewer|full-attach}|window {off|<minutes>}|key {add <pubkey-file> [comment]|rm <fingerprint>|fingerprints}}|backup|login [--profile <name>] [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}"
   echo "cbox: with zero arguments and a TTY on stdin+stdout, bare '$0' opens the interactive hub instead of this usage text"
   echo "cbox: 'cbox ls' lists RUNNING isolated projects only, not every configured project"
   exit 1
 }
 
 case "${1:-}" in
+  acp) shift; acp "$@";;
+  acp-backend) shift; acp_backend "$@";;
   run) shift; run "$@";;
   session) shift; _cbox_session_cmd "$@";;
   profile) shift; _cbox_profile_cmd "$@";;
@@ -10525,6 +10696,7 @@ case "${1:-}" in
     ;;
   netaccess) shift; netaccess_cmd "$@";;
   bins) shift; bins_cmd "$@";;
+  models) shift; models_cmd "$@";;
   ollama) shift; ollama_cmd "$@";;
   hyperqwen) shift; hyperqwen_cmd "$@";;
   llm) shift; llm_cmd "$@";;

@@ -262,7 +262,7 @@ sec_get() {
           printf '%s\n' 'CBOX_BASHRC CBOX_BASHRC_COMMANDS'
           ;;
         mcp-servers)
-          printf '%s\n' 'CBOX_MCP_SERVERS'
+          printf '%s\n' 'CBOX_MCP_SERVERS CBOX_MODEL_CODEX_SOL CBOX_MODEL_CODEX_LUNA CBOX_MODEL_CODEX_ASTRA'
           ;;
         codex-progress)
           printf '%s\n' 'CBOX_CODEX_PROGRESS_MODE CBOX_CODEX_SHIM_TURN_TIMEOUT_SEC'
@@ -280,7 +280,7 @@ sec_get() {
           printf '%s\n' 'CBOX_OLLAMA_MODE CBOX_OLLAMA_IMAGE CBOX_OLLAMA_GPU CBOX_OLLAMA_GPU_DEVICE CBOX_OLLAMA_STORE CBOX_OLLAMA_STORE_PATH CBOX_OLLAMA_PORT CBOX_OLLAMA_NUM_PARALLEL CBOX_OLLAMA_CONTEXT_LENGTH CBOX_OLLAMA_FLASH_ATTENTION CBOX_OLLAMA_KV_CACHE_TYPE CBOX_OLLAMA_KEEP_ALIVE'
           ;;
         hyperqwen)
-          printf '%s\n' 'CBOX_HYPERQWEN_MODE CBOX_HYPERQWEN_IMAGE CBOX_HYPERQWEN_GPU_DEVICE CBOX_HYPERQWEN_MODELS_PATH CBOX_HYPERQWEN_SPEC CBOX_HYPERQWEN_CTX CBOX_HYPERQWEN_MAX_LEN CBOX_HYPERQWEN_SHM_SIZE CBOX_HYPERQWEN_KV_OFFLOAD CBOX_HYPERQWEN_KV_OFFLOAD_MIB CBOX_HYPERQWEN_RAM_RESERVE_GIB'
+          printf '%s\n' 'CBOX_HYPERQWEN_MODE CBOX_HYPERQWEN_IMAGE CBOX_HYPERQWEN_OFFLINE CBOX_HYPERQWEN_GPU_DEVICE CBOX_HYPERQWEN_MODELS_PATH CBOX_HYPERQWEN_SPEC CBOX_HYPERQWEN_CTX CBOX_HYPERQWEN_MAX_LEN CBOX_HYPERQWEN_SHM_SIZE CBOX_HYPERQWEN_KV_OFFLOAD CBOX_HYPERQWEN_KV_OFFLOAD_MIB CBOX_HYPERQWEN_RAM_RESERVE_GIB'
           ;;
         wireguard)
           printf '%s\n' 'CBOX_WG_MODE CBOX_WG_IMPL CBOX_WG_ADDRESS CBOX_WG_LISTEN_PORT CBOX_WG_PUBLISH_ADDR CBOX_WG_PEER_ENDPOINT CBOX_WG_PEER_PUBKEY CBOX_WG_PEER_ADDRESS CBOX_WG_KEEPALIVE CBOX_WG_FORWARDS CBOX_WG_CLIENT_ATTACH'
@@ -301,7 +301,7 @@ sec_get() {
           printf '%s\n' ''
           ;;
         settings)
-          printf '%s\n' ''
+          printf '%s\n' 'CBOX_MODEL_FABLE CBOX_MODEL_OPUS CBOX_MODEL_HAIKU'
           ;;
         hooks)
           printf '%s\n' ''
@@ -319,7 +319,7 @@ sec_get() {
           printf '%s\n' 'CBOX_RESTART_POLICY'
           ;;
         autoupdate)
-          printf '%s\n' 'CBOX_AUTOUPDATE CBOX_AUTOUPDATE_TTL_HOURS'
+          printf '%s\n' 'CBOX_AUTOUPDATE CBOX_AUTOUPDATE_TTL_HOURS CBOX_MODEL_CHECK'
           ;;
         dns)
           printf '%s\n' 'CBOX_DNS_MODE CBOX_DNS_SERVERS CBOX_DNS_STUB_IP'
@@ -413,7 +413,7 @@ sec_get() {
           printf '%s\n' 'none'
           ;;
         settings)
-          printf '%s\n' 'restart'
+          printf '%s\n' 'recreate'
           ;;
         hooks)
           printf '%s\n' 'restart'

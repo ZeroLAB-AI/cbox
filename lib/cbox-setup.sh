@@ -944,9 +944,9 @@ staged_install_files() {
 
 merge_settings_json() {
   local target="$1" merge="$2" home="$3" out="$4"
-  python3 - "$target" "$merge" "$home" "$out" <<'PYEOF'
+  python3 - "$target" "$merge" "$home" "$out" "${CBOX_MODEL_FABLE:-claude-opus-5-5[1m]}" "${CBOX_MODEL_OPUS:-}" "${CBOX_MODEL_HAIKU:-}" <<'PYEOF'
 import json, os, sys
-target, merge_path, home, out = sys.argv[1:5]
+target, merge_path, home, out, model_fable, model_opus, model_haiku = sys.argv[1:8]
 data = {}
 if os.path.isfile(target):
     try:
@@ -957,6 +957,12 @@ if os.path.isfile(target):
 with open(merge_path) as f:
     raw = f.read().replace("@HOME@", home)
 merge = json.loads(raw)
+if "ANTHROPIC_DEFAULT_FABLE_MODEL" in merge.get("env", {}):
+    merge["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"] = model_fable
+if model_opus and "ANTHROPIC_DEFAULT_OPUS_MODEL" in merge.get("env", {}):
+    merge["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model_opus
+if model_haiku and "ANTHROPIC_DEFAULT_HAIKU_MODEL" in merge.get("env", {}):
+    merge["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model_haiku
 
 def superseded_commands(entry):
     out = set()
@@ -2735,7 +2741,7 @@ kernel_lang_rule_line() {
   local out_lang="${CBOX_KERNEL_LANG_OUTPUT:-}" reasoning_lang="${CBOX_KERNEL_LANG_REASONING:-}"
   [ -n "$out_lang" ] || return 0
   [ -n "$reasoning_lang" ] || reasoning_lang="$out_lang"
-  printf 'LANGUAGE: reason and think in %s; answer and write every output in %s.\n' "$reasoning_lang" "$out_lang"
+  printf 'LANGUAGE: reason and think in %s; answer the human in %s. Files, code and commits follow K3 (ASCII) and prompts to hermes-local are English. This rule overrides any other language or diacritics instruction.\n' "$reasoning_lang" "$out_lang"
 }
 
 apply_kernel_lang_rule() {
@@ -2807,7 +2813,15 @@ claude_md_kernel_block_file() {
   local out="$1"
   local kernel_src="$ETC_DIR/hooks/conduct-kernel.txt"
   [ -f "$kernel_src" ] || die "missing conduct-kernel source $kernel_src"
-  local rendered digest
+  local rendered digest docs manual_line=""
+  if [ "${CBOX_CLAUDE_MODE:-mount}" = mount ]; then
+    docs="${CBOX_CLAUDE_PATH:-$HOME/.claude}/cbox-docs"
+  else
+    docs="${GEN_DIR:-$INSTALL_DIR/generated}/claude/cbox-docs"
+  fi
+  if [ -f "$docs/MANUAL.md" ] && [ ! -L "$docs/MANUAL.md" ]; then
+    manual_line="For cbox setup, config, features or troubleshooting, read ${HOST_HOME:-$HOME}/.claude/cbox-docs/MANUAL.md: grep '^#' for sections, then read the section; cbox commands run on the host."
+  fi
   rendered="$(mktemp)"
   apply_name_substitution "$kernel_src" "$rendered"
   apply_kernel_lang_rule "$rendered"
@@ -2818,6 +2832,7 @@ claude_md_kernel_block_file() {
     cat "$rendered"
     claude_md_container_exec_paragraph
     claude_md_netaccess_line
+    [ -z "$manual_line" ] || printf '\n%s\n' "$manual_line"
     printf 'Digest: %s\n' "$digest"
     printf '%s\n' "$CLAUDE_MD_KERNEL_MARK_END"
   } > "$out"
@@ -3006,6 +3021,15 @@ claude_md_target_base() {
   fi
 }
 
+claude_md_deploy_docs() {
+  local target="$1" f
+  mkdir -p "$target"
+  for f in MANUAL.md README.md; do
+    [ -f "$INSTALL_DIR/$f" ] || die "missing document source $INSTALL_DIR/$f"
+    _cbox_write_local "$target/$f" < "$INSTALL_DIR/$f"
+  done
+}
+
 step_claude_md() {
   echo "== section: claude-md =="
   if [ "$CBOX_HISTORY" = 0 ]; then
@@ -3036,6 +3060,7 @@ step_claude_md() {
     claude_md_prune_deselected "$CBOX_CLAUDE_PATH/templates" "$ETC_DIR/claude/templates" "${template_files[@]}"
     staged_install_files "$stage/policies" "$CBOX_CLAUDE_PATH/policies" 0644 "${policy_files[@]}" || true
     staged_install_files "$stage/templates" "$CBOX_CLAUDE_PATH/templates" 0644 "${template_files[@]}" || true
+    claude_md_deploy_docs "$CBOX_CLAUDE_PATH/cbox-docs"
     local target="$CBOX_CLAUDE_PATH/CLAUDE.md" work
     work="$stage/target-claude-md"
     if [ -f "$target" ]; then
@@ -3062,6 +3087,7 @@ step_claude_md() {
     for f in "${template_files[@]}"; do
       _cbox_write_local "$GEN_DIR/claude/templates/$f" < "$stage/templates/$f"
     done
+    claude_md_deploy_docs "$GEN_DIR/claude/cbox-docs"
     local work="$GEN_DIR/claude/CLAUDE.md"
     if [ ! -f "$work" ]; then
       cp "$stage/CLAUDE.md" "$work"
@@ -3109,7 +3135,7 @@ step_hooks() {
   fi
   gen_hooks_dir
   if [ "$CBOX_CLAUDE_MODE" = mount ]; then
-    staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 codex_mode_guard.py agent_label_guard.py code_hygiene_guard.py commit_guard.py rm_glob_guard.py net_proxy_guard.py rm_permission_gate.py spawn_gate.py codex_guard_bridge.py hermes_guard_bridge.py orchestrator-global.txt conduct-kernel.txt session-core.txt codex_scope.container.json ask_claude_mcp.py ask_claude_fallback_models.json codex_notify.py codex_bump_probe.sh codex_mcp_shim.py hermes_delegate_mcp.py local_model_mcp.py container_exec_mcp.py cbox_net_mcp.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py continuity_session_start.py session_scope_farm.py limit_watchdog.py session_pane_map.py usage_statusline.py codex_usage_refresh.py claude_usage_refresh.py cbox_budget.py || true
+    staged_install_files "$GEN_DIR/hooks" "$CBOX_CLAUDE_PATH/hooks" 0644 codex_mode_guard.py agent_label_guard.py paid_agent_tracker.py code_hygiene_guard.py commit_guard.py rm_glob_guard.py net_proxy_guard.py rm_permission_gate.py spawn_gate.py codex_guard_bridge.py hermes_guard_bridge.py cbox_hermes_acp.py conduct-kernel.txt session-core.txt codex_scope.container.json ask_claude_mcp.py ask_claude_fallback_models.json codex_notify.py codex_bump_probe.sh codex_mcp_shim.py hermes_delegate_mcp.py local_model_mcp.py container_exec_mcp.py cbox_net_mcp.py continuity_commit_log.py continuity_ledger_sweep.py continuity_session_digest.py continuity_session_start.py session_scope_farm.py limit_watchdog.py session_pane_map.py usage_statusline.py codex_usage_refresh.py claude_usage_refresh.py cbox_budget.py || true
   else
     note "volume mode: hooks are served read-only from $GEN_DIR/hooks (synced)"
   fi
@@ -4430,6 +4456,12 @@ run_local() {
   digest="$(_cbox_resolve_base_digest ubuntu:24.04)" || die "cannot resolve base image digest and no local image - network required for first build"
   cp "$INSTALL_DIR/entrypoint.sh" "$eff/entrypoint.sh"
   cp "$INSTALL_DIR/install-bins.sh" "$eff/install-bins.sh"
+  cp "$INSTALL_DIR/lib/codex-acp-exec.sh" "$eff/codex-acp-exec.sh"
+  cp "$INSTALL_DIR/lib/codex_acp_config.py" "$eff/codex_acp_config.py"
+  mkdir -p "$eff/acp-claude"
+  cp "$INSTALL_DIR/acp-claude/package.json" "$INSTALL_DIR/acp-claude/package-lock.json" "$eff/acp-claude/"
+  mkdir -p "$eff/acp-codex"
+  cp "$INSTALL_DIR/acp-codex/package.json" "$INSTALL_DIR/acp-codex/package-lock.json" "$eff/acp-codex/"
   gen_session_entry_into "$eff"
   gen_image_inputs "$eff" "$digest"
   local img_hash img_tag

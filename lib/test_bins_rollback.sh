@@ -577,9 +577,9 @@ run_rollback_group() {
 R1="$TMPBASE/r1"
 mkdir -p "$R1/.config/cbox"
 run_rollback_group "$R1" "claude codex" "cbox-bins: claude 1.0.0 abcd rollback 2.0.0 manual" >"$R1.out"
-grep -Eq '^[0-9]+\|vol-claude\|claude\|stable\|2\.0\.0\|1\.0\.0\|rollback\|manual$' "$R1/.config/cbox/bins.history" \
+grep -Eq '^[0-9]+\|vol-claude\|claude\|stable\+acp0\.90\.0\|2\.0\.0\|1\.0\.0\|rollback\|manual$' "$R1/.config/cbox/bins.history" \
   || _fail "cbox: a successful rollback line must append a history line with from=badver, to=restored version, status=rollback"
-grep -q "vol-claude|claude|stable|1.0.0|" "$R1/.config/cbox/bins.stamp" \
+grep -q "vol-claude|claude|stable+acp0.90.0|1.0.0|" "$R1/.config/cbox/bins.stamp" \
   || _fail "cbox: a successful rollback must update the version cache to the restored version"
 _ok "cbox: _bins_run_rollback_group records a successful rollback in both the cache and the append-only history"
 

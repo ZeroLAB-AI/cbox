@@ -31,6 +31,14 @@ CLROOT="$HOST_HOME/.local"
 CXPKG="$HOST_HOME/.codex/packages"
 HXROOT="/opt/hermes"
 HXSEED="$HXROOT/delegate-home"
+ACPROOT="$CLROOT/acp-claude"
+ACPSRC="/opt/cbox/acp-claude"
+CDACPROOT="$CLROOT/acp-codex"
+CDACPSRC="/opt/cbox/acp-codex"
+ACPNODE_VERSION="22.23.3"
+ACPADAPTER_VERSION="0.90.0"
+CDACPADAPTER_VERSION="2.2.2"
+ACPNODE_SHA256="1084aa36196bba4c3a5e69a1ee388a6e4ff729dad09445fbcd434b28fe3c24af"
 
 getent group "$HOST_GID" >/dev/null || groupadd -g "$HOST_GID" "$HOST_USER"
 id -u "$HOST_USER" >/dev/null 2>&1 || useradd -o -u "$HOST_UID" -g "$HOST_GID" -d "$HOST_HOME" -s /bin/bash "$HOST_USER"
@@ -217,7 +225,110 @@ _adopt_check() {
   local cur_hash want_hash
   want_hash="$(_stamp_field "$stamp" 3)" || return 1
   cur_hash="$(_tool_hash "$name" "$resolved")" || return 1
-  [ "$cur_hash" = "$want_hash" ]
+  [ "$cur_hash" = "$want_hash" ] || return 1
+  if [ "$name" = hermes ]; then
+    "$HXROOT/bin/python3" -c 'import importlib.metadata as m; assert m.version("agent-client-protocol") == "0.9.0"; assert m.version("mcp") == "1.26.0"; assert m.version("starlette") == "1.0.1"' >/dev/null 2>&1 || return 1
+  elif [ "$name" = claude ]; then
+    _claude_acp_ready || return 1
+  elif [ "$name" = codex ]; then
+    _codex_acp_ready || return 1
+  fi
+}
+
+_claude_acp_ready() {
+  local node="$ACPROOT/node/bin/node" pkg="$ACPROOT/adapter/node_modules/@agentclientprotocol/claude-agent-acp/package.json"
+  local entry="$ACPROOT/adapter/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js"
+  local stamp="$ACPROOT/.cbox-acp-stamp" node_hash lock_hash
+  [ -x "$node" ] && [ -f "$pkg" ] && [ -f "$entry" ] && [ -f "$stamp" ] || return 1
+  [ "$("$node" --version 2>/dev/null)" = "v$ACPNODE_VERSION" ] || return 1
+  [ "$("$node" -p 'require(process.argv[1]).version' "$pkg" 2>/dev/null)" = "$ACPADAPTER_VERSION" ] || return 1
+  cmp -s "$ACPSRC/package-lock.json" "$ACPROOT/adapter/package-lock.json" || return 1
+  [ "$(sed -n '1p' "$stamp")" = "$ACPNODE_VERSION" ] || return 1
+  [ "$(sed -n '2p' "$stamp")" = "$ACPADAPTER_VERSION" ] || return 1
+  node_hash="$(sha256sum "$node" | awk '{print $1}')" || return 1
+  lock_hash="$(sha256sum "$ACPROOT/adapter/package-lock.json" | awk '{print $1}')" || return 1
+  [ "$(sed -n '3p' "$stamp")" = "$node_hash" ] && [ "$(sed -n '4p' "$stamp")" = "$lock_hash" ]
+}
+
+_install_claude_acp() {
+  local archive tmp node_dir adapter_dir node_hash lock_hash old
+  old="$CLROOT/.cbox-acp-old"
+  if [ -e "$old" ]; then
+    if [ -e "$ACPROOT" ]; then
+      _gosu find "$old" -depth -delete || return 1
+    else
+      _gosu mv "$old" "$ACPROOT" || return 1
+    fi
+  fi
+  archive="$(_gosu mktemp "$CLROOT/.cbox-node.XXXXXX")" || return 1
+  tmp="$(_gosu mktemp -d "$CLROOT/.cbox-acp.XXXXXX")" || return 1
+  _gosu curl -fsSL --connect-timeout 10 --retry 2 --retry-connrefused -o "$archive" "https://nodejs.org/dist/v$ACPNODE_VERSION/node-v$ACPNODE_VERSION-linux-x64.tar.gz" || return 1
+  printf '%s  %s\n' "$ACPNODE_SHA256" "$archive" | sha256sum -c - >/dev/null || return 1
+  node_dir="$tmp/node"
+  adapter_dir="$tmp/adapter"
+  _gosu mkdir -p "$node_dir" "$adapter_dir" || return 1
+  _gosu tar -xzf "$archive" --strip-components=1 -C "$node_dir" || return 1
+  _gosu cp "$ACPSRC/package.json" "$ACPSRC/package-lock.json" "$adapter_dir/" || return 1
+  _gosu env PATH="$node_dir/bin:$PATH" "$node_dir/bin/npm" ci --prefix "$adapter_dir" --ignore-scripts --omit=optional --no-audit --no-fund >&2 || return 1
+  node_hash="$(sha256sum "$node_dir/bin/node" | awk '{print $1}')" || return 1
+  lock_hash="$(sha256sum "$adapter_dir/package-lock.json" | awk '{print $1}')" || return 1
+  printf '%s\n%s\n%s\n%s\n' "$ACPNODE_VERSION" "$ACPADAPTER_VERSION" "$node_hash" "$lock_hash" | _gosu tee "$tmp/.cbox-acp-stamp" >/dev/null || return 1
+  if [ -e "$ACPROOT" ]; then
+    _gosu mv "$ACPROOT" "$old" || return 1
+  fi
+  if ! _gosu mv "$tmp" "$ACPROOT"; then
+    [ ! -e "$old" ] || _gosu mv "$old" "$ACPROOT"
+    return 1
+  fi
+  [ ! -e "$old" ] || _gosu find "$old" -depth -delete
+  _gosu find "$archive" -delete
+  _claude_acp_ready
+}
+
+_codex_acp_ready() {
+  local node="$ACPROOT/node/bin/node" pkg="$CDACPROOT/adapter/node_modules/@agentclientprotocol/codex-acp/package.json"
+  local entry="$CDACPROOT/adapter/node_modules/@agentclientprotocol/codex-acp/dist/index.js"
+  local stamp="$CDACPROOT/.cbox-acp-stamp" node_hash lock_hash
+  [ -x "$node" ] && [ -f "$pkg" ] && [ -f "$entry" ] && [ -f "$stamp" ] || return 1
+  [ "$("$node" --version 2>/dev/null)" = "v$ACPNODE_VERSION" ] || return 1
+  [ "$("$node" -p 'require(process.argv[1]).version' "$pkg" 2>/dev/null)" = "$CDACPADAPTER_VERSION" ] || return 1
+  cmp -s "$CDACPSRC/package-lock.json" "$CDACPROOT/adapter/package-lock.json" || return 1
+  [ "$(sed -n '1p' "$stamp")" = "$ACPNODE_VERSION" ] || return 1
+  [ "$(sed -n '2p' "$stamp")" = "$CDACPADAPTER_VERSION" ] || return 1
+  node_hash="$(sha256sum "$node" | awk '{print $1}')" || return 1
+  lock_hash="$(sha256sum "$CDACPROOT/adapter/package-lock.json" | awk '{print $1}')" || return 1
+  [ "$(sed -n '3p' "$stamp")" = "$node_hash" ] && [ "$(sed -n '4p' "$stamp")" = "$lock_hash" ]
+}
+
+_install_codex_acp() {
+  local tmp adapter_dir node node_hash lock_hash old
+  _claude_acp_ready || _install_claude_acp || return 1
+  node="$ACPROOT/node/bin/node"
+  old="$CLROOT/.cbox-acp-codex-old"
+  if [ -e "$old" ]; then
+    if [ -e "$CDACPROOT" ]; then
+      _gosu find "$old" -depth -delete || return 1
+    else
+      _gosu mv "$old" "$CDACPROOT" || return 1
+    fi
+  fi
+  tmp="$(_gosu mktemp -d "$CLROOT/.cbox-acp-codex.XXXXXX")" || return 1
+  adapter_dir="$tmp/adapter"
+  _gosu mkdir -p "$adapter_dir" || return 1
+  _gosu cp "$CDACPSRC/package.json" "$CDACPSRC/package-lock.json" "$adapter_dir/" || return 1
+  _gosu env PATH="$ACPROOT/node/bin:$PATH" "$ACPROOT/node/bin/npm" ci --prefix "$adapter_dir" --ignore-scripts --omit=optional --no-audit --no-fund >&2 || return 1
+  node_hash="$(sha256sum "$node" | awk '{print $1}')" || return 1
+  lock_hash="$(sha256sum "$adapter_dir/package-lock.json" | awk '{print $1}')" || return 1
+  printf '%s\n%s\n%s\n%s\n' "$ACPNODE_VERSION" "$CDACPADAPTER_VERSION" "$node_hash" "$lock_hash" | _gosu tee "$tmp/.cbox-acp-stamp" >/dev/null || return 1
+  if [ -e "$CDACPROOT" ]; then
+    _gosu mv "$CDACPROOT" "$old" || return 1
+  fi
+  if ! _gosu mv "$tmp" "$CDACPROOT"; then
+    [ ! -e "$old" ] || _gosu mv "$old" "$CDACPROOT"
+    return 1
+  fi
+  [ ! -e "$old" ] || _gosu find "$old" -depth -delete
+  _codex_acp_ready
 }
 
 _run_claude_install() {
@@ -228,7 +339,8 @@ _run_claude_install() {
     trap "rm -rf \"$tmp\" \"$cfg\"" EXIT
     curl -fsSL --connect-timeout 10 --retry 2 --retry-connrefused -o "$tmp" https://claude.ai/install.sh
     CLAUDE_CONFIG_DIR="$cfg" bash "$tmp" "$1"
-  ' claude-install "$CBOX_CLAUDE_TARGET" >&2
+  ' claude-install "$CBOX_CLAUDE_TARGET" >&2 || return 1
+  _install_claude_acp
 }
 
 _run_codex_install() {
@@ -238,7 +350,8 @@ _run_codex_install() {
     trap "rm -f \"$tmp\"" EXIT
     curl -fsSL --connect-timeout 10 --retry 2 --retry-connrefused -o "$tmp" https://chatgpt.com/codex/install.sh
     sh "$tmp"
-  ' >&2
+  ' >&2 || return 1
+  _install_codex_acp
 }
 
 _hermes_stamp_install_method() {
@@ -511,7 +624,7 @@ _run_hermes_install() {
   if [ -d "$(_hermes_backup_dir)" ]; then backed_up=1; fi
   if [ "$take_rc" = 0 ]; then
     if _hermes_venv_reset; then
-      { _hxgosu "$HXROOT/bin/pip" install --no-cache-dir "$spec" && _hermes_stamp_install_method && _hermes_seed_delegate_home || rc=1; } >&2
+      { _hxgosu "$HXROOT/bin/pip" install --no-cache-dir "$spec" 'agent-client-protocol==0.9.0' 'mcp==1.26.0' 'starlette==1.0.1' && _hermes_stamp_install_method && _hermes_seed_delegate_home || rc=1; } >&2
     else
       rc=1
     fi

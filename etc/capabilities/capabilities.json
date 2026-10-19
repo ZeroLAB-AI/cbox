@@ -33,6 +33,40 @@
       },
       "degrade_floor": "none"
     },
+    "cbox-manual": {
+      "class": "context",
+      "enforcement": "advisory",
+      "audience": "all",
+      "sources": [
+        "MANUAL.md",
+        "README.md",
+        "lib/cbox-setup.sh",
+        "templates/generators.sh",
+        "entrypoint.sh"
+      ],
+      "enabled_when_env": null,
+      "planes": [
+        "native",
+        "substrate"
+      ],
+      "bindings": {
+        "claude": {
+          "mechanism": "claude-md-discovery-line+readonly-docs-bind",
+          "artifact": "generated/claude/CLAUDE.md",
+          "status": "live"
+        },
+        "codex": {
+          "mechanism": "agents-override-discovery-line+readonly-docs-bind",
+          "artifact": "generated/codex/AGENTS.override.md",
+          "status": "live"
+        },
+        "hermes": {
+          "mechanism": "ephemeral-system-prompt-discovery-line+readonly-docs-bind",
+          "status": "live"
+        }
+      },
+      "degrade_floor": "feature-off"
+    },
     "context-to-delegates": {
       "class": "context",
       "enforcement": "advisory",
@@ -365,6 +399,26 @@
           "mechanism": "pretooluse-hook",
           "matcher": "Agent|Workflow",
           "artifact": "etc/hooks/spawn_gate.py",
+          "status": "live"
+        }
+      },
+      "degrade_floor": "advisory-text"
+    },
+    "guard-paid-concurrency": {
+      "class": "guard",
+      "enforcement": "behavioral",
+      "audience": "driver",
+      "sources": [
+        "etc/hooks/paid_agent_tracker.py"
+      ],
+      "enabled_when_env": null,
+      "planes": [
+        "native"
+      ],
+      "bindings": {
+        "claude": {
+          "mechanism": "subagent-lifecycle-hook",
+          "artifact": "etc/hooks/paid_agent_tracker.py",
           "status": "live"
         }
       },

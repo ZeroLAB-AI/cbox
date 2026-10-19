@@ -38,11 +38,11 @@ out_bogus="$(cat "$BOGUS_RAW")"
 cmp -s "$BARE_RAW" "$BOGUS_RAW" || _fail "non-TTY bare cbox output differs byte-for-byte (including trailing newlines) from an invalid-subcommand invocation"
 _ok "non-TTY bare cbox is byte-identical to an invalid-subcommand invocation (usage text + exit code, verified raw-byte via cmp, not just command-substitution-stripped)"
 
-echo "$out_bare" | grep -qF "usage: $INSTALL_DIR/cbox {run" || _fail "usage text missing the run-verb summary"
+echo "$out_bare" | grep -qF "usage: $INSTALL_DIR/cbox {acp <hermes|claude|codex>|run" || _fail "usage text missing the acp and run summaries"
 _ok "usage text intact"
 
 out_stdout_tty="$(HOME="$FIXHOME" script -qec "$(printf '%q' "$INSTALL_DIR/cbox") </dev/null" /dev/null 2>&1)" || true
-echo "$out_stdout_tty" | grep -qF "usage: $INSTALL_DIR/cbox {run" \
+echo "$out_stdout_tty" | grep -qF "usage: $INSTALL_DIR/cbox {acp <hermes|claude|codex>|run" \
   || _fail "stdin from /dev/null (non-TTY) with a TTY stdout unexpectedly opened the hub"
 _ok "TTY stdout alone (non-TTY stdin) does not open the hub"
 

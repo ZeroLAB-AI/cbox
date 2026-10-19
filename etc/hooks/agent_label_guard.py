@@ -42,6 +42,10 @@ try:
 except Exception:
     cbox_budget = None
 try:
+    import paid_agent_tracker
+except Exception:
+    paid_agent_tracker = None
+try:
     import limit_watchdog
 except Exception:
     limit_watchdog = None
@@ -217,6 +221,58 @@ def quota_n_claude(family="claude"):
     if budget.get("status") not in ("ok", "override") or budget.get("free"):
         return None
     return budget.get("n")
+
+
+FREE_AGENT_TYPES = paid_agent_tracker.FREE_AGENT_TYPES if paid_agent_tracker is not None else set()
+
+
+def paid_running_deny_reason(running=None):
+    if cbox_budget is None or paid_agent_tracker is None:
+        return None
+    try:
+        if cbox_budget._subscription_profile() != "low":
+            return None
+        if running is None:
+            running = paid_agent_tracker.running_paid_agents()
+    except Exception:
+        return None
+    if not running:
+        return None
+    agents = ", ".join("%s %s %s %dm" % (
+            "reserved, not started" if r.get("kind") == "pending" else "running",
+            paid_agent_tracker.marker_name(r.get("agent_type")) or "?",
+            paid_agent_tracker.marker_name(r.get("agent_id")) or "?",
+            max(0, int((time.time() - r["ts"]) / 60))) for r in running)
+    reason = (
+        "CBOX_SUBSCRIPTION_PROFILE=low allows one paid agent at a time; "
+        "running: %s; wait for completion, or send this step to hermes-local" % agents)
+    marker = next((r for r in running if r.get("kind") != "pending"), None)
+    if marker:
+        reason += ("; if this marker is known dead, run python3 "
+                   "~/.claude/hooks/paid_agent_tracker.py clear %s"
+                   % paid_agent_tracker.marker_name(marker["agent_id"]))
+    if any(r.get("kind") == "pending" for r in running):
+        reason += ("; stuck reservations are cleared with python3 "
+                   "~/.claude/hooks/paid_agent_tracker.py clear --all")
+    return reason
+
+
+def reserve_paid_deny_reason(atype, data):
+    if cbox_budget is None or paid_agent_tracker is None:
+        return None
+    if cbox_budget._subscription_profile() != "low":
+        return None
+    try:
+        running = paid_agent_tracker.reserve_paid_agent(
+            atype, data.get("session_id"), data.get("tool_use_id"))
+    except Exception as exc:
+        reason = getattr(exc, "args", (None,))
+        detail = str(reason[0]) if reason and reason[0] else str(exc)
+        if "fix: python3" in detail:
+            return ("cannot verify the paid-agent state: %s" % detail)
+        return ("cannot verify the paid-agent state: %s (fix: python3 "
+                "~/.claude/hooks/paid_agent_tracker.py reset)" % detail)
+    return paid_running_deny_reason(running)
 
 
 def label_re(atype):
@@ -433,6 +489,24 @@ def _script_runs_local_agent(tokens):
     return False
 
 
+def workflow_has_paid_agent(script):
+    tokens = scan_js(script)
+    for k, (kind, val, _) in enumerate(tokens):
+        if kind != "id" or val != "agent":
+            continue
+        prev = tokens[k - 1] if k else ("p", "", 0)
+        nxt = tokens[k + 1] if k + 1 < len(tokens) else ("p", "", 0)
+        if prev[:2] == ("p", ".") or nxt[:2] != ("p", "("):
+            continue
+        opts, close = _options_after(tokens, k + 1)
+        if opts is None:
+            return True
+        state, atype = _literal_prop(tokens, opts, close, "agentType")
+        if state != "literal" or atype not in FREE_AGENT_TYPES:
+            return True
+    return False
+
+
 def workflow_violations(script, local_first=True, enforce_cap=True):
     tokens = scan_js(script)
     local_in_script = _script_runs_local_agent(tokens)
@@ -540,6 +614,11 @@ def main():
                        "substitutes without their own reason: %s; %s" % ("; ".join(problems), MARKER_HELP))
             else:
                 refuse("this workflow cannot be admitted: %s" % "; ".join(problems))
+            return
+        if workflow_has_paid_agent(script):
+            paid_reason = reserve_paid_deny_reason("Workflow", data)
+            if paid_reason:
+                refuse(paid_reason)
         return
     if data.get("tool_name") != "Agent":
         return
@@ -553,6 +632,10 @@ def main():
             refuse(reason)
             return
     if atype in EXEMPT:
+        if atype not in FREE_AGENT_TYPES:
+            paid_reason = reserve_paid_deny_reason(atype, data)
+            if paid_reason:
+                refuse(paid_reason)
         return
     if "/" in atype or "\\" in atype or ".." in atype:
         return
@@ -588,6 +671,11 @@ def main():
         prefix = "%s (%s/%s): " % (atype, model, effort)
     else:
         prefix = "%s (%s): " % (atype, model)
+    if atype not in FREE_AGENT_TYPES:
+        paid_reason = reserve_paid_deny_reason(atype, data)
+        if paid_reason:
+            refuse(paid_reason)
+            return
     if desc.startswith(prefix):
         return
     task = label_re(atype).sub("", desc)

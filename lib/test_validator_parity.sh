@@ -609,6 +609,46 @@ _new_case CBOX_CODEX_MODEL "bad model" reject
 _new_case CBOX_CODEX_MODEL "bad;rm -rf /" reject
 _new_case CBOX_CODEX_MODEL '$(evil)' reject
 
+_new_case CBOX_MODEL_FABLE 'claude-opus-5-5[1m]' accept
+_new_case CBOX_MODEL_FABLE 'claude-opus-5-5' accept
+_new_case CBOX_MODEL_FABLE 'claude-fable-5-1' reject
+_new_case CBOX_MODEL_FABLE 'claude-fable-5-1[1m]' reject
+_new_case CBOX_MODEL_FABLE 'Claude Opus' reject
+_new_case CBOX_MODEL_FABLE '' reject
+
+_new_case CBOX_MODEL_OPUS 'claude-opus-5-5[1m]' accept
+_new_case CBOX_MODEL_OPUS 'claude-opus-5-6' accept
+_new_case CBOX_MODEL_OPUS 'claude-fable-5-1' reject
+_new_case CBOX_MODEL_OPUS 'claude-fable-5-1[1m]' reject
+_new_case CBOX_MODEL_OPUS 'Claude Opus' reject
+_new_case CBOX_MODEL_OPUS '' reject
+_new_case CBOX_MODEL_HAIKU 'claude-haiku-5-5' accept
+_new_case CBOX_MODEL_HAIKU 'claude-haiku-5-6[1m]' accept
+_new_case CBOX_MODEL_HAIKU 'claude-fable-5-1' reject
+_new_case CBOX_MODEL_HAIKU 'haiku' reject
+_new_case CBOX_MODEL_HAIKU '' reject
+
+_new_case CBOX_MODEL_CODEX_SOL 'gpt-6-sol' accept
+_new_case CBOX_MODEL_CODEX_SOL 'gpt-6.1-sol' accept
+_new_case CBOX_MODEL_CODEX_SOL 'gpt-6.1' reject
+_new_case CBOX_MODEL_CODEX_SOL 'gpt-6-Sol' reject
+_new_case CBOX_MODEL_CODEX_SOL 'gpt-6.-sol' reject
+_new_case CBOX_MODEL_CODEX_SOL 'gpt-6-sol;rm' reject
+_new_case CBOX_MODEL_CODEX_SOL '' reject
+_new_case CBOX_MODEL_CODEX_LUNA 'gpt-6-luna' accept
+_new_case CBOX_MODEL_CODEX_LUNA 'gpt-7-luna' accept
+_new_case CBOX_MODEL_CODEX_LUNA 'claude-opus-5-5' reject
+_new_case CBOX_MODEL_CODEX_LUNA '' reject
+_new_case CBOX_MODEL_CODEX_ASTRA 'gpt-6-astra' accept
+_new_case CBOX_MODEL_CODEX_ASTRA 'gpt-6.10-astra' accept
+_new_case CBOX_MODEL_CODEX_ASTRA 'gpt--astra' reject
+_new_case CBOX_MODEL_CODEX_ASTRA '' reject
+
+_new_case CBOX_MODEL_CHECK on accept
+_new_case CBOX_MODEL_CHECK off accept
+_new_case CBOX_MODEL_CHECK maybe reject
+_new_case CBOX_MODEL_CHECK '' reject
+
 _new_case CBOX_HERMES_EFFORT "" reject
 _new_case CBOX_HERMES_DELEGATE_MODE agent accept
 _new_case CBOX_HERMES_DELEGATE_MODE workspace reject
@@ -748,6 +788,9 @@ _new_case CBOX_HYPERQWEN_GPU_DEVICE '0$(x)' reject
 _new_case CBOX_HYPERQWEN_MODE off accept
 _new_case CBOX_HYPERQWEN_MODE on accept
 _new_case CBOX_HYPERQWEN_MODE bogus reject
+_new_case CBOX_HYPERQWEN_OFFLINE off accept
+_new_case CBOX_HYPERQWEN_OFFLINE on accept
+_new_case CBOX_HYPERQWEN_OFFLINE bogus reject
 _new_case CBOX_HYPERQWEN_IMAGE "ghcr.io/syv-ai/hyperqwen:sha-53557bc" accept
 _new_case CBOX_HYPERQWEN_IMAGE "ghcr.io/syv-ai/hyperqwen:sha-53557bc@sha256:25bfa39ca4b71d5ba5ea32e5486c841dd4fb8b6429846c012ec5d1b06b2457a6" accept
 _new_case CBOX_HYPERQWEN_IMAGE "ghcr.io/syv-ai/hyperqwen@sha256:25bfa39ca4b71d5ba5ea32e5486c841dd4fb8b6429846c012ec5d1b06b2457a6" accept

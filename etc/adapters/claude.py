@@ -116,6 +116,15 @@ def cmd_settings_merge():
         text = fh.read()
     text = text.replace("@HOME@", home)
     settings = json.loads(text)
+    env = settings.get("env", {})
+    pins = (
+        ("ANTHROPIC_DEFAULT_FABLE_MODEL", 4),
+        ("ANTHROPIC_DEFAULT_OPUS_MODEL", 5),
+        ("ANTHROPIC_DEFAULT_HAIKU_MODEL", 6),
+    )
+    for key, pos in pins:
+        if len(sys.argv) > pos and sys.argv[pos] and key in env:
+            env[key] = sys.argv[pos]
     sys.stdout.write(json.dumps(settings, separators=(",", ":")))
 
 

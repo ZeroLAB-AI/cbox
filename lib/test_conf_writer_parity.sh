@@ -218,6 +218,13 @@ _strip_container_exec_tool_line() {
     | grep -v '^CBOX_BUDGET_PACE_WINDOW_H=' \
     | grep -v '^CBOX_BUDGET_PACE_SLACK_H=' \
     | grep -v "^CBOX_CLAUDE_SWITCH_MODELS_ON_FLAG=" \
+    | grep -v '^CBOX_MODEL_FABLE=' \
+    | grep -v '^CBOX_MODEL_OPUS=' \
+    | grep -v '^CBOX_MODEL_HAIKU=' \
+    | grep -v '^CBOX_MODEL_CODEX_SOL=' \
+    | grep -v '^CBOX_MODEL_CODEX_LUNA=' \
+    | grep -v '^CBOX_MODEL_CODEX_ASTRA=' \
+    | grep -v '^CBOX_MODEL_CHECK=' \
     | grep -v '^CBOX_SESSION_MULTIPLEX=' \
     | grep -v '^CBOX_SAFEGUARD_AUTOCONFIRM=' \
     | grep -v '^CBOX_SESSION_BROKER_MODE=' \
@@ -242,6 +249,7 @@ _strip_container_exec_tool_line() {
     | grep -v '^CBOX_OLLAMA_GPU_DEVICE=' \
     | grep -v '^CBOX_HYPERQWEN_MODE=' \
     | grep -v '^CBOX_HYPERQWEN_IMAGE=' \
+    | grep -v '^CBOX_HYPERQWEN_OFFLINE=' \
     | grep -v '^CBOX_HYPERQWEN_GPU_DEVICE=' \
     | grep -v '^CBOX_HYPERQWEN_MODELS_PATH=' \
     | grep -v '^CBOX_HYPERQWEN_SPEC=' \
@@ -327,6 +335,8 @@ for fx in default full isolated special_chars; do
     || _fail "conf_save output for fixture '$fx' is missing the new CBOX_HYPERQWEN_MODE= line"
   grep -q '^CBOX_HYPERQWEN_IMAGE=' "$TMPBASE/new_$fx.conf" \
     || _fail "conf_save output for fixture '$fx' is missing the new CBOX_HYPERQWEN_IMAGE= line"
+  grep -q '^CBOX_HYPERQWEN_OFFLINE=off$' "$TMPBASE/new_$fx.conf" \
+    || _fail "conf_save output for fixture '$fx' is missing the default CBOX_HYPERQWEN_OFFLINE=off line"
   grep -q '^CBOX_HYPERQWEN_GPU_DEVICE=' "$TMPBASE/new_$fx.conf" \
     || _fail "conf_save output for fixture '$fx' is missing the new CBOX_HYPERQWEN_GPU_DEVICE= line"
   grep -q '^CBOX_HYPERQWEN_MODELS_PATH=' "$TMPBASE/new_$fx.conf" \

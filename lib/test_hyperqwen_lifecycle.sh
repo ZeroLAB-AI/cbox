@@ -29,7 +29,7 @@ _load_fn() {
 for fn in \
   _cbox_ollama_lock_file _cbox_ollama_lock_fd_open _cbox_ollama_copyup_recover \
   _cbox_local_backends_gpu_overlap_text _cbox_local_backends_gpu_overlap_warn \
-  _cbox_hyperqwen_image _cbox_hyperqwen_guard _cbox_hyperqwen_models_guard \
+  _cbox_hyperqwen_image _cbox_hyperqwen_offline_image_guard _cbox_hyperqwen_guard _cbox_hyperqwen_models_guard \
   _cbox_hyperqwen_volume_ensure _cbox_hyperqwen_volumes_ensure \
   _cbox_hyperqwen_adopt_or_refuse _cbox_hyperqwen_prepared_marker _cbox_hyperqwen_prepared_ok \
   _cbox_hyperqwen_prepared_write _cbox_hyperqwen_prepared_key _cbox_hyperqwen_heal_recreate_marker _cbox_hyperqwen_heal_recreate_set \
@@ -157,8 +157,8 @@ OTHER_IMAGE="ghcr.io/syv-ai/hyperqwen:sha-0000000"
 
 _reset() {
   : > "$CALLS"
-  unset T_GEN_ERR T_VOLCREATE_RC T_MANIFEST_OK T_INCONTAINER T_STAT_UID T_CID T_UP_ERR T_RUN_RC T_NETCREATE_RC T_PS_CID T_STATE T_LABELS T_PROJECT T_IMAGE
-  unset CBOX_HYPERQWEN_MODE CBOX_HYPERQWEN_IMAGE CBOX_HYPERQWEN_MODELS_PATH CBOX_HYPERQWEN_GPU_DEVICE
+  unset T_GEN_ERR T_VOLCREATE_RC T_MANIFEST_OK T_INCONTAINER T_STAT_UID T_CID T_UP_ERR T_RUN_RC T_NETCREATE_RC T_PS_CID T_STATE T_LABELS T_PROJECT T_IMAGE T_IMAGE_RC
+  unset CBOX_HYPERQWEN_MODE CBOX_HYPERQWEN_IMAGE CBOX_HYPERQWEN_MODELS_PATH CBOX_HYPERQWEN_GPU_DEVICE CBOX_HYPERQWEN_OFFLINE
   unset CBOX_OLLAMA_MODE CBOX_OLLAMA_GPU CBOX_OLLAMA_GPU_DEVICE
   unset CBOX_HYPERQWEN_KV_OFFLOAD CBOX_HYPERQWEN_KV_OFFLOAD_MIB CBOX_HYPERQWEN_RAM_RESERVE_GIB T_MEM_KIB
   rm -rf -- "$HOME/.config"
@@ -902,5 +902,78 @@ for body_fn in _cbox_hyperqwen_prepare_restore _cbox_hyperqwen_reconcile_cmd _cb
   case "$body" in *_cbox_ollama_reconcile_networks_impl*|*_cbox_ollama_gc_scope_networks_impl*) _fail "$body_fn must reach the scope networks through _cbox_hyperqwen_scope_networks only" ;; esac
 done
 _ok "lock wiring: lifecycle and heal use the hyperqwen lock, the shared ollama lock only inside the scope network step"
+
+_reset
+export CBOX_HYPERQWEN_MODE=on
+_render
+( _cbox_hyperqwen_prepare_cmd ) >/dev/null 2>&1 || _fail "online prepare must succeed"
+grep -q '^docker network create ' "$CALLS" || _fail "online prepare must retain the temporary network"
+grep -q '^docker run --rm --name .* --network cbox-hyperqwen-prepare-' "$CALLS" || _fail "online prepare argv changed: $(cat "$CALLS")"
+! grep -q '^docker run .*--pull never' "$CALLS" || _fail "online prepare must retain the current pull behavior"
+! grep -q 'HF_HUB_OFFLINE\|TRANSFORMERS_OFFLINE' "$CALLS" || _fail "online prepare env changed"
+_ok "offline off: prepare network and docker run argv retain the current behavior"
+
+_reset
+export CBOX_HYPERQWEN_MODE=on CBOX_HYPERQWEN_OFFLINE=on
+_render
+( _cbox_hyperqwen_prepare_cmd ) >/dev/null 2>&1 || _fail "offline prepare must succeed with a local image"
+grep -q '^docker run --rm --pull never --name .* --network none ' "$CALLS" || _fail "offline prepare must disable image pulls and networking: $(cat "$CALLS")"
+grep -q -- '-e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1' "$CALLS" || _fail "offline prepare must set the Hugging Face offline env"
+! grep -q '^docker network create\|^docker network rm' "$CALLS" || _fail "offline prepare must not create or remove a prepare network"
+out="$( ( _cbox_hyperqwen_status_cmd ) )"
+case "$out" in *'offline=on'*) ;; *) _fail "status must show offline=on: $out" ;; esac
+_ok "offline on: prepare has no network, never pulls and sets both offline env vars; status shows the mode"
+
+_reset
+export CBOX_HYPERQWEN_MODE=on CBOX_HYPERQWEN_OFFLINE=on
+_render
+T_IMAGE_RC=1
+for command in _cbox_hyperqwen_up_cmd _cbox_hyperqwen_reconcile_cmd _cbox_hyperqwen_prepare_cmd _cbox_hyperqwen_gpu_check_cmd; do
+  : > "$CALLS"
+  rc=0
+  out="$( ( "$command" ) 2>&1)" || rc=$?
+  [ "$rc" != 0 ] || _fail "$command must fail when the offline image is missing"
+  case "$out" in *'scripts/hyperqwen-restore.sh'*'docs/HYPERQWEN_BACKUP.md'*'CBOX_HYPERQWEN_IMAGE'*'CBOX_HYPERQWEN_OFFLINE=off'*) ;; *) _fail "$command must print the complete restore and plain-tag hint: $out" ;; esac
+  ! grep -q '^docker run\|^compose up' "$CALLS" || _fail "$command must not start a container when the image is missing: $(cat "$CALLS")"
+done
+_ok "offline on: missing configured image blocks up, reconcile, prepare and gpu-check before any container run"
+
+_reset
+export CBOX_HYPERQWEN_MODE=on CBOX_HYPERQWEN_OFFLINE=on
+export CBOX_HYPERQWEN_IMAGE="$IMAGE@sha256:25bfa39ca4b71d5ba5ea32e5486c841dd4fb8b6429846c012ec5d1b06b2457a6"
+T_IMAGE_RC=1
+rc=0
+( _cbox_hyperqwen_gpu_check_cmd ) >/dev/null 2>&1 || rc=$?
+[ "$rc" != 0 ] || _fail "a missing digest-pinned image must fail offline"
+grep -qxF "docker image inspect -- $CBOX_HYPERQWEN_IMAGE" "$CALLS" || _fail "offline image inspection must use the configured digest ref exactly: $(cat "$CALLS")"
+[ "$(wc -l < "$CALLS")" -eq 1 ] || _fail "offline gpu-check must not try a tag or CUDA base fallback: $(cat "$CALLS")"
+_ok "offline image guard keeps the configured digest and never falls back to a tag or base image"
+
+_reset
+export CBOX_HYPERQWEN_MODE=on CBOX_HYPERQWEN_OFFLINE=on
+T_RUN_RC=1
+_render
+rc=0
+out="$( ( _cbox_hyperqwen_prepare_cmd ) 2>&1)" || rc=$?
+[ "$rc" != 0 ] || _fail "a failed offline prepare must fail"
+case "$out" in *'models and cache volumes'*'restore them from the backup'*) ;; *) _fail "failed offline prepare must name the restored files requirement: $out" ;; esac
+! grep -q '^docker network create' "$CALLS" || _fail "failed offline prepare must not create a network"
+_ok "offline prepare failure explains that the models and cache must be restored"
+
+_reset
+export CBOX_HYPERQWEN_OFFLINE=on
+( _cbox_hyperqwen_gpu_check_cmd ) >/dev/null 2>&1 || _fail "offline gpu-check must succeed with a local image"
+grep -q '^docker run --rm --pull never --entrypoint nvidia-smi' "$CALLS" || _fail "offline gpu-check must not pull an image: $(cat "$CALLS")"
+! grep -q 'nvidia/cuda:13.0.3-base-ubuntu24.04' "$CALLS" || _fail "offline gpu-check must use the configured image"
+_ok "offline gpu-check uses the configured local image and --pull never"
+
+_reset
+_render
+( eval "$(_extract_fn "$INSTALL_DIR/cbox" _cbox_hyperqwen_owner_compose)"; CBOX_HYPERQWEN_OFFLINE=on _cbox_hyperqwen_owner_compose up -d hyperqwen ) >/dev/null 2>&1 || _fail "offline owner compose up must succeed"
+grep -q '^docker compose .* up --pull never -d hyperqwen$' "$CALLS" || _fail "offline owner compose up must disable pulls even with an older compose file: $(cat "$CALLS")"
+: > "$CALLS"
+( eval "$(_extract_fn "$INSTALL_DIR/cbox" _cbox_hyperqwen_owner_compose)"; CBOX_HYPERQWEN_OFFLINE=off _cbox_hyperqwen_owner_compose up -d hyperqwen ) >/dev/null 2>&1 || _fail "online owner compose up must succeed"
+grep -q '^docker compose .* up -d hyperqwen$' "$CALLS" || _fail "online owner compose up argv changed: $(cat "$CALLS")"
+_ok "owner compose up forbids pulls offline, including an older render, and keeps the online argv"
 
 echo "PASS: all hyperqwen lifecycle checks"

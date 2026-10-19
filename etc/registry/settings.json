@@ -290,7 +290,7 @@
       "id": "settings",
       "title": "Settings",
       "description": "Merge etc/claude/settings.merge.json into the effective ~/.claude/settings.json.",
-      "apply_class": "restart",
+      "apply_class": "recreate",
       "profile": "auto",
       "scope": "project",
       "dependencies": [],
@@ -428,6 +428,48 @@
     "profile"
   ],
   "variables": [
+    {
+      "key": "CBOX_MODEL_FABLE",
+      "section": "settings",
+      "type": {
+        "kind": "string",
+        "escape_hatch": "claude-model-id"
+      },
+      "default": "claude-opus-5-5[1m]",
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Claude fable tier model ID in effective and managed settings and the container environment. The claude-fable-5-1 point release is banned.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_MODEL_OPUS",
+      "section": "settings",
+      "type": {
+        "kind": "string",
+        "escape_hatch": "claude-model-id"
+      },
+      "default": "claude-opus-5-5[1m]",
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Claude opus tier model ID in effective and managed settings and the container environment (ANTHROPIC_DEFAULT_OPUS_MODEL). The claude-fable-5-1 point release is banned.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_MODEL_HAIKU",
+      "section": "settings",
+      "type": {
+        "kind": "string",
+        "escape_hatch": "claude-model-id"
+      },
+      "default": "claude-haiku-5-5",
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Claude haiku tier model ID in effective and managed settings and the container environment (ANTHROPIC_DEFAULT_HAIKU_MODEL). The claude-fable-5-1 point release is banned.",
+      "validator": null
+    },
     {
       "key": "CBOX_MODE",
       "section": "mode",
@@ -1119,6 +1161,48 @@
       "validator": null
     },
     {
+      "key": "CBOX_MODEL_CODEX_SOL",
+      "section": "mcp-servers",
+      "type": {
+        "kind": "string",
+        "escape_hatch": "codex-model-id"
+      },
+      "default": "gpt-6-sol",
+      "role": "setting",
+      "export": true,
+      "prompt": null,
+      "help": "Model the codex-sol MCP delegate is pinned to (gpt-<major>[.<minor>]-<tier>).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_MODEL_CODEX_LUNA",
+      "section": "mcp-servers",
+      "type": {
+        "kind": "string",
+        "escape_hatch": "codex-model-id"
+      },
+      "default": "gpt-6-luna",
+      "role": "setting",
+      "export": true,
+      "prompt": null,
+      "help": "Model the codex-luna MCP delegate is pinned to (gpt-<major>[.<minor>]-<tier>).",
+      "validator": null
+    },
+    {
+      "key": "CBOX_MODEL_CODEX_ASTRA",
+      "section": "mcp-servers",
+      "type": {
+        "kind": "string",
+        "escape_hatch": "codex-model-id"
+      },
+      "default": "gpt-6-astra",
+      "role": "setting",
+      "export": true,
+      "prompt": null,
+      "help": "Model the codex-astra MCP delegate is pinned to (gpt-<major>[.<minor>]-<tier>).",
+      "validator": null
+    },
+    {
       "key": "CBOX_CODEX_PROGRESS_MODE",
       "section": "codex-progress",
       "type": {
@@ -1706,6 +1790,23 @@
       "export": true,
       "prompt": "setup: hyperqwen image reference (pinned tag or digest)",
       "help": "Pinned hyperqwen image reference; the default is the immutable per-commit tag pinned by its sha256 index digest.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_HYPERQWEN_OFFLINE",
+      "section": "hyperqwen",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "off",
+          "on"
+        ]
+      },
+      "default": "off",
+      "role": "setting",
+      "export": true,
+      "prompt": "setup: hyperqwen offline mode (off, on)",
+      "help": "Off by default. On requires the configured image locally, disables image pulls, and runs model prepare without network using files restored to the models and cache volumes.",
       "validator": null
     },
     {
@@ -2609,6 +2710,23 @@
       "export": false,
       "prompt": "setup: autoupdate check interval in hours: ",
       "help": "How many hours since the last autoupdate check before the next one runs.",
+      "validator": null
+    },
+    {
+      "key": "CBOX_MODEL_CHECK",
+      "section": "autoupdate",
+      "type": {
+        "kind": "enum",
+        "values": [
+          "on",
+          "off"
+        ]
+      },
+      "default": "on",
+      "role": "setting",
+      "export": false,
+      "prompt": null,
+      "help": "Model update check: at an interactive cbox run, at most once per 24 hours, compare the pinned Claude and codex delegate models with the vendor model lists and ask whether to update (yes, no, never). off skips the check entirely.",
       "validator": null
     },
     {

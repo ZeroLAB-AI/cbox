@@ -18,7 +18,7 @@
     },
     "entrypoint.sh": {
       "layer": "container",
-      "purpose": "container entrypoint, Linux forever per section 3"
+      "purpose": "container entrypoint, including the Claude ACP adapter running as the container user"
     },
     "etc/adapters/claude.py": {
       "layer": "host",
@@ -108,6 +108,10 @@
       "layer": "template-generating-container-content",
       "purpose": "M4 gated (CBOX_HERMES_HOOKS): translates hermes pre_tool_call payloads to the claude-shaped stdin commit_guard.py/rm_glob_guard.py expect, emits {\"decision\":\"block\"} on rm-glob deny, armored to degrade to allow on any internal exception (hermes fails open on crash); copied into generated/hooks, staged into container claude hooks"
     },
+    "etc/hooks/cbox_hermes_acp.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "Hermes ACP adapter wrapper staged into container claude hooks"
+    },
     "etc/hooks/continuity_commit_log.py": {
       "layer": "template-generating-container-content",
       "purpose": "copied into generated/hooks, staged into container claude hooks"
@@ -145,6 +149,10 @@
       "purpose": "copied into generated/hooks, staged into container claude hooks"
     },
     "etc/hooks/session_scope_farm.py": {
+      "layer": "template-generating-container-content",
+      "purpose": "copied into generated/hooks, staged into container claude hooks"
+    },
+    "etc/hooks/paid_agent_tracker.py": {
       "layer": "template-generating-container-content",
       "purpose": "copied into generated/hooks, staged into container claude hooks"
     },
@@ -202,7 +210,7 @@
     },
     "install-bins.sh": {
       "layer": "container",
-      "purpose": "Linux/ubuntu-24.04 image build script, never portable per section 3"
+      "purpose": "Linux bins installer with pinned Node and Claude ACP adapter checks"
     },
     "lib/cbox-ai.sh": {
       "layer": "host",
@@ -220,6 +228,14 @@
       "layer": "host",
       "purpose": "the setup wizard body, sourced by cbox on the host under the 'cbox setup' verb"
     },
+    "lib/codex-acp-exec.sh": {
+      "layer": "container",
+      "purpose": "Codex app-server launcher with managed runtime flags"
+    },
+    "lib/codex_acp_config.py": {
+      "layer": "container",
+      "purpose": "Codex ACP config from the managed terminal profile and hooks"
+    },
     "lib/cbox_host.py": {
       "layer": "host",
       "purpose": "python3-stdlib implementation backing lib/portable.sh (the P1 waist skeleton, docs/MULTIPLATFORM_DESIGN.md section 3); sourced/invoked host-side only"
@@ -227,6 +243,10 @@
     "lib/cbox_bind_guard.py": {
       "layer": "host",
       "purpose": "stdlib bind source guard; 'roots-write' records the declared bind roots of a rendered compose (with their render-time real paths) in a sidecar, 'check' parses the compose files and refuses any bind source whose real path leaves its declared root, resolves into the XDG runtime dir, ~/.config/cbox, ~/.ssh, ~/.gnupg or ~/.docker outside a declared bridge/eff/store root, or exposes a protected credential path of a profile container; run host-side by cbox right before every compose up or run"
+    },
+    "lib/cbox_acp_proxy.py": {
+      "layer": "host",
+      "purpose": "host-side ACP stdio proxy core with bounded JSON-RPC framing, method and project-root filtering, session tracking, and backend failure reporting"
     },
     "lib/cbox_hub.py": {
       "layer": "host",
@@ -247,6 +267,10 @@
     "lib/cbox_netaccess.py": {
       "layer": "host",
       "purpose": "invoked by cbox on the host (cbox:177)"
+    },
+    "lib/cbox_model_check.py": {
+      "layer": "host",
+      "purpose": "model update check invoked by cbox on the host before claude, codex or hermes start and by 'cbox models check'; lists the vendor models (claude over the OAuth model list, codex through codex app-server inside the project container), offers a newer same-family or same-tier model with a yes, no or never answer, saves yes through 'cbox config set', keeps ~/.config/cbox/model-updates.json, never blocks the start"
     },
     "lib/cbox_session_bridge.py": {
       "layer": "container",
@@ -368,6 +392,10 @@
       "layer": "test",
       "purpose": "M1 referential-integrity test for capabilities.json: engine/env/delegate cross-references, hook-command coverage, projection-aware dispatch-site inventory, null-history and two-live-mains negative fixtures"
     },
+    "lib/test_cbox_manual_line.sh": {
+      "layer": "test",
+      "purpose": "checks manual discovery in all three engines, atomic docs deployment and read-only compose binds"
+    },
     "lib/test_cbox_ai_local_qwen.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
@@ -375,6 +403,18 @@
     "lib/test_cbox_net_mcp.py": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_cbox_acp_proxy.py": {
+      "layer": "test",
+      "purpose": "host-side ACP proxy tests with a temporary fake backend and no container or network"
+    },
+    "lib/test_cbox_hermes_acp.py": {
+      "layer": "test",
+      "purpose": "Hermes ACP wrapper unit tests against a temporary fake acp_adapter/run_agent tree: prompt delivery to the patched AIAgent, explicit-prompt non-override, env-unset no-patch passthrough, missing-patch-point exit 3 with a one-line stderr and empty stdout, entry exit-code propagation, in-process patch verification, and an optional real-hermes patch-point probe skipped when the acp package is absent"
+    },
+    "lib/test_acp_launcher.sh": {
+      "layer": "test",
+      "purpose": "host-side ACP launcher tests with fake commands and no container or network"
     },
     "lib/test_host_alias_forwarder.py": {
       "layer": "test",
@@ -405,6 +445,14 @@
       "purpose": "host-side test harness under the lib/test_* suite"
     },
     "lib/test_cbox_profile_seed.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_cbox_model_check.py": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_model_check_wiring.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
@@ -757,6 +805,10 @@
       "purpose": "cbox setup update <section> --local: both argument orders, explicit and cwd root, missing-project and refused-section errors, changed keys only into cbox.override and cbox.conf with the global conf untouched, config-set apply staging, plain update note, existing --local forms"
     },
     "lib/test_socks_guard.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_paid_agent_tracker.py": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },

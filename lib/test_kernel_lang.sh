@@ -85,7 +85,7 @@ _ok "inert: unset CBOX_KERNEL_LANG_OUTPUT renders the kernel identical to the na
 SET_OUT="$TMPBASE/set_out"
 mkdir -p "$SET_OUT/hooks"
 _render_kernel_generators "$SET_OUT" "English" "slovencina bez diakritiky"
-grep -q "^LANGUAGE: reason and think in slovencina bez diakritiky; answer and write every output in English\.$" \
+grep -q "^LANGUAGE: reason and think in slovencina bez diakritiky; answer the human in English. Files, code and commits follow K3 (ASCII) and prompts to hermes-local are English\. This rule overrides any other language or diacritics instruction\.$" \
   "$SET_OUT/hooks/conduct-kernel.txt" \
   || _fail "rendered kernel is missing the two-part language rule line:
 $(cat "$SET_OUT/hooks/conduct-kernel.txt")"
@@ -95,7 +95,7 @@ DEFAULT_OUT="$TMPBASE/default_out"
 mkdir -p "$DEFAULT_OUT/hooks"
 _render_kernel_generators "$DEFAULT_OUT" "English" "slovencina bez diakritiky"
 DEFAULT_LINE="$(grep '^LANGUAGE:' "$DEFAULT_OUT/hooks/conduct-kernel.txt")"
-[ "$DEFAULT_LINE" = "LANGUAGE: reason and think in slovencina bez diakritiky; answer and write every output in English." ] \
+[ "$DEFAULT_LINE" = "LANGUAGE: reason and think in slovencina bez diakritiky; answer the human in English. Files, code and commits follow K3 (ASCII) and prompts to hermes-local are English. This rule overrides any other language or diacritics instruction." ] \
   || _fail "shipped reasoning-language default did not survive the render path byte for byte, got: $DEFAULT_LINE"
 python3 -c "
 s = 'slovencina bez diakritiky'
@@ -106,7 +106,7 @@ _ok "ASCII path: shipped CBOX_KERNEL_LANG_REASONING default passes through the r
 REASONING_FALLBACK_OUT="$TMPBASE/reasoning_fallback_out"
 mkdir -p "$REASONING_FALLBACK_OUT/hooks"
 _render_kernel_generators "$REASONING_FALLBACK_OUT" "English" ""
-grep -q "^LANGUAGE: reason and think in English; answer and write every output in English\.$" \
+grep -q "^LANGUAGE: reason and think in English; answer the human in English. Files, code and commits follow K3 (ASCII) and prompts to hermes-local are English\. This rule overrides any other language or diacritics instruction\.$" \
   "$REASONING_FALLBACK_OUT/hooks/conduct-kernel.txt" \
   || _fail "rendering with output language set but reasoning language empty should fall back to the output language, got:
 $(cat "$REASONING_FALLBACK_OUT/hooks/conduct-kernel.txt")"
@@ -146,7 +146,7 @@ _ok "codex delivery path: AGENTS.override.md carries no LANGUAGE rule when the o
 
 CODEX_ON="$TMPBASE/codex_agents_on"
 _render_codex_agents "$CODEX_ON" "English" "slovencina bez diakritiky"
-grep -q "^LANGUAGE: reason and think in slovencina bez diakritiky; answer and write every output in English\.$" \
+grep -q "^LANGUAGE: reason and think in slovencina bez diakritiky; answer the human in English. Files, code and commits follow K3 (ASCII) and prompts to hermes-local are English\. This rule overrides any other language or diacritics instruction\.$" \
   "$CODEX_ON/AGENTS.override.md" \
   || _fail "AGENTS.override.md (codex delivery path via gen_codex_agents_into) is missing the LANGUAGE rule:
 $(cat "$CODEX_ON/AGENTS.override.md")"
@@ -220,7 +220,7 @@ _ok "claude delivery path: CLAUDE.md kernel block carries no LANGUAGE rule when 
 
 CLAUDEMD_ON="$TMPBASE/claudemd_on.txt"
 _render_claude_md_kernel_block "$CLAUDEMD_ON" "English" "slovencina bez diakritiky"
-grep -q "^LANGUAGE: reason and think in slovencina bez diakritiky; answer and write every output in English\.$" \
+grep -q "^LANGUAGE: reason and think in slovencina bez diakritiky; answer the human in English. Files, code and commits follow K3 (ASCII) and prompts to hermes-local are English\. This rule overrides any other language or diacritics instruction\.$" \
   "$CLAUDEMD_ON" \
   || _fail "CLAUDE.md kernel block (claude delivery path via claude_md_kernel_block_file) is missing the LANGUAGE rule:
 $(cat "$CLAUDEMD_ON")"
@@ -307,7 +307,7 @@ HERMES_PREAMBLE_OUT="$(
   source "$_HERMES_PREAMBLE_FUNC"
   _hermes_kernel_preamble
 )"
-printf '%s' "$HERMES_PREAMBLE_OUT" | grep -q "^LANGUAGE: reason and think in slovencina bez diakritiky; answer and write every output in English\.$" \
+printf '%s' "$HERMES_PREAMBLE_OUT" | grep -q "^LANGUAGE: reason and think in slovencina bez diakritiky; answer the human in English. Files, code and commits follow K3 (ASCII) and prompts to hermes-local are English\. This rule overrides any other language or diacritics instruction\.$" \
   || _fail "hermes delivery path (_hermes_kernel_preamble reading \$HOST_HOME/.claude/hooks/conduct-kernel.txt) is missing the LANGUAGE rule:
 $HERMES_PREAMBLE_OUT"
 _ok "hermes delivery path: _hermes_kernel_preamble (entrypoint.sh) carries the LANGUAGE rule from the deployed conduct-kernel.txt"
@@ -325,7 +325,7 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 sys.stdout.write(m.load_kernel())
 ")"
-printf '%s' "$CODEX_SHIM_KERNEL" | grep -q "^LANGUAGE: reason and think in slovencina bez diakritiky; answer and write every output in English\.$" \
+printf '%s' "$CODEX_SHIM_KERNEL" | grep -q "^LANGUAGE: reason and think in slovencina bez diakritiky; answer the human in English. Files, code and commits follow K3 (ASCII) and prompts to hermes-local are English\. This rule overrides any other language or diacritics instruction\.$" \
   || _fail "codex delegate delivery path (codex_mcp_shim.py load_kernel(), injected as developer-instructions on every call) is missing the LANGUAGE rule:
 $CODEX_SHIM_KERNEL"
 _ok "codex delegate delivery path: codex_mcp_shim.py load_kernel() carries the LANGUAGE rule (injected as developer-instructions on every codex-* MCP call)"

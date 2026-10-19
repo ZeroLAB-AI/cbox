@@ -15,7 +15,8 @@
   },
   "env": {
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5-5[1m]",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-fable-5[1m]",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-opus-5-5[1m]",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-5-5",
     "CBOX_AGENT_MODEL_DENY": "opus-4",
     "CBOX_AGENT_MODEL_BAN": "fable-5-1"
   },
@@ -105,6 +106,17 @@
         "hooks": [
           {
             "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/paid_agent_tracker.py",
+            "timeout": 10,
+            "statusMessage": "paid agent session cleanup"
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
             "command": "python3 @HOME@/.claude/hooks/session_pane_map.py",
             "timeout": 10,
             "statusMessage": "session scope map"
@@ -112,7 +124,57 @@
         ]
       }
     ],
+    "SubagentStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/paid_agent_tracker.py",
+            "timeout": 10,
+            "statusMessage": "paid agent tracker"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/paid_agent_tracker.py",
+            "timeout": 10,
+            "statusMessage": "paid agent tracker"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "TaskStop",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/paid_agent_tracker.py",
+            "timeout": 10,
+            "statusMessage": "paid agent task cleanup"
+          }
+        ]
+      }
+    ],
     "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 @HOME@/.claude/hooks/paid_agent_tracker.py",
+            "timeout": 10,
+            "statusMessage": "paid agent session cleanup"
+          }
+        ]
+      },
       {
         "matcher": "",
         "hooks": [

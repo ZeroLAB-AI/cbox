@@ -75,8 +75,33 @@ def _adapter_of(name, spec):
     return adapter, cbox
 
 
+CODEX_MODEL_ENV = {
+    "codex-sol": "CBOX_MODEL_CODEX_SOL",
+    "codex-luna": "CBOX_MODEL_CODEX_LUNA",
+    "codex-astra": "CBOX_MODEL_CODEX_ASTRA",
+}
+
+CODEX_MODEL_RE = re.compile(r"^gpt-[0-9]+(\.[0-9]+)?-[a-z]+$")
+
+
+def _codex_model_override(name):
+    var = CODEX_MODEL_ENV.get(name)
+    if not var:
+        return None
+    value = os.environ.get(var, "")
+    if not value:
+        return None
+    if not CODEX_MODEL_RE.match(value):
+        sys.stderr.write(
+            "render_mcp.py: ignoring invalid %s=%r - keeping the registry "
+            "model for %s\n" % (var, value, name)
+        )
+        return None
+    return value
+
+
 def wrap_codex_entry(name, spec, cbox, hooks_dir, shim_mode):
-    model = cbox.get("model")
+    model = _codex_model_override(name) or cbox.get("model")
     effort = cbox.get("model_reasoning_effort")
     if not isinstance(model, str) or not isinstance(effort, str):
         raise DelegateEntryError(

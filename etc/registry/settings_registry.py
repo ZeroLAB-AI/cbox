@@ -45,6 +45,8 @@ NAMED_VALIDATORS = {
     "ipv4-list",
     "kernel-lang",
     "codex-model-slug",
+    "claude-model-id",
+    "codex-model-id",
     "host-alias-mode",
     "profile-name",
 }

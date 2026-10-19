@@ -211,6 +211,22 @@ _cbox_val_named_claude_target() {
   printf '%s' "$val" | grep -Eq '^(stable|latest|[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?)$' || { printf 'expected stable, latest, or x.y.z'; return 1; }
 }
 
+_cbox_val_named_claude_model_id() {
+  local val="$1"
+  case "$val" in
+    claude-fable-5-1|claude-fable-5-1'[1m]')
+      printf 'claude-fable-5-1 is banned'
+      return 1
+      ;;
+  esac
+  printf '%s' "$val" | grep -Eq '^claude-[a-z0-9-]+(\[1m\])?$' || { printf 'expected a claude model ID (claude-<lowercase letters, digits, dashes> with optional [1m])'; return 1; }
+}
+
+_cbox_val_named_codex_model_id() {
+  local val="$1"
+  printf '%s' "$val" | grep -Eq '^gpt-[0-9]+(\.[0-9]+)?-[a-z]+$' || { printf 'expected a codex model id (gpt-<digits>[.<digits>]-<lowercase word>)'; return 1; }
+}
+
 _cbox_val_named_codex_version() {
   local val="$1"
   printf '%s' "$val" | grep -Eq '^(latest|[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta)(\.[0-9]+)?)?)$' || { printf 'expected latest or x.y.z'; return 1; }

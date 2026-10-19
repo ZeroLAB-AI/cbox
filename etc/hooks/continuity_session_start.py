@@ -29,7 +29,7 @@ RESUME_MARKER = "RESUME"
 FENCE_MARKER = "--- CBOX CONTINUITY PAYLOAD"
 FENCE_MARKER_NEUTRALIZED = "-.- CBOX CONTINUITY PAYLOAD"
 
-SESSION_CORE_VERSION = "session-core v8"
+SESSION_CORE_VERSION = "session-core v9"
 REVIEW_TOKEN = "{{REVIEW}}"
 REVIEW_MODES = ("ask", "auto")
 REVIEW_DEFAULT = "ask"
@@ -64,17 +64,17 @@ FANOUT_TOKEN = "{{FANOUT}}"
 FANOUT_MODES = ("low", "high", "max")
 FANOUT_DEFAULT = "high"
 
+FANOUT_HIGH_TEXT = (
+    "FAN-OUT vs WORKFLOW: default to a plain agent fan-out for peer, independent tasks - when the work splits, launch ~5 peers as multiple Agent tool uses in a SINGLE message so they run concurrently, then collect their distillates yourself (sequential one-at-a-time calls degrade a fan-out into a slow pipeline). Reach for a Workflow ONLY for genuine inter-step dependencies (a later step consumes an earlier step's output); equal-rank volume alone never justifies one - fan out instead."
+)
+
 FANOUT_TEXT = {
-    "high": (
-        "FAN-OUT vs WORKFLOW: default to a plain agent fan-out for peer, independent tasks - when the work splits, launch ~5 peers as multiple Agent tool uses in a SINGLE message so they run concurrently, then collect their distillates yourself (sequential one-at-a-time calls degrade a fan-out into a slow pipeline). Reach for a Workflow ONLY for genuine inter-step dependencies (a later step consumes an earlier step's output); equal-rank volume alone never justifies one - fan out instead."
-    ),
-    "max": (
-        "FAN-OUT vs WORKFLOW: default to a plain agent fan-out for peer, independent tasks - when the work splits, launch ~5 peers as multiple Agent tool uses in a SINGLE message so they run concurrently, then collect their distillates yourself (sequential one-at-a-time calls degrade a fan-out into a slow pipeline). Reach for a Workflow ONLY for genuine inter-step dependencies (a later step consumes an earlier step's output); equal-rank volume alone never justifies one - fan out instead."
-    ),
+    "high": FANOUT_HIGH_TEXT,
+    "max": FANOUT_HIGH_TEXT,
     "low": (
         "SUBSCRIPTION PROFILE low (overrides FAN-OUT and SUBAGENT ROUTING): Claude quota is scarce. "
         "hermes-local carries the work - up to 2 hermes calls in parallel; split work into hermes-sized branches first. "
-        "No fan-out to Claude or Codex: at most one paid agent at a time (Workflow cap enforces it; keep plain Agent spawns to one too). "
+        "No fan-out to Claude or Codex: at most one paid agent at a time (the agent_label_guard enforces it for Agent and Workflow spawns). "
         "Paid order: codex-luna (routine), codex-sol (hard), worker only for Claude-only tooling; debugger, alien and codex-astra only on the owner's request. "
         "As driver, plan and verify; have hermes extract large files, logs and diffs instead of reading them yourself. "
         "Workflow only for genuine inter-step dependencies."
@@ -83,20 +83,28 @@ FANOUT_TEXT = {
 
 SESSION_CORE_VERSION_RE = re.compile(r"^Version:\s*(session-core v[0-9A-Za-z.]+)\s*$", re.MULTILINE)
 
-LIGHT_CORE = """SESSION CORE (light profile) - minimal driver floor.
+LOCAL_FIRST_TOKEN = "{{LOCAL_FIRST}}"
+LOCAL_FIRST_FALLBACK = (
+    "LOCAL FIRST (P0 before P5): use hermes-local first and verify its result; "
+    "a paid substitute needs a local-skip: <reason> marker in its own label."
+)
+LOCAL_FIRST_LINE_RE = re.compile(r"^(?:C[0-9]+ )?(LOCAL FIRST \(P0 before P5\).*)$", re.MULTILINE)
 
-LOCAL FIRST (P0 before P5): always use hermes-local (the mcp__hermes-local__hermes-delegate tool or the hermes-local agent). When work splits into parallel branches, hermes-local takes one of them - assigned first - and the other branches go to paid tiers (worker, code-reviewer, debugger, verifier, doc-writer, your own hands) at the same time; never wait serially on the single hermes slot. Give hermes-local the branch it is good at (bounded, with file paths and an acceptance test), sized so its run stays balanced with the parallel branches - a following step may wait for it, but not for an hour. Prompt it in English, verify the result empirically, and descend to P5 only with "local-skip: <unavailable|verify-failed|edge-case-spec|cross-cutting|owner-explanation|security-gate|local-busy>" (or "local-verify:") in that spawn's own label, per step with a 4+ word why, never shared across a wave - the agent_label_guard refuses a paid substitute without it. The reason applies per step, never per wave: mechanical steps inside a cross-cutting or security-gated wave (ratchet bumps, doc edits, fixture updates) still go P0, and your own hands are not exempt. Absent or connection error: route classically at once.
-DELEGATE WRITE BOUNDARY: subagents and MCP delegates never write the project brain files directly - they return a distillate, and you (the driver) decide what is durable and write it yourself.
-ONE-ACTIVE-WRITER: exactly one driver writes the shared brain at a time. Update LEDGER.md before switching phases and after accepting verified work.
-PROCEED, DO NOT BLOCK: when there is work to do, do it - resolve ambiguity yourself and ask once only what genuinely gates the build; fan out ~5 peer independent tasks as multiple Agent tool uses in a single message so they run concurrently. When the owner says continue, a blocking question is a failure.
+LIGHT_CORE = """SESSION CORE (light profile) - minimal driver floor. The conduct kernel (K1-K10) applies in full.
+
+{{LOCAL_FIRST}}
+DELEGATE WRITE BOUNDARY (K9): delegates never write the brain files; you write what becomes durable. Exactly one driver writes the shared brain at a time; update LEDGER.md before switching phases and after accepting verified work.
+PROCEED, DO NOT BLOCK: resolve ambiguity yourself and ask once only what genuinely gates the build; fan out ~5 independent peer tasks as multiple Agent tool uses in a single message; record decisions as K10 "!!!" lines. When the owner says continue, a blocking question is a failure.
+Run tests yourself with the test command in Bash; verifier only on the owner's explicit request.
 {{REVIEW}}
 Full orchestration detail (routing, cross-engine delegation, limit resume) is on disk in the session-core source; consult it before an unusual delegation. This light profile omits it to save context.
 """
 
-RESUME_KERNEL = """SESSION CORE (resume) - short driver kernel for a resumed/compacted session.
+RESUME_KERNEL = """SESSION CORE (resume) - short driver kernel for a resumed/compacted session. The conduct kernel (K1-K10) applies in full.
 
-LOCAL FIRST (P0 before P5): always use hermes-local (the mcp__hermes-local__hermes-delegate tool or the hermes-local agent). When work splits into parallel branches, hermes-local takes one of them - assigned first - and the other branches go to paid tiers (worker, code-reviewer, debugger, verifier, doc-writer, your own hands) at the same time; never wait serially on the single hermes slot. Give hermes-local the branch it is good at (bounded, with file paths and an acceptance test), sized so its run stays balanced with the parallel branches - a following step may wait for it, but not for an hour. Prompt it in English, verify the result empirically, and descend to P5 only with "local-skip: <unavailable|verify-failed|edge-case-spec|cross-cutting|owner-explanation|security-gate|local-busy>" (or "local-verify:") in that spawn's own label, per step with a 4+ word why, never shared across a wave - the agent_label_guard refuses a paid substitute without it. The reason applies per step, never per wave: mechanical steps inside a cross-cutting or security-gated wave (ratchet bumps, doc edits, fixture updates) still go P0, and your own hands are not exempt. Absent or connection error: route classically at once.
-Reconstitute from the ledger below, then PROCEED, DO NOT BLOCK: continue the queue immediately without asking - a resume nudge is the instruction to act, not a prompt to ask. Accept and commit work that already passed its gate; relaunch only unfinished work, fanning out independent peer tasks concurrently. Update LEDGER.md before switching phases and after accepting verified work. Delegates never write the brain directly - they return a distillate, you write it.
+{{LOCAL_FIRST}}
+Reconstitute from the ledger below, then PROCEED, DO NOT BLOCK: continue the queue immediately without asking - a resume nudge is the instruction to act. Accept and commit work that already passed its gate; relaunch only unfinished work, fanning out independent peer tasks concurrently. Update LEDGER.md before switching phases and after accepting verified work. Delegates never write the brain (K9) - they return a distillate, you write it.
+Run tests yourself with the test command in Bash; verifier only on the owner's explicit request.
 {{REVIEW}}
 """
 
@@ -306,8 +314,28 @@ def _derive_core_version(core_text):
     return SESSION_CORE_VERSION
 
 
+def _local_first_line(core_text):
+    if core_text:
+        m = LOCAL_FIRST_LINE_RE.search(core_text)
+        if m:
+            return m.group(1).rstrip()
+    return LOCAL_FIRST_FALLBACK
+
+
+def _render_kernel(template, hooks_dir=None):
+    core_text = ""
+    try:
+        path = os.path.join(hooks_dir or _hooks_dir(), "session-core.txt")
+        with io.open(path, "r", encoding="utf-8") as f:
+            core_text = f.read()
+    except Exception:
+        core_text = ""
+    body = template.replace(LOCAL_FIRST_TOKEN, _local_first_line(core_text))
+    return _render_review(body, REVIEW_FLOOR_TEXT)
+
+
 def _degraded_core_body():
-    body = _render_review(LIGHT_CORE, REVIEW_FLOOR_TEXT)
+    body = _render_kernel(LIGHT_CORE)
     return body.replace(FANOUT_TOKEN, "")
 
 
@@ -326,7 +354,7 @@ def _hooks_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
-LOCAL_FIRST_PREFIX = "LOCAL FIRST (P0 before P5)"
+LOCAL_FIRST_PREFIX_RE = re.compile(r"^(?:C[0-9]+ )?LOCAL FIRST \(P0 before P5\)")
 
 
 def _local_tier_present(cwd):
@@ -342,7 +370,7 @@ def _local_tier_present(cwd):
 
 def _strip_local_first(text):
     kept = [ln for ln in text.splitlines(keepends=True)
-            if not ln.startswith(LOCAL_FIRST_PREFIX)]
+            if not LOCAL_FIRST_PREFIX_RE.match(ln)]
     return "".join(kept)
 
 
@@ -497,7 +525,7 @@ def main():
         if profile == "light":
             core_label = "SESSION CORE"
             core_version = "%s light" % SESSION_CORE_VERSION
-            core_body = _render_review(LIGHT_CORE, REVIEW_FLOOR_TEXT)
+            core_body = _render_kernel(LIGHT_CORE, hooks_dir)
             if sub_profile == "low":
                 core_body = core_body + "\n\n" + FANOUT_TEXT["low"]
         elif source in ("startup", "clear"):
@@ -513,7 +541,7 @@ def main():
         else:
             core_label = "SESSION CORE"
             core_version = "%s resume" % SESSION_CORE_VERSION
-            core_body = _render_review(RESUME_KERNEL, REVIEW_FLOOR_TEXT)
+            core_body = _render_kernel(RESUME_KERNEL, hooks_dir)
             if sub_profile == "low":
                 core_body = core_body + "\n\n" + FANOUT_TEXT["low"]
         core_body = core_body.replace(FANOUT_TOKEN, "")

@@ -73,6 +73,7 @@ for line in open(p).read().split("\n"):
     if line == "      - CBOX_CONTEXT_PROFILE=full":
         out.append("      - CBOX_REVIEW=ask")
         out.append("      - CBOX_BUDGET_MODE=on")
+    if line == "      - CBOX_SUBSCRIPTION_PROFILE=high":
         out.append("      - CBOX_BUDGET_LOW_5H=15")
         out.append("      - CBOX_BUDGET_LOW_7D=20")
         out.append("      - CBOX_BUDGET_PACE_WINDOW_H=3")

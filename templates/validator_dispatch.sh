@@ -11,6 +11,15 @@ _cbox_reg_validate_var_dispatch() {
   local key="$1" val="$2"
   _cbox_val_no_ctrl "$val" || { printf 'contains a control character'; return 1; }
   case "$key" in
+    CBOX_MODEL_FABLE)
+      _cbox_val_named_claude_model_id "$val" || return 1
+      ;;
+    CBOX_MODEL_OPUS)
+      _cbox_val_named_claude_model_id "$val" || return 1
+      ;;
+    CBOX_MODEL_HAIKU)
+      _cbox_val_named_claude_model_id "$val" || return 1
+      ;;
     CBOX_MODE)
       _cbox_val_kind_enum "$val" 'global' 'isolated' || return 1
       ;;
@@ -140,6 +149,15 @@ _cbox_reg_validate_var_dispatch() {
     CBOX_MCP_SERVERS)
       _cbox_val_named_no_validator "$val" || return 1
       ;;
+    CBOX_MODEL_CODEX_SOL)
+      _cbox_val_named_codex_model_id "$val" || return 1
+      ;;
+    CBOX_MODEL_CODEX_LUNA)
+      _cbox_val_named_codex_model_id "$val" || return 1
+      ;;
+    CBOX_MODEL_CODEX_ASTRA)
+      _cbox_val_named_codex_model_id "$val" || return 1
+      ;;
     CBOX_CODEX_PROGRESS_MODE)
       _cbox_val_kind_enum "$val" 'off' 'shim' || return 1
       ;;
@@ -256,6 +274,9 @@ _cbox_reg_validate_var_dispatch() {
       ;;
     CBOX_HYPERQWEN_IMAGE)
       _cbox_val_named_ollama_image "$val" || return 1
+      ;;
+    CBOX_HYPERQWEN_OFFLINE)
+      _cbox_val_kind_enum "$val" 'off' 'on' || return 1
       ;;
     CBOX_HYPERQWEN_GPU_DEVICE)
       _cbox_val_named_gpu_device_list "$val" || return 1
@@ -430,6 +451,9 @@ _cbox_reg_validate_var_dispatch() {
       ;;
     CBOX_AUTOUPDATE_TTL_HOURS)
       _cbox_val_kind_uint_min "$val" 0 || return 1
+      ;;
+    CBOX_MODEL_CHECK)
+      _cbox_val_kind_enum "$val" 'on' 'off' || return 1
       ;;
     CBOX_DNS_MODE)
       _cbox_val_kind_enum "$val" 'docker' 'public' 'stub' || return 1

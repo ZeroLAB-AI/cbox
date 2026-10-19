@@ -1652,7 +1652,7 @@ class PaceMeasurabilityTests(BrakeHarness):
         self.assertIsNone(self.rate())
 
     def test_real_sequence_18_29_to_19_32(self):
-        now = time_now()
+        now = _epoch(2026, 10, 7, 19, 50)
         rows = [
             (_epoch(2026, 10, 7, 17, 8), 31.0),
             (_epoch(2026, 10, 7, 17, 13), 31.0),

@@ -1028,6 +1028,36 @@ test_claude_and_codex_renders_unaffected_by_hermes_target() {
   echo "PASS: claude and codex renders are byte-identical to before the hermes target was added"
 }
 
+test_codex_model_keys_override_only_when_set() {
+  local base="$TMPBASE/codex_model_base.json" over="$TMPBASE/codex_model_over.json" bad="$TMPBASE/codex_model_bad.json"
+  _render "codex-sol codex-luna codex-astra" off "$base"
+  CBOX_MODEL_CODEX_SOL=gpt-6.1-sol CBOX_MODEL_CODEX_ASTRA=gpt-7-astra \
+    python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$INSTALL_DIR/etc/mcp/delegates.json" "codex-sol codex-luna codex-astra" \
+    "/home/x/.claude/hooks" off claude > "$over"
+  CBOX_MODEL_CODEX_SOL='gpt-6-sol;evil' CBOX_MODEL_CODEX_LUNA= \
+    python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$INSTALL_DIR/etc/mcp/delegates.json" "codex-sol codex-luna codex-astra" \
+    "/home/x/.claude/hooks" off claude > "$bad" 2> "$TMPBASE/codex_model_bad.err"
+  python3 - "$base" "$over" "$bad" <<'PY' || _fail "codex model keys: wrong rendered --model"
+import json, sys
+def models(path):
+    out = {}
+    for name, spec in json.load(open(path)).items():
+        args = spec["args"]
+        out[name] = args[args.index("--model") + 1]
+    return out
+base, over, bad = (models(p) for p in sys.argv[1:4])
+assert base == {"codex-sol": "gpt-6-sol", "codex-luna": "gpt-6-luna", "codex-astra": "gpt-6-astra"}, base
+assert over == {"codex-sol": "gpt-6.1-sol", "codex-luna": "gpt-6-luna", "codex-astra": "gpt-7-astra"}, over
+assert bad == base, bad
+PY
+  grep -q "ignoring invalid CBOX_MODEL_CODEX_SOL" "$TMPBASE/codex_model_bad.err" || _fail "codex model keys: invalid value not reported"
+  CBOX_MODEL_CODEX_SOL=gpt-6-sol CBOX_MODEL_CODEX_LUNA=gpt-6-luna CBOX_MODEL_CODEX_ASTRA=gpt-6-astra \
+    python3 "$INSTALL_DIR/etc/mcp/render_mcp.py" "$INSTALL_DIR/etc/mcp/delegates.json" "codex-sol codex-luna codex-astra" \
+    "/home/x/.claude/hooks" off claude > "$TMPBASE/codex_model_same.json"
+  cmp -s "$base" "$TMPBASE/codex_model_same.json" || _fail "codex model keys at their defaults changed the render"
+  echo "PASS: codex model keys override the delegate model only when set and valid; unset and default render byte-identical"
+}
+
 test_render_byte_identity_progress_off
 test_render_byte_identity_progress_on
 test_seed_shape_byte_identity
@@ -1073,4 +1103,5 @@ test_hermes_target_gated_off_entry_renders_enabled_false
 test_hermes_target_explicit_unconfigured_gate_still_errors
 test_hermes_target_claude_cli_adapter_renders
 test_claude_and_codex_renders_unaffected_by_hermes_target
+test_codex_model_keys_override_only_when_set
 echo "all render_mcp golden tests passed"

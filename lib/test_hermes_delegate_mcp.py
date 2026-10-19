@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util
 import fcntl
+import http.client
 import io
 import json
 import os
@@ -27,6 +28,12 @@ SPEC = importlib.util.spec_from_file_location(
 )
 MOD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MOD)
+
+
+def clear_cbox_env(env):
+    for name in list(env):
+        if name.startswith("CBOX_"):
+            env.pop(name, None)
 
 
 STUB_SOURCE = '''#!/usr/bin/env python3
@@ -172,7 +179,10 @@ if len(sys.argv) >= 2 and sys.argv[1] == "-z":
                 ("step %%d done" %% i, tool_calls))
             conn.commit()
         conn.close()
-        sys.stdout.write("stub-sqlite-answer\\n")
+        if control.get("context_exceeded"):
+            sys.stdout.write("partial work\\nContext length exceeded: max compression attempts (3) reached.\\n")
+        else:
+            sys.stdout.write("stub-sqlite-answer\\n")
         sys.exit(0)
     sys.stdout.write("stub-canned-answer\\n")
     sys.exit(0)
@@ -259,10 +269,12 @@ class HermesDelegateUnitTests(unittest.TestCase):
         self.stub = make_stub(self.tmpdir, self.control_file)
         self.template_home = make_template_home(self.tmpdir)
         self.env_backup = dict(os.environ)
+        clear_cbox_env(os.environ)
         os.environ["HERMES_BIN"] = self.stub
         os.environ["CBOX_HERMES_DELEGATE_HOME_TEMPLATE"] = self.template_home
         os.environ[MOD.LOCK_DIR_VAR] = os.path.join(self.tmpdir, "locks")
         os.environ[MOD.RUNS_DIR_VAR] = os.path.join(self.tmpdir, "runs")
+        os.environ[MOD.KV_CAPACITY_VAR] = "1000000"
         os.environ["CBOX_HERMES_DELEGATE_PROVIDER"] = "local"
         os.environ["CBOX_HERMES_DELEGATE_BASE_URL"] = "http://127.0.0.1:11434"
         os.environ.pop("CBOX_HERMES_DELEGATE_MODEL", None)
@@ -1355,6 +1367,48 @@ class HermesDelegateUnitTests(unittest.TestCase):
         steps, last_call = MOD._read_latest_tool_call(d)
         self.assertEqual((steps, last_call), (0, None))
 
+    def test_context_exceeded_becomes_error_with_partial_output(self):
+        write_control(self.control_file, mode="sqlite", sqlite_steps=3,
+                      sqlite_gap_sec=0.01, context_exceeded=True)
+        os.environ.pop("CBOX_HERMES_DELEGATE_MAX_CONCURRENCY", None)
+        os.environ.pop("OLLAMA_NUM_PARALLEL", None)
+        result = MOD.run_hermes_delegate({"prompt": "x"})
+        self.assertTrue(result["isError"], result)
+        text = result["content"][0]["text"]
+        self.assertIn("task too large for its budget", text)
+        self.assertIn("partial output:", text)
+        self.assertIn("partial work", text)
+        self.assertNotIn("pass slots=", text)
+
+    def test_compression_and_budget_written_to_config(self):
+        marker = os.path.join(self.tmpdir, "marker_comp_budget.txt")
+        write_control(self.control_file, marker=marker)
+        os.environ[MOD.KV_CAPACITY_VAR] = "100000"
+        os.environ[MOD.DELEGATE_CONTEXT_LENGTH_VAR] = "196608"
+        result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertFalse(result["isError"], result)
+        with open(marker) as fh:
+            calls = fh.read()
+        self.assertIn("config set model.context_length 85000", calls)
+        self.assertIn("config set compression.enabled true", calls)
+        self.assertIn("config set compression.threshold 0.75", calls)
+        self.assertIn("config set compression.target_ratio 0.15", calls)
+        self.assertIn("config set compression.protect_first_n 1", calls)
+        self.assertIn("config set compression.protect_last_n 4", calls)
+        self.assertIn("config set compression.in_place false", calls)
+
+    def test_run_line_reports_budget_and_slots(self):
+        write_control(self.control_file, mode="sqlite", sqlite_steps=2,
+                      sqlite_gap_sec=0.01)
+        os.environ[MOD.KV_CAPACITY_VAR] = "100000"
+        os.environ[MOD.DELEGATE_CONTEXT_LENGTH_VAR] = "196608"
+        result = MOD.run_hermes_delegate({"prompt": "x"})
+        self.assertFalse(result["isError"], result)
+        text = result["content"][0]["text"]
+        self.assertRegex(
+            text,
+            r"\[hermes-delegate run \S+: \d+ steps; budget 85000 tokens on 1 slot\(s\)")
+
 
 class DelegateModeTests(unittest.TestCase):
     def test_default_mode_is_qa(self):
@@ -1456,10 +1510,12 @@ class HermesDelegateStdioTests(unittest.TestCase):
         self.stub = make_stub(self.tmpdir, self.control_file)
         self.template_home = make_template_home(self.tmpdir)
         self.env = dict(os.environ)
+        clear_cbox_env(self.env)
         self.env["HERMES_BIN"] = self.stub
         self.env["CBOX_HERMES_DELEGATE_HOME_TEMPLATE"] = self.template_home
         self.env[MOD.LOCK_DIR_VAR] = os.path.join(self.tmpdir, "locks")
         self.env[MOD.RUNS_DIR_VAR] = os.path.join(self.tmpdir, "runs")
+        self.env[MOD.KV_CAPACITY_VAR] = "1000000"
         self.env["CBOX_HERMES_DELEGATE_PROVIDER"] = "local"
         self.env["CBOX_HERMES_DELEGATE_BASE_URL"] = "http://127.0.0.1:11434"
         self.env.pop("CBOX_OLLAMA_CONTEXT_LENGTH", None)
@@ -1611,9 +1667,12 @@ class HermesDelegateTemplateContentTests(unittest.TestCase):
         write_control(self.control_file)
         self.stub = make_stub(self.tmpdir, self.control_file)
         self.env_backup = dict(os.environ)
+        clear_cbox_env(os.environ)
         os.environ["HERMES_BIN"] = self.stub
         os.environ["CBOX_HERMES_DELEGATE_PROVIDER"] = "local"
         os.environ["CBOX_HERMES_DELEGATE_BASE_URL"] = "http://127.0.0.1:11434"
+        os.environ[MOD.LOCK_DIR_VAR] = os.path.join(self.tmpdir, "locks")
+        os.environ[MOD.KV_CAPACITY_VAR] = "1000000"
         os.environ.pop("CBOX_HERMES_DELEGATE_MODEL", None)
         os.environ.pop("CBOX_HERMES_PROVIDER", None)
         os.environ.pop("CBOX_HERMES_MODEL_URL", None)
@@ -1745,6 +1804,7 @@ class ConcurrencySlotTests(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp()
         self.lockdir = os.path.join(self.tmpdir, "locks")
         self.env_backup = dict(os.environ)
+        clear_cbox_env(os.environ)
         os.environ["CBOX_HERMES_DELEGATE_LOCK_DIR"] = self.lockdir
         os.environ[MOD.RUNS_DIR_VAR] = os.path.join(self.tmpdir, "runs")
         os.environ.pop("CBOX_HERMES_DELEGATE_MAX_CONCURRENCY", None)
@@ -1844,6 +1904,220 @@ class ConcurrencySlotTests(unittest.TestCase):
         self.assertGreaterEqual(spans[1][0], spans[0][1] - 0.05)
 
 
+class KvBudgetTests(unittest.TestCase):
+    def setUp(self):
+        self.env_backup = dict(os.environ)
+        clear_cbox_env(os.environ)
+        self.lockdir = os.path.join(tempfile.mkdtemp(), "locks")
+        os.environ["CBOX_HERMES_DELEGATE_LOCK_DIR"] = self.lockdir
+        MOD._METRICS_CACHE.clear()
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.env_backup)
+        shutil.rmtree(os.path.dirname(self.lockdir), ignore_errors=True)
+
+    def _fake_response(self, payload):
+        class _Resp:
+            def __init__(self):
+                self._buf = payload
+                self._pos = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self, n=None):
+                if n is None:
+                    out = self._buf[self._pos:]
+                    self._pos = len(self._buf)
+                    return out
+                out = self._buf[self._pos:self._pos + n]
+                self._pos += len(out)
+                return out
+        return _Resp()
+
+    def _fake_opener(self, payload=None, side_effect=None):
+        opener = mock.Mock()
+        if side_effect is not None:
+            opener.open.side_effect = side_effect
+        else:
+            opener.open.side_effect = \
+                lambda *a, **k: self._fake_response(payload)
+        return opener
+
+    def test_kv_capacity_from_metrics(self):
+        metric = ('vllm:cache_config_info{block_size="832",'
+                 'kv_cache_size_tokens="202849",num_gpu_blocks="260"} 1.0')
+        text = "node_cpu_seconds_total 1.0\n" + metric + \
+            "vllm:other_metric 1.0\n"
+        self.assertEqual(MOD._kv_capacity_from_metrics(text), 202849)
+        self.assertIsNone(MOD._kv_capacity_from_metrics(
+            "vllm:other_metric 1.0\nno kv line here\n"))
+        zero = ('vllm:cache_config_info{block_size="832",'
+                'kv_cache_size_tokens="0",num_gpu_blocks="260"} 1.0')
+        self.assertIsNone(MOD._kv_capacity_from_metrics(zero))
+
+    def test_context_budget(self):
+        os.environ[MOD.KV_CAPACITY_VAR] = "200000"
+        os.environ[MOD.DELEGATE_CONTEXT_LENGTH_VAR] = "196608"
+        self.assertEqual(MOD._context_budget(1, 2, ""), 85000)
+        self.assertEqual(MOD._context_budget(2, 2, ""), 170000)
+        os.environ[MOD.KV_CAPACITY_VAR] = "1000000"
+        self.assertEqual(MOD._context_budget(1, 1, ""), 196608)
+
+    def test_context_budget_metrics_fallback(self):
+        os.environ[MOD.DELEGATE_CONTEXT_LENGTH_VAR] = "100000"
+        os.environ.pop(MOD.KV_CAPACITY_VAR, None)
+        with mock.patch.object(MOD, "_metrics_capacity",
+                               return_value=None) as mc:
+            self.assertEqual(MOD._context_budget(1, 1, "http://x:1"),
+                             85000)
+            mc.assert_called_once_with("http://x:1")
+
+    def test_metrics_capacity_failure_retry_window(self):
+        clock = [1000.0]
+        build_opener = mock.Mock(
+            return_value=self._fake_opener(side_effect=OSError("boom")))
+        with mock.patch.object(MOD.urllib.request, "build_opener",
+                               build_opener), \
+                mock.patch.object(MOD.time, "monotonic",
+                                  side_effect=lambda: clock[0]):
+            self.assertIsNone(MOD._metrics_capacity("http://model:8000/v1"))
+            build_opener.assert_called_once()
+            self.assertIsNone(MOD._metrics_capacity("http://model:8000/v1"))
+            self.assertEqual(build_opener.call_count, 1)
+            clock[0] += MOD.METRICS_RETRY_SEC + 1
+            self.assertIsNone(MOD._metrics_capacity("http://model:8000/v1"))
+            self.assertEqual(build_opener.call_count, 2)
+
+    def test_metrics_capacity_success_cached(self):
+        metric = ('vllm:cache_config_info{block_size="832",'
+                 'kv_cache_size_tokens="202849",num_gpu_blocks="260"} 1.0')
+        build_opener = mock.Mock(
+            return_value=self._fake_opener((metric + "\n").encode()))
+        clock = [1000.0]
+        with mock.patch.object(MOD.urllib.request, "build_opener",
+                               build_opener), \
+                mock.patch.object(MOD.time, "monotonic",
+                                  side_effect=lambda: clock[0]):
+            self.assertEqual(MOD._metrics_capacity("http://model:8000/v1"),
+                             202849)
+            self.assertEqual(MOD._metrics_capacity("http://model:8000/v1"),
+                             202849)
+            self.assertEqual(build_opener.call_count, 1)
+            clock[0] += MOD.METRICS_SUCCESS_TTL_SEC + 1
+            self.assertEqual(MOD._metrics_capacity("http://model:8000/v1"),
+                             202849)
+            self.assertEqual(build_opener.call_count, 2)
+
+    def test_context_budget_floor(self):
+        os.environ[MOD.KV_CAPACITY_VAR] = "200000"
+        os.environ[MOD.DELEGATE_CONTEXT_LENGTH_VAR] = "196608"
+        self.assertEqual(MOD._context_budget(1, 4, ""), 64000)
+        os.environ[MOD.DELEGATE_CONTEXT_LENGTH_VAR] = "50000"
+        self.assertEqual(MOD._context_budget(1, 4, ""), 50000)
+
+    def test_metrics_capacity_bad_status_line_returns_none(self):
+        build_opener = mock.Mock(
+            return_value=self._fake_opener(
+                side_effect=http.client.BadStatusLine("x")))
+        with mock.patch.object(MOD.urllib.request, "build_opener",
+                               build_opener), \
+                mock.patch.object(MOD.time, "monotonic",
+                                  side_effect=lambda: 1000.0):
+            self.assertIsNone(MOD._metrics_capacity("http://model:8000/v1"))
+
+    def test_spawn_releases_slots_when_context_budget_raises(self):
+        self.addCleanup(MOD._CANCEL.clear)
+        self.addCleanup(MOD._CLOSED.clear)
+        self.addCleanup(lambda: MOD._SHUTDOWN.__setitem__(0, False))
+        self.addCleanup(MOD.end_call)
+        self.assertTrue(MOD.begin_call(1, None))
+        os.environ[MOD.AUDIT_VAR] = os.path.join(
+            os.path.dirname(self.lockdir), "audit.jsonl")
+        with mock.patch.object(
+                MOD, "_context_budget",
+                side_effect=RuntimeError("budget boom")) as cb:
+            try:
+                MOD.run_hermes_delegate({"prompt": "x"})
+            except Exception:
+                pass
+        cb.assert_called_once()
+        fd = os.open(os.path.join(self.lockdir, "slot.0"),
+                     os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def test_is_context_exceeded(self):
+        exceeded = [
+            "Context length exceeded: max compression attempts (3) reached.",
+            "Context length exceeded (12,345 tokens). Cannot compress "
+            "further.",
+            "Request payload too large (413). Cannot compress further.",
+            "Request payload too large: max compression attempts (3) "
+            "reached.",
+        ]
+        for line in exceeded:
+            self.assertTrue(MOD._is_context_exceeded(line))
+            self.assertTrue(MOD._is_context_exceeded(
+                "some earlier log line\n" + line + "\n\n\n"))
+        for line in exceeded:
+            self.assertFalse(MOD._is_context_exceeded(
+                line + "\ntrailing status line"))
+        self.assertFalse(MOD._is_context_exceeded(
+            "the log says context length exceeded"))
+        self.assertFalse(MOD._is_context_exceeded(None))
+        self.assertFalse(MOD._is_context_exceeded(""))
+
+    def test_acquire_slot_validation_and_release(self):
+        os.environ["CBOX_HERMES_DELEGATE_MAX_CONCURRENCY"] = "2"
+        fds, err = MOD.acquire_slot(2)
+        self.assertIsNone(err)
+        self.assertEqual(len(fds), 2)
+        for fd in fds:
+            self.assertGreaterEqual(fd, 0)
+        MOD.release_slot(fds)
+        for i in (0, 1):
+            fd = os.open(os.path.join(self.lockdir, "slot.%d" % i),
+                         os.O_CREAT | os.O_RDWR)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+        for bad in (3, 0, True):
+            res, err = MOD.acquire_slot(bad)
+            self.assertIsNone(res)
+            self.assertIn("slots must be an integer from 1 to 2", err)
+
+    def test_acquire_slot_busy_partial_release(self):
+        os.environ["CBOX_HERMES_DELEGATE_MAX_CONCURRENCY"] = "2"
+        os.environ["CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC"] = "1"
+        os.makedirs(self.lockdir, exist_ok=True)
+        fd1 = os.open(os.path.join(self.lockdir, "slot.1"),
+                      os.O_CREAT | os.O_RDWR)
+        self.addCleanup(os.close, fd1)
+        fcntl.flock(fd1, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with mock.patch.object(MOD, "emit_progress"):
+            res, err = MOD.acquire_slot(2)
+        self.assertIsNone(res)
+        self.assertIn("needs 2 of 2 slots", err)
+        fd0 = os.open(os.path.join(self.lockdir, "slot.0"),
+                      os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(fd0, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            fcntl.flock(fd0, fcntl.LOCK_UN)
+            os.close(fd0)
+        fcntl.flock(fd1, fcntl.LOCK_UN)
+
+
 class EmptyEnvDefaultsTests(unittest.TestCase):
     """A rendered MCP entry supplies every declared env key, so an unset cbox var
     arrives as an EMPTY STRING rather than as a missing key. os.environ.get(k, d)
@@ -1929,6 +2203,7 @@ class AgentModeTests(unittest.TestCase):
         self.stub = make_stub(self.tmpdir, self.control_file)
         self.template_home = make_template_home(self.tmpdir)
         self.env_backup = dict(os.environ)
+        clear_cbox_env(os.environ)
         os.environ["HERMES_BIN"] = self.stub
         os.environ["CBOX_HERMES_DELEGATE_HOME_TEMPLATE"] = self.template_home
         os.environ["CBOX_HERMES_DELEGATE_PROVIDER"] = "local"
@@ -1942,6 +2217,7 @@ class AgentModeTests(unittest.TestCase):
             os.environ.pop(k, None)
         os.environ["CBOX_HERMES_DELEGATE_LOCK_DIR"] = os.path.join(self.tmpdir, "locks")
         os.environ[MOD.RUNS_DIR_VAR] = os.path.join(self.tmpdir, "runs")
+        os.environ[MOD.KV_CAPACITY_VAR] = "1000000"
         self.guard_script = os.path.join(self.tmpdir, "hermes_guard_bridge.py")
         with open(self.guard_script, "w") as fh:
             fh.write("import sys\nsys.exit(0)\n")
@@ -2270,11 +2546,13 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
         write_control(self.control_file)
         self.stub = make_stub(self.tmpdir, self.control_file)
         self.env_backup = dict(os.environ)
+        clear_cbox_env(os.environ)
         os.environ["HERMES_BIN"] = self.stub
         os.environ[MOD.TEMPLATE_HOME_VAR] = \
             make_template_home(self.tmpdir)
         os.environ[MOD.LOCK_DIR_VAR] = os.path.join(self.tmpdir, "locks")
         os.environ[MOD.RUNS_DIR_VAR] = os.path.join(self.tmpdir, "runs")
+        os.environ[MOD.KV_CAPACITY_VAR] = "1000000"
         os.environ[MOD.PROVIDER_VAR] = "local"
         os.environ[MOD.BASE_URL_VAR] = "http://127.0.0.1:11434"
         for name in (MOD.MODEL_VAR, MOD.CONSOLE_PROVIDER_VAR,

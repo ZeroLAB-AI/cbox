@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+for v in $(compgen -v CBOX_); do
+  unset "$v"
+done
+
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMPBASE="$(mktemp -d)"
 trap 'rm -rf "$TMPBASE"' EXIT
@@ -36,6 +40,14 @@ _ok "names lists claude, codex, hermes in order"
 BIN="$(python3 "$PY" get "$REG" claude bin)"
 [ "$BIN" = "claude" ] || _fail "get claude bin mismatch: $BIN"
 _ok "get claude bin == claude"
+
+ACP_ENTRY="$(python3 "$PY" get "$REG" hermes acp_entry)"
+[ "$ACP_ENTRY" = "acp-hermes" ] || _fail "get hermes acp_entry mismatch: $ACP_ENTRY"
+_ok "hermes declares acp-hermes as its ACP entry"
+
+ACP_ENTRY="$(python3 "$PY" get "$REG" claude acp_entry)"
+[ "$ACP_ENTRY" = "acp-claude" ] || _fail "get claude acp_entry mismatch: $ACP_ENTRY"
+_ok "claude declares acp-claude as its ACP entry"
 
 STAMP="$(python3 "$PY" get "$REG" codex probe.stamp)"
 [ "$STAMP" = '$HOST_HOME/.codex/packages/.cbox-stamp' ] \
@@ -433,6 +445,9 @@ $(cat "$TMPBASE/claude_caps_missing_check.out")"
 _ok "verify asserts shared-session capability fields are populated"
 
 CODEX_HEALTH_KIND="$(python3 "$PY" get "$REG" codex health.kind)"
+CODEX_ACP_ENTRY="$(python3 "$PY" get "$REG" codex acp_entry)"
+[ "$CODEX_ACP_ENTRY" = "acp-codex" ] || _fail "codex acp_entry mismatch: $CODEX_ACP_ENTRY"
+_ok "get codex acp_entry == acp-codex"
 [ "$CODEX_HEALTH_KIND" = "subcommand-handshake" ] || _fail "codex health.kind mismatch: $CODEX_HEALTH_KIND"
 _ok "get codex health.kind == subcommand-handshake"
 

@@ -14,6 +14,9 @@ import unittest
 from unittest import mock
 
 
+USAGE_ISOLATION = tempfile.TemporaryDirectory()
+os.environ["CBOX_USAGE_DIR"] = USAGE_ISOLATION.name
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
     "codex_mcp_shim", ROOT / "etc" / "mcp" / "codex_mcp_shim.py"
@@ -1866,8 +1869,8 @@ class RateLimitLiveCaptureTests(RelayHarness):
         os.environ.pop("CBOX_USAGE_DIR", None)
         if self.saved_usage_dir is not None:
             os.environ["CBOX_USAGE_DIR"] = self.saved_usage_dir
-        self._usage_tmp.cleanup()
         super().tearDown()
+        self._usage_tmp.cleanup()
 
     def _codex_json_path(self):
         return os.path.join(self._usage_tmp.name, "codex.json")
@@ -1936,8 +1939,8 @@ class RefreshScheduledOnFailurePathTests(IntegrationHarness):
         os.environ.pop("CBOX_USAGE_DIR", None)
         if self.saved_usage_dir is not None:
             os.environ["CBOX_USAGE_DIR"] = self.saved_usage_dir
-        self._usage_tmp.cleanup()
         super().tearDown()
+        self._usage_tmp.cleanup()
 
     def _codex_json_path(self):
         return os.path.join(self._usage_tmp.name, "codex.json")

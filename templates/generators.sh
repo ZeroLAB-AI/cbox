@@ -41,7 +41,7 @@ _cbox_kernel_lang_rule_line() {
   local out_lang="${CBOX_KERNEL_LANG_OUTPUT:-}" reasoning_lang="${CBOX_KERNEL_LANG_REASONING:-}"
   [ -n "$out_lang" ] || return 0
   [ -n "$reasoning_lang" ] || reasoning_lang="$out_lang"
-  printf 'LANGUAGE: reason and think in %s; answer and write every output in %s.\n' "$reasoning_lang" "$out_lang"
+  printf 'LANGUAGE: reason and think in %s; answer the human in %s. Files, code and commits follow K3 (ASCII) and prompts to hermes-local are English. This rule overrides any other language or diacritics instruction.\n' "$reasoning_lang" "$out_lang"
 }
 
 _cbox_apply_kernel_lang_rule() {
@@ -440,6 +440,11 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod 755 /entrypoint.sh
 COPY install-bins.sh /opt/cbox/install-bins.sh
 RUN chmod 755 /opt/cbox/install-bins.sh
+COPY acp-claude /opt/cbox/acp-claude
+COPY acp-codex /opt/cbox/acp-codex
+COPY codex-acp-exec.sh /opt/cbox/codex-acp-exec.sh
+RUN chmod 755 /opt/cbox/codex-acp-exec.sh
+COPY codex_acp_config.py /opt/cbox/codex_acp_config.py
 COPY cbox-session-entry.py /opt/cbox/cbox-session-entry.py
 RUN chmod 755 /opt/cbox/cbox-session-entry.py
 RUN mkdir -p /opt/hermes && ln -sf /opt/hermes/bin/hermes /usr/local/bin/hermes
@@ -772,7 +777,7 @@ _cbox_final_pkgs() {
 
 gen_image_inputs() {
   local eff="$1" digest="$2"
-  local pkgs claude_target codex_version codex_target entrypoint_sha install_bins_sha session_entry_sha tpl_sha workdir
+  local pkgs claude_target codex_version codex_target entrypoint_sha install_bins_sha session_entry_sha acp_package_sha acp_lock_sha codex_acp_package_sha codex_acp_lock_sha codex_acp_exec_sha codex_acp_config_sha tpl_sha workdir
   pkgs="$(_cbox_final_pkgs)"
   workdir="$(_cbox_workdir)"
   claude_target="${CBOX_CLAUDE_TARGET:-stable}"
@@ -781,6 +786,12 @@ gen_image_inputs() {
   entrypoint_sha="$(_cbox_sha256 "$eff/entrypoint.sh")"
   install_bins_sha="$(_cbox_sha256 "$eff/install-bins.sh")"
   session_entry_sha="$(_cbox_sha256 "$eff/cbox-session-entry.py")"
+  acp_package_sha="$(_cbox_sha256 "$eff/acp-claude/package.json")"
+  acp_lock_sha="$(_cbox_sha256 "$eff/acp-claude/package-lock.json")"
+  codex_acp_package_sha="$(_cbox_sha256 "$eff/acp-codex/package.json")"
+  codex_acp_lock_sha="$(_cbox_sha256 "$eff/acp-codex/package-lock.json")"
+  codex_acp_exec_sha="$(_cbox_sha256 "$eff/codex-acp-exec.sh")"
+  codex_acp_config_sha="$(_cbox_sha256 "$eff/codex_acp_config.py")"
   tpl_sha="$(_cbox_tpl_sha)"
   {
     printf 'schema=1\n'
@@ -796,6 +807,12 @@ gen_image_inputs() {
     printf 'copy.entrypoint.sh=%s\n' "$entrypoint_sha"
     printf 'copy.install-bins.sh=%s\n' "$install_bins_sha"
     printf 'copy.cbox-session-entry.py=%s\n' "$session_entry_sha"
+    printf 'copy.acp-claude-package.json=%s\n' "$acp_package_sha"
+    printf 'copy.acp-claude-package-lock.json=%s\n' "$acp_lock_sha"
+    printf 'copy.acp-codex-package.json=%s\n' "$codex_acp_package_sha"
+    printf 'copy.acp-codex-package-lock.json=%s\n' "$codex_acp_lock_sha"
+    printf 'copy.codex-acp-exec.sh=%s\n' "$codex_acp_exec_sha"
+    printf 'copy.codex_acp_config.py=%s\n' "$codex_acp_config_sha"
     printf 'tpl_sha=%s\n' "$tpl_sha"
   } | _cbox_write "$eff/image.inputs"
 }
@@ -824,9 +841,14 @@ _cbox_model_policy_env_into() {
     echo "_cbox_model_policy_env_into: $src missing - rendering WITHOUT the model policy env (ban/deny gates stay dark in this container)" >&2
     return 0
   fi
-  out="$(python3 - "$src" <<'PY'
+  out="$(python3 - "$src" "${CBOX_MODEL_FABLE:-claude-opus-5-5[1m]}" "${CBOX_MODEL_OPUS:-}" "${CBOX_MODEL_HAIKU:-}" <<'PY'
 import json, re, sys
 env = json.load(open(sys.argv[1])).get("env") or {}
+env["ANTHROPIC_DEFAULT_FABLE_MODEL"] = sys.argv[2]
+if sys.argv[3]:
+    env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = sys.argv[3]
+if sys.argv[4]:
+    env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = sys.argv[4]
 lines = []
 for key in sorted(env):
     if re.fullmatch(r"ANTHROPIC_DEFAULT_[A-Z]+_MODEL", key) \
@@ -1341,7 +1363,7 @@ EOF
   printf '      - %s:/opt/cbox/cbox_session_bridge.py:ro\n' "$INSTALL_DIR/lib/cbox_session_bridge.py" >> "$tmp"
   if [ "$claude_mode" = "mount" ]; then
     gen_claude_config_into "$INSTALL_DIR/generated/claude-config" "$claude_path"
-    mkdir -p "$claude_path/hooks" "$claude_path/agents" "$claude_path/policies" "$claude_path/templates" "$claude_path/projects" "$claude_path/tasks" "$claude_path/session-env" "$claude_path/plugins" "$claude_path/file-history" "$claude_path/plans" "$claude_path/shell-snapshots" "$claude_path/agent-memory" "$claude_path/commands" "$claude_path/skills" "$claude_path/rules"
+    mkdir -p "$claude_path/hooks" "$claude_path/agents" "$claude_path/policies" "$claude_path/templates" "$claude_path/cbox-docs" "$claude_path/projects" "$claude_path/tasks" "$claude_path/session-env" "$claude_path/plugins" "$claude_path/file-history" "$claude_path/plans" "$claude_path/shell-snapshots" "$claude_path/agent-memory" "$claude_path/commands" "$claude_path/skills" "$claude_path/rules"
     [ -f "$claude_path/settings.json" ] || printf '{}\n' > "$claude_path/settings.json"
     [ -f "$HOME/.claude.json" ] || printf '{}\n' > "$HOME/.claude.json"
     [ -f "$claude_path/CLAUDE.md" ] || : > "$claude_path/CLAUDE.md"
@@ -1363,6 +1385,7 @@ EOF
     fi
     cat >> "$tmp" <<EOF
       - $claude_path/templates:\${HOST_HOME}/.claude/templates:ro
+      - $claude_path/cbox-docs:\${HOST_HOME}/.claude/cbox-docs:ro
       - $INSTALL_DIR/generated/claude-config:\${HOST_HOME}/.claude-cbox:rw
       - $claude_path/projects:\${HOST_HOME}/.claude-cbox/projects:rw
       - $claude_path/jobs:\${HOST_HOME}/.claude-cbox/jobs:rw
@@ -1382,6 +1405,7 @@ EOF
       - $claude_path/agents:\${HOST_HOME}/.claude-cbox/agents:ro
       - $claude_path/policies:\${HOST_HOME}/.claude-cbox/policies:ro
       - $claude_path/templates:\${HOST_HOME}/.claude-cbox/templates:ro
+      - $claude_path/cbox-docs:\${HOST_HOME}/.claude-cbox/cbox-docs:ro
 EOF
   else
     cat >> "$tmp" <<EOF
@@ -1401,6 +1425,7 @@ EOF
     fi
     cat >> "$tmp" <<EOF
       - $INSTALL_DIR/generated/claude/templates:\${HOST_HOME}/.claude/templates:ro
+      - $INSTALL_DIR/generated/claude/cbox-docs:\${HOST_HOME}/.claude/cbox-docs:ro
 EOF
   fi
   if [ "$codex_mode" = "mount" ]; then
@@ -1865,7 +1890,7 @@ EOF
 
   if [ "$claude_mode" = "mount" ]; then
     gen_claude_config_into "$eff/claude-config" "$claude_path" "$cred_target"
-    mkdir -p "$claude_path/hooks" "$claude_path/agents" "$claude_path/policies" "$claude_path/templates" "$claude_path/projects" "$claude_path/tasks" "$claude_path/session-env" "$claude_path/plugins" "$claude_path/file-history" "$claude_path/plans" "$claude_path/shell-snapshots" "$claude_path/agent-memory" "$claude_path/commands" "$claude_path/skills" "$claude_path/rules"
+    mkdir -p "$claude_path/hooks" "$claude_path/agents" "$claude_path/policies" "$claude_path/templates" "$claude_path/cbox-docs" "$claude_path/projects" "$claude_path/tasks" "$claude_path/session-env" "$claude_path/plugins" "$claude_path/file-history" "$claude_path/plans" "$claude_path/shell-snapshots" "$claude_path/agent-memory" "$claude_path/commands" "$claude_path/skills" "$claude_path/rules"
     [ -f "$claude_path/settings.json" ] || printf '{}\n' > "$claude_path/settings.json"
     if [ "$profile_active" = 1 ]; then
       _cbox_render_profile_seed_json "$scope_eff/claude-config/.claude.json" "$eff/claude-config/.claude.json" || return 1
@@ -1897,6 +1922,7 @@ EOF
     fi
     cat >> "$tmp" <<EOF
       - $claude_path/templates:\${HOST_HOME}/.claude/templates:ro
+      - $claude_path/cbox-docs:\${HOST_HOME}/.claude/cbox-docs:ro
       - $eff/claude-config:\${HOST_HOME}/.claude-cbox:rw
       - $claude_path/commands:\${HOST_HOME}/.claude-cbox/commands:ro
       - $claude_path/skills:\${HOST_HOME}/.claude-cbox/skills:ro
@@ -1913,6 +1939,7 @@ EOF
       - $claude_path/agents:\${HOST_HOME}/.claude-cbox/agents:ro
       - $claude_path/policies:\${HOST_HOME}/.claude-cbox/policies:ro
       - $claude_path/templates:\${HOST_HOME}/.claude-cbox/templates:ro
+      - $claude_path/cbox-docs:\${HOST_HOME}/.claude-cbox/cbox-docs:ro
 EOF
     if [ "$profile_active" = 1 ]; then
       cat >> "$tmp" <<EOF
@@ -1938,6 +1965,7 @@ EOF
     fi
     cat >> "$tmp" <<EOF
       - $INSTALL_DIR/generated/claude/templates:\${HOST_HOME}/.claude/templates:ro
+      - $INSTALL_DIR/generated/claude/cbox-docs:\${HOST_HOME}/.claude/cbox-docs:ro
 EOF
   fi
 
@@ -2999,7 +3027,7 @@ gen_settings_volume() {
     echo "gen_settings_volume: missing $src" >&2
     return 1
   fi
-  out="$(python3 "$INSTALL_DIR/etc/adapters/claude.py" settings-merge "$src" "$HOME")" || return 1
+  out="$(python3 "$INSTALL_DIR/etc/adapters/claude.py" settings-merge "$src" "$HOME" "${CBOX_MODEL_FABLE:-claude-opus-5-5[1m]}" "${CBOX_MODEL_OPUS:-}" "${CBOX_MODEL_HAIKU:-}")" || return 1
   printf '%s\n' "$out" | _cbox_write "$INSTALL_DIR/generated/settings.json"
 }
 
@@ -3023,7 +3051,7 @@ gen_managed_settings() {
     echo "gen_managed_settings: missing $src" >&2
     return 1
   fi
-  out="$(python3 "$INSTALL_DIR/etc/adapters/claude.py" settings-merge "$src" "$HOME")" || return 1
+  out="$(python3 "$INSTALL_DIR/etc/adapters/claude.py" settings-merge "$src" "$HOME" "${CBOX_MODEL_FABLE:-claude-opus-5-5[1m]}" "${CBOX_MODEL_OPUS:-}" "${CBOX_MODEL_HAIKU:-}")" || return 1
   printf '%s\n' "$out" | _cbox_write "$target"
 }
 
@@ -3195,16 +3223,15 @@ EOF
 Docker networks here are reachable only through the cbox SOCKS gateway: call cbox-net net_map first, then net_probe; target containers by name over socks5h; never guess IPs or set ALL_PROXY; a down gateway is a host-side fix.
 EOF
   fi
-}
-
-_cbox_codex_agents_delegate_boundary() {
-  cat <<'EOF'
-DELEGATE WRITE BOUNDARY (codex wording): when you are the delegated side of
-an ask-claude or codex-* relay call, do not write .cbox brain files
-(LEDGER.md, PROGRESS_YYYY_MM_DD.md, CHANGELOG.md, OPEN_QUESTIONS.md,
-DIARY.md) directly - return a distillate in your final message; the driver
-that invoked you decides what is durable and writes it.
-EOF
+  local docs
+  if [ "${CBOX_CLAUDE_MODE:-mount}" = mount ]; then
+    docs="${CBOX_CLAUDE_PATH:-$HOME/.claude}/cbox-docs"
+  else
+    docs="$INSTALL_DIR/generated/claude/cbox-docs"
+  fi
+  if [ -f "$docs/MANUAL.md" ] && [ ! -L "$docs/MANUAL.md" ]; then
+    printf '%s\n' "For cbox setup, config, features or troubleshooting, read ${HOST_HOME:-$HOME}/.claude/cbox-docs/MANUAL.md: grep '^#' for sections, then read the section; cbox commands run on the host."
+  fi
 }
 
 gen_codex_agents_into() {
@@ -3234,8 +3261,6 @@ gen_codex_agents_into() {
   _cbox_apply_kernel_lang_rule "$kernel_rendered"
   cat "$kernel_rendered" >> "$tail_tmp"
   rm -f "$kernel_rendered"
-  printf '\n' >> "$tail_tmp"
-  _cbox_codex_agents_delegate_boundary >> "$tail_tmp"
   local cur_size tail_size banner_begin banner_end banner_size budget
   cur_size="$(wc -c < "$tmp")"
   tail_size="$(wc -c < "$tail_tmp")"
@@ -3297,6 +3322,7 @@ gen_hooks_dir() {
   local kernel_rendered
   _cbox_write "$INSTALL_DIR/generated/hooks/codex_mode_guard.py" < "$INSTALL_DIR/etc/hooks/codex_mode_guard.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/agent_label_guard.py" < "$INSTALL_DIR/etc/hooks/agent_label_guard.py"
+  _cbox_write "$INSTALL_DIR/generated/hooks/paid_agent_tracker.py" < "$INSTALL_DIR/etc/hooks/paid_agent_tracker.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/code_hygiene_guard.py" < "$INSTALL_DIR/etc/hooks/code_hygiene_guard.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/rm_glob_guard.py" < "$INSTALL_DIR/etc/hooks/rm_glob_guard.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/net_proxy_guard.py" < "$INSTALL_DIR/etc/hooks/net_proxy_guard.py"
@@ -3305,11 +3331,11 @@ gen_hooks_dir() {
   _cbox_write "$INSTALL_DIR/generated/hooks/commit_guard.py" < "$INSTALL_DIR/etc/hooks/commit_guard.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/codex_guard_bridge.py" < "$INSTALL_DIR/etc/hooks/codex_guard_bridge.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/hermes_guard_bridge.py" < "$INSTALL_DIR/etc/hooks/hermes_guard_bridge.py"
+  _cbox_write "$INSTALL_DIR/generated/hooks/cbox_hermes_acp.py" < "$INSTALL_DIR/etc/hooks/cbox_hermes_acp.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/continuity_commit_log.py" < "$INSTALL_DIR/etc/hooks/continuity_commit_log.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/continuity_ledger_sweep.py" < "$INSTALL_DIR/etc/hooks/continuity_ledger_sweep.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/continuity_session_digest.py" < "$INSTALL_DIR/etc/hooks/continuity_session_digest.py"
   _cbox_write "$INSTALL_DIR/generated/hooks/continuity_session_start.py" < "$INSTALL_DIR/etc/hooks/continuity_session_start.py"
-  _cbox_write "$INSTALL_DIR/generated/hooks/orchestrator-global.txt" < "$INSTALL_DIR/etc/hooks/orchestrator-global.txt"
   kernel_rendered="$(mktemp "$INSTALL_DIR/generated/hooks/.cbox.XXXXXX")"
   _cbox_apply_name_substitution "$INSTALL_DIR/etc/hooks/conduct-kernel.txt" "$kernel_rendered"
   _cbox_apply_kernel_lang_rule "$kernel_rendered"
@@ -4642,7 +4668,7 @@ _cbox_hyperqwen_models_path_safe() {
 
 _cbox_hyperqwen_validate_all() {
   local _hq_pair _hq_var _hq_def _hq_val _hq_err
-  for _hq_pair in CBOX_HYPERQWEN_IMAGE=ghcr.io/syv-ai/hyperqwen:sha-53557bc@sha256:25bfa39ca4b71d5ba5ea32e5486c841dd4fb8b6429846c012ec5d1b06b2457a6 CBOX_HYPERQWEN_GPU_DEVICE=all CBOX_HYPERQWEN_MODELS_PATH= CBOX_HYPERQWEN_SPEC=mtp CBOX_HYPERQWEN_CTX=long CBOX_HYPERQWEN_MAX_LEN= CBOX_HYPERQWEN_SHM_SIZE=8g CBOX_HYPERQWEN_KV_OFFLOAD=off CBOX_HYPERQWEN_KV_OFFLOAD_MIB=19072 CBOX_HYPERQWEN_RAM_RESERVE_GIB=16; do
+  for _hq_pair in CBOX_HYPERQWEN_IMAGE=ghcr.io/syv-ai/hyperqwen:sha-53557bc@sha256:25bfa39ca4b71d5ba5ea32e5486c841dd4fb8b6429846c012ec5d1b06b2457a6 CBOX_HYPERQWEN_OFFLINE=off CBOX_HYPERQWEN_GPU_DEVICE=all CBOX_HYPERQWEN_MODELS_PATH= CBOX_HYPERQWEN_SPEC=mtp CBOX_HYPERQWEN_CTX=long CBOX_HYPERQWEN_MAX_LEN= CBOX_HYPERQWEN_SHM_SIZE=8g CBOX_HYPERQWEN_KV_OFFLOAD=off CBOX_HYPERQWEN_KV_OFFLOAD_MIB=19072 CBOX_HYPERQWEN_RAM_RESERVE_GIB=16; do
     _hq_var="${_hq_pair%%=*}"
     _hq_def="${_hq_pair#*=}"
     _hq_val="$(eval "printf '%s' \"\${$_hq_var:-}\"")"
@@ -4696,6 +4722,11 @@ name: "$name"
 services:
   hyperqwen:
     image: "$image"
+YML
+  if [ "${CBOX_HYPERQWEN_OFFLINE:-off}" = on ]; then
+    printf '    pull_policy: never\n' >> "$tmp"
+  fi
+  cat >> "$tmp" <<YML
     command: ["single"]
     restart: "$restart"
     labels:

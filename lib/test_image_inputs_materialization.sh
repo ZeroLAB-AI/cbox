@@ -28,6 +28,12 @@ test_run_local_sequence_materializes_session_entry() {
   mkdir -p "$eff"
   cp "$INSTALL_DIR/entrypoint.sh" "$eff/entrypoint.sh"
   cp "$INSTALL_DIR/install-bins.sh" "$eff/install-bins.sh"
+  cp "$INSTALL_DIR/lib/codex-acp-exec.sh" "$eff/codex-acp-exec.sh"
+  cp "$INSTALL_DIR/lib/codex_acp_config.py" "$eff/codex_acp_config.py"
+  mkdir -p "$eff/acp-claude"
+  cp "$INSTALL_DIR/acp-claude/package.json" "$INSTALL_DIR/acp-claude/package-lock.json" "$eff/acp-claude/"
+  mkdir -p "$eff/acp-codex"
+  cp "$INSTALL_DIR/acp-codex/package.json" "$INSTALL_DIR/acp-codex/package-lock.json" "$eff/acp-codex/"
   (
     INSTALL_DIR="$INSTALL_DIR"
     export INSTALL_DIR
@@ -53,6 +59,14 @@ test_run_local_sequence_materializes_session_entry() {
 $(cat "$eff/image.inputs")"
   [ "$got" = "$want" ] \
     || _fail "image.inputs copy.cbox-session-entry.py digest ($got) does not match sha256 of etc/container/cbox-session-entry.py ($want)"
+
+  want="$(sha256sum "$INSTALL_DIR/acp-claude/package-lock.json" | awk '{print $1}')"
+  got="$(grep '^copy.acp-claude-package-lock.json=' "$eff/image.inputs" | cut -d= -f2)"
+  [ "$got" = "$want" ] || _fail "image.inputs ACP lockfile digest mismatch"
+
+  want="$(sha256sum "$INSTALL_DIR/acp-codex/package-lock.json" | awk '{print $1}')"
+  got="$(grep '^copy.acp-codex-package-lock.json=' "$eff/image.inputs" | cut -d= -f2)"
+  [ "$got" = "$want" ] || _fail "image.inputs Codex ACP lockfile digest mismatch"
 
   cmp -s "$eff/cbox-session-entry.py" "$INSTALL_DIR/etc/container/cbox-session-entry.py" \
     || _fail "materialized cbox-session-entry.py content differs from the source under etc/container/"

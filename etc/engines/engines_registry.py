@@ -7,7 +7,7 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 TOP_KEYS = {"schema", "engines"}
 ENGINE_REQUIRED_KEYS = {"bin", "install", "probe", "version_vars", "enabled_var", "login", "credentials"}
-ENGINE_OPTIONAL_KEYS = {"preassign_id", "resume_argv", "seed_channel", "history_read", "health"}
+ENGINE_OPTIONAL_KEYS = {"preassign_id", "resume_argv", "seed_channel", "history_read", "health", "acp_entry"}
 ENGINE_KEYS = ENGINE_REQUIRED_KEYS | ENGINE_OPTIONAL_KEYS
 INSTALL_VALUES = {"bins-volume", "image"}
 LOGIN_PREFIXES = ("oauth-bridge", "port-bridge:", "none")
@@ -97,6 +97,8 @@ def _check_probe(name, probe):
 
 
 def _check_capabilities(name, spec):
+    if "acp_entry" in spec:
+        _require(spec["acp_entry"] == "acp-" + name, "engine %s: acp_entry must be acp-%s" % (name, name))
     if "preassign_id" in spec:
         _require(isinstance(spec["preassign_id"], bool), "engine %s: preassign_id must be a boolean" % name)
 

@@ -3,6 +3,7 @@
   "engines": {
     "claude": {
       "bin": "claude",
+      "acp_entry": "acp-claude",
       "install": "bins-volume",
       "probe": {"kind": "exe-stamp", "stamp": "$HOST_HOME/.local/.cbox-stamp", "infra_filter_argv1": ["daemon", "--bg-pty-host", "--bg-spare"]},
       "version_vars": ["CBOX_CLAUDE_TARGET"],
@@ -17,6 +18,7 @@
     },
     "codex": {
       "bin": "codex",
+      "acp_entry": "acp-codex",
       "install": "bins-volume",
       "probe": {"kind": "exe-stamp", "stamp": "$HOST_HOME/.codex/packages/.cbox-stamp", "infra_filter_argv1": ["mcp-server", "app-server"]},
       "version_vars": ["CBOX_CODEX_VERSION", "CBOX_CODEX_TARGET"],
@@ -31,6 +33,7 @@
     },
     "hermes": {
       "bin": "hermes",
+      "acp_entry": "acp-hermes",
       "install": "bins-volume",
       "probe": {"kind": "canonical-paths", "exe_realpath_prefix": "/usr/bin/python3", "argv0_prefix": "/opt/hermes/bin/", "argv1": ["/opt/hermes/bin/hermes", "/usr/local/bin/hermes"]},
       "version_vars": ["CBOX_HERMES_VERSION"],

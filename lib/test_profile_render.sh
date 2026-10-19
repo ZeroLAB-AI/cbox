@@ -236,7 +236,7 @@ claude = home + "/.claude"
 allowed_claude = {
     "history.jsonl", "tasks", "jobs", "session-env", "plugins", "file-history", "plans",
     "shell-snapshots", "agent-memory", "commands", "skills", "rules", "hooks", "settings.json",
-    "CLAUDE.md", "agents", "policies", "templates",
+    "CLAUDE.md", "agents", "policies", "templates", "cbox-docs",
 }
 seen = set()
 for line in open(compose):
@@ -252,7 +252,7 @@ for line in open(compose):
         seen.add(first)
 assert allowed_claude <= seen, sorted(allowed_claude - seen)
 PY
-for d in history.jsonl:rw tasks:rw jobs:rw session-env:rw plugins:rw file-history:rw plans:rw shell-snapshots:rw agent-memory:rw commands:ro skills:ro rules:ro hooks:ro settings.json:rw CLAUDE.md:ro agents:ro policies:ro templates:ro; do
+for d in history.jsonl:rw tasks:rw jobs:rw session-env:rw plugins:rw file-history:rw plans:rw shell-snapshots:rw agent-memory:rw commands:ro skills:ro rules:ro hooks:ro settings.json:rw CLAUDE.md:ro agents:ro policies:ro templates:ro cbox-docs:ro; do
   grep -qxF -- "      - $H/.claude/${d%%:*}:\${HOST_HOME}/.claude/${d%%:*}:${d##*:}" "$C" || _fail "profile compose lacks the shared bind ${d%%:*} (${d##*:})"
 done
 grep -qxF -- "      - $EFFP/audit:\${HOST_HOME}/.claude/cbox-audit:rw" "$C" || _fail "profile audit dir bind missing"

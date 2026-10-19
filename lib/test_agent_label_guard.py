@@ -5,16 +5,30 @@ import os
 import pathlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 
+LIVE_STATE_DIR = "/tmp/cbox-paid-agents"
+LIVE_STATE_BEFORE = sorted(os.listdir(LIVE_STATE_DIR)) if os.path.exists(LIVE_STATE_DIR) else None
+TEST_STATE = tempfile.TemporaryDirectory()
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 GUARD = ROOT / "etc" / "hooks" / "agent_label_guard.py"
+TRACKER = ROOT / "etc" / "hooks" / "paid_agent_tracker.py"
 BUDGET_MODULE = ROOT / "etc" / "hooks" / "cbox_budget.py"
 
-os.environ.pop("CBOX_SUBSCRIPTION_PROFILE", None)
-os.environ.pop("CBOX_BUDGET_MODE", None)
+for _k in [k for k in os.environ if k.startswith("CBOX_")]:
+    os.environ.pop(_k)
+os.environ["CBOX_PAID_AGENT_DIR"] = os.path.join(TEST_STATE.name, "state")
+
+
+def tearDownModule():
+    after = sorted(os.listdir(LIVE_STATE_DIR)) if os.path.exists(LIVE_STATE_DIR) else None
+    TEST_STATE.cleanup()
+    if after != LIVE_STATE_BEFORE:
+        raise AssertionError("live paid-agent state changed during tests")
 
 
 def hold_all_slots(lock_dir, n):
@@ -79,12 +93,14 @@ def _run_payload(home, payload, env=None):
     e = {
         k: v for k, v in os.environ.items()
         if k not in ("CBOX_AGENT_MODEL_DENY", "CBOX_AGENT_MODEL_BAN", "CBOX_HERMES_DELEGATE",
-                     "CBOX_USAGE_DIR", "CBOX_BUDGET_MODE", "CBOX_SUBSCRIPTION_PROFILE", "CLAUDE_CONFIG_DIR")
+                     "CBOX_USAGE_DIR", "CBOX_BUDGET_MODE", "CBOX_SUBSCRIPTION_PROFILE", "CLAUDE_CONFIG_DIR",
+                     "CBOX_PAID_AGENT_DIR", "CBOX_PAID_AGENT_TTL_H")
         and not k.startswith("CBOX_BUDGET_")
         and not (k.startswith("ANTHROPIC_DEFAULT_") and k.endswith("_MODEL"))
     }
     e["HOME"] = home
     e["CLAUDE_CONFIG_DIR"] = os.path.join(home, ".claude-cfg")
+    e["CBOX_PAID_AGENT_DIR"] = os.path.join(home, "no-paid-agents")
     if env:
         e.update(env)
     proc = subprocess.run(
@@ -95,6 +111,8 @@ def _run_payload(home, payload, env=None):
         timeout=30,
         env=e,
     )
+    if proc.returncode != 0:
+        raise AssertionError("guard crashed: %s" % proc.stderr)
     out = proc.stdout.strip()
     return json.loads(out)["hookSpecificOutput"] if out else None
 
@@ -1274,6 +1292,229 @@ class SubscriptionProfileLowCapTests(unittest.TestCase):
                                  "CBOX_SUBSCRIPTION_PROFILE": "low",
                                  "CBOX_BUDGET_LOW_7D": "101"})
         self.assertEqual(mod.quota_n_claude(), 1)
+
+
+class PaidConcurrencyTests(unittest.TestCase):
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.state = os.path.join(self.home, "paid")
+        for name in ("worker", "hermes-local"):
+            write_agent(self.home, name)
+        self.usage = tempfile.mkdtemp()
+
+    def marker(self, atype="worker", ts=None):
+        os.makedirs(self.state, exist_ok=True)
+        with open(os.path.join(self.state, "a1"), "w", encoding="ascii") as fh:
+            json.dump({"agent_id": "a1", "agent_type": atype, "session_id": "s",
+                       "ts": time.time() if ts is None else ts}, fh)
+
+    def env(self, profile="low"):
+        e = {"CBOX_PAID_AGENT_DIR": self.state, "CBOX_USAGE_DIR": self.usage,
+             "CBOX_BUDGET_MODE": "off"}
+        if profile:
+            e["CBOX_SUBSCRIPTION_PROFILE"] = profile
+        return e
+
+    def worker(self, profile="low"):
+        return run(self.home, "worker",
+                   "worker: local-skip: edge-case-spec - implementation against a spec with edge cases",
+                   env=self.env(profile))
+
+    def event(self, payload):
+        e = dict(os.environ)
+        e.update(self.env())
+        proc = subprocess.run(["python3", str(TRACKER)], input=json.dumps(payload),
+                              capture_output=True, text=True, timeout=30, env=e)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, "")
+
+    def paid_spawn(self, tool_use_id):
+        return _run_payload(self.home, {
+            "tool_name": "Agent", "tool_use_id": tool_use_id, "session_id": "s",
+            "tool_input": {"subagent_type": "worker", "description":
+                           "worker: local-skip: edge-case-spec - implementation against a spec with edge cases"}
+        }, self.env())
+
+    def test_worker_is_refused_while_a_paid_agent_runs(self):
+        self.marker("code-reviewer")
+        out = self.worker()
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("running: running code-reviewer a1 0m", out["permissionDecisionReason"])
+        self.assertIn("paid_agent_tracker.py clear a1", out["permissionDecisionReason"])
+
+    def test_exempt_types_are_refused_too(self):
+        self.marker()
+        for atype in ("Explore", "Plan", "general-purpose", "fork"):
+            out = run(self.home, atype, "scan the tree", env=self.env())
+            self.assertEqual(out["permissionDecision"], "deny", atype)
+            self.assertIn("one paid agent at a time", out["permissionDecisionReason"])
+
+    def test_hermes_local_is_allowed(self):
+        self.marker()
+        out = run(self.home, "hermes-local", "bounded edit", env=self.env())
+        self.assertIsNotNone(out)
+        self.assertEqual(out["permissionDecision"], "allow")
+
+    def test_no_marker_is_not_refused_by_this_rule(self):
+        out = self.worker()
+        self.assertIsNotNone(out)
+        self.assertEqual(out["permissionDecision"], "allow")
+
+    def test_high_profile_with_marker_is_not_refused_by_this_rule(self):
+        self.marker()
+        for profile in ("high", None):
+            out = self.worker(profile)
+            self.assertIsNotNone(out)
+            self.assertEqual(out["permissionDecision"], "allow")
+
+    def test_stale_marker_does_not_refuse(self):
+        self.marker(ts=time.time() - 13 * 3600)
+        out = self.worker()
+        self.assertIsNotNone(out)
+        self.assertEqual(out["permissionDecision"], "allow")
+
+    def test_four_hour_old_marker_still_refuses(self):
+        self.marker(ts=time.time() - 4 * 3600)
+        out = self.worker()
+        self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_two_pretooluse_calls_reserve_before_subagent_start(self):
+        self.assertEqual(self.paid_spawn("use1")["permissionDecision"], "allow")
+        out = self.paid_spawn("use2")
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("reserved, not started worker use1 0m", out["permissionDecisionReason"])
+        self.assertIn("clear --all", out["permissionDecisionReason"])
+
+    def test_same_tool_use_id_is_allowed_twice(self):
+        self.assertEqual(self.paid_spawn("use1")["permissionDecision"], "allow")
+        self.assertEqual(self.paid_spawn("use1")["permissionDecision"], "allow")
+
+    def test_pending_expiry_allows_next_spawn(self):
+        self.assertEqual(self.paid_spawn("use1")["permissionDecision"], "allow")
+        path = os.path.join(self.state, "pending-use1")
+        with open(path, encoding="ascii") as fh:
+            rec = json.load(fh)
+        rec["ts"] = time.time() - 60
+        with open(path, "w", encoding="ascii") as fh:
+            json.dump(rec, fh)
+        self.assertEqual(self.paid_spawn("use2")["permissionDecision"], "allow")
+
+    def test_taskstop_removes_marker(self):
+        self.marker()
+        self.event({"hook_event_name": "PostToolUse", "tool_name": "TaskStop",
+                    "tool_input": {"task_id": "a1"}})
+        self.assertEqual(self.paid_spawn("use1")["permissionDecision"], "allow")
+
+    def test_resume_clears_same_session_but_compact_does_not(self):
+        self.marker()
+        self.event({"hook_event_name": "SessionStart", "source": "compact", "session_id": "s"})
+        self.assertEqual(self.paid_spawn("use1")["permissionDecision"], "deny")
+        self.event({"hook_event_name": "SessionStart", "source": "resume", "session_id": "s"})
+        self.assertEqual(self.paid_spawn("use2")["permissionDecision"], "allow")
+
+    def test_idle_transcript_marker_is_ignored(self):
+        self.event({"hook_event_name": "SubagentStart", "session_id": "s",
+                    "agent_id": "a1", "agent_type": "worker",
+                    "transcript_path": os.path.join(self.home, "s.jsonl")})
+        path = os.path.join(self.home, "s", "subagents", "agent-a1.jsonl")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        pathlib.Path(path).write_text("done", encoding="ascii")
+        old = time.time() - 21 * 60
+        os.utime(path, (old, old))
+        self.assertEqual(self.paid_spawn("use1")["permissionDecision"], "allow")
+
+    def test_crafted_marker_content_does_not_reach_the_denial_message(self):
+        os.makedirs(self.state, exist_ok=True)
+        with open(os.path.join(self.state, "evil"), "w", encoding="ascii") as fh:
+            json.dump({"agent_id": "x`rm -rf ~`", "agent_type": "worker); $(reboot)",
+                       "session_id": "s; rm -rf /", "ts": time.time()}, fh)
+        out = self.worker()
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("running workerreboot evil 0m", out["permissionDecisionReason"])
+        self.assertNotIn("`", out["permissionDecisionReason"])
+        self.assertNotIn("$", out["permissionDecisionReason"])
+        self.assertNotIn("rm -rf", out["permissionDecisionReason"])
+        self.assertIn("paid_agent_tracker.py clear evil", out["permissionDecisionReason"])
+        proc = subprocess.run([sys.executable, str(TRACKER), "clear", "evil"],
+                              capture_output=True, text=True, timeout=30,
+                              env={**self.env(), "CBOX_PAID_AGENT_DIR": self.state})
+        self.assertEqual(proc.stdout.strip(), "1")
+        self.assertFalse(os.path.exists(os.path.join(self.state, "evil")))
+        out = self.worker()
+        self.assertEqual(out["permissionDecision"], "allow")
+
+    def test_huge_marker_timestamp_is_stale_and_spawn_allowed(self):
+        self.marker(ts=10 ** 400)
+        out = self.worker()
+        self.assertEqual(out["permissionDecision"], "allow")
+        self.assertFalse(os.path.exists(os.path.join(self.state, "a1")))
+
+    def test_future_marker_timestamp_is_stale_and_spawn_allowed(self):
+        self.marker(ts=time.time() + 3600)
+        out = self.worker()
+        self.assertEqual(out["permissionDecision"], "allow")
+
+    def test_lock_directory_refuses_with_the_reset_fix_command(self):
+        os.makedirs(self.state, exist_ok=True)
+        os.mkdir(os.path.join(self.state, ".lock"))
+        started = time.monotonic()
+        out = self.worker()
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("cannot verify the paid-agent state", out["permissionDecisionReason"])
+        self.assertIn("paid_agent_tracker.py reset", out["permissionDecisionReason"])
+        self.assertLess(time.monotonic() - started, 3.0)
+        proc = subprocess.run([sys.executable, str(TRACKER), "reset"],
+                              capture_output=True, text=True, timeout=30,
+                              env=self.env())
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("removed .lock", proc.stdout)
+        self.assertTrue(os.path.isfile(os.path.join(self.state, ".lock")))
+        out = self.worker()
+        self.assertEqual(out["permissionDecision"], "allow")
+        self.assertTrue(any(name.startswith("pending-") for name in os.listdir(self.state)))
+
+    def test_symlinked_state_path_refuses_and_reset_repairs_it(self):
+        target = os.path.join(self.home, "real-state")
+        os.makedirs(target)
+        os.symlink(target, self.state)
+        out = self.worker()
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("cannot verify the paid-agent state", out["permissionDecisionReason"])
+        self.assertIn("paid_agent_tracker.py reset", out["permissionDecisionReason"])
+        proc = subprocess.run([sys.executable, str(TRACKER), "reset"],
+                              capture_output=True, text=True, timeout=30,
+                              env=self.env())
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("removed paid", proc.stdout)
+        self.assertFalse(os.path.islink(self.state))
+        self.assertTrue(os.path.isdir(self.state))
+        out = self.worker()
+        self.assertEqual(out["permissionDecision"], "allow")
+
+    def test_workflow_is_refused_while_a_paid_agent_runs(self):
+        self.marker()
+        script = WF_HEAD + "agent(P, {label: 'worker: local-skip: edge-case-spec - the task has a complex parser', agentType: 'worker'})\n"
+        out = run_workflow(self.home, script, env=self.env())
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("one paid agent at a time", out["permissionDecisionReason"])
+        self.assertIn("running worker a1 0m", out["permissionDecisionReason"])
+
+    def test_free_only_workflow_is_allowed_while_paid_agent_runs(self):
+        self.marker()
+        script = WF_HEAD + "agent(P, {label: 'x', agentType: 'hermes-local'})\n"
+        script += "agent(Q, {label: 'y', agentType: 'aevum-elm'})\n"
+        self.assertIsNone(run_workflow(self.home, script, env=self.env()))
+
+    def test_paid_workflow_reserves_slot_before_subagent_start(self):
+        script = WF_HEAD + "agent(P, {label: 'worker: local-skip: edge-case-spec - the task has a complex parser', agentType: 'worker'})\n"
+        self.assertIsNone(run_workflow(self.home, script, env=self.env()))
+        out = self.paid_spawn("use2")
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("Workflow", out["permissionDecisionReason"])
+
+    def test_workflow_without_marker_is_not_refused_by_this_rule(self):
+        script = WF_HEAD + "agent(P, {label: 'x', agentType: 'hermes-local'})\n"
+        self.assertIsNone(run_workflow(self.home, script, env=self.env()))
 
 
 if __name__ == "__main__":

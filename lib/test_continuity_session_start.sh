@@ -136,7 +136,7 @@ import sys
 with open(sys.argv[1], "w", encoding="utf-8") as f:
     f.write("SESSION CORE (oversized synthetic fixture)\n\n")
     f.write(("filler line to exceed the core byte cap\n") * 500)
-    f.write("\nVersion: session-core v8\n")
+    f.write("\nVersion: session-core v9\n")
 PY
   local d="$TMPBASE/oversized-core-repo"
   _make_repo "$d"
@@ -149,7 +149,7 @@ JSON
     *) _fail "oversized core: expected truncation marker, cap did not engage" ;;
   esac
   case "$payload" in
-    *"Version: session-core v8"*) _fail "oversized core: full body present, fixture did not exceed the cap" ;;
+    *"Version: session-core v9"*) _fail "oversized core: full body present, fixture did not exceed the cap" ;;
     *) ;;
   esac
   echo "PASS: a core file larger than the cap still truncates with the marker"
@@ -216,8 +216,8 @@ JSON
     *) _fail "resume profile core payload does not open with the LOCAL FIRST rule" ;;
   esac
   case "$payload" in
-    *"session-core v8 resume"*) : ;;
-    *) _fail "resume profile core version is not session-core v8" ;;
+    *"session-core v9 resume"*) : ;;
+    *) _fail "resume profile core version is not session-core v9" ;;
   esac
   echo "PASS: resume profile opens with the LOCAL FIRST rule"
 }
@@ -795,7 +795,7 @@ _core_sub() {
 JSON
 }
 
-LOW_FANOUT_TEXT='SUBSCRIPTION PROFILE low (overrides FAN-OUT and SUBAGENT ROUTING): Claude quota is scarce. hermes-local carries the work - up to 2 hermes calls in parallel; split work into hermes-sized branches first. No fan-out to Claude or Codex: at most one paid agent at a time (Workflow cap enforces it; keep plain Agent spawns to one too). Paid order: codex-luna (routine), codex-sol (hard), worker only for Claude-only tooling; debugger, alien and codex-astra only on the owner'"'"'s request. As driver, plan and verify; have hermes extract large files, logs and diffs instead of reading them yourself. Workflow only for genuine inter-step dependencies.'
+LOW_FANOUT_TEXT='SUBSCRIPTION PROFILE low (overrides FAN-OUT and SUBAGENT ROUTING): Claude quota is scarce. hermes-local carries the work - up to 2 hermes calls in parallel; split work into hermes-sized branches first. No fan-out to Claude or Codex: at most one paid agent at a time (the agent_label_guard enforces it for Agent and Workflow spawns). Paid order: codex-luna (routine), codex-sol (hard), worker only for Claude-only tooling; debugger, alien and codex-astra only on the owner'"'"'s request. As driver, plan and verify; have hermes extract large files, logs and diffs instead of reading them yourself. Workflow only for genuine inter-step dependencies.'
 
 test_subscription_profile_full_core() {
   local d="$TMPBASE/sub_full" high low max bogus
@@ -877,7 +877,7 @@ test_subscription_profile_low_core_size_and_tail() {
     *"(remainder on disk, not injected)"*) _fail "low core carries a truncation marker" ;;
   esac
   case "$low" in
-    *"ONE-ACTIVE-WRITER: Exactly one human-driven engine writes the shared brain at a time."*"This is an invariant, not a lock: do not add file locking."*"Version: session-core v8"*) : ;;
+    *"C12 ONE-ACTIVE-WRITER: Exactly one human-driven engine writes the shared brain at a time."*"This is an invariant, not a lock: do not add file locking."*"Version: session-core v9"*) : ;;
     *) _fail "low core lost its tail (ONE-ACTIVE-WRITER paragraph or version line)" ;;
   esac
   case "$low" in
@@ -940,12 +940,12 @@ test_review_mode_core_size_and_tail() {
   for mode in ask auto; do
     payload="$(_core_for "$mode" startup full "$d")"
     bytes="$(_body_bytes core "$payload")" || _fail "$mode: missing core payload"
-    [ "$bytes" -le 7923 ] || _fail "$mode core body is $bytes B, above the 7923 B delivered by the previous core"
+    [ "$bytes" -le 7854 ] || _fail "$mode core body is $bytes B, above the 7854 B ratchet of the v9 core"
     case "$payload" in
       *"(remainder on disk, not injected)"*) _fail "$mode core carries a truncation marker" ;;
     esac
     case "$payload" in
-      *"ONE-ACTIVE-WRITER: Exactly one human-driven engine writes the shared brain at a time."*"This is an invariant, not a lock: do not add file locking."*"Version: session-core v8"*) : ;;
+      *"C12 ONE-ACTIVE-WRITER: Exactly one human-driven engine writes the shared brain at a time."*"This is an invariant, not a lock: do not add file locking."*"Version: session-core v9"*) : ;;
       *) _fail "$mode core lost its tail (ONE-ACTIVE-WRITER paragraph or version line)" ;;
     esac
     case "$payload" in
@@ -953,11 +953,11 @@ test_review_mode_core_size_and_tail() {
       *) _fail "$mode core lacks the last non-empty line of session-core.txt" ;;
     esac
     case "$payload" in
-      *"(session-core v8)"*) : ;;
-      *) _fail "$mode core label does not carry session-core v8" ;;
+      *"(session-core v9)"*) : ;;
+      *) _fail "$mode core label does not carry session-core v9" ;;
     esac
   done
-  echo "PASS: ask and auto full core stay within 7923 B and deliver the ONE-ACTIVE-WRITER tail intact"
+  echo "PASS: ask and auto full core stay within 7854 B and deliver the ONE-ACTIVE-WRITER tail intact"
 }
 
 test_review_mode_light_and_resume() {
