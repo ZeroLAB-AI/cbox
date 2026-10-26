@@ -190,7 +190,7 @@ _ok "docker-down (volume inspect fails): probe-skip, no rollback, no cached verd
 echo "--- rc 2 triggers rollback mode exactly once under the flock ---"
 H4="$TMPBASE/h4"
 mkdir -p "$H4/.config/cbox"
-printf 'vol-claude|claude|stable|1.0.0|1000\n' > "$H4/.config/cbox/bins.stamp"
+printf 'vol-claude|claude|stable+acp0.90.0|1.0.0|1000\n' > "$H4/.config/cbox/bins.stamp"
 CBOX_BINS_HEALTH_GATE=on _CBOX_HEALTH_SH="" VOL_OK=1 PROBE_RC=2 \
   ROLLBACK_LINES="cbox-bins: claude 1.0.0 abcd1234 rollback 2.0.0 handshake-failed" \
   run_gate "$H4" img >/dev/null
@@ -198,7 +198,7 @@ RBCALLS4="$(_run_rollback_count "$H4/calllog.txt")"
 [ "$RBCALLS4" = 1 ] || _fail "rc 2: expected exactly 1 rollback-mode docker run, got $RBCALLS4"
 grep -q 'rollback' "$H4/.config/cbox/bins.history" \
   || _fail "rc 2: the rollback must be recorded in bins.history"
-grep -q '^vol-claude|claude|stable|1\.0\.0|' "$H4/.config/cbox/bins.stamp" \
+grep -q '^vol-claude|claude|stable+acp0\.90\.0|1\.0\.0|' "$H4/.config/cbox/bins.stamp" \
   || _fail "rc 2: bins.stamp (cache) must end at the restored version"
 grep -q 'CBOX_ROLLBACK_REASON=health-gate' "$H4/calllog.txt" \
   || _fail "rc 2: an automatic start-gate rollback must be tagged health-gate, not manual"

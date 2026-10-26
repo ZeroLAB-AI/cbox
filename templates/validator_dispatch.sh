@@ -12,7 +12,7 @@ _cbox_reg_validate_var_dispatch() {
   _cbox_val_no_ctrl "$val" || { printf 'contains a control character'; return 1; }
   case "$key" in
     CBOX_MODEL_FABLE)
-      _cbox_val_named_claude_model_id "$val" || return 1
+      _cbox_val_named_claude_model_id_or_off "$val" || return 1
       ;;
     CBOX_MODEL_OPUS)
       _cbox_val_named_claude_model_id "$val" || return 1

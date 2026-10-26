@@ -943,8 +943,11 @@ staged_install_files() {
 }
 
 merge_settings_json() {
-  local target="$1" merge="$2" home="$3" out="$4"
-  python3 - "$target" "$merge" "$home" "$out" "${CBOX_MODEL_FABLE:-claude-opus-5-5[1m]}" "${CBOX_MODEL_OPUS:-}" "${CBOX_MODEL_HAIKU:-}" <<'PYEOF'
+  local target="$1" merge="$2" home="$3" out="$4" model_fable="${CBOX_MODEL_FABLE-off}"
+  case "$model_fable" in
+    off) model_fable="" ;;
+  esac
+  python3 - "$target" "$merge" "$home" "$out" "$model_fable" "${CBOX_MODEL_OPUS:-}" "${CBOX_MODEL_HAIKU:-}" <<'PYEOF'
 import json, os, sys
 target, merge_path, home, out, model_fable, model_opus, model_haiku = sys.argv[1:8]
 data = {}
@@ -957,8 +960,12 @@ if os.path.isfile(target):
 with open(merge_path) as f:
     raw = f.read().replace("@HOME@", home)
 merge = json.loads(raw)
-if "ANTHROPIC_DEFAULT_FABLE_MODEL" in merge.get("env", {}):
-    merge["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"] = model_fable
+if model_fable:
+    merge.setdefault("env", {})["ANTHROPIC_DEFAULT_FABLE_MODEL"] = model_fable
+else:
+    merge.get("env", {}).pop("ANTHROPIC_DEFAULT_FABLE_MODEL", None)
+    if isinstance(data.get("env"), dict):
+        data["env"].pop("ANTHROPIC_DEFAULT_FABLE_MODEL", None)
 if model_opus and "ANTHROPIC_DEFAULT_OPUS_MODEL" in merge.get("env", {}):
     merge["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model_opus
 if model_haiku and "ANTHROPIC_DEFAULT_HAIKU_MODEL" in merge.get("env", {}):

@@ -116,7 +116,7 @@ run_install_group() {
 H1="$TMPBASE/h1"
 mkdir -p "$H1/.config/cbox"
 run_install_group "$H1" "claude codex" "cbox-bins: claude 1.0.0 abcd ok" >/dev/null
-grep -Eq '^[0-9]+\|vol-claude\|claude\|stable\|\|1\.0\.0\|ok\|$' "$H1/.config/cbox/bins.history" \
+grep -Eq '^[0-9]+\|vol-claude\|claude\|stable\+acp0\.90\.0\|\|1\.0\.0\|ok\|$' "$H1/.config/cbox/bins.history" \
   || _fail "history: a fresh ok install must record an empty from_version and the new version"
 _ok "history: fresh ok install recorded with empty from_version"
 
@@ -124,14 +124,14 @@ H2="$TMPBASE/h2"
 mkdir -p "$H2/.config/cbox"
 printf 'vol-claude|claude|stable|1.0.0|1000\n' > "$H2/.config/cbox/bins.stamp"
 run_install_group "$H2" "claude codex" "cbox-bins: claude 2.0.0 efgh ok" >/dev/null
-grep -Eq '^[0-9]+\|vol-claude\|claude\|stable\|1\.0\.0\|2\.0\.0\|ok\|$' "$H2/.config/cbox/bins.history" \
+grep -Eq '^[0-9]+\|vol-claude\|claude\|stable\+acp0\.90\.0\|1\.0\.0\|2\.0\.0\|ok\|$' "$H2/.config/cbox/bins.history" \
   || _fail "history: a real version change must record the correct from_version and to_version"
 _ok "history: version change recorded with correct from_version and to_version"
 
 H3="$TMPBASE/h3"
 mkdir -p "$H3/.config/cbox"
 run_install_group "$H3" "claude codex" "cbox-bins: codex 3.0.0 hijk adopt" >/dev/null
-grep -Eq '^[0-9]+\|vol-codex\|codex\|latest\|\|3\.0\.0\|adopt\|$' "$H3/.config/cbox/bins.history" \
+grep -Eq '^[0-9]+\|vol-codex\|codex\|latest\+acp2\.2\.2\|\|3\.0\.0\|adopt\|$' "$H3/.config/cbox/bins.history" \
   || _fail "history: an adopt status must be recorded like a fresh ok install"
 _ok "history: adopt status recorded in history"
 
@@ -144,11 +144,11 @@ _ok "history: unchanged version installs stay silent (no redundant history line)
 
 H5="$TMPBASE/h5"
 mkdir -p "$H5/.config/cbox"
-printf 'vol-codex|codex|latest|0.154.0|1000\n' > "$H5/.config/cbox/bins.stamp"
+printf 'vol-codex|codex|latest+acp2.2.2|0.154.0|1000\n' > "$H5/.config/cbox/bins.stamp"
 run_install_group "$H5" "claude codex" 'cbox-bins: codex 0.153.4 abcd1234 rollback 0.154.0 app-server handshake: no userAgent' >"$H5.out" 2>"$H5.err"
-grep -Eq '^[0-9]+\|vol-codex\|codex\|latest\|0\.154\.0\|0\.153\.4\|rollback\|app-server handshake: no userAgent$' "$H5/.config/cbox/bins.history" \
+grep -Eq '^[0-9]+\|vol-codex\|codex\|latest\+acp2\.2\.2\|0\.154\.0\|0\.153\.4\|rollback\|app-server handshake: no userAgent$' "$H5/.config/cbox/bins.history" \
   || _fail "parser: a rollback status_word must append a history line with from=badver, to=restored, status=rollback, note=reason: $(cat "$H5/.config/cbox/bins.history" 2>/dev/null)"
-grep -q 'vol-codex|codex|latest|0.153.4|' "$H5/.config/cbox/bins.stamp" \
+grep -q 'vol-codex|codex|latest+acp2.2.2|0.153.4|' "$H5/.config/cbox/bins.stamp" \
   || _fail "parser: a rollback status_word must cache_put the restored version"
 [ -f "$H5/.config/cbox/bins.hold.vol-codex" ] || _fail "parser: a rollback status_word must write a hold file"
 grep -q '^version=0.153.4$' "$H5/.config/cbox/bins.hold.vol-codex" || _fail "parser: hold file must record the good (restored) version"
@@ -161,9 +161,9 @@ H6="$TMPBASE/h6"
 mkdir -p "$H6/.config/cbox"
 printf 'vol-codex|codex|latest|0.153.4|1000\n' > "$H6/.config/cbox/bins.stamp"
 run_install_group "$H6" "claude codex" 'cbox-bins: codex 0.154.0 ffffeeee unreliable probe unreliable on both candidates, kept the new install' >"$H6.out" 2>"$H6.err"
-grep -Eq '^[0-9]+\|vol-codex\|codex\|latest\|0\.153\.4\|0\.154\.0\|unreliable\|' "$H6/.config/cbox/bins.history" \
+grep -Eq '^[0-9]+\|vol-codex\|codex\|latest\+acp2\.2\.2\|0\.153\.4\|0\.154\.0\|unreliable\|' "$H6/.config/cbox/bins.history" \
   || _fail "parser: an unreliable status_word must append a history line recording the kept version: $(cat "$H6/.config/cbox/bins.history" 2>/dev/null)"
-grep -q 'vol-codex|codex|latest|0.154.0|' "$H6/.config/cbox/bins.stamp" \
+grep -q 'vol-codex|codex|latest+acp2.2.2|0.154.0|' "$H6/.config/cbox/bins.stamp" \
   || _fail "parser: an unreliable status_word must cache_put the kept (new) version"
 [ -f "$H6/.config/cbox/bins.hold.vol-codex" ] && _fail "parser: an unreliable status_word must never write a hold file"
 grep -q 'health probe was unreliable' "$H6.err" || _fail "parser: an unreliable status_word must print an operator-facing notice"
@@ -369,11 +369,11 @@ run_status_print() {
 
 SPA="$TMPBASE/sp_a"
 mkdir -p "$SPA/.config/cbox"
-printf 'vol-claude|claude|stable|1.2.3|1000\n' > "$SPA/.config/cbox/bins.stamp"
+printf 'vol-claude|claude|stable+acp0.90.0|1.2.3|1000\n' > "$SPA/.config/cbox/bins.stamp"
 SP_OUT="$(run_status_print "$SPA")"
-printf '%s\n' "$SP_OUT" | grep -Eq '^claude +volume=vol-claude want=stable installed=1\.2\.3 fresh$' \
+printf '%s\n' "$SP_OUT" | grep -Eq '^claude +volume=vol-claude want=stable\+acp0\.90\.0 installed=1\.2\.3 fresh$' \
   || _fail "bins status: an installed tool whose cache matches its want string must render fresh (got: $SP_OUT)"
-printf '%s\n' "$SP_OUT" | grep -Eq '^codex +volume=vol-codex want=latest installed=unknown stale$' \
+printf '%s\n' "$SP_OUT" | grep -Eq '^codex +volume=vol-codex want=latest\+acp2\.2\.2 installed=unknown stale$' \
   || _fail "bins status: a tool with no cache entry must render unknown/stale (got: $SP_OUT)"
 printf '%s\n' "$SP_OUT" | grep -Eq '^hermes +off$' \
   || _fail "bins status: hermes must render off when CBOX_HERMES is not on (got: $SP_OUT)"

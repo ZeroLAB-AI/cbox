@@ -748,7 +748,13 @@ _install_health_gate() {
         ;;
       *)
         echo "install-bins: hermes rollback target also failed its health check - hermes has no roll-forward, keeping the restored (previous) version live" >&2
-        printf '%s\n' "$out"
+        if printf '%s\n' "$out" | grep -Eq '^cbox-bins: hermes [^ ]+ [^ ]+ rollback '; then
+          [ -n "$note" ] || note="health check failed"
+          printf 'cbox-bins: hermes %s %s unreliable probe unreliable on both candidates, kept the restored version: %s\n' \
+            "$(printf '%s' "$out" | awk '{print $3}')" "$(printf '%s' "$out" | awk '{print $4}')" "$note"
+        else
+          printf '%s\n' "$out"
+        fi
         ;;
     esac
     return 0

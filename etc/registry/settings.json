@@ -433,13 +433,13 @@
       "section": "settings",
       "type": {
         "kind": "string",
-        "escape_hatch": "claude-model-id"
+        "escape_hatch": "claude-model-id-or-off"
       },
-      "default": "claude-opus-5-5[1m]",
+      "default": "off",
       "role": "setting",
       "export": false,
       "prompt": null,
-      "help": "Claude fable tier model ID in effective and managed settings and the container environment. The claude-fable-5-1 point release is banned.",
+      "help": "Claude fable tier model ID in effective and managed settings and the container environment, or off to render no ANTHROPIC_DEFAULT_FABLE_MODEL at all. A pin is a reverse identity in Claude Code: any model with that ID is reported as the fable tier, so a real ID must differ from CBOX_MODEL_OPUS and CBOX_MODEL_HAIKU. The claude-fable-5-1 point release is banned.",
       "validator": null
     },
     {
@@ -1479,7 +1479,7 @@
       "role": "setting",
       "export": true,
       "prompt": null,
-      "help": "Concurrency slot count for the hermes delegate; falls back to OLLAMA_NUM_PARALLEL, else 1, capped at 16.",
+      "help": "Concurrency limit L for the hermes delegate: one full slot plus L-1 small slots; falls back to OLLAMA_NUM_PARALLEL, else 1, capped at 16.",
       "validator": null
     },
     {
@@ -1492,7 +1492,7 @@
       "role": "setting",
       "export": true,
       "prompt": null,
-      "help": "Max seconds a call blocks for a concurrency slot before returning a busy error (default 1500s).",
+      "help": "Default 0: no queue; if the global slots remain full after the 1s lock-probe retry, the call is refused. A positive value queues the call for up to that many seconds.",
       "validator": null
     },
     {
@@ -1532,7 +1532,7 @@
       "role": "setting",
       "export": true,
       "prompt": null,
-      "help": "Directory holding the hermes delegate concurrency slot files (default /tmp/cbox-hermes-delegate-locks).",
+      "help": "Default $HOME/.claude/cbox-hermes-slots. With the default host bind mount, the host and engine containers share these slot files, making the pool machine-wide. Set CBOX_HERMES_DELEGATE_LOCK_DIR to override the directory.",
       "validator": null
     },
     {

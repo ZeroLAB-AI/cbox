@@ -21,6 +21,10 @@ mkdir -p "$HOME/.config/cbox" "$HOME/.claude/hooks" "$HOME/.codex" "$FARM/bin"
 for _f in _common.sh lib templates etc entrypoint.sh install-bins.sh; do
   ln -s "$REAL/$_f" "$FARM/$_f"
 done
+for _d in acp-claude acp-codex; do
+  mkdir -p "$FARM/$_d"
+  cp "$REAL/$_d/package.json" "$REAL/$_d/package-lock.json" "$FARM/$_d/"
+done
 : > "$FARM/.dockerignore"
 sed 's/^_cbox_config_in_container() {$/&\n  return 1/' "$REAL/cbox" > "$FARM/cbox"
 chmod +x "$FARM/cbox"

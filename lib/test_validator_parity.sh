@@ -609,6 +609,7 @@ _new_case CBOX_CODEX_MODEL "bad model" reject
 _new_case CBOX_CODEX_MODEL "bad;rm -rf /" reject
 _new_case CBOX_CODEX_MODEL '$(evil)' reject
 
+_new_case CBOX_MODEL_FABLE 'off' accept
 _new_case CBOX_MODEL_FABLE 'claude-opus-5-5[1m]' accept
 _new_case CBOX_MODEL_FABLE 'claude-opus-5-5' accept
 _new_case CBOX_MODEL_FABLE 'claude-fable-5-1' reject
@@ -616,12 +617,14 @@ _new_case CBOX_MODEL_FABLE 'claude-fable-5-1[1m]' reject
 _new_case CBOX_MODEL_FABLE 'Claude Opus' reject
 _new_case CBOX_MODEL_FABLE '' reject
 
+_new_case CBOX_MODEL_OPUS 'off' reject
 _new_case CBOX_MODEL_OPUS 'claude-opus-5-5[1m]' accept
 _new_case CBOX_MODEL_OPUS 'claude-opus-5-6' accept
 _new_case CBOX_MODEL_OPUS 'claude-fable-5-1' reject
 _new_case CBOX_MODEL_OPUS 'claude-fable-5-1[1m]' reject
 _new_case CBOX_MODEL_OPUS 'Claude Opus' reject
 _new_case CBOX_MODEL_OPUS '' reject
+_new_case CBOX_MODEL_HAIKU 'off' reject
 _new_case CBOX_MODEL_HAIKU 'claude-haiku-5-5' accept
 _new_case CBOX_MODEL_HAIKU 'claude-haiku-5-6[1m]' accept
 _new_case CBOX_MODEL_HAIKU 'claude-fable-5-1' reject

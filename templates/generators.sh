@@ -259,10 +259,10 @@ _cbox_bind_roots_write() {
 _cbox_profile_claude_shared_into() {
   local tmp="$1" claude_path="$2" eff="$3" d
   [ -e "$claude_path/history.jsonl" ] || ( umask 077; : >> "$claude_path/history.jsonl" ) || return 1
-  mkdir -p "$eff/audit" "$claude_path/jobs" || return 1
-  chmod 0700 "$eff/audit" || return 1
+  mkdir -p "$eff/audit" "$claude_path/jobs" "$claude_path/cbox-hermes-slots" || return 1
+  chmod 0700 "$eff/audit" "$claude_path/cbox-hermes-slots" || return 1
   printf '      - %s/history.jsonl:${HOST_HOME}/.claude/history.jsonl:rw\n' "$claude_path" >> "$tmp"
-  for d in tasks jobs session-env plugins file-history plans shell-snapshots agent-memory; do
+  for d in tasks jobs session-env plugins file-history plans shell-snapshots agent-memory cbox-hermes-slots; do
     printf '      - %s/%s:${HOST_HOME}/.claude/%s:rw\n' "$claude_path" "$d" "$d" >> "$tmp"
   done
   for d in commands skills rules; do
@@ -835,16 +835,27 @@ _cbox_clip_dir() {
   printf '%s/cbox-clip-%s' "$(_cbox_xdg_runtime_dir)" "$1"
 }
 
+_cbox_model_fable_pin() {
+  local val="${CBOX_MODEL_FABLE-off}"
+  case "$val" in
+    off|"") printf '' ;;
+    *) printf '%s' "$val" ;;
+  esac
+}
+
 _cbox_model_policy_env_into() {
   local src="$INSTALL_DIR/etc/claude/settings.merge.json" out
   if [ ! -f "$src" ]; then
     echo "_cbox_model_policy_env_into: $src missing - rendering WITHOUT the model policy env (ban/deny gates stay dark in this container)" >&2
     return 0
   fi
-  out="$(python3 - "$src" "${CBOX_MODEL_FABLE:-claude-opus-5-5[1m]}" "${CBOX_MODEL_OPUS:-}" "${CBOX_MODEL_HAIKU:-}" <<'PY'
+  out="$(python3 - "$src" "$(_cbox_model_fable_pin)" "${CBOX_MODEL_OPUS:-}" "${CBOX_MODEL_HAIKU:-}" <<'PY'
 import json, re, sys
 env = json.load(open(sys.argv[1])).get("env") or {}
-env["ANTHROPIC_DEFAULT_FABLE_MODEL"] = sys.argv[2]
+if sys.argv[2]:
+    env["ANTHROPIC_DEFAULT_FABLE_MODEL"] = sys.argv[2]
+else:
+    env.pop("ANTHROPIC_DEFAULT_FABLE_MODEL", None)
 if sys.argv[3]:
     env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = sys.argv[3]
 if sys.argv[4]:
@@ -3027,7 +3038,7 @@ gen_settings_volume() {
     echo "gen_settings_volume: missing $src" >&2
     return 1
   fi
-  out="$(python3 "$INSTALL_DIR/etc/adapters/claude.py" settings-merge "$src" "$HOME" "${CBOX_MODEL_FABLE:-claude-opus-5-5[1m]}" "${CBOX_MODEL_OPUS:-}" "${CBOX_MODEL_HAIKU:-}")" || return 1
+  out="$(python3 "$INSTALL_DIR/etc/adapters/claude.py" settings-merge "$src" "$HOME" "$(_cbox_model_fable_pin)" "${CBOX_MODEL_OPUS:-}" "${CBOX_MODEL_HAIKU:-}")" || return 1
   printf '%s\n' "$out" | _cbox_write "$INSTALL_DIR/generated/settings.json"
 }
 
@@ -3051,7 +3062,7 @@ gen_managed_settings() {
     echo "gen_managed_settings: missing $src" >&2
     return 1
   fi
-  out="$(python3 "$INSTALL_DIR/etc/adapters/claude.py" settings-merge "$src" "$HOME" "${CBOX_MODEL_FABLE:-claude-opus-5-5[1m]}" "${CBOX_MODEL_OPUS:-}" "${CBOX_MODEL_HAIKU:-}")" || return 1
+  out="$(python3 "$INSTALL_DIR/etc/adapters/claude.py" settings-merge "$src" "$HOME" "$(_cbox_model_fable_pin)" "${CBOX_MODEL_OPUS:-}" "${CBOX_MODEL_HAIKU:-}")" || return 1
   printf '%s\n' "$out" | _cbox_write "$target"
 }
 
@@ -3165,7 +3176,7 @@ ENGINE NOTE: this file plays the role CLAUDE.md plays for Claude Code - the
 same global guidance, rendered for the codex engine. Where the source
 material below refers to "Claude subagents" or the Agent tool, no such
 mechanism exists here: your delegate for handing off a task is the
-ask-claude MCP tool (model haiku, sonnet, opus, or fable; effort low,
+ask-claude MCP tool (model haiku, sonnet, or opus; effort low,
 medium, high, or max). Workflow and ledger/continuity conventions
 (LEDGER.md, PROGRESS_YYYY_MM_DD.md, CHANGELOG.md) are identical across
 engines.

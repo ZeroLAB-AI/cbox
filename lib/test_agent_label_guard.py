@@ -9,10 +9,13 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 LIVE_STATE_DIR = "/tmp/cbox-paid-agents"
 LIVE_STATE_BEFORE = sorted(os.listdir(LIVE_STATE_DIR)) if os.path.exists(LIVE_STATE_DIR) else None
 TEST_STATE = tempfile.TemporaryDirectory()
+os.environ["CBOX_USAGE_DIR"] = os.path.join(TEST_STATE.name, "usage")
+os.environ["CBOX_HERMES_DELEGATE_LOCK_DIR"] = os.path.join(TEST_STATE.name, "locks")
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 GUARD = ROOT / "etc" / "hooks" / "agent_label_guard.py"
@@ -21,6 +24,9 @@ BUDGET_MODULE = ROOT / "etc" / "hooks" / "cbox_budget.py"
 
 for _k in [k for k in os.environ if k.startswith("CBOX_")]:
     os.environ.pop(_k)
+os.environ["HOME"] = TEST_STATE.name
+os.environ["CBOX_USAGE_DIR"] = os.path.join(TEST_STATE.name, "usage")
+os.environ["CBOX_HERMES_DELEGATE_LOCK_DIR"] = os.path.join(TEST_STATE.name, "locks")
 os.environ["CBOX_PAID_AGENT_DIR"] = os.path.join(TEST_STATE.name, "state")
 
 
@@ -101,6 +107,8 @@ def _run_payload(home, payload, env=None):
     e["HOME"] = home
     e["CLAUDE_CONFIG_DIR"] = os.path.join(home, ".claude-cfg")
     e["CBOX_PAID_AGENT_DIR"] = os.path.join(home, "no-paid-agents")
+    e["CBOX_USAGE_DIR"] = os.path.join(home, "usage")
+    e["CBOX_HERMES_DELEGATE_LOCK_DIR"] = os.path.join(home, "hermes-locks")
     if env:
         e.update(env)
     proc = subprocess.run(
@@ -383,7 +391,7 @@ class LocalFirstGateTests(unittest.TestCase):
         self.assertEqual(out["permissionDecision"], "deny")
         self.assertIn("free", out["permissionDecisionReason"])
 
-    def test_local_busy_denied_when_one_of_two_slots_is_free(self):
+    def test_local_busy_allowed_when_only_the_full_slot_is_held(self):
         write_agent(self.home, "hermes-local", model="haiku", effort="low")
         lock_dir = tempfile.mkdtemp()
         fds = hold_all_slots(lock_dir, 1)
@@ -392,6 +400,25 @@ class LocalFirstGateTests(unittest.TestCase):
                       "local-skip: local-busy - hermes is running the extraction step",
                       env={"CBOX_HERMES_DELEGATE_LOCK_DIR": lock_dir,
                            "CBOX_HERMES_DELEGATE_MAX_CONCURRENCY": "2"})
+            self.assertEqual(out["permissionDecision"], "allow")
+        finally:
+            release_slots(fds)
+
+    def test_local_busy_denied_when_only_small_slots_are_held(self):
+        write_agent(self.home, "hermes-local")
+        lock_dir = os.path.join(self.home, "small-locks")
+        os.makedirs(lock_dir)
+        fds = []
+        try:
+            for i in (1, 2):
+                fd = os.open(os.path.join(lock_dir, "slot.%d" % i),
+                             os.O_CREAT | os.O_RDWR, 0o600)
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fds.append(fd)
+            out = run(self.home, "worker",
+                      "local-skip: local-busy - side tasks hold the small slots",
+                      env={"CBOX_HERMES_DELEGATE_LOCK_DIR": lock_dir,
+                           "CBOX_HERMES_DELEGATE_MAX_CONCURRENCY": "3"})
             self.assertEqual(out["permissionDecision"], "deny")
             self.assertIn("free", out["permissionDecisionReason"])
         finally:
@@ -405,6 +432,67 @@ class LocalFirstGateTests(unittest.TestCase):
                   env={"CBOX_HERMES_DELEGATE_LOCK_DIR": missing_dir})
         self.assertEqual(out["permissionDecision"], "deny")
         self.assertIn("free", out["permissionDecisionReason"])
+
+    def test_local_busy_allowed_when_fresh_vllm_load_fills_the_pool(self):
+        write_agent(self.home, "hermes-local", model="haiku", effort="low")
+        usage_dir = os.path.join(self.home, "usage")
+        os.makedirs(usage_dir, exist_ok=True)
+        now = time.time()
+        with open(os.path.join(usage_dir, "hermes.json"), "w", encoding="ascii") as f:
+            json.dump({"ts": now, "last_probe_ts": now, "reachable": True,
+                       "running": 1, "waiting": 1, "history": [True]}, f)
+        out = run(self.home, "worker",
+                  "local-skip: local-busy - hermes is running the extraction step",
+                  env={"CBOX_HERMES_DELEGATE_MAX_CONCURRENCY": "2"})
+        self.assertEqual(out["permissionDecision"], "allow")
+
+    def test_local_busy_denied_when_vllm_load_is_stale(self):
+        write_agent(self.home, "hermes-local", model="haiku", effort="low")
+        usage_dir = os.path.join(self.home, "usage")
+        os.makedirs(usage_dir, exist_ok=True)
+        now = time.time() - 121
+        with open(os.path.join(usage_dir, "hermes.json"), "w", encoding="ascii") as f:
+            json.dump({"ts": now, "last_probe_ts": now, "reachable": True,
+                       "running": 2, "waiting": 0, "history": [True]}, f)
+        out = run(self.home, "worker",
+                  "local-skip: local-busy - hermes is running the extraction step",
+                  env={"CBOX_HERMES_DELEGATE_MAX_CONCURRENCY": "2"})
+        self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_local_busy_does_not_follow_a_slot_symlink(self):
+        write_agent(self.home, "hermes-local", model="haiku", effort="low")
+        lock_dir = tempfile.mkdtemp()
+        target = os.path.join(lock_dir, "held")
+        fd = os.open(target, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.symlink(target, os.path.join(lock_dir, "slot.0"))
+        try:
+            out = run(self.home, "worker",
+                      "local-skip: local-busy - hermes is running the extraction step",
+                      env={"CBOX_HERMES_DELEGATE_LOCK_DIR": lock_dir,
+                           "CBOX_HERMES_DELEGATE_MAX_CONCURRENCY": "1"})
+            self.assertEqual(out["permissionDecision"], "deny")
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def test_default_slot_directory_uses_home_at_call_time(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "agent_label_guard_default_slots", str(GUARD))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        lock_dir = os.path.join(self.home, ".claude", "cbox-hermes-slots")
+        fds = hold_all_slots(lock_dir, 1)
+        try:
+            with mock.patch.dict(os.environ):
+                os.environ["HOME"] = self.home
+                os.environ["CBOX_USAGE_DIR"] = os.path.join(self.home, "usage")
+                os.environ["CBOX_HERMES_DELEGATE_LOCK_DIR"] = ""
+                os.environ["CBOX_HERMES_DELEGATE_MAX_CONCURRENCY"] = "1"
+                self.assertTrue(mod.hermes_busy())
+        finally:
+            release_slots(fds)
 
 
 def run_workflow(home, script, env=None):

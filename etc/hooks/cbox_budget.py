@@ -936,12 +936,16 @@ def hermes_state(now=None):
         available = any(bool(x) for x in recent)
     else:
         available = bool(reachable)
-    return {
+    result = {
         "state": "available" if available else "unavailable",
         "reachable": reachable,
         "model_loaded": model_loaded,
         "age_seconds": age,
     }
+    for key in ("running", "waiting"):
+        if key in data:
+            result[key] = data[key]
+    return result
 
 
 def _cmd_metrics():

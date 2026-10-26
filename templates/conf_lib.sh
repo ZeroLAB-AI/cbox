@@ -132,7 +132,7 @@ _cbox_reg_conf_defaults() {
   : "${CBOX_OPEN_QUESTIONS:=1}"
   : "${CBOX_CONTEXT_PROFILE:=full}"
   : "${CBOX_REVIEW:=ask}"
-  : "${CBOX_MODEL_FABLE=claude-opus-5-5[1m]}"
+  : "${CBOX_MODEL_FABLE=off}"
   : "${CBOX_MODEL_OPUS=claude-opus-5-5[1m]}"
   : "${CBOX_MODEL_HAIKU=claude-haiku-5-5}"
   : "${CBOX_GITCONFIG:=0}"

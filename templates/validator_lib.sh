@@ -222,6 +222,12 @@ _cbox_val_named_claude_model_id() {
   printf '%s' "$val" | grep -Eq '^claude-[a-z0-9-]+(\[1m\])?$' || { printf 'expected a claude model ID (claude-<lowercase letters, digits, dashes> with optional [1m])'; return 1; }
 }
 
+_cbox_val_named_claude_model_id_or_off() {
+  local val="$1"
+  [ "$val" = off ] && return 0
+  _cbox_val_named_claude_model_id "$val"
+}
+
 _cbox_val_named_codex_model_id() {
   local val="$1"
   printf '%s' "$val" | grep -Eq '^gpt-[0-9]+(\.[0-9]+)?-[a-z]+$' || { printf 'expected a codex model id (gpt-<digits>[.<digits>]-<lowercase word>)'; return 1; }

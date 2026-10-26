@@ -46,6 +46,7 @@ NAMED_VALIDATORS = {
     "kernel-lang",
     "codex-model-slug",
     "claude-model-id",
+    "claude-model-id-or-off",
     "codex-model-id",
     "host-alias-mode",
     "profile-name",

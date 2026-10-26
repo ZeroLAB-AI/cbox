@@ -42,8 +42,9 @@ CAPTURED_AT_FUTURE_TOLERANCE_SECONDS = 60
 HERMES_RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$")
 HERMES_RUN_SCAN_CAP = 30
 HERMES_HISTORY_MAX = 5
-HERMES_DEFAULT_LOCK_DIR = "/tmp/cbox-hermes-delegate-locks"
+HERMES_DEFAULT_LOCK_DIR = os.path.join(".claude", "cbox-hermes-slots")
 HERMES_MAX_CONCURRENCY_CAP = 16
+HERMES_METRICS_READ_CAP = 1024 * 1024
 
 
 def _usage_dir():
@@ -242,32 +243,75 @@ def _probe_hermes_blocking(base, timeout, result):
             with opener.open(base + "/v1/models", timeout=timeout) as resp:
                 raw = resp.read(HERMES_PROBE_READ_CAP)
         except Exception:
-            return
+            raw = None
+            endpoint = None
+        else:
+            endpoint = "models"
+    except Exception:
+        raw = None
+        endpoint = None
+    else:
+        endpoint = "ps"
+    if raw is not None:
         result["reachable"] = True
         try:
             payload = json.loads(raw.decode("utf-8"))
         except Exception:
-            return
-        if isinstance(payload, dict):
-            data = payload.get("data")
-            if isinstance(data, list) and len(data) > 0:
-                result["model_loaded"] = True
-        return
-    except Exception:
-        return
-    result["reachable"] = True
+            payload = None
+        if endpoint == "models":
+            if isinstance(payload, dict):
+                data = payload.get("data")
+                if isinstance(data, list) and data:
+                    result["model_loaded"] = True
+        elif endpoint == "ps":
+            model_loaded = False
+            if isinstance(payload, dict):
+                models = payload.get("models")
+                if isinstance(models, list) and models:
+                    model_loaded = True
+            elif isinstance(payload, list):
+                model_loaded = bool(payload)
+            result["model_loaded"] = model_loaded
+    load = _hermes_metrics_load(base, timeout)
+    if load is not None:
+        result["running"], result["waiting"] = load
+
+
+def _hermes_metrics_load(base, timeout):
+    import urllib.request
+
+    class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
     try:
-        payload = json.loads(raw.decode("utf-8"))
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), NoRedirectHandler())
+        with opener.open(base.rstrip("/") + "/metrics", timeout=timeout) as resp:
+            raw = resp.read(HERMES_METRICS_READ_CAP + 1)
+        if len(raw) > HERMES_METRICS_READ_CAP:
+            return None
+        metric_text = raw.decode("utf-8")
     except Exception:
-        return
-    model_loaded = False
-    if isinstance(payload, dict):
-        models = payload.get("models")
-        if isinstance(models, list) and len(models) > 0:
-            model_loaded = True
-    elif isinstance(payload, list):
-        model_loaded = len(payload) > 0
-    result["model_loaded"] = model_loaded
+        return None
+    totals = {}
+    for line in metric_text.splitlines():
+        match = re.fullmatch(
+            r'vllm:num_requests_(running|waiting)(?:\{[^\n}]*\})?\s+(\S+)(?:\s+\S+)?',
+            line.strip())
+        if match is None:
+            continue
+        try:
+            value = float(match.group(2))
+        except ValueError:
+            return None
+        if not math.isfinite(value) or value < 0:
+            return None
+        key = match.group(1)
+        totals[key] = totals.get(key, 0) + value
+    if "running" not in totals or "waiting" not in totals:
+        return None
+    return totals["running"], totals["waiting"]
 
 
 def _probe_hermes(base, timeout=HERMES_PROBE_TIMEOUT, join_deadline=HERMES_PROBE_JOIN_DEADLINE):
@@ -276,8 +320,9 @@ def _probe_hermes(base, timeout=HERMES_PROBE_TIMEOUT, join_deadline=HERMES_PROBE
     t.start()
     t.join(join_deadline)
     if t.is_alive():
-        return False, False
-    return result["reachable"], result["model_loaded"]
+        return False, False, None, None
+    return (result["reachable"], result["model_loaded"], result.get("running"),
+            result.get("waiting"))
 
 
 def _update_hermes_cache(now):
@@ -293,7 +338,7 @@ def _update_hermes_cache(now):
     pending = dict(existing)
     pending["last_probe_ts"] = now
     _atomic_write(path, pending)
-    reachable, model_loaded = _probe_hermes(base)
+    reachable, model_loaded, running, waiting = _probe_hermes(base)
     history = existing.get("history")
     if not isinstance(history, list):
         history = []
@@ -305,6 +350,9 @@ def _update_hermes_cache(now):
         "model_loaded": model_loaded,
         "history": history,
     }
+    if running is not None and waiting is not None:
+        payload["running"] = running
+        payload["waiting"] = waiting
     _atomic_write(path, payload)
 
 
@@ -677,7 +725,8 @@ def _maybe_spawn_claude_refresh(now):
 
 
 def _hermes_lock_dir():
-    return os.environ.get("CBOX_HERMES_DELEGATE_LOCK_DIR") or HERMES_DEFAULT_LOCK_DIR
+    return os.environ.get("CBOX_HERMES_DELEGATE_LOCK_DIR") or os.path.join(
+        os.path.expanduser("~"), HERMES_DEFAULT_LOCK_DIR)
 
 
 def _hermes_runs_dir():
@@ -703,13 +752,13 @@ def _hermes_concurrency_limit():
     return min(limit, HERMES_MAX_CONCURRENCY_CAP)
 
 
-def _hermes_any_slot_busy():
+def _hermes_held_slots():
     d = _hermes_lock_dir()
-    busy = False
+    held = []
     for i in range(_hermes_concurrency_limit()):
         path = os.path.join(d, "slot.%d" % i)
         try:
-            fd = os.open(path, os.O_RDONLY)
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         except OSError:
             continue
         try:
@@ -717,10 +766,14 @@ def _hermes_any_slot_busy():
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 fcntl.flock(fd, fcntl.LOCK_UN)
             except OSError:
-                busy = True
+                held.append(i)
         finally:
             os.close(fd)
-    return busy
+    return held
+
+
+def _hermes_any_slot_busy():
+    return bool(_hermes_held_slots())
 
 
 def _parse_run_id_epoch(run_id):
@@ -771,30 +824,54 @@ def _hermes_run_scan():
     return latest_unfinished, durations
 
 
-def _hermes_unreachable(now):
-    state = _cbox_budget_mod().hermes_state(now)
-    return state.get("state") == "unavailable" and state.get("reachable") is False
+def _hermes_external_load(state):
+    if not isinstance(state, dict) or state.get("state") == "unknown":
+        return None
+    running = state.get("running")
+    waiting = state.get("waiting")
+    if (isinstance(running, bool) or not isinstance(running, (int, float))
+            or not math.isfinite(running) or running < 0):
+        return None
+    if (isinstance(waiting, bool) or not isinstance(waiting, (int, float))
+            or not math.isfinite(waiting) or waiting < 0):
+        return None
+    return running + waiting
 
 
 def _hermes_segment(now, cwd=None):
     if not _cbox_budget_mod().local_tier_present(cwd):
         return None
-    if not _hermes_any_slot_busy():
-        if _hermes_unreachable(now):
+    slots = _hermes_held_slots()
+    held = len(slots)
+    limit = _hermes_concurrency_limit()
+    pool = "hermes: full %d/1" % (0 in slots)
+    if limit > 1:
+        pool += " small %d/%d" % (sum(i > 0 for i in slots), limit - 1)
+    state = _cbox_budget_mod().hermes_state(now)
+    load = _hermes_external_load(state)
+    foreign = load - held if load is not None else 0
+    foreign_text = " +%s ext" % format(foreign, "g") if foreign > 0 else ""
+    if held == 0:
+        if foreign > 0:
+            return pool + foreign_text
+        if state.get("state") == "unavailable" and state.get("reachable") is False:
             return "hermes: down"
         return "hermes: idle"
     latest_unfinished, durations = _hermes_run_scan()
     if latest_unfinished is None:
-        return "hermes: 0min"
-    _, started = latest_unfinished
-    elapsed = max(0.0, now - started)
-    if durations:
-        median = statistics.median(durations)
-        remaining = max(0.0, median - elapsed)
-        minutes = int(round(remaining / 60.0))
-        return "hermes: ~%dmin" % minutes
-    minutes = int(round(elapsed / 60.0))
-    return "hermes: %dmin" % minutes
+        eta = " 0min"
+    else:
+        _, started = latest_unfinished
+        elapsed = max(0.0, now - started)
+        if durations:
+            median = statistics.median(durations)
+            remaining = max(0.0, median - elapsed)
+            minutes = int(round(remaining / 60.0))
+            eta = " ~%dmin" % minutes
+        else:
+            minutes = int(round(elapsed / 60.0))
+            eta = " %dmin" % minutes
+    return pool + eta + foreign_text
 
 
 def _dual_segment(label, five_s, seven_s, drop_seven):

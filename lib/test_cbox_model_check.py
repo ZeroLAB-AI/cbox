@@ -702,9 +702,20 @@ class CliTests(unittest.TestCase):
         defaults = mc.registry_defaults()
         self.assertEqual(set(defaults), set(k for _, k, _ in mc.TIERS))
         for key, value in defaults.items():
+            if value == "off":
+                continue
             kind = [kd for _, k, kd in mc.TIERS if k == key][0]
             parsed = mc.parse_claude_id(value) if kind == "claude" else mc.parse_codex_id(value)
             self.assertIsNotNone(parsed, value)
+
+    def test_an_off_slot_is_not_a_pin(self):
+        defaults = {k: "off" for _, k, _ in mc.TIERS}
+        self.assertEqual(mc.current_pins({}, defaults), [])
+        defaults["CBOX_MODEL_OPUS"] = "claude-opus-5-5[1m]"
+        self.assertEqual(
+            mc.current_pins({"CBOX_MODEL_FABLE": "off"}, defaults),
+            [("opus", "CBOX_MODEL_OPUS", "claude", "claude-opus-5-5[1m]")],
+        )
 
     def test_start_never_raises(self):
         old = os.environ.get("HOME")

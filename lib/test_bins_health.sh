@@ -530,6 +530,84 @@ printf '%s\n' "$OUTH" | grep -Eq '^cbox-bins: hermes 1\.2\.3 oldhash rollback 2\
 [ "$(cat "$HXROOT_H/bin/hermes")" = old-hermes ] || _fail "hermes: the live tree must be the restored (old) content"
 _ok "hermes: a health probe failing on the fresh install but passing on the restored .prev backup reports rollback and restores the old tree"
 
+echo "--- hermes: a health probe that fails on BOTH the fresh install and the restored .prev backup reports unreliable, keeps the restored version, and never emits a rollback line ---"
+
+HXROOT_U="$TMPBASE/hermes-bothfail"
+mkdir -p "$HXROOT_U/bin" "$HXROOT_U/lib/marker-pkg"
+printf 'old-python\n' > "$HXROOT_U/bin/python"
+printf 'old-hermes\n' > "$HXROOT_U/bin/hermes"
+chmod 0755 "$HXROOT_U/bin/python" "$HXROOT_U/bin/hermes"
+printf 'old-marker\n' > "$HXROOT_U/lib/marker-pkg/data.txt"
+printf 'latest\n%s/bin/hermes\noldhash\n1.2.3\n' "$HXROOT_U" > "$HXROOT_U/.cbox-stamp"
+
+HCALLS_U="$TMPBASE/hcalls_u"
+rm -f "$HCALLS_U"
+rc=0
+OUTHU="$(HXROOT="$HXROOT_U" HOST_UID="$(id -u)" HOST_GID="$(id -g)" CBOX_HERMES_VERSION=latest \
+  CBOX_INSTALL_TOOLS=hermes CBOX_INSTALL_FORCE=refresh HOST_HOME="$TMPBASE/hermes-bothfail-home" bash -c '
+  set -u
+  chown() { :; }
+  _hxgosu() { "$@"; }
+  _hermes_stamp_install_method() { return 0; }
+  _hermes_seed_delegate_home() { return 0; }
+  '"$VRESET_FN"'
+  '"$BDIR_FN"'
+  '"$TREEOK_FN"'
+  '"$BMARKER_FN"'
+  '"$PREVREAL_FN"'
+  '"$BISCOMPLETE_FN"'
+  '"$BUNWIND_FN"'
+  '"$RECOVER_FN"'
+  '"$BTAKE_FN"'
+  '"$BCOMMIT_FN"'
+  '"$BRESTORE_FN"'
+  '"$RHI_FN"'
+  '"$PREVRESTOREHERMES_FN"'
+  '"$PREVRESTORE_FN"'
+  '"$STAMPPATH_FN"'
+  '"$STAMPFIELD_FN"'
+  '"$STAMPWRITE_FN"'
+  '"$WANTCOMPAT_FN"'
+  '"$WANTSTRING_FN"'
+  '"$RESOLVEHERMESBIN_FN"'
+  '"$RESOLVETOOLBIN_FN"'
+  '"$ADOPTCHECK_FN"'
+  '"$INSTALLHEALTHGATE_FN"'
+  '"$INSTALLONE_FN"'
+  python3() {
+    shift; shift
+    local target="$1"
+    mkdir -p "$target/bin" "$target/lib/marker-pkg"
+    printf "new-python\n" > "$target/bin/python"
+    printf "new-hermes\n" > "$target/bin/hermes"
+    printf "#!/bin/sh\nexit 0\n" > "$target/bin/pip"
+    chmod 0755 "$target/bin/python" "$target/bin/hermes" "$target/bin/pip"
+    printf "new-marker\n" > "$target/lib/marker-pkg/data.txt"
+  }
+  _verify_tool() {
+    printf "%s/bin/hermes\nnewhash\n2.0.0\n" "$HXROOT"
+  }
+  _parsed_version() {
+    case "$1" in
+      hermes) printf "2.0.0" ;;
+      *) return 1 ;;
+    esac
+  }
+  _health_check() {
+    _HEALTH_CHECK_NOTE="hermes probe fails for every candidate in this fixture"
+    return 2
+  }
+  _install_one hermes
+')" || rc=$?
+[ "$rc" = 0 ] || _fail "hermes: _install_one must succeed (fail-open) when the health gate fails on both candidates: $OUTHU"
+printf '%s\n' "$OUTHU" | grep -Eq '^cbox-bins: hermes 1\.2\.3 oldhash unreliable ' \
+  || _fail "hermes: expected an unreliable cbox-bins line naming the kept (restored) version, got: $OUTHU"
+printf '%s\n' "$OUTHU" | grep -Eq '^cbox-bins: hermes .* rollback ' \
+  && _fail "hermes: a double failure must never emit a rollback cbox-bins line (it would write a hold with identical good/bad versions), got: $OUTHU"
+[ "$(sed -n '4p' "$HXROOT_U/.cbox-stamp")" = 1.2.3 ] || _fail "hermes: stamp must end at the restored (previous) version"
+[ "$(cat "$HXROOT_U/bin/hermes")" = old-hermes ] || _fail "hermes: the live tree must be the restored (old) content"
+_ok "hermes: a health probe failing on both the fresh install and the restored .prev backup reports unreliable, keeps the restored version, and never emits a rollback line"
+
 echo "--- _health_check: an unexpected probe exit code (neither 0, 2, nor 3) normalizes to inconclusive (3), never falls through to rollback ---"
 HEALTHCHECK_FN="$(_extract_fn "$IB" _health_check)"
 [ -n "$HEALTHCHECK_FN" ] || _fail "cannot extract install-bins function for _health_check"

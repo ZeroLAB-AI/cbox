@@ -674,7 +674,7 @@
     },
     "lib/test_model_policy_compose_env.sh": {
       "layer": "test",
-      "purpose": "settings.merge.json pins the fable and opus tiers and bans the fable point release, and both compose renderers carry that model policy env (ANTHROPIC_DEFAULT_*_MODEL, CBOX_AGENT_MODEL_DENY, CBOX_AGENT_MODEL_BAN) into the container so hooks, codex and ask-claude see one source of truth"
+      "purpose": "settings.merge.json pins the opus and haiku tiers, carries no fable pin (CBOX_MODEL_FABLE=off) and bans the fable point release, and both compose renderers carry that model policy env (ANTHROPIC_DEFAULT_*_MODEL, CBOX_AGENT_MODEL_DENY, CBOX_AGENT_MODEL_BAN) into the container so hooks, codex and ask-claude see one source of truth"
     },
     "lib/test_net_discovery_line.sh": {
       "layer": "test",

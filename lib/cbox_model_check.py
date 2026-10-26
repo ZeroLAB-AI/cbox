@@ -154,7 +154,7 @@ def current_pins(env, defaults=None):
     pins = []
     for tier, key, kind in TIERS:
         value = (env.get(key) or "").strip() or defaults.get(key, "")
-        if value:
+        if value and value != "off":
             pins.append((tier, key, kind, value))
     return pins
 

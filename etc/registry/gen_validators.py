@@ -26,6 +26,7 @@ NAMED_DISPATCH = {
     "kernel-lang": "_cbox_val_named_kernel_lang \"$val\"",
     "codex-model-slug": "_cbox_val_named_codex_model_slug \"$val\"",
     "claude-model-id": "_cbox_val_named_claude_model_id \"$val\"",
+    "claude-model-id-or-off": "_cbox_val_named_claude_model_id_or_off \"$val\"",
     "codex-model-id": "_cbox_val_named_codex_model_id \"$val\"",
     "host-alias-mode": "_cbox_val_named_host_alias_mode \"$val\"",
     "profile-name": "_cbox_val_named_profile_name \"$val\"",

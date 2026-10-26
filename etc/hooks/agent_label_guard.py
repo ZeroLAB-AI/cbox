@@ -1,6 +1,7 @@
 import datetime
 import fcntl
 import json
+import math
 import os
 import re
 import stat
@@ -62,7 +63,7 @@ IDENT_START = re.compile(r"[A-Za-z_$]")
 IDENT_CHAR = re.compile(r"[A-Za-z0-9_$]")
 
 LOCK_DIR_VAR = "CBOX_HERMES_DELEGATE_LOCK_DIR"
-DEFAULT_LOCK_DIR = "/tmp/cbox-hermes-delegate-locks"
+DEFAULT_LOCK_DIR = os.path.join(".claude", "cbox-hermes-slots")
 CONCURRENCY_VAR = "CBOX_HERMES_DELEGATE_MAX_CONCURRENCY"
 OLLAMA_PARALLEL_VAR = "OLLAMA_NUM_PARALLEL"
 MAX_CONCURRENCY_CAP = 16
@@ -87,26 +88,51 @@ def _hermes_concurrency_limit():
     return min(val, MAX_CONCURRENCY_CAP)
 
 
-def hermes_busy():
-    d = os.environ.get(LOCK_DIR_VAR) or DEFAULT_LOCK_DIR
+def _hermes_locked_slots(limit):
+    d = os.environ.get(LOCK_DIR_VAR) or os.path.join(
+        os.path.expanduser("~"), DEFAULT_LOCK_DIR)
     if not os.path.isdir(d):
-        return False
-    limit = _hermes_concurrency_limit()
+        return 0
+    held = 0
     for i in range(limit):
         path = os.path.join(d, "slot.%d" % i)
         try:
-            fd = os.open(path, os.O_RDWR)
+            fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
         except OSError:
-            return False
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            os.close(fd)
             continue
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                held += 1
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+    return held
+
+
+def hermes_busy():
+    limit = _hermes_concurrency_limit()
+    if _hermes_locked_slots(1):
+        return True
+    if cbox_budget is None:
         return False
-    return True
+    try:
+        state = cbox_budget.hermes_state()
+    except Exception:
+        return False
+    if not isinstance(state, dict) or state.get("state") == "unknown":
+        return False
+    running = state.get("running")
+    waiting = state.get("waiting")
+    if (isinstance(running, bool) or not isinstance(running, (int, float))
+            or not math.isfinite(running) or running < 0):
+        return False
+    if (isinstance(waiting, bool) or not isinstance(waiting, (int, float))
+            or not math.isfinite(waiting) or waiting < 0):
+        return False
+    return running + waiting >= limit
 
 QUOTA_B_DENY = 0.5
 QUOTA_LOCAL_BUSY_MIN = 1.0

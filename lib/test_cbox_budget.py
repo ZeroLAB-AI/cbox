@@ -13,6 +13,11 @@ from unittest import mock
 for _k in [k for k in os.environ if k.startswith("CBOX_BUDGET_") or k == "CBOX_SUBSCRIPTION_PROFILE"]:
     del os.environ[_k]
 
+_TEST_HERMES_ENV = tempfile.TemporaryDirectory(prefix="budget-hermes-env-")
+os.environ["CBOX_USAGE_DIR"] = os.path.join(_TEST_HERMES_ENV.name, "usage")
+os.environ["CBOX_HERMES_DELEGATE_LOCK_DIR"] = os.path.join(
+    _TEST_HERMES_ENV.name, "locks")
+
 FORCE_BRAKE = {"CBOX_BUDGET_LOW_5H": "101", "CBOX_BUDGET_LOW_7D": "101"}
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -524,6 +529,25 @@ class HermesStateTests(unittest.TestCase):
         self._write({"ts": now, "last_probe_ts": now, "reachable": True,
                      "model_loaded": True, "history": [True, True]})
         self.assertEqual(cbox_budget.hermes_state(now=now + 121)["state"], "unknown")
+
+    def test_fresh_vllm_load_is_passed_through(self):
+        now = 1700000000.0
+        self._write({"ts": now, "last_probe_ts": now, "reachable": True,
+                     "model_loaded": True, "running": 2.0, "waiting": 3.0,
+                     "history": [True, True]})
+        state = cbox_budget.hermes_state(now=now + 5)
+        self.assertEqual(state["running"], 2.0)
+        self.assertEqual(state["waiting"], 3.0)
+
+    def test_stale_vllm_load_is_not_passed_through(self):
+        now = 1700000000.0
+        self._write({"ts": now, "last_probe_ts": now, "reachable": True,
+                     "model_loaded": True, "running": 2.0, "waiting": 3.0,
+                     "history": [True, True]})
+        state = cbox_budget.hermes_state(now=now + 121)
+        self.assertEqual(state["state"], "unknown")
+        self.assertNotIn("running", state)
+        self.assertNotIn("waiting", state)
 
 
 class BudgetCliTests(unittest.TestCase):

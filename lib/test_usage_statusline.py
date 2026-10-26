@@ -40,6 +40,12 @@ NETWORK_ENV_VARS = (
     "NO_COLOR",
 )
 
+_TEST_HERMES_ENV = tempfile.TemporaryDirectory(prefix="statusline-hermes-env-")
+os.environ["HOME"] = _TEST_HERMES_ENV.name
+os.environ["CBOX_USAGE_DIR"] = os.path.join(_TEST_HERMES_ENV.name, "usage")
+os.environ["CBOX_HERMES_DELEGATE_LOCK_DIR"] = os.path.join(
+    _TEST_HERMES_ENV.name, "locks")
+atexit.register(_TEST_HERMES_ENV.cleanup)
 
 _CFG_ROOT = tempfile.mkdtemp(prefix="statusline-cfg-")
 atexit.register(shutil.rmtree, _CFG_ROOT, True)
@@ -174,37 +180,6 @@ class UsageStatuslineTests(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.usage_dir, "claude.json")))
 
 
-def start_fake_hermes(payload_obj, status=200):
-    import http.server
-    import threading
-
-    body = json.dumps(payload_obj).encode("utf-8")
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, *a):
-            pass
-
-    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server, thread
-
-
-def find_refused_port():
-    import socket
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
-
-
 def base_payload():
     return json.dumps({
         "rate_limits": {
@@ -215,53 +190,57 @@ def base_payload():
 
 class HermesCacheTests(unittest.TestCase):
     def setUp(self):
+        import importlib.util
         self._tmp = tempfile.TemporaryDirectory()
         self.usage_dir = os.path.join(self._tmp.name, "cbox-usage")
+        self._env_patcher = mock.patch.dict(os.environ)
+        self._env_patcher.start()
+        self.addCleanup(self._env_patcher.stop)
+        self.addCleanup(self._tmp.cleanup)
+        os.environ["CBOX_USAGE_DIR"] = self.usage_dir
+        os.environ["CBOX_HERMES_DELEGATE_LOCK_DIR"] = os.path.join(
+            self._tmp.name, "hermes-locks")
+        spec = importlib.util.spec_from_file_location(
+            "usage_statusline_hermes_cache", str(SCRIPT))
+        self.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.mod)
 
-    def tearDown(self):
-        self._tmp.cleanup()
+    def _probe(self, result):
+        with mock.patch.object(self.mod, "_probe_hermes", return_value=result) as probe:
+            self.mod._update_hermes_cache(time.time())
+        return probe
 
     def _hermes_json(self):
         with open(os.path.join(self.usage_dir, "hermes.json"), "r", encoding="utf-8") as f:
             return json.load(f)
 
-    def test_reachable_server_marks_reachable_and_model_loaded(self):
-        server, thread = start_fake_hermes({"models": [{"name": "qwen"}]})
-        try:
-            base = "http://127.0.0.1:%d" % server.server_address[1]
-            proc = run(base_payload(), self.usage_dir, extra_env={"CBOX_HERMES_MODEL_URL": base})
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            data = self._hermes_json()
-            self.assertTrue(data["reachable"])
-            self.assertTrue(data["model_loaded"])
-        finally:
-            server.shutdown()
-            thread.join(timeout=5)
+    def test_reachable_probe_stores_metrics(self):
+        base = "http://model.example:8000"
+        os.environ["CBOX_HERMES_MODEL_URL"] = base
+        probe = self._probe((True, True, 2.0, 3.0))
+        probe.assert_called_once_with(base)
+        data = self._hermes_json()
+        self.assertTrue(data["reachable"])
+        self.assertTrue(data["model_loaded"])
+        self.assertEqual(data["running"], 2.0)
+        self.assertEqual(data["waiting"], 3.0)
 
-    def test_refused_port_marks_unreachable(self):
-        port = find_refused_port()
-        base = "http://127.0.0.1:%d" % port
-        proc = run(base_payload(), self.usage_dir, extra_env={"CBOX_HERMES_MODEL_URL": base})
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+    def test_unavailable_probe_omits_metrics(self):
+        os.environ["CBOX_HERMES_MODEL_URL"] = "http://model.example:8000"
+        self._probe((False, False, None, None))
         data = self._hermes_json()
         self.assertFalse(data["reachable"])
+        self.assertNotIn("running", data)
+        self.assertNotIn("waiting", data)
 
     def test_v1_suffix_is_stripped_from_base_url(self):
-        server, thread = start_fake_hermes({"models": []})
-        try:
-            base = "http://127.0.0.1:%d/v1" % server.server_address[1]
-            proc = run(base_payload(), self.usage_dir, extra_env={"CBOX_HERMES_MODEL_URL": base})
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            data = self._hermes_json()
-            self.assertTrue(data["reachable"])
-            self.assertFalse(data["model_loaded"])
-        finally:
-            server.shutdown()
-            thread.join(timeout=5)
+        os.environ["CBOX_HERMES_MODEL_URL"] = "http://model.example:8000/v1"
+        probe = self._probe((True, False, None, None))
+        probe.assert_called_once_with("http://model.example:8000")
+        self.assertFalse(self._hermes_json()["model_loaded"])
 
     def test_no_hermes_url_configured_writes_nothing(self):
-        proc = run(base_payload(), self.usage_dir)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.mod._update_hermes_cache(time.time())
         self.assertFalse(os.path.exists(os.path.join(self.usage_dir, "hermes.json")))
 
     def test_probe_is_skipped_within_throttle_window(self):
@@ -269,15 +248,25 @@ class HermesCacheTests(unittest.TestCase):
         with open(os.path.join(self.usage_dir, "hermes.json"), "w", encoding="utf-8") as f:
             json.dump({"ts": time.time(), "last_probe_ts": time.time(),
                        "reachable": True, "model_loaded": True, "history": [True, True]}, f)
-        port = find_refused_port()
-        base = "http://127.0.0.1:%d" % port
-        proc = run(base_payload(), self.usage_dir, extra_env={"CBOX_HERMES_MODEL_URL": base})
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+        os.environ["CBOX_HERMES_MODEL_URL"] = "http://model.example:8000"
+        with mock.patch.object(self.mod, "_probe_hermes") as probe:
+            self.mod._update_hermes_cache(time.time())
+        probe.assert_not_called()
         data = self._hermes_json()
         self.assertTrue(data["reachable"])
 
 
 class ProbeDeadlineTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._env_patcher = mock.patch.dict(os.environ)
+        self._env_patcher.start()
+        self.addCleanup(self._env_patcher.stop)
+        self.addCleanup(self._tmp.cleanup)
+        os.environ["CBOX_USAGE_DIR"] = self._tmp.name
+        os.environ["CBOX_HERMES_DELEGATE_LOCK_DIR"] = os.path.join(
+            self._tmp.name, "locks")
+
     def test_a_hung_probe_thread_is_not_waited_on_past_the_deadline(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location("usage_statusline_probe", str(SCRIPT))
@@ -291,12 +280,15 @@ class ProbeDeadlineTests(unittest.TestCase):
         mod._probe_hermes_blocking = hung
         try:
             started = time.monotonic()
-            reachable, model_loaded = mod._probe_hermes("http://127.0.0.1:1", join_deadline=0.2)
+            reachable, model_loaded, running, waiting = mod._probe_hermes(
+                "http://model.example:1", join_deadline=0.2)
             elapsed = time.monotonic() - started
         finally:
             mod._probe_hermes_blocking = original
         self.assertFalse(reachable)
         self.assertFalse(model_loaded)
+        self.assertIsNone(running)
+        self.assertIsNone(waiting)
         self.assertLess(elapsed, 2.0)
 
     def test_last_probe_ts_is_recorded_even_when_the_probe_hangs(self):
@@ -310,23 +302,45 @@ class ProbeDeadlineTests(unittest.TestCase):
 
         mod._probe_hermes_blocking = hung
         tmp = tempfile.TemporaryDirectory()
+        old_usage = os.environ.get("CBOX_USAGE_DIR")
+        old_lock = os.environ.get("CBOX_HERMES_DELEGATE_LOCK_DIR")
+        old_url = os.environ.get("CBOX_HERMES_MODEL_URL")
         try:
             os.environ["CBOX_USAGE_DIR"] = tmp.name
-            os.environ["CBOX_HERMES_MODEL_URL"] = "http://127.0.0.1:1"
+            os.environ["CBOX_HERMES_DELEGATE_LOCK_DIR"] = os.path.join(tmp.name, "locks")
+            os.environ["CBOX_HERMES_MODEL_URL"] = "http://model.example:1"
             now = time.time()
             mod._update_hermes_cache(now)
             with open(os.path.join(tmp.name, "hermes.json"), "r", encoding="utf-8") as f:
                 data = json.load(f)
             self.assertAlmostEqual(data["last_probe_ts"], now, delta=1.0)
         finally:
-            os.environ.pop("CBOX_USAGE_DIR", None)
-            os.environ.pop("CBOX_HERMES_MODEL_URL", None)
+            if old_usage is None:
+                os.environ.pop("CBOX_USAGE_DIR", None)
+            else:
+                os.environ["CBOX_USAGE_DIR"] = old_usage
+            if old_lock is None:
+                os.environ.pop("CBOX_HERMES_DELEGATE_LOCK_DIR", None)
+            else:
+                os.environ["CBOX_HERMES_DELEGATE_LOCK_DIR"] = old_lock
+            if old_url is None:
+                os.environ.pop("CBOX_HERMES_MODEL_URL", None)
+            else:
+                os.environ["CBOX_HERMES_MODEL_URL"] = old_url
             tmp.cleanup()
 
 
 class HermesBlockingProbeTests(unittest.TestCase):
     def setUp(self):
         import importlib.util
+        self._tmp = tempfile.TemporaryDirectory()
+        self._env_patcher = mock.patch.dict(os.environ)
+        self._env_patcher.start()
+        self.addCleanup(self._env_patcher.stop)
+        self.addCleanup(self._tmp.cleanup)
+        os.environ["CBOX_USAGE_DIR"] = os.path.join(self._tmp.name, "usage")
+        os.environ["CBOX_HERMES_DELEGATE_LOCK_DIR"] = os.path.join(
+            self._tmp.name, "locks")
         spec = importlib.util.spec_from_file_location(
             "usage_statusline_blocking_probe", str(SCRIPT))
         self.mod = importlib.util.module_from_spec(spec)
@@ -337,12 +351,14 @@ class HermesBlockingProbeTests(unittest.TestCase):
         self.build_opener.return_value = self.opener
         self.addCleanup(self._patcher.stop)
 
-    def _cm(self, payload):
+    def _cm(self, payload, reads=None):
         if isinstance(payload, str):
             payload = payload.encode("utf-8")
 
         class _Resp:
             def read(self, n=None):
+                if reads is not None:
+                    reads.append(n)
                 return payload
 
         class _CM:
@@ -354,7 +370,7 @@ class HermesBlockingProbeTests(unittest.TestCase):
 
         return _CM()
 
-    def _probe(self, base="http://127.0.0.1:8999"):
+    def _probe(self, base="http://model.example:8999"):
         result = {"reachable": False, "model_loaded": False}
         self.mod._probe_hermes_blocking(base, 1.0, result)
         return result
@@ -365,6 +381,58 @@ class HermesBlockingProbeTests(unittest.TestCase):
         result = self._probe()
         self.assertTrue(result["reachable"])
         self.assertTrue(result["model_loaded"])
+
+    def test_metrics_sum_values_over_all_label_sets(self):
+        metric_text = (
+            'vllm:num_requests_running{model="a"} 2\n'
+            'vllm:num_requests_running{model="b"} 3\n'
+            'vllm:num_requests_waiting{model="a"} 1\n'
+            'vllm:num_requests_waiting{model="b"} 4 1234567890\n')
+
+        def open_side_effect(url, **kwargs):
+            if url.endswith("/metrics"):
+                return self._cm(metric_text)
+            return self._cm(json.dumps({"models": [{"name": "qwen"}]}))
+
+        self.opener.open.side_effect = open_side_effect
+        result = self._probe()
+        self.assertEqual(result["running"], 5.0)
+        self.assertEqual(result["waiting"], 5.0)
+        urls = [call[0][0] for call in self.opener.open.call_args_list]
+        self.assertEqual(urls, ["http://model.example:8999/api/ps",
+                                "http://model.example:8999/metrics"])
+
+    def test_metrics_failure_omits_both_load_keys(self):
+        def open_side_effect(url, **kwargs):
+            if url.endswith("/metrics"):
+                return self._cm("vllm:num_requests_running 3\n")
+            return self._cm(json.dumps({"models": [{"name": "qwen"}]}))
+
+        self.opener.open.side_effect = open_side_effect
+        result = self._probe()
+        self.assertNotIn("running", result)
+        self.assertNotIn("waiting", result)
+
+    def test_metrics_read_is_capped_and_uses_no_proxy_or_redirects(self):
+        reads = []
+
+        def open_side_effect(url, **kwargs):
+            if url.endswith("/metrics"):
+                return self._cm("x" * (self.mod.HERMES_METRICS_READ_CAP + 1), reads)
+            return self._cm(json.dumps({"models": [{"name": "qwen"}]}))
+
+        self.opener.open.side_effect = open_side_effect
+        result = self._probe()
+        self.assertNotIn("running", result)
+        self.assertNotIn("waiting", result)
+        self.assertEqual(reads, [self.mod.HERMES_METRICS_READ_CAP + 1])
+        handlers = self.build_opener.call_args_list[-1][0]
+        import urllib.request
+        self.assertIsInstance(handlers[0], urllib.request.ProxyHandler)
+        self.assertEqual(handlers[0].proxies, {})
+        self.assertIsInstance(handlers[1], urllib.request.HTTPRedirectHandler)
+        self.assertIsNone(handlers[1].redirect_request(
+            None, None, 302, "Found", {}, "http://model.example:8999/elsewhere"))
 
     def test_api_ps_404_falls_back_to_v1_models(self):
         import urllib.error
@@ -409,8 +477,9 @@ class HermesBlockingProbeTests(unittest.TestCase):
         self.assertFalse(result["reachable"])
         self.assertFalse(result["model_loaded"])
         urls = [c[0][0] for c in self.opener.open.call_args_list]
-        self.assertEqual(len(urls), 1)
+        self.assertEqual(len(urls), 2)
         self.assertIn("api/ps", urls[0])
+        self.assertIn("/metrics", urls[1])
         self.assertFalse(any("v1/models" in u for u in urls))
 
 
@@ -1206,23 +1275,23 @@ class HermesSegmentTests(unittest.TestCase):
         self.usage_dir = os.path.join(self._tmp.name, "cbox-usage")
         self.lock_dir = os.path.join(self._tmp.name, "hermes-locks")
         self.runs_dir = os.path.join(self._tmp.name, "hermes-runs")
-        self._held_fd = None
+        self._held_fds = []
 
     def tearDown(self):
-        if self._held_fd is not None:
+        for fd in self._held_fds:
             try:
-                fcntl.flock(self._held_fd, fcntl.LOCK_UN)
+                fcntl.flock(fd, fcntl.LOCK_UN)
             except OSError:
                 pass
-            os.close(self._held_fd)
+            os.close(fd)
         self._tmp.cleanup()
 
-    def _hold_slot(self):
+    def _hold_slot(self, index=0):
         os.makedirs(self.lock_dir, exist_ok=True)
-        path = os.path.join(self.lock_dir, "slot.0")
+        path = os.path.join(self.lock_dir, "slot.%d" % index)
         fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o666)
         fcntl.flock(fd, fcntl.LOCK_EX)
-        self._held_fd = fd
+        self._held_fds.append(fd)
 
     def _write_unfinished(self, rid):
         os.makedirs(os.path.join(self.runs_dir, rid), exist_ok=True)
@@ -1234,11 +1303,25 @@ class HermesSegmentTests(unittest.TestCase):
             json.dump({"run_id": rid, "outcome": "ok", "started": iso(started_epoch),
                         "ended": iso(ended_epoch)}, f)
 
-    def _run(self):
+    def _run(self, limit=1):
         return run(json.dumps({}), self.usage_dir, extra_env={
             "CBOX_HERMES_DELEGATE_LOCK_DIR": self.lock_dir,
             "CBOX_HERMES_DELEGATE_RUNS_DIR": self.runs_dir,
+            "CBOX_HERMES_DELEGATE_MAX_CONCURRENCY": str(limit),
         })
+
+    def test_default_lock_directory_uses_home_at_call_time(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "usage_statusline_default_slots", str(SCRIPT))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        with mock.patch.dict(os.environ, {
+                "HOME": self._tmp.name,
+                "CBOX_HERMES_DELEGATE_LOCK_DIR": ""}):
+            self.assertEqual(
+                mod._hermes_lock_dir(),
+                os.path.join(self._tmp.name, ".claude", "cbox-hermes-slots"))
 
     def test_idle_when_no_slot_is_held(self):
         proc = self._run()
@@ -1254,7 +1337,7 @@ class HermesSegmentTests(unittest.TestCase):
             self._write_finished(run_id(started, i), started, started + offset)
         proc = self._run()
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(proc.stdout.strip(), "hermes: ~3min")
+        self.assertEqual(proc.stdout.strip(), "hermes: full 1/1 ~3min")
 
     def test_no_history_shows_elapsed_without_tilde(self):
         self._hold_slot()
@@ -1262,7 +1345,7 @@ class HermesSegmentTests(unittest.TestCase):
         self._write_unfinished(run_id(now - 60, 1))
         proc = self._run()
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(proc.stdout.strip(), "hermes: 1min")
+        self.assertEqual(proc.stdout.strip(), "hermes: full 1/1 1min")
 
     def test_overdue_shows_tilde_zero(self):
         self._hold_slot()
@@ -1272,7 +1355,27 @@ class HermesSegmentTests(unittest.TestCase):
         self._write_finished(run_id(started, 2), started, started + 300)
         proc = self._run()
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(proc.stdout.strip(), "hermes: ~0min")
+        self.assertEqual(proc.stdout.strip(), "hermes: full 1/1 ~0min")
+
+    def test_two_held_slots_show_the_shared_pool_count(self):
+        self._hold_slot(0)
+        self._hold_slot(1)
+        proc = self._run(limit=2)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "hermes: full 1/1 small 1/1 0min")
+
+    def test_only_full_slot_held_shows_both_classes(self):
+        self._hold_slot(0)
+        proc = self._run(limit=3)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "hermes: full 1/1 small 0/2 0min")
+
+    def test_only_small_slots_held_show_full_slot_free(self):
+        self._hold_slot(1)
+        self._hold_slot(2)
+        proc = self._run(limit=3)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "hermes: full 0/1 small 2/2 0min")
 
 
 class HermesPresenceSegmentTests(unittest.TestCase):
@@ -1282,33 +1385,38 @@ class HermesPresenceSegmentTests(unittest.TestCase):
         os.makedirs(self.usage_dir, exist_ok=True)
         self.lock_dir = os.path.join(self._tmp.name, "locks")
         self.runs_dir = os.path.join(self._tmp.name, "runs")
-        self._held_fd = None
+        self._held_fds = []
 
     def tearDown(self):
-        if self._held_fd is not None:
-            fcntl.flock(self._held_fd, fcntl.LOCK_UN)
-            os.close(self._held_fd)
+        for fd in self._held_fds:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
         self._tmp.cleanup()
 
-    def _snapshot(self, reachable, age=0, history=None):
+    def _snapshot(self, reachable, age=0, history=None, running=None, waiting=None):
         ts = time.time() - age
         doc = {"ts": ts, "last_probe_ts": ts, "reachable": reachable,
                "model_loaded": False,
                "history": history if history is not None else [reachable, reachable]}
+        if running is not None and waiting is not None:
+            doc["running"] = running
+            doc["waiting"] = waiting
         with open(os.path.join(self.usage_dir, "hermes.json"), "w", encoding="utf-8") as f:
             json.dump(doc, f)
 
-    def _hold_slot(self):
+    def _hold_slot(self, index=0):
         os.makedirs(self.lock_dir, exist_ok=True)
-        fd = os.open(os.path.join(self.lock_dir, "slot.0"), os.O_CREAT | os.O_RDWR, 0o666)
+        fd = os.open(os.path.join(self.lock_dir, "slot.%d" % index),
+                     os.O_CREAT | os.O_RDWR, 0o666)
         fcntl.flock(fd, fcntl.LOCK_EX)
-        self._held_fd = fd
+        self._held_fds.append(fd)
 
-    def _run(self, cfg=PRESENT_CFG, payload=None):
+    def _run(self, cfg=PRESENT_CFG, payload=None, limit=1):
         return run(json.dumps(payload or {}), self.usage_dir, extra_env={
             "CLAUDE_CONFIG_DIR": cfg,
             "CBOX_HERMES_DELEGATE_LOCK_DIR": self.lock_dir,
             "CBOX_HERMES_DELEGATE_RUNS_DIR": self.runs_dir,
+            "CBOX_HERMES_DELEGATE_MAX_CONCURRENCY": str(limit),
         })
 
     def test_absent_tier_omits_the_segment_entirely(self):
@@ -1361,7 +1469,36 @@ class HermesPresenceSegmentTests(unittest.TestCase):
         self._snapshot(False)
         self._hold_slot()
         proc = self._run()
-        self.assertEqual(proc.stdout.strip(), "hermes: 0min")
+        self.assertEqual(proc.stdout.strip(), "hermes: full 1/1 0min")
+
+    def test_external_load_is_shown_without_local_slots(self):
+        self._snapshot(True, running=2, waiting=1)
+        proc = self._run(limit=2)
+        self.assertEqual(proc.stdout.strip(), "hermes: full 0/1 small 0/1 +3 ext")
+
+    def test_external_load_subtracts_local_slots(self):
+        self._snapshot(True, running=2, waiting=1)
+        self._hold_slot()
+        proc = self._run(limit=2)
+        self.assertEqual(proc.stdout.strip(), "hermes: full 1/1 small 0/1 0min +2 ext")
+
+    def test_stale_external_load_is_ignored(self):
+        self._snapshot(True, age=121, running=2, waiting=1)
+        proc = self._run(limit=2)
+        self.assertEqual(proc.stdout.strip(), "hermes: idle")
+
+    def test_slot_symlink_is_not_followed(self):
+        os.makedirs(self.lock_dir, exist_ok=True)
+        target = os.path.join(self.lock_dir, "held")
+        fd = os.open(target, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.symlink(target, os.path.join(self.lock_dir, "slot.0"))
+        try:
+            proc = self._run()
+            self.assertEqual(proc.stdout.strip(), "hermes: idle")
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
 
     def test_project_scoped_server_matches_the_status_cwd_exactly(self):
         cfg = _make_cfg("scoped", {"projects": {"/work/proj": {"mcpServers": {"hermes-local": {}}}}})
@@ -1610,7 +1747,7 @@ class ExactLineFixtureTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(
             proc.stdout.strip(),
-            "[myprofile] claude: 40%/44% | codex: 70%/80% | hermes: ~20min | agents: 2",
+            "[myprofile] claude: 40%/44% | codex: 70%/80% | hermes: full 1/1 ~20min | agents: 2",
         )
 
     def test_wide_line_shows_near_reset_countdowns(self):
@@ -1625,7 +1762,7 @@ class ExactLineFixtureTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(
             proc.stdout.strip(),
-            "[myprofile] claude: 50%(15m)/75%(36h) | codex: 70%(40m)/80% | hermes: ~20min | agents: 2",
+            "[myprofile] claude: 50%(15m)/75%(36h) | codex: 70%(40m)/80% | hermes: full 1/1 ~20min | agents: 2",
         )
 
     def test_narrow_width_drop_order_countdown_agents_hermes_seven_day(self):
@@ -1634,20 +1771,20 @@ class ExactLineFixtureTests(unittest.TestCase):
             "five_used": 50, "seven_used": 25,
             "five_offset": 15 * 60 + 30, "seven_offset": 36 * 3600 + 1800,
         }
-        proc80 = self._run(extra_env={"CBOX_PROFILE": "myprofile", "COLUMNS": "80"},
+        proc85 = self._run(extra_env={"CBOX_PROFILE": "myprofile", "COLUMNS": "85"},
                             payload_kwargs=payload_kwargs)
-        self.assertEqual(proc80.returncode, 0, proc80.stderr)
+        self.assertEqual(proc85.returncode, 0, proc85.stderr)
         self.assertEqual(
-            proc80.stdout.strip(),
-            "[myprofile] claude: 50%/75% | codex: 70%/80% | hermes: ~20min | agents: 2",
+            proc85.stdout.strip(),
+            "[myprofile] claude: 50%/75% | codex: 70%/80% | hermes: full 1/1 ~20min | agents: 2",
         )
 
-        proc65 = self._run(extra_env={"CBOX_PROFILE": "myprofile", "COLUMNS": "65"},
+        proc70 = self._run(extra_env={"CBOX_PROFILE": "myprofile", "COLUMNS": "70"},
                             payload_kwargs=payload_kwargs)
-        self.assertEqual(proc65.returncode, 0, proc65.stderr)
+        self.assertEqual(proc70.returncode, 0, proc70.stderr)
         self.assertEqual(
-            proc65.stdout.strip(),
-            "[myprofile] claude: 50%/75% | codex: 70%/80% | hermes: ~20min",
+            proc70.stdout.strip(),
+            "[myprofile] claude: 50%/75% | codex: 70%/80% | hermes: full 1/1 ~20min",
         )
 
         proc50 = self._run(extra_env={"CBOX_PROFILE": "myprofile", "COLUMNS": "50"},

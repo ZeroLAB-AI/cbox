@@ -6,6 +6,7 @@ import io
 import json
 import os
 import pathlib
+import queue
 import re
 import select
 import signal
@@ -28,6 +29,33 @@ SPEC = importlib.util.spec_from_file_location(
 )
 MOD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MOD)
+
+
+TEST_ENV = tempfile.TemporaryDirectory(prefix="delegate-tests-")
+os.environ["HOME"] = TEST_ENV.name
+os.environ[MOD.LOCK_DIR_VAR] = os.path.join(TEST_ENV.name, "locks")
+
+
+def tearDownModule():
+    TEST_ENV.cleanup()
+
+
+def server_argv():
+    return [sys.executable, "-c",
+            "import runpy,sys; "
+            "ns=runpy.run_path(sys.argv[1]); "
+            "ns['main'].__globals__['_fetch_metrics']=lambda base_url: None; "
+            "sys.exit(ns['main']())",
+            str(ROOT / "etc" / "mcp" / "hermes_delegate_mcp.py")]
+
+
+def call_with_context(req_id, token, function, *args):
+    try:
+        if not MOD.begin_call(req_id, token):
+            return None, MOD.CANCELLED_MESSAGE, MOD._empty_run_meta()
+        return function(*args)
+    finally:
+        MOD.end_call()
 
 
 def clear_cbox_env(env):
@@ -82,6 +110,9 @@ def _save_cfg(cfg):
 
 
 if len(sys.argv) >= 5 and sys.argv[1] == "config" and sys.argv[2] == "set":
+    if sys.argv[3] == control.get("config_set_fail"):
+        sys.stderr.write("injected config failure\\n")
+        sys.exit(1)
     cfg = _load_cfg()
     node = cfg
     parts = sys.argv[3].split(".")
@@ -121,6 +152,9 @@ if (len(sys.argv) >= 4 and sys.argv[1] == "config" and sys.argv[2] == "get"
     sys.exit(0)
 
 if len(sys.argv) >= 2 and sys.argv[1] == "-z":
+    if control.get("config_record"):
+        with open(control["config_record"], "w") as fh:
+            json.dump(_load_cfg(), fh)
     mode = control.get("mode", "ok")
     if mode == "sleep":
         time.sleep(float(control.get("sleep_sec", 10)))
@@ -156,7 +190,7 @@ if len(sys.argv) >= 2 and sys.argv[1] == "-z":
         conn = sqlite3.connect(db_path)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(
-            "CREATE TABLE sessions (id INTEGER PRIMARY KEY, name TEXT)")
+            "CREATE TABLE sessions (id INTEGER PRIMARY KEY, name TEXT, end_reason TEXT)")
         conn.execute(
             "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, "
             "session_id INTEGER, role TEXT, content TEXT, tool_call_id TEXT, "
@@ -177,6 +211,9 @@ if len(sys.argv) >= 2 and sys.argv[1] == "-z":
                 "INSERT INTO messages (session_id, role, content, "
                 "tool_calls) VALUES (1, 'assistant', ?, ?)",
                 ("step %%d done" %% i, tool_calls))
+            conn.commit()
+        if control.get("compression_at_finish"):
+            conn.execute("UPDATE sessions SET end_reason='compression'")
             conn.commit()
         conn.close()
         if control.get("context_exceeded"):
@@ -263,6 +300,9 @@ def _scandir_denying(blocked):
 
 class HermesDelegateUnitTests(unittest.TestCase):
     def setUp(self):
+        metrics = mock.patch.object(MOD, "_fetch_metrics", return_value=None)
+        metrics.start()
+        self.addCleanup(metrics.stop)
         self.tmpdir = tempfile.mkdtemp()
         self.control_file = os.path.join(self.tmpdir, "control.json")
         write_control(self.control_file)
@@ -432,6 +472,76 @@ class HermesDelegateUnitTests(unittest.TestCase):
         self.assertTrue(result["isError"])
         self.assertIn("exceeds max size", result["content"][0]["text"])
         self.assertFalse(os.path.exists(marker))
+
+    def test_small_prompt_cap_counts_system_bytes_before_admission(self):
+        os.environ[MOD.MAX_PROMPT_VAR] = "1000000"
+        for prompt, system in (("x" * 12001, None),
+                               ("x" * 11999, "\u00e9")):
+            with self.subTest(system=system), \
+                    mock.patch.object(MOD, "acquire_slot") as admission, \
+                    mock.patch.object(MOD, "spawn_hermes") as spawn:
+                result = MOD.run_hermes_delegate(
+                    {"prompt": prompt, "system": system, "size": "small"})
+            self.assertTrue(result["isError"])
+            self.assertEqual(result["content"][0]["text"],
+                             "hermes-delegate refused: prompt too large for a small slot "
+                             "(12001 bytes, limit 12000) - pass file paths with line ranges, "
+                             "or use size=full")
+            admission.assert_not_called()
+            spawn.assert_not_called()
+
+    def test_small_prompt_at_cap_and_full_above_small_cap_are_admitted(self):
+        for size, prompt, system in (("small", "x" * 11998, "\u00e9"),
+                                      ("full", "x" * 12001, None)):
+            with self.subTest(size=size), mock.patch.object(
+                    MOD, "spawn_hermes",
+                    return_value=("ok", None, MOD._empty_run_meta())) as spawn:
+                result = MOD.run_hermes_delegate(
+                    {"prompt": prompt, "system": system, "size": size})
+            self.assertFalse(result["isError"], result)
+            spawn.assert_called_once()
+
+    def _wall_clock_result(self, size, configured, elapsed):
+        os.environ[MOD.CONCURRENCY_VAR] = "2"
+        os.environ[MOD.IDLE_TIMEOUT_VAR] = "0"
+        if configured is None:
+            os.environ.pop(MOD.TIMEOUT_VAR, None)
+        else:
+            os.environ[MOD.TIMEOUT_VAR] = configured
+        real_monotonic = time.monotonic
+        offset = [0]
+
+        def progress(message, force=False):
+            if message == "hermes started":
+                offset[0] = elapsed
+
+        with mock.patch.object(MOD.time, "monotonic",
+                               side_effect=lambda: real_monotonic() + offset[0]), \
+                mock.patch.object(MOD, "emit_progress", side_effect=progress):
+            return MOD.run_hermes_delegate({"prompt": "hi", "size": size})
+
+    def test_small_default_wall_clock_cap_unset_or_zero(self):
+        for configured in (None, "0"):
+            with self.subTest(configured=configured):
+                result = self._wall_clock_result("small", configured, 1201)
+                self.assertTrue(result["isError"])
+                self.assertIn("timed out after 1200s", result["content"][0]["text"])
+
+    def test_full_default_wall_clock_remains_uncapped(self):
+        for configured in (None, "0"):
+            with self.subTest(configured=configured):
+                result = self._wall_clock_result("full", configured, 1201)
+                self.assertFalse(result["isError"], result)
+
+    def test_explicit_wall_clock_cap_applies_to_both_classes(self):
+        for size in ("small", "full"):
+            for configured, elapsed, is_error in (("1", 2, True),
+                                                   ("2400", 1201, False)):
+                with self.subTest(size=size, configured=configured):
+                    result = self._wall_clock_result(size, configured, elapsed)
+                    self.assertEqual(result["isError"], is_error, result)
+                    if is_error:
+                        self.assertIn("timed out after 1s", result["content"][0]["text"])
 
     def test_timeout_kills_and_returns_error(self):
         write_control(self.control_file, mode="sleep", sleep_sec=10)
@@ -1113,7 +1223,7 @@ class HermesDelegateUnitTests(unittest.TestCase):
         self.assertEqual(summary["outcome"], "timeout")
 
     def test_cancelled_call_returns_plain_error_without_run_detail(self):
-        self.addCleanup(MOD._CANCEL.clear)
+        self.addCleanup(MOD.end_call)
         self.addCleanup(MOD._CANCELLED_IDS.clear)
         pid_file = os.path.join(self.tmpdir, "pid_cancel_run.txt")
         stub_path = make_pid_stub(self.tmpdir, pid_file, 60)
@@ -1121,9 +1231,9 @@ class HermesDelegateUnitTests(unittest.TestCase):
         outcome = {}
 
         def runner():
-            outcome["result"] = MOD.run_hermes_delegate({"prompt": "hi"})
+            outcome["result"] = call_with_context(
+                42, None, MOD.run_hermes_delegate, {"prompt": "hi"})
 
-        self.assertTrue(MOD.begin_call(42, None))
         thread = threading.Thread(target=runner, daemon=True)
         thread.start()
         pid = wait_for_pid_file(pid_file, 5)
@@ -1309,7 +1419,7 @@ class HermesDelegateUnitTests(unittest.TestCase):
         self.assertTrue(MOD.begin_call(1, "tok"))
         try:
             with mock.patch.object(MOD, "PROGRESS_MIN_GAP_SEC", 100):
-                MOD._CALL["last"] = time.monotonic()
+                MOD._CALL_LOCAL.call.last = time.monotonic()
                 self.assertFalse(MOD.progress_due())
                 self.assertTrue(MOD.progress_due(force=True))
         finally:
@@ -1383,31 +1493,188 @@ class HermesDelegateUnitTests(unittest.TestCase):
     def test_compression_and_budget_written_to_config(self):
         marker = os.path.join(self.tmpdir, "marker_comp_budget.txt")
         write_control(self.control_file, marker=marker)
-        os.environ[MOD.KV_CAPACITY_VAR] = "100000"
+        os.environ[MOD.KV_CAPACITY_VAR] = "104000"
         os.environ[MOD.DELEGATE_CONTEXT_LENGTH_VAR] = "196608"
         result = MOD.run_hermes_delegate({"prompt": "hi"})
         self.assertFalse(result["isError"], result)
         with open(marker) as fh:
             calls = fh.read()
-        self.assertIn("config set model.context_length 85000", calls)
+        self.assertIn("config set model.context_length 98800", calls)
         self.assertIn("config set compression.enabled true", calls)
-        self.assertIn("config set compression.threshold 0.75", calls)
+        self.assertIn("config set compression.threshold 0.90", calls)
         self.assertIn("config set compression.target_ratio 0.15", calls)
         self.assertIn("config set compression.protect_first_n 1", calls)
         self.assertIn("config set compression.protect_last_n 4", calls)
         self.assertIn("config set compression.in_place false", calls)
 
-    def test_run_line_reports_budget_and_slots(self):
+    def test_compression_at_completion_cannot_return_success_between_polls(self):
+        write_control(self.control_file, mode="sqlite", sqlite_steps=1,
+                      sqlite_gap_sec=0.01, compression_at_finish=True)
+        with mock.patch.object(MOD, "HEARTBEAT_POLL_SEC", 60), \
+                mock.patch.object(MOD, "_read_compression_count",
+                                  wraps=MOD._read_compression_count) as reads:
+            result = MOD.run_hermes_delegate({"prompt": "hi"})
+        self.assertTrue(result["isError"], result)
+        text = result["content"][0]["text"]
+        self.assertTrue(text.startswith("hermes-local stopped: context budget "))
+        self.assertIn("stub-sqlite-answer", text)
+        self.assertIn("step 0 done", text)
+        reads.assert_called_once()
+
+    def test_per_class_output_caps_are_nested_in_config(self):
+        os.environ[MOD.CONCURRENCY_VAR] = "2"
+        for size, values in (("small", (20000, 500, 20000)),
+                              ("full", (50000, 2000, 100000))):
+            with self.subTest(size=size):
+                record = os.path.join(self.tmpdir, size + "-config.json")
+                write_control(self.control_file, config_record=record)
+                result = MOD.run_hermes_delegate({"prompt": "hi", "size": size})
+                self.assertFalse(result["isError"], result)
+                with open(record) as fh:
+                    cfg = json.load(fh)
+                self.assertEqual((int(cfg["tool_output"]["max_bytes"]),
+                                  int(cfg["tool_output"]["max_lines"]),
+                                  int(cfg["file_read_max_chars"])), values)
+                self.assertNotIn("tool_output.max_bytes", cfg)
+                self.assertEqual(float(cfg["compression"]["threshold"]), 0.90)
+                self.assertEqual(cfg["compression"]["enabled"], "true")
+
+    def test_output_cap_config_failure_refuses_before_agent_spawn(self):
+        for key in ("tool_output.max_bytes", "tool_output.max_lines", "file_read_max_chars"):
+            with self.subTest(key=key):
+                marker = os.path.join(self.tmpdir, "failed-config-marker")
+                write_control(self.control_file, config_set_fail=key, marker=marker)
+                result = MOD.run_hermes_delegate({"prompt": "hi"})
+                self.assertTrue(result["isError"])
+                self.assertIn("hermes config set " + key + " failed", result["content"][0]["text"])
+                with open(marker) as fh:
+                    self.assertFalse(any(line.startswith("-z ") for line in fh))
+
+    def test_small_default_effort_and_explicit_override(self):
+        os.environ[MOD.CONCURRENCY_VAR] = "2"
+        os.environ[MOD.EFFORT_VAR] = "xhigh"
+        for effort in (None, "", "none", "medium", "xhigh"):
+            with self.subTest(effort=effort):
+                record = os.path.join(self.tmpdir, "effort-config.json")
+                write_control(self.control_file, config_record=record)
+                args = {"prompt": "hi", "size": "small"}
+                if effort is not None:
+                    args["effort"] = effort
+                result = MOD.run_hermes_delegate(args)
+                self.assertFalse(result["isError"], result)
+                with open(record) as fh:
+                    cfg = json.load(fh)
+                self.assertEqual(cfg["agent"]["reasoning_effort"], effort or "low")
+
+    def test_run_line_reports_budget_and_full_slot(self):
         write_control(self.control_file, mode="sqlite", sqlite_steps=2,
                       sqlite_gap_sec=0.01)
-        os.environ[MOD.KV_CAPACITY_VAR] = "100000"
+        os.environ[MOD.KV_CAPACITY_VAR] = "104000"
         os.environ[MOD.DELEGATE_CONTEXT_LENGTH_VAR] = "196608"
         result = MOD.run_hermes_delegate({"prompt": "x"})
         self.assertFalse(result["isError"], result)
         text = result["content"][0]["text"]
         self.assertRegex(
             text,
-            r"\[hermes-delegate run \S+: \d+ steps; budget 85000 tokens on 1 slot\(s\)")
+            r"\[hermes-delegate run \S+: \d+ steps; budget 98800 tokens on the full slot")
+
+    def test_run_line_reports_small_budget_and_slot(self):
+        os.environ[MOD.CONCURRENCY_VAR] = "2"
+        os.environ[MOD.KV_CAPACITY_VAR] = "202849"
+        os.environ[MOD.DELEGATE_CONTEXT_LENGTH_VAR] = "196608"
+        result = MOD.run_hermes_delegate({"prompt": "small task", "size": "small"})
+        self.assertFalse(result["isError"], result)
+        self.assertIn("budget 64000 tokens on a small slot", result["content"][0]["text"])
+
+    def test_size_schema_and_description(self):
+        tool = MOD.build_tool()
+        props = tool["inputSchema"]["properties"]
+        self.assertNotIn("slots", props)
+        self.assertEqual(props["size"]["type"], "string")
+        self.assertEqual(props["size"]["enum"], ["full", "small"])
+        self.assertEqual(props["size"]["default"], "full")
+        self.assertIn("default call takes the full slot", tool["description"])
+        self.assertIn("size=small", tool["description"])
+
+    def test_slots_argument_is_rejected_before_delete_or_spawn(self):
+        with mock.patch.object(MOD, "spawn_hermes") as spawn, \
+                mock.patch.object(MOD, "_delete_processed_runs") as delete:
+            for slots in (1, 2, None, True, "full"):
+                result = MOD.run_hermes_delegate({"prompt": "task", "slots": slots})
+                self.assertTrue(result["isError"], result)
+                self.assertIn("slots was replaced by size", result["content"][0]["text"])
+            spawn.assert_not_called()
+            delete.assert_not_called()
+
+    def test_invalid_size_is_rejected_without_spawning(self):
+        with mock.patch.object(MOD, "spawn_hermes") as spawn:
+            for size in (1, True, None, "large", [], {}):
+                result = MOD.run_hermes_delegate({"prompt": "task", "size": size})
+                self.assertTrue(result["isError"], result)
+                self.assertIn("size must be full or small", result["content"][0]["text"])
+            spawn.assert_not_called()
+
+    def test_full_refusal_is_audited_as_busy(self):
+        os.environ[MOD.CONCURRENCY_VAR] = "2"
+        os.environ[MOD.AUDIT_VAR] = os.path.join(self.tmpdir, "busy-audit.jsonl")
+        fds, err = MOD.acquire_slot()
+        self.assertIsNone(err)
+        try:
+            with mock.patch.object(MOD, "_apply_config") as configure:
+                result = MOD.run_hermes_delegate({"prompt": "busy task"})
+            self.assertTrue(result["isError"], result)
+            configure.assert_not_called()
+            with open(os.environ[MOD.AUDIT_VAR]) as fh:
+                self.assertEqual(json.loads(fh.readline())["outcome"], "busy")
+        finally:
+            MOD.release_slot(fds)
+
+
+    def test_foreign_load_refuses_without_spawning_and_audits_busy(self):
+        os.environ[MOD.CONCURRENCY_VAR] = "2"
+        os.environ[MOD.AUDIT_VAR] = os.path.join(self.tmpdir, "load-audit.jsonl")
+        for running, waiting in ((2, 0), (1, 1), (0, 2)):
+            metrics = "vllm:num_requests_running %d\nvllm:num_requests_waiting %d\n" % (
+                running, waiting)
+            with self.subTest(running=running, waiting=waiting), \
+                    mock.patch.object(MOD, "_fetch_metrics", return_value=metrics), \
+                    mock.patch.object(MOD, "_apply_config") as configure:
+                result = MOD.run_hermes_delegate({"prompt": "foreign load"})
+                self.assertTrue(result["isError"], result)
+                self.assertIn("model busy: %d running, %d waiting, 2 from clients" % (
+                    running, waiting), result["content"][0]["text"])
+                configure.assert_not_called()
+                self.assertEqual(MOD._slot_holders(), [])
+        with open(os.environ[MOD.AUDIT_VAR]) as fh:
+            self.assertEqual([json.loads(line)["outcome"] for line in fh],
+                             ["busy", "busy", "busy"])
+
+    def test_one_running_request_with_one_other_holder_is_admitted(self):
+        os.environ[MOD.CONCURRENCY_VAR] = "2"
+        other, err = MOD.acquire_slot("small", prompt="other call")
+        self.assertIsNone(err)
+        try:
+            with mock.patch.object(MOD, "_fetch_metrics", return_value=(
+                    'vllm:num_requests_running{worker="a"} 1\n'
+                    'vllm:num_requests_waiting{worker="a"} 0\n')):
+                result = MOD.run_hermes_delegate({"prompt": "admitted"})
+            self.assertFalse(result["isError"], result)
+            self.assertEqual(len(MOD._slot_holders()), 1)
+        finally:
+            MOD.release_slot(other)
+
+    def test_failed_or_missing_metrics_leave_the_pool_deciding(self):
+        os.environ[MOD.CONCURRENCY_VAR] = "2"
+        other, err = MOD.acquire_slot("small", prompt="other call")
+        self.assertIsNone(err)
+        try:
+            for metrics in (None, "", "vllm:num_requests_running 100\n"):
+                with self.subTest(metrics=metrics), mock.patch.object(
+                        MOD, "_fetch_metrics", return_value=metrics):
+                    result = MOD.run_hermes_delegate({"prompt": "pool decides"})
+                    self.assertFalse(result["isError"], result)
+        finally:
+            MOD.release_slot(other)
 
 
 class DelegateModeTests(unittest.TestCase):
@@ -1528,8 +1795,7 @@ class HermesDelegateStdioTests(unittest.TestCase):
         self.env.pop("CBOX_MCP_DEPTH", None)
 
     def _run(self, messages, env=None):
-        argv = [sys.executable, str(ROOT / "etc" / "mcp" /
-                                   "hermes_delegate_mcp.py")]
+        argv = server_argv()
         if not messages:
             proc = subprocess.run(argv, input=b"", capture_output=True,
                                   env=env if env is not None else self.env,
@@ -1662,6 +1928,9 @@ class HermesDelegateStdioTests(unittest.TestCase):
 
 class HermesDelegateTemplateContentTests(unittest.TestCase):
     def setUp(self):
+        metrics = mock.patch.object(MOD, "_fetch_metrics", return_value=None)
+        metrics.start()
+        self.addCleanup(metrics.stop)
         self.tmpdir = tempfile.mkdtemp()
         self.control_file = os.path.join(self.tmpdir, "control.json")
         write_control(self.control_file)
@@ -1834,7 +2103,7 @@ class ConcurrencySlotTests(unittest.TestCase):
         t0 = time.monotonic()
         fd2, err2 = MOD.acquire_slot()
         self.assertIsNone(fd2)
-        self.assertIn("queue wait exceeded", err2)
+        self.assertIn("full slot held by", err2)
         self.assertGreaterEqual(time.monotonic() - t0, 1.0)
         MOD.release_slot(fd)
         fd3, err3 = MOD.acquire_slot()
@@ -1843,16 +2112,75 @@ class ConcurrencySlotTests(unittest.TestCase):
 
     def test_two_slots_allow_two_holders(self):
         os.environ["CBOX_HERMES_DELEGATE_MAX_CONCURRENCY"] = "2"
-        os.environ["CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC"] = "1"
         fd1, err1 = MOD.acquire_slot()
-        fd2, err2 = MOD.acquire_slot()
+        fd2, err2 = MOD.acquire_slot("small")
         self.assertIsNone(err1)
         self.assertIsNone(err2)
+        started = time.monotonic()
         fd3, err3 = MOD.acquire_slot()
         self.assertIsNone(fd3)
-        self.assertIn("queue wait exceeded", err3)
+        self.assertIn("full slot held by", err3)
+        self.assertGreaterEqual(time.monotonic() - started, 1.0)
+        self.assertLess(time.monotonic() - started, 1.8)
         MOD.release_slot(fd1)
         MOD.release_slot(fd2)
+
+    def test_full_refusal_does_not_take_a_free_small_slot(self):
+        os.environ[MOD.CONCURRENCY_VAR] = "2"
+        os.environ[MOD.DELEGATE_CONTEXT_LENGTH_VAR] = "196608"
+        os.environ[MOD.WORKSPACE_VAR] = "/work/example"
+        with mock.patch.object(MOD, "_CALLER_NAME", "client"), \
+                mock.patch.object(MOD.time, "time", return_value=1000):
+            fds, err = MOD.acquire_slot(prompt="main task")
+            self.assertIsNone(err)
+            self.addCleanup(MOD.release_slot, fds)
+            next_fds, err = MOD.acquire_slot()
+        self.assertIsNone(next_fds)
+        self.assertEqual(err, 'hermes-local full slot held by example/client "main task" (0m) - '
+                         "pass size=small for a small task (64000 tokens), or route this step "
+                         "to a paid tier with 'local-skip: local-busy - <why>' or retry later")
+        small, err = MOD.acquire_slot("small")
+        self.assertIsNone(err)
+        MOD.release_slot(small)
+
+    def test_small_calls_try_all_small_slots_without_taking_full(self):
+        os.environ[MOD.CONCURRENCY_VAR] = "3"
+        os.environ[MOD.WORKSPACE_VAR] = "/work/example"
+        with mock.patch.object(MOD, "_CALLER_NAME", "client"), \
+                mock.patch.object(MOD.time, "time", return_value=1000):
+            for task in ("side one", "side two"):
+                fds, err = MOD.acquire_slot("small", task)
+                self.assertIsNone(err)
+                self.addCleanup(MOD.release_slot, fds)
+                record = json.loads(os.pread(fds[0], 4096, 0))
+                self.assertEqual(record["v"], 2)
+                self.assertEqual(record["size"], "small")
+            next_fds, err = MOD.acquire_slot("small")
+        self.assertIsNone(next_fds)
+        self.assertEqual(err, 'hermes-local small slots full (2/2 held: '
+                         'example/client "side one" (0m); example/client "side two" (0m)) - '
+                         "route this step to a paid tier with 'local-skip: local-busy - <why>' or retry later")
+        full, err = MOD.acquire_slot()
+        self.assertIsNone(err)
+        MOD.release_slot(full)
+
+    def test_limit_one_refuses_small_without_creating_pool(self):
+        fds, err = MOD.acquire_slot("small")
+        self.assertIsNone(fds)
+        self.assertEqual(err, "no small slots (limit 1)")
+        self.assertFalse(os.path.exists(self.lockdir))
+
+    def test_legacy_and_unreadable_holders_infer_size_from_index(self):
+        os.environ[MOD.CONCURRENCY_VAR] = "3"
+        for size in ("full", "small", "small"):
+            fds, err = MOD.acquire_slot(size)
+            self.assertIsNone(err)
+            self.addCleanup(MOD.release_slot, fds)
+            os.ftruncate(fds[0], 0)
+            payload = b'{"v":1,"slots":1}\n' if size == "full" else b'[]'
+            os.pwrite(fds[0], payload, 0)
+        self.assertEqual([r["size"] for r in MOD._slot_holders()],
+                         ["full", "small", "small"])
 
     def test_cross_process_serialization(self):
         rec = os.path.join(self.tmpdir, "rec.txt")
@@ -1863,6 +2191,7 @@ class ConcurrencySlotTests(unittest.TestCase):
         install_fake_venv_python(self.tmpdir)
         template = make_template_home(self.tmpdir)
         env = dict(os.environ)
+        env[MOD.QUEUE_WAIT_VAR] = "10"
         env["HERMES_BIN"] = stub_path
         env["CBOX_HERMES_DELEGATE_HOME_TEMPLATE"] = template
         env["CBOX_HERMES_DELEGATE_PROVIDER"] = "local"
@@ -1878,7 +2207,7 @@ class ConcurrencySlotTests(unittest.TestCase):
         ]
         payload = "".join(json.dumps(m) + "\n" for m in msgs).encode()
         script = str(ROOT / "etc" / "mcp" / "hermes_delegate_mcp.py")
-        procs = [subprocess.Popen([sys.executable, script],
+        procs = [subprocess.Popen(server_argv(),
                                   stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE, env=env)
@@ -1890,6 +2219,10 @@ class ConcurrencySlotTests(unittest.TestCase):
             self.assertTrue(p.stdout.readline())
             p.stdin.close()
             p.wait(timeout=30)
+            p.stdout.close()
+            stderr = p.stderr.read()
+            p.stderr.close()
+            self.assertEqual(p.returncode, 0, stderr)
         spans = []
         cur = None
         with open(rec) as fh:
@@ -1902,6 +2235,61 @@ class ConcurrencySlotTests(unittest.TestCase):
         self.assertEqual(len(spans), 2)
         spans.sort()
         self.assertGreaterEqual(spans[1][0], spans[0][1] - 0.05)
+
+    def test_holder_record_is_present_while_held_and_truncated_on_release(self):
+        os.environ[MOD.WORKSPACE_VAR] = "/work/example/"
+        with mock.patch.object(MOD, "_CALLER_NAME", "test-client"):
+            fds, err = MOD.acquire_slot(prompt="ab\n\x00\x7f\x85cd" + "x" * 80)
+        self.assertIsNone(err)
+        path = os.path.join(self.lockdir, "slot.0")
+        with open(path) as fh:
+            record = json.load(fh)
+        self.assertEqual(set(record), {"v", "since", "container", "scope",
+                                       "caller", "size", "task"})
+        self.assertEqual(record["v"], 2)
+        self.assertEqual(record["scope"], "example")
+        self.assertEqual(record["caller"], "test-client")
+        self.assertEqual(record["container"], os.uname().nodename)
+        self.assertEqual(record["size"], "full")
+        self.assertEqual(record["task"], "abcd" + "x" * 56)
+        self.assertLess(abs(record["since"] - time.time()), 2)
+        self.assertEqual(stat.S_IMODE(os.stat(self.lockdir).st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        self.assertEqual(MOD._slot_holders(), [record])
+        MOD.release_slot(fds)
+        self.assertEqual(os.stat(path).st_size, 0)
+        self.assertEqual(MOD._slot_holders(), [])
+        with open(path, "w") as fh:
+            json.dump(record, fh)
+        self.assertEqual(MOD._slot_holders(), [])
+
+    def test_brief_reader_probe_does_not_refuse_admission(self):
+        os.makedirs(self.lockdir)
+        fd = os.open(os.path.join(self.lockdir, "slot.0"),
+                     os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.addCleanup(os.close, fd)
+        release = threading.Timer(0.2, fcntl.flock, args=(fd, fcntl.LOCK_UN))
+        release.start()
+        self.addCleanup(release.join)
+        fds, err = MOD.acquire_slot()
+        self.assertIsNone(err)
+        MOD.release_slot(fds)
+
+    def test_positive_queue_wait_admits_after_the_admission_retry(self):
+        os.environ[MOD.QUEUE_WAIT_VAR] = "4"
+        fds, err = MOD.acquire_slot()
+        self.assertIsNone(err)
+        release = threading.Timer(1.3, MOD.release_slot, args=(fds,))
+        release.start()
+        self.addCleanup(release.join)
+        started = time.monotonic()
+        with mock.patch.object(MOD, "emit_progress") as progress:
+            next_fds, err = MOD.acquire_slot()
+        self.assertIsNone(err)
+        self.assertGreaterEqual(time.monotonic() - started, 1.2)
+        self.assertTrue(progress.called)
+        MOD.release_slot(next_fds)
 
 
 class KvBudgetTests(unittest.TestCase):
@@ -1961,20 +2349,21 @@ class KvBudgetTests(unittest.TestCase):
         self.assertIsNone(MOD._kv_capacity_from_metrics(zero))
 
     def test_context_budget(self):
-        os.environ[MOD.KV_CAPACITY_VAR] = "200000"
+        os.environ[MOD.KV_CAPACITY_VAR] = "202849"
         os.environ[MOD.DELEGATE_CONTEXT_LENGTH_VAR] = "196608"
-        self.assertEqual(MOD._context_budget(1, 2, ""), 85000)
-        self.assertEqual(MOD._context_budget(2, 2, ""), 170000)
+        self.assertEqual(MOD._context_budget("full", 2, ""), 128706)
+        self.assertEqual(MOD._context_budget("small", 2, ""), 64000)
+        self.assertEqual(MOD._context_budget("full", 1, ""), 192706)
         os.environ[MOD.KV_CAPACITY_VAR] = "1000000"
-        self.assertEqual(MOD._context_budget(1, 1, ""), 196608)
+        self.assertEqual(MOD._context_budget("full", 1, ""), 196608)
 
     def test_context_budget_metrics_fallback(self):
-        os.environ[MOD.DELEGATE_CONTEXT_LENGTH_VAR] = "100000"
+        os.environ[MOD.DELEGATE_CONTEXT_LENGTH_VAR] = "104000"
         os.environ.pop(MOD.KV_CAPACITY_VAR, None)
         with mock.patch.object(MOD, "_metrics_capacity",
                                return_value=None) as mc:
-            self.assertEqual(MOD._context_budget(1, 1, "http://x:1"),
-                             85000)
+            self.assertEqual(MOD._context_budget("full", 1, "http://x:1"),
+                             98800)
             mc.assert_called_once_with("http://x:1")
 
     def test_metrics_capacity_failure_retry_window(self):
@@ -2016,9 +2405,106 @@ class KvBudgetTests(unittest.TestCase):
     def test_context_budget_floor(self):
         os.environ[MOD.KV_CAPACITY_VAR] = "200000"
         os.environ[MOD.DELEGATE_CONTEXT_LENGTH_VAR] = "196608"
-        self.assertEqual(MOD._context_budget(1, 4, ""), 64000)
+        self.assertEqual(MOD._context_budget("full", 4, ""), 126000)
         os.environ[MOD.DELEGATE_CONTEXT_LENGTH_VAR] = "50000"
-        self.assertEqual(MOD._context_budget(1, 4, ""), 50000)
+        self.assertEqual(MOD._context_budget("full", 4, ""), 50000)
+        self.assertEqual(MOD._context_budget("small", 4, ""), 50000)
+        os.environ[MOD.DELEGATE_CONTEXT_LENGTH_VAR] = "16000"
+        self.assertEqual(MOD._context_budget("full", 4, ""), 16000)
+        self.assertEqual(MOD._context_budget("small", 4, ""), 16000)
+
+    def test_capacity_clamps_small_admission_and_full_budget(self):
+        os.environ[MOD.CONCURRENCY_VAR] = "4"
+        os.environ[MOD.DELEGATE_CONTEXT_LENGTH_VAR] = "196608"
+        for source in ("env", "metrics"):
+            with self.subTest(source=source):
+                if source == "env":
+                    os.environ[MOD.KV_CAPACITY_VAR] = "202849"
+                else:
+                    os.environ.pop(MOD.KV_CAPACITY_VAR, None)
+                with mock.patch.object(MOD, "_metrics_capacity", return_value=202849), \
+                        mock.patch.object(MOD.os, "open", wraps=os.open) as opened:
+                    self.assertEqual(MOD._context_budget("full", 4, "http://x:1"), 128706)
+                    held = []
+                    try:
+                        for _ in range(1):
+                            fds, err = MOD.acquire_slot("small")
+                            self.assertIsNone(err)
+                            held.extend(fds)
+                        fds, err = MOD.acquire_slot("small")
+                        self.assertIsNone(fds)
+                        self.assertIn("small slots full (1/1 held:", err)
+                        full, err = MOD.acquire_slot("full")
+                        self.assertIsNone(err)
+                        held.extend(full)
+                    finally:
+                        MOD.release_slot(held)
+                    created = [os.path.basename(call.args[0])
+                               for call in opened.call_args_list if call.args[1] & os.O_CREAT]
+                    self.assertEqual(set(created), {"slot.0", "slot.1"})
+                    self.assertFalse(os.path.exists(os.path.join(self.lockdir, "slot.3")))
+
+    def test_small_budget_meets_installed_minimum_context_length(self):
+        path = "/opt/hermes/lib/python3.12/site-packages/agent/model_metadata.py"
+        if not os.path.isfile(path):
+            self.skipTest("installed hermes model_metadata.py not found")
+        minimum = None
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                match = re.match(r"MINIMUM_CONTEXT_LENGTH\s*=\s*([0-9_]+)", line)
+                if match:
+                    minimum = int(match.group(1).replace("_", ""))
+        self.assertIsNotNone(minimum)
+        self.assertGreaterEqual(MOD.SMALL_CONTEXT_BUDGET, minimum)
+        self.assertGreaterEqual(MOD.MIN_CONTEXT_BUDGET, minimum)
+
+    def test_capacity_below_floor_disables_small_admission(self):
+        os.environ[MOD.CONCURRENCY_VAR] = "4"
+        os.environ[MOD.KV_CAPACITY_VAR] = "100000"
+        fds, err = MOD.acquire_slot("small")
+        self.assertIsNone(fds)
+        self.assertEqual(err, "no small slots (limit 1)")
+        self.assertFalse(os.path.exists(self.lockdir))
+
+    def test_load_sums_all_label_sets_and_fetches_without_cache(self):
+        payload = (b'vllm:num_requests_running{worker="a"} 1\n'
+                   b'vllm:num_requests_running{worker="b"} 2e0\n'
+                   b'vllm:num_requests_waiting{worker="a"} 3\n'
+                   b'vllm:num_requests_waiting{worker="b"} 4\n')
+        opener = self._fake_opener(payload)
+        with mock.patch.object(MOD.urllib.request, "build_opener",
+                               return_value=opener) as build:
+            self.assertEqual(MOD._model_load("http://model:8000/v1"), (3, 7))
+            self.assertEqual(MOD._model_load("http://model:8000/v1"), (3, 7))
+        self.assertEqual(build.call_count, 2)
+        for call in build.call_args_list:
+            self.assertEqual(call.args[0].proxies, {})
+            self.assertIsInstance(call.args[1], MOD._NoRedirectHandler)
+        opener.open.assert_called_with("http://model:8000/metrics",
+                                       timeout=MOD.METRICS_TIMEOUT_SEC)
+
+    def test_failed_fetch_and_missing_or_invalid_load_series_skip_check(self):
+        with mock.patch.object(MOD.urllib.request, "build_opener", return_value=
+                               self._fake_opener(side_effect=OSError("offline"))):
+            self.assertIsNone(MOD._model_load("http://model:8000/v1"))
+        for payload in (b"", b"vllm:num_requests_running 2\n",
+                        b"vllm:num_requests_waiting 1\n",
+                        b"vllm:num_requests_running NaN\nvllm:num_requests_waiting 0\n",
+                        b"vllm:num_requests_running -1\nvllm:num_requests_waiting 0\n"):
+            with self.subTest(payload=payload), mock.patch.object(
+                    MOD.urllib.request, "build_opener",
+                    return_value=self._fake_opener(payload)):
+                self.assertIsNone(MOD._model_load("http://model:8000/v1"))
+
+    def test_metrics_fetch_enforces_size_cap_and_total_deadline(self):
+        with mock.patch.object(MOD.urllib.request, "build_opener", return_value=
+                               self._fake_opener(b"x" * 100)), \
+                mock.patch.object(MOD, "METRICS_MAX_BYTES", 10):
+            self.assertIsNone(MOD._fetch_metrics("http://model:8000/v1"))
+        with mock.patch.object(MOD.urllib.request, "build_opener", return_value=
+                               self._fake_opener(b"x")), \
+                mock.patch.object(MOD.time, "monotonic", side_effect=(1, 2)):
+            self.assertIsNone(MOD._fetch_metrics("http://model:8000/v1"))
 
     def test_metrics_capacity_bad_status_line_returns_none(self):
         build_opener = mock.Mock(
@@ -2031,7 +2517,7 @@ class KvBudgetTests(unittest.TestCase):
             self.assertIsNone(MOD._metrics_capacity("http://model:8000/v1"))
 
     def test_spawn_releases_slots_when_context_budget_raises(self):
-        self.addCleanup(MOD._CANCEL.clear)
+        self.addCleanup(MOD.end_call)
         self.addCleanup(MOD._CLOSED.clear)
         self.addCleanup(lambda: MOD._SHUTDOWN.__setitem__(0, False))
         self.addCleanup(MOD.end_call)
@@ -2076,46 +2562,36 @@ class KvBudgetTests(unittest.TestCase):
         self.assertFalse(MOD._is_context_exceeded(""))
 
     def test_acquire_slot_validation_and_release(self):
-        os.environ["CBOX_HERMES_DELEGATE_MAX_CONCURRENCY"] = "2"
-        fds, err = MOD.acquire_slot(2)
-        self.assertIsNone(err)
-        self.assertEqual(len(fds), 2)
-        for fd in fds:
-            self.assertGreaterEqual(fd, 0)
-        MOD.release_slot(fds)
-        for i in (0, 1):
-            fd = os.open(os.path.join(self.lockdir, "slot.%d" % i),
-                         os.O_CREAT | os.O_RDWR)
+        os.environ[MOD.CONCURRENCY_VAR] = "2"
+        for size, index in (("full", 0), ("small", 1)):
+            fds, err = MOD.acquire_slot(size)
+            self.assertIsNone(err)
+            self.assertEqual(len(fds), 1)
+            MOD.release_slot(fds)
+            fd = os.open(os.path.join(self.lockdir, "slot.%d" % index), os.O_RDWR)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             finally:
                 fcntl.flock(fd, fcntl.LOCK_UN)
                 os.close(fd)
-        for bad in (3, 0, True):
+        for bad in (3, 0, True, None, "large", [], {}):
             res, err = MOD.acquire_slot(bad)
             self.assertIsNone(res)
-            self.assertIn("slots must be an integer from 1 to 2", err)
+            self.assertEqual(err, "size must be full or small")
 
-    def test_acquire_slot_busy_partial_release(self):
-        os.environ["CBOX_HERMES_DELEGATE_MAX_CONCURRENCY"] = "2"
-        os.environ["CBOX_HERMES_DELEGATE_QUEUE_WAIT_SEC"] = "1"
-        os.makedirs(self.lockdir, exist_ok=True)
-        fd1 = os.open(os.path.join(self.lockdir, "slot.1"),
-                      os.O_CREAT | os.O_RDWR)
-        self.addCleanup(os.close, fd1)
-        fcntl.flock(fd1, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with mock.patch.object(MOD, "emit_progress"):
-            res, err = MOD.acquire_slot(2)
-        self.assertIsNone(res)
-        self.assertIn("needs 2 of 2 slots", err)
-        fd0 = os.open(os.path.join(self.lockdir, "slot.0"),
-                      os.O_CREAT | os.O_RDWR)
+    def test_small_refusal_leaves_the_full_slot_available(self):
+        os.environ[MOD.CONCURRENCY_VAR] = "2"
+        fds, err = MOD.acquire_slot("small", "side task")
+        self.assertIsNone(err)
         try:
-            fcntl.flock(fd0, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            res, err = MOD.acquire_slot("small")
+            self.assertIsNone(res)
+            self.assertIn("small slots full (1/1 held:", err)
+            full, err = MOD.acquire_slot()
+            self.assertIsNone(err)
+            MOD.release_slot(full)
         finally:
-            fcntl.flock(fd0, fcntl.LOCK_UN)
-            os.close(fd0)
-        fcntl.flock(fd1, fcntl.LOCK_UN)
+            MOD.release_slot(fds)
 
 
 class EmptyEnvDefaultsTests(unittest.TestCase):
@@ -2143,15 +2619,23 @@ class EmptyEnvDefaultsTests(unittest.TestCase):
     def test_empty_lock_dir_still_acquires_a_slot(self):
         fallback = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, fallback, True)
-        with mock.patch.dict(os.environ, {MOD.LOCK_DIR_VAR: ""}, clear=False), \
-                mock.patch.object(MOD, "DEFAULT_LOCK_DIR", fallback):
+        with mock.patch.dict(os.environ, {MOD.LOCK_DIR_VAR: "", "HOME": fallback}, clear=False):
             handle, err = MOD.acquire_slot()
-            self.assertTrue(os.path.exists(os.path.join(fallback, "slot.0")))
+            self.assertTrue(os.path.exists(os.path.join(fallback, ".claude", "cbox-hermes-slots", "slot.0")))
             self.assertIsNone(
                 err,
                 "an empty lock dir must fall back to the default, not fail: %r" % (err,))
             self.assertIsNotNone(handle)
             MOD.release_slot(handle)
+
+    def test_default_lock_dir_is_resolved_at_call_time(self):
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            for home in (first, second):
+                with mock.patch.dict(os.environ, {"HOME": home, MOD.LOCK_DIR_VAR: ""}):
+                    self.assertEqual(MOD.lock_dir(), os.path.join(
+                        home, ".claude", "cbox-hermes-slots"))
+            with mock.patch.dict(os.environ, {MOD.LOCK_DIR_VAR: first}):
+                self.assertEqual(MOD.lock_dir(), first)
 
 
 class PerCallEffortTests(unittest.TestCase):
@@ -2197,6 +2681,9 @@ class PerCallEffortTests(unittest.TestCase):
 
 class AgentModeTests(unittest.TestCase):
     def setUp(self):
+        metrics = mock.patch.object(MOD, "_fetch_metrics", return_value=None)
+        metrics.start()
+        self.addCleanup(metrics.stop)
         self.tmpdir = tempfile.mkdtemp()
         self.control_file = os.path.join(self.tmpdir, "control.json")
         write_control(self.control_file)
@@ -2488,11 +2975,13 @@ def make_pid_stub(tmpdir, pid_file, sleep_sec):
     return stub_path
 
 
-def make_tree_stub(tmpdir, parent_file, child_file, config_stub):
+def make_tree_stub(tmpdir, parent_file, child_file, config_stub, compression_count=0):
     stub_path = os.path.join(tmpdir, "tree-stub.py")
     source = '''#!/usr/bin/env python3
+import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -2507,10 +2996,25 @@ child = subprocess.Popen(
     env={key: value for key, value in os.environ.items() if key != "HERMES_HOME"})
 with open(%(parent_file)r, "w") as fh:
     fh.write(str(os.getpid()))
+if %(compression_count)d:
+    while not os.path.isfile(%(child_file)r):
+        time.sleep(0.01)
+    conn = sqlite3.connect(os.path.join(os.environ["HERMES_HOME"], "state.db"))
+    conn.execute("CREATE TABLE sessions (end_reason TEXT)")
+    conn.executemany("INSERT INTO sessions VALUES (?)",
+                     [("compression",)] * %(compression_count)d)
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, role TEXT, content TEXT, tool_calls TEXT)")
+    calls = json.dumps([{"function": {"name": "read_file", "arguments": {"path": "evidence.txt"}}}])
+    conn.execute("INSERT INTO messages VALUES (1, 'assistant', ?, ?)",
+                 ("gathered evidence tail", calls))
+    conn.commit()
+    conn.close()
+    sys.stdout.write("partial stdout evidence\\n")
+    sys.stdout.flush()
 while True:
     time.sleep(0.1)
 ''' % {"config_stub": config_stub, "parent_file": parent_file,
-       "child_file": child_file}
+       "child_file": child_file, "compression_count": compression_count}
     with open(stub_path, "w") as fh:
         fh.write(source)
     os.chmod(stub_path, os.stat(stub_path).st_mode | stat.S_IEXEC)
@@ -2540,6 +3044,9 @@ def process_is_alive(pid):
 
 class HermesDelegateCancelProgressTests(unittest.TestCase):
     def setUp(self):
+        metrics = mock.patch.object(MOD, "_fetch_metrics", return_value=None)
+        metrics.start()
+        self.addCleanup(metrics.stop)
         self.tmpdir = tempfile.mkdtemp()
         self.tree_files = []
         self.control_file = os.path.join(self.tmpdir, "control.json")
@@ -2565,12 +3072,9 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
                      "OLLAMA_NUM_PARALLEL", MOD.QUEUE_WAIT_VAR):
             os.environ.pop(name, None)
         os.environ[MOD.AUDIT_VAR] = os.path.join(self.tmpdir, "audit.jsonl")
-        for reset in (lambda: MOD._CANCEL.clear(),
-                      lambda: MOD._CLOSED.clear(),
+        for reset in (lambda: MOD._CLOSED.clear(),
                       MOD.end_call,
                       lambda: MOD._SHUTDOWN.__setitem__(0, False),
-                      lambda: MOD._LIVE_PROC.__setitem__(0, None),
-                      lambda: MOD._LIVE_HOME.__setitem__(0, None),
                       lambda: MOD._CANCELLED_IDS.clear()):
             try:
                 reset()
@@ -2582,12 +3086,9 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
             pid = wait_for_pid_file(path, 0.1)
             if pid is not None and process_is_alive(pid):
                 os.kill(pid, signal.SIGKILL)
-        for reset in (lambda: MOD._CANCEL.clear(),
-                      lambda: MOD._CLOSED.clear(),
+        for reset in (lambda: MOD._CLOSED.clear(),
                       MOD.end_call,
                       lambda: MOD._SHUTDOWN.__setitem__(0, False),
-                      lambda: MOD._LIVE_PROC.__setitem__(0, None),
-                      lambda: MOD._LIVE_HOME.__setitem__(0, None),
                       lambda: MOD._CANCELLED_IDS.clear()):
             try:
                 reset()
@@ -2607,12 +3108,12 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
                       beat_gap_sec=beat_gap_sec)
         os.environ["HERMES_BIN"] = self.stub
 
-    def _tree_stub(self, tag):
+    def _tree_stub(self, tag, compression_count=0):
         parent = os.path.join(self.tmpdir, "tree-parent-" + tag)
         child = os.path.join(self.tmpdir, "tree-child-" + tag)
         self.tree_files.extend((parent, child))
         os.environ["HERMES_BIN"] = make_tree_stub(
-            self.tmpdir, parent, child, self.stub)
+            self.tmpdir, parent, child, self.stub, compression_count)
         return parent, child
 
     def _assert_tree_gone(self, parent, child):
@@ -2626,9 +3127,8 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
     def test_cancel_kills_detached_grandchild_ignoring_sigterm(self):
         parent, child = self._tree_stub("cancel")
         outcome = {}
-        self.assertTrue(MOD.begin_call(101, None))
         thread = threading.Thread(
-            target=lambda: outcome.setdefault("result", MOD.spawn_hermes("x", None)))
+            target=lambda: outcome.setdefault("result", call_with_context(101, None, MOD.spawn_hermes, "x", None)))
         thread.start()
         self.assertIsNotNone(wait_for_pid_file(child, 5))
         MOD.cancel_request(101)
@@ -2636,6 +3136,58 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(outcome["result"][1], MOD.CANCELLED_MESSAGE)
         self._assert_tree_gone(parent, child)
+
+    def test_first_compression_kills_tree_before_release_and_keeps_partial_run(self):
+        os.environ[MOD.CONCURRENCY_VAR] = "2"
+        os.environ[MOD.KV_CAPACITY_VAR] = "202849"
+        os.environ[MOD.DELEGATE_CONTEXT_LENGTH_VAR] = "196608"
+        for size, budget in (("small", 64000), ("full", 128706)):
+            for count in (1, 2):
+                with self.subTest(size=size, compressions=count):
+                    parent, child = self._tree_stub(size + str(count), count)
+                    real_release = MOD.release_slot
+                    released = []
+
+                    def release(fds):
+                        try:
+                            self._assert_tree_gone(parent, child)
+                            released.append(True)
+                        finally:
+                            real_release(fds)
+
+                    with mock.patch.object(MOD, "HEARTBEAT_POLL_SEC", 0.1), \
+                            mock.patch.object(MOD, "release_slot", side_effect=release), \
+                            mock.patch.object(MOD, "_read_compression_count",
+                                              wraps=MOD._read_compression_count) as reads:
+                        result = MOD.run_hermes_delegate({"prompt": "gather evidence", "size": size})
+                    self.assertEqual(released, [True])
+                    self.assertTrue(result["isError"], result)
+                    text = result["content"][0]["text"]
+                    expected = ("hermes-local stopped: context budget %d tokens used up on the %s "
+                                "slot after 1 steps - a compression would drop what it gathered; "
+                                "split the task into smaller calls%s" % (
+                                    budget, size, ", or use size=full" if size == "small" else ""))
+                    self.assertEqual(text.splitlines()[0], expected)
+                    self.assertEqual(
+                        text.count(", or use size=full"), 1 if size == "small" else 0)
+                    self.assertIn("partial output:", text)
+                    self.assertIn("partial stdout evidence", text)
+                    self.assertIn("gathered evidence tail", text)
+                    self.assertIn("read_file: evidence.txt", text)
+                    self.assertGreaterEqual(reads.call_count, 2)
+                    self.assertEqual(len({call.args[0] for call in reads.call_args_list}), 1)
+                    run_id = re.search(r"run id: (\S+)", text).group(1)
+                    run_dir = os.path.join(self.tmpdir, "runs", run_id)
+                    with open(os.path.join(run_dir, "summary.json")) as fh:
+                        summary = json.load(fh)
+                    self.assertEqual(summary["outcome"], "context-full")
+                    self.assertEqual(summary["final_text_tail"], "gathered evidence tail")
+                    self.assertTrue(os.path.isfile(os.path.join(run_dir, "state.db")))
+                    self.assertTrue(os.path.isfile(os.path.join(run_dir, "output.log")))
+                    with open(os.environ[MOD.AUDIT_VAR]) as fh:
+                        records = [json.loads(line) for line in fh]
+                    self.assertEqual(records[-1]["outcome"], "context-full")
+                    self.assertEqual(records[-1]["run_id"], run_id)
 
     def test_stdin_eof_kills_detached_grandchild(self):
         parent, child = self._tree_stub("eof")
@@ -2667,6 +3219,7 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
         self._assert_tree_gone(parent, child)
 
     def test_queued_cancel_never_spawns(self):
+        os.environ[MOD.QUEUE_WAIT_VAR] = "10"
         marker = os.path.join(self.tmpdir, "queue-marker")
         write_control(self.control_file, marker=marker)
         lock_dir = os.environ[MOD.LOCK_DIR_VAR]
@@ -2674,9 +3227,8 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
         fd = os.open(os.path.join(lock_dir, "slot.0"), os.O_CREAT | os.O_RDWR, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX)
         outcome = {}
-        self.assertTrue(MOD.begin_call(103, None))
         thread = threading.Thread(
-            target=lambda: outcome.setdefault("result", MOD.spawn_hermes("x", None)))
+            target=lambda: outcome.setdefault("result", call_with_context(103, None, MOD.spawn_hermes, "x", None)))
         thread.start()
         time.sleep(0.3)
         MOD.cancel_request(103)
@@ -2688,6 +3240,7 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
         self.assertFalse(os.path.exists(marker))
 
     def test_queued_client_eof_never_spawns(self):
+        os.environ[MOD.QUEUE_WAIT_VAR] = "10"
         marker = os.path.join(self.tmpdir, "queue-marker-eof")
         write_control(self.control_file, marker=marker)
         lock_dir = os.environ[MOD.LOCK_DIR_VAR]
@@ -2695,9 +3248,8 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
         fd = os.open(os.path.join(lock_dir, "slot.0"), os.O_CREAT | os.O_RDWR, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX)
         outcome = {}
-        self.assertTrue(MOD.begin_call(105, None))
         thread = threading.Thread(
-            target=lambda: outcome.setdefault("result", MOD.spawn_hermes("x", None)))
+            target=lambda: outcome.setdefault("result", call_with_context(105, None, MOD.spawn_hermes, "x", None)))
         thread.start()
         time.sleep(0.3)
         MOD._CLOSED.set()
@@ -2732,12 +3284,11 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
         pid_file = self._pid_stub("quiet-progress", 60)
         recorded = []
         outcome = {}
-        self.assertTrue(MOD.begin_call(104, "quiet-token"))
         with mock.patch.object(MOD, "PROGRESS_HEARTBEAT_SEC", 0.2), \
                 mock.patch.object(MOD, "HEARTBEAT_POLL_SEC", 0.1), \
                 mock.patch.object(MOD, "send", side_effect=recorded.append):
             thread = threading.Thread(
-                target=lambda: outcome.setdefault("result", MOD.spawn_hermes("x", None)))
+                target=lambda: outcome.setdefault("result", call_with_context(104, "quiet-token", MOD.spawn_hermes, "x", None)))
             thread.start()
             self.assertIsNotNone(wait_for_pid_file(pid_file, 5))
             time.sleep(0.8)
@@ -2795,9 +3346,8 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
         outcome = {}
 
         def runner():
-            outcome["result"] = MOD.spawn_hermes("hi", None)
+            outcome["result"] = call_with_context(9, None, MOD.spawn_hermes, "hi", None)
 
-        self.assertTrue(MOD.begin_call(9, None))
         thread = threading.Thread(target=runner, daemon=True)
         thread.start()
         pid = wait_for_pid_file(pid_file, 5)
@@ -2831,7 +3381,7 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
         env = dict(os.environ)
         script = str(ROOT / "etc" / "mcp" / "hermes_delegate_mcp.py")
         proc = subprocess.Popen(
-            [sys.executable, script],
+            server_argv(),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, env=env)
         out_chunks = []
@@ -2928,7 +3478,7 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
         ]
         payload = "".join(json.dumps(m) + "\n" for m in messages).encode()
         proc = subprocess.run(
-            [sys.executable, script], input=payload,
+            server_argv(), input=payload,
             capture_output=True, env=env, timeout=15)
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
         replies = [
@@ -2959,7 +3509,7 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
         env = dict(os.environ)
         script = str(ROOT / "etc" / "mcp" / "hermes_delegate_mcp.py")
         proc = subprocess.Popen(
-            [sys.executable, script],
+            server_argv(),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, env=env)
         out_chunks = []
@@ -3219,9 +3769,8 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
         outcome = {}
 
         def runner():
-            outcome["result"] = MOD.spawn_hermes("hi", None)
+            outcome["result"] = call_with_context(20, None, MOD.spawn_hermes, "hi", None)
 
-        self.assertTrue(MOD.begin_call(20, None))
         thread = threading.Thread(target=runner, daemon=True)
         thread.start()
         pid = wait_for_pid_file(pid_file, 5)
@@ -3246,9 +3795,9 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
         outcome = {}
 
         def runner():
-            outcome["result"] = MOD.run_hermes_delegate({"prompt": "hi"})
+            outcome["result"] = call_with_context(
+                21, None, MOD.run_hermes_delegate, {"prompt": "hi"})
 
-        self.assertTrue(MOD.begin_call(21, None))
         thread = threading.Thread(target=runner, daemon=True)
         thread.start()
         pid = wait_for_pid_file(pid_file, 5)
@@ -3271,6 +3820,280 @@ class HermesDelegateCancelProgressTests(unittest.TestCase):
         with open(os.path.join(run_dir, "summary.json")) as fh:
             summary = json.load(fh)
         self.assertEqual(summary["outcome"], "cancelled")
+
+
+class _ConcurrentServer:
+    def __init__(self, env):
+        self.proc = subprocess.Popen(
+            server_argv(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=env)
+        self.inbox = queue.Queue()
+        self.messages = []
+        self.closed = False
+        self.reader = threading.Thread(target=self._read, daemon=True)
+        self.reader.start()
+
+    def _read(self):
+        for line in self.proc.stdout:
+            self.inbox.put(json.loads(line))
+
+    def send(self, message):
+        self.proc.stdin.write((json.dumps(message) + "\n").encode())
+        self.proc.stdin.flush()
+
+    def call(self, req_id, task, size="full"):
+        self.send({"jsonrpc": "2.0", "id": req_id, "method": "tools/call",
+                   "params": {"name": MOD.TOOL_NAME,
+                              "arguments": {"prompt": task, "size": size},
+                              "_meta": {"progressToken": task}}})
+
+    def reply(self, req_id, timeout=8):
+        deadline = time.monotonic() + timeout
+        while True:
+            for message in self.messages:
+                if message.get("id") == req_id:
+                    return message
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError("no reply for %r: %r" % (req_id, self.messages))
+            try:
+                self.messages.append(self.inbox.get(timeout=remaining))
+            except queue.Empty:
+                raise AssertionError("no reply for %r: %r" % (req_id, self.messages))
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        if not self.proc.stdin.closed:
+            self.proc.stdin.close()
+        try:
+            self.proc.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait(timeout=3)
+            raise AssertionError("server failed to join its calls on shutdown")
+        finally:
+            self.reader.join(timeout=2)
+            self.proc.stdout.close()
+            self.stderr = self.proc.stderr.read()
+            self.proc.stderr.close()
+
+
+class GlobalServerConcurrencyTests(unittest.TestCase):
+    def setUp(self):
+        HermesDelegateCancelProgressTests.setUp(self)
+        self.servers = []
+        self.addCleanup(self._close_servers)
+        os.environ[MOD.CONCURRENCY_VAR] = "2"
+        self.concurrent_stub = os.path.join(self.tmpdir, "concurrent-stub.py")
+        source = '''#!/usr/bin/env python3
+import os
+import signal
+import subprocess
+import sys
+import time
+
+if "-z" not in sys.argv:
+    os.execv(%(config_stub)r, [%(config_stub)r] + sys.argv[1:])
+task = sys.argv[sys.argv.index("-z") + 1]
+root = %(root)r
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child = subprocess.Popen(
+    [sys.executable, "-c", %(child_code)r, os.path.join(root, "child-" + task)],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL, start_new_session=True)
+with open(os.path.join(root, "parent-" + task), "w") as fh:
+    fh.write(str(os.getpid()))
+print("started " + task, flush=True)
+while not os.path.exists(os.path.join(root, "finish-" + task)):
+    time.sleep(0.02)
+print("completed " + task, flush=True)
+''' % {"config_stub": self.stub, "root": self.tmpdir,
+       "child_code": "import os,signal,sys,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);open(sys.argv[1],'w').write(str(os.getpid()));time.sleep(60)"}
+        with open(self.concurrent_stub, "w") as fh:
+            fh.write(source)
+        os.chmod(self.concurrent_stub, 0o700)
+        os.environ["HERMES_BIN"] = self.concurrent_stub
+
+    tearDown = HermesDelegateCancelProgressTests.tearDown
+    _assert_tree_gone = HermesDelegateCancelProgressTests._assert_tree_gone
+
+    def _close_servers(self):
+        for server in self.servers:
+            server.close()
+
+    def _server(self, caller):
+        env = dict(os.environ)
+        env[MOD.WORKSPACE_VAR] = "/workspace/example"
+        server = _ConcurrentServer(env)
+        self.servers.append(server)
+        server.send({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+                     "params": {"clientInfo": {"name": caller}}})
+        self.assertIn("result", server.reply(0))
+        return server
+
+    def _paths(self, task):
+        return tuple(os.path.join(self.tmpdir, prefix + task)
+                     for prefix in ("parent-", "child-"))
+
+    def _start_call(self, server, req_id, task, size="full"):
+        paths = self._paths(task)
+        self.tree_files.extend(paths)
+        server.call(req_id, task, size)
+        for path in paths:
+            self.assertIsNotNone(wait_for_pid_file(path, 5), path)
+
+    def _finish(self, task):
+        pathlib.Path(self.tmpdir, "finish-" + task).touch()
+
+    def _assert_pool_free(self):
+        for size in ("full", "small"):
+            fds, err = MOD.acquire_slot(size)
+            self.assertIsNone(err)
+            MOD.release_slot(fds)
+        for index in range(2):
+            self.assertEqual(os.stat(os.path.join(
+                os.environ[MOD.LOCK_DIR_VAR], "slot.%d" % index)).st_size, 0)
+
+    def test_one_server_completes_two_concurrent_calls_and_refuses_third(self):
+        server = self._server("shared-client")
+        self._start_call(server, 1, "first")
+        self._start_call(server, 2, "second", size="small")
+        self.assertEqual(len(MOD._slot_holders()), 2)
+        started = time.monotonic()
+        server.call(3, "third")
+        refusal = server.reply(3)["result"]
+        self.assertLess(time.monotonic() - started, 0.8)
+        self.assertTrue(refusal["isError"])
+        text = refusal["content"][0]["text"]
+        self.assertIn('full slot held by example/shared-client "first"', text)
+        self.assertNotIn('"second"', text)
+        self.assertFalse(os.path.exists(self._paths("third")[0]))
+        server.send({"jsonrpc": "2.0", "id": 4, "method": "tools/list"})
+        self.assertTrue(server.reply(4)["result"]["tools"])
+        self._finish("first")
+        self._finish("second")
+        for req_id, task in ((1, "first"), (2, "second")):
+            result = server.reply(req_id)["result"]
+            self.assertFalse(result["isError"], result)
+            self.assertIn("completed " + task, result["content"][0]["text"])
+            progress = [msg["params"]["progress"] for msg in server.messages
+                        if msg.get("method") == "notifications/progress"
+                        and msg["params"]["progressToken"] == task]
+            self.assertTrue(progress)
+            self.assertEqual(progress, list(range(1, len(progress) + 1)))
+            self._assert_tree_gone(*self._paths(task))
+        server.close()
+        self.assertEqual(server.proc.returncode, 0, server.stderr)
+        self._assert_pool_free()
+        with open(os.environ[MOD.AUDIT_VAR]) as fh:
+            outcomes = [rec["outcome"] for rec in map(json.loads, fh)
+                        if rec["decision"] in ("error", "allow")]
+        self.assertCountEqual(outcomes, ["busy", "ok", "ok"])
+
+    def test_two_servers_share_one_plus_one_and_refuse_third_on_either(self):
+        left, right = self._server("left"), self._server("right")
+        self._start_call(left, 1, "left-call")
+        self._start_call(right, 1, "right-call", size="small")
+        for server in (left, right):
+            started = time.monotonic()
+            server.call(2, "refused")
+            result = server.reply(2)["result"]
+            self.assertTrue(result["isError"], result)
+            self.assertLess(time.monotonic() - started, 1.8)
+            text = result["content"][0]["text"]
+            self.assertIn('full slot held by example/left "left-call"', text)
+            server.call(3, "small-refused", size="small")
+            small = server.reply(3)["result"]
+            self.assertTrue(small["isError"], small)
+            self.assertIn('small slots full (1/1 held: example/right "right-call"',
+                          small["content"][0]["text"])
+        self._finish("left-call")
+        self._finish("right-call")
+        self.assertFalse(left.reply(1)["result"]["isError"])
+        self.assertFalse(right.reply(1)["result"]["isError"])
+        self._assert_pool_free()
+
+    def test_full_call_blocks_only_full_calls(self):
+        owner, other = self._server("owner"), self._server("other")
+        self._start_call(owner, 1, "full-task")
+        for server in (owner, other):
+            started = time.monotonic()
+            server.call(2, "blocked")
+            result = server.reply(2)["result"]
+            self.assertTrue(result["isError"], result)
+            self.assertIn("full slot held by", result["content"][0]["text"])
+            self.assertLess(time.monotonic() - started, 1.8)
+        self._start_call(other, 3, "side-task", size="small")
+        self._finish("full-task")
+        self._finish("side-task")
+        self.assertFalse(owner.reply(1)["result"]["isError"])
+        self.assertFalse(other.reply(3)["result"]["isError"])
+        self._assert_pool_free()
+
+    def test_cancelling_one_call_kills_only_its_tree(self):
+        server = self._server("cancel-client")
+        self._start_call(server, 1, "cancelled")
+        self._start_call(server, 2, "survivor", size="small")
+        server.send({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                     "params": {"requestId": 1}})
+        self._assert_tree_gone(*self._paths("cancelled"))
+        for path in self._paths("survivor"):
+            self.assertTrue(process_is_alive(wait_for_pid_file(path, 1)))
+        self._finish("survivor")
+        result = server.reply(2)["result"]
+        self.assertFalse(result["isError"], result)
+        server.close()
+        self.assertFalse(any(msg.get("id") == 1 for msg in server.messages))
+        self._assert_pool_free()
+
+    def test_cancel_before_start_never_spawns_and_keeps_serving(self):
+        server = self._server("pre-cancel-client")
+        server.send({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                     "params": {"requestId": 1}})
+        server.call(1, "pre-cancelled")
+        server.send({"jsonrpc": "2.0", "id": 2, "method": "ping"})
+        self.assertEqual(server.reply(2)["result"], {})
+        server.close()
+        self.assertFalse(os.path.exists(self._paths("pre-cancelled")[0]))
+        self.assertEqual(MOD._slot_holders(), [])
+
+    def test_malformed_call_releases_its_admission_reservation(self):
+        server = self._server("malformed-client")
+        server.send({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                     "params": ["invalid"]})
+        self.assertEqual(server.reply(9)["error"]["code"], -32602)
+        self._start_call(server, 1, "valid-first")
+        self._start_call(server, 2, "valid-second", size="small")
+        server.close()
+        for task in ("valid-first", "valid-second"):
+            self._assert_tree_gone(*self._paths(task))
+        self._assert_pool_free()
+
+    def test_client_eof_kills_both_live_trees_and_releases_slots(self):
+        server = self._server("eof-client")
+        self._start_call(server, 1, "eof-first")
+        self._start_call(server, 2, "eof-second", size="small")
+        server.close()
+        self.assertEqual(server.proc.returncode, 0, server.stderr)
+        for task in ("eof-first", "eof-second"):
+            self._assert_tree_gone(*self._paths(task))
+        self._assert_pool_free()
+
+    def test_server_signals_kill_both_live_trees_and_release_slots(self):
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            with self.subTest(signal=sig):
+                server = self._server("signal-client")
+                tasks = ["signal-%d-%d" % (sig, index) for index in (1, 2)]
+                for index, task in enumerate(tasks, 1):
+                    self._start_call(server, index, task, size="full" if index == 1 else "small")
+                server.proc.send_signal(sig)
+                server.proc.wait(timeout=8)
+                server.close()
+                for task in tasks:
+                    self._assert_tree_gone(*self._paths(task))
+                self._assert_pool_free()
 
 
 class KillCallTreeHomeMatchTests(unittest.TestCase):

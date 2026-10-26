@@ -302,6 +302,12 @@ _image_inputs_hash() {
   : > "$eff/entrypoint.sh"
   : > "$eff/install-bins.sh"
   : > "$eff/cbox-session-entry.py"
+  cp "$INSTALL_DIR/lib/codex-acp-exec.sh" "$eff/codex-acp-exec.sh"
+  cp "$INSTALL_DIR/lib/codex_acp_config.py" "$eff/codex_acp_config.py"
+  for _d in acp-claude acp-codex; do
+    mkdir -p "$eff/$_d"
+    cp "$INSTALL_DIR/$_d/package.json" "$INSTALL_DIR/$_d/package-lock.json" "$eff/$_d/"
+  done
   (
     INSTALL_DIR="$INSTALL_DIR"
     export INSTALL_DIR
@@ -490,10 +496,12 @@ _render_hermes_mcp_servers() {
 
 _make_fake_install_with_delegates() {
   local dir="$1" delegates_json="$2"
-  mkdir -p "$dir/etc/mcp" "$dir/etc/adapters" "$dir/generated/hermes" "$dir/templates"
+  mkdir -p "$dir/etc/mcp" "$dir/etc/adapters" "$dir/generated/hermes" "$dir/templates" "$dir/acp-claude" "$dir/acp-codex"
   cp "$INSTALL_DIR/_common.sh" "$dir/_common.sh"
   cp "$INSTALL_DIR/templates/generators.sh" "$dir/templates/generators.sh"
   cp "$INSTALL_DIR/etc/mcp/render_mcp.py" "$dir/etc/mcp/render_mcp.py"
+  cp "$INSTALL_DIR/acp-claude/package.json" "$INSTALL_DIR/acp-claude/package-lock.json" "$dir/acp-claude/"
+  cp "$INSTALL_DIR/acp-codex/package.json" "$INSTALL_DIR/acp-codex/package-lock.json" "$dir/acp-codex/"
   if [ -d "$INSTALL_DIR/etc/adapters" ]; then
     cp "$INSTALL_DIR"/etc/adapters/*.py "$dir/etc/adapters/" 2>/dev/null || true
   fi
@@ -802,8 +810,10 @@ $PREAMBLE_REAL_OUT"
 _ok "_hermes_kernel_preamble: real conduct-kernel.txt render carries the delegate write boundary and the leaf rule"
 
 FI_MANIFEST="$TMPBASE/fi_manifest"
-mkdir -p "$FI_MANIFEST/etc/hooks" "$FI_MANIFEST/etc/claude" "$FI_MANIFEST/etc/mcp" "$FI_MANIFEST/generated/codex" "$FI_MANIFEST/templates" "$FI_MANIFEST/lib"
+mkdir -p "$FI_MANIFEST/etc/hooks" "$FI_MANIFEST/etc/claude" "$FI_MANIFEST/etc/mcp" "$FI_MANIFEST/generated/codex" "$FI_MANIFEST/templates" "$FI_MANIFEST/lib" "$FI_MANIFEST/acp-claude" "$FI_MANIFEST/acp-codex"
 cp "$INSTALL_DIR/_common.sh" "$FI_MANIFEST/_common.sh"
+cp "$INSTALL_DIR/acp-claude/package.json" "$INSTALL_DIR/acp-claude/package-lock.json" "$FI_MANIFEST/acp-claude/"
+cp "$INSTALL_DIR/acp-codex/package.json" "$INSTALL_DIR/acp-codex/package-lock.json" "$FI_MANIFEST/acp-codex/"
 cp "$INSTALL_DIR/lib/portable.sh" "$FI_MANIFEST/lib/portable.sh"
 cp "$INSTALL_DIR/lib/cbox_host.py" "$FI_MANIFEST/lib/cbox_host.py"
 cp "$INSTALL_DIR/templates/generators.sh" "$FI_MANIFEST/templates/generators.sh"

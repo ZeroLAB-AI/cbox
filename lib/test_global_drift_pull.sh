@@ -77,6 +77,10 @@ for _f in _common.sh lib templates etc; do
 done
 : > "$GLOBAL/entrypoint.sh"
 : > "$GLOBAL/install-bins.sh"
+for _d in acp-claude acp-codex; do
+  mkdir -p "$GLOBAL/$_d"
+  cp "$INSTALL_DIR/$_d/package.json" "$INSTALL_DIR/$_d/package-lock.json" "$GLOBAL/$_d/"
+done
 HOME="$TMPBASE/home"
 mkdir -p "$HOME/.claude/hooks"
 export HOME
