@@ -12,7 +12,8 @@ _extract_fn() {
   awk -v fn="$2" '$0 == fn"() {" , $0 == "}"' "$1"
 }
 
-for fn in _cbox_ollama_gpu_preflight _cbox_ollama_owner_up _cbox_nvidia_uvm_present _cbox_nvidia_uvm_ensure; do
+for fn in _cbox_ollama_gpu_preflight _cbox_ollama_owner_up _cbox_nvidia_uvm_present _cbox_nvidia_uvm_ensure \
+  _cbox_cdi_failed_node _cbox_cdi_spec_files_for _cbox_cdi_spec_writable _cbox_cdi_spec_regenerate _cbox_cdi_host_device_recover; do
   body="$(_extract_fn "$INSTALL_DIR/cbox" "$fn")"
   [ -n "$body" ] || _fail "cannot extract $fn from cbox"
   eval "$body"

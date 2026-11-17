@@ -277,6 +277,52 @@ create table messages (id integer primary key, session_id text, role text, conte
         self.assertEqual(rows[-1]["n"], 799)
         self.assertEqual(cursor, os.path.getsize(path))
 
+    def test_jsonl_incomplete_tail_is_retried_after_append(self):
+        path = os.path.join(self.tmp.name, "partial.jsonl")
+        for tail in (b'{"n":', b'{"n":2}', b'{"n":"' + b'x' * bridge.MAX_JSONL_LINE):
+            with self.subTest(length=len(tail)):
+                with open(path, "wb") as fh:
+                    fh.write(b'{"n":1}\n' + tail)
+                rows, cursor = bridge.jsonl_records(path)
+                self.assertEqual(rows, [{"n": 1}])
+                self.assertEqual(cursor, len(b'{"n":1}\n'))
+                suffix = b'2}\n' if tail == b'{"n":' else b'\n'
+                if len(tail) > bridge.MAX_JSONL_LINE:
+                    suffix = b'"}\n'
+                with open(path, "ab") as fh:
+                    fh.write(suffix + b'{"n":3}\n')
+                rows, end = bridge.jsonl_records(path, cursor)
+                expected = [{"n": 3}] if len(tail) > bridge.MAX_JSONL_LINE else [{"n": 2}, {"n": 3}]
+                self.assertEqual(rows, expected)
+                self.assertEqual(end, os.path.getsize(path))
+                self.assertEqual(bridge.jsonl_records(path, end), ([], end))
+
+    def test_jsonl_complete_malformed_record_does_not_block_cursor(self):
+        path = os.path.join(self.tmp.name, "malformed.jsonl")
+        with open(path, "wb") as fh:
+            fh.write(b'bad json\n{"n":1}\n')
+        self.assertEqual(bridge.jsonl_records(path), ([{"n": 1}], os.path.getsize(path)))
+
+    def test_codex_tool_chatter_does_not_evict_conversation(self):
+        path = os.path.join(self.codex, "sessions", "2026", "07", "21", "rollout.jsonl")
+        with open(path, "a", encoding="utf-8") as fh:
+            for i in range(bridge.EXTRACT_MESSAGES + 10):
+                fh.write(json.dumps({"type": "event_msg", "payload": {"type": "token_count"}}) + "\n")
+                fh.write(json.dumps({"type": "response_item", "payload": {"type": "message", "role": "developer", "content": "skip"}}) + "\n")
+        delta = bridge.extract(self.root, "codex", self.codex_id, "")
+        self.assertEqual([x["text"] for x in delta["messages"]], ["codex request", "codex answer"])
+        self.assertEqual(delta["cursor"]["value"], os.path.getsize(path))
+        self.assertEqual(bridge.extract(self.root, "codex", self.codex_id, json.dumps(delta["cursor"]))["messages"], [])
+
+    def test_codex_conversation_limit_keeps_latest_messages(self):
+        path = os.path.join(self.codex, "sessions", "2026", "07", "21", "rollout.jsonl")
+        count = bridge.EXTRACT_MESSAGES + 10
+        with open(path, "a", encoding="utf-8") as fh:
+            for i in range(count):
+                fh.write(json.dumps({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": str(i)}]}}) + "\n")
+        delta = bridge.extract(self.root, "codex", self.codex_id, "")
+        self.assertEqual([x["text"] for x in delta["messages"]], [str(i) for i in range(10, count)])
+
     def test_mine_records_poisoned_history_cannot_break_containment(self):
         poison_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
         path = os.path.join(self.claude, "projects", "-project", poison_id + ".jsonl")

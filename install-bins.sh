@@ -10,9 +10,9 @@ CBOX_HERMES_VERSION="${CBOX_HERMES_VERSION:-latest}"
 CBOX_INSTALL_TOOLS="${CBOX_INSTALL_TOOLS:-claude codex}"
 case " $CBOX_INSTALL_TOOLS " in
   *" hermes "*)
-    if [ "$CBOX_HERMES_VERSION" != latest ]; then
+    if [ "$CBOX_HERMES_VERSION" != latest ] && [ "$CBOX_HERMES_VERSION" != main ]; then
       printf '%s' "$CBOX_HERMES_VERSION" | grep -Eq '^[0-9]+([.][0-9]+){1,3}$' \
-        || { echo "install-bins: CBOX_HERMES_VERSION must be latest or x.y[.z[.w]]" >&2; exit 1; }
+        || { echo "install-bins: CBOX_HERMES_VERSION must be latest, main or x.y[.z[.w]]" >&2; exit 1; }
     fi
     ;;
 esac
@@ -31,6 +31,10 @@ CLROOT="$HOST_HOME/.local"
 CXPKG="$HOST_HOME/.codex/packages"
 HXROOT="/opt/hermes"
 HXSEED="$HXROOT/delegate-home"
+HXSRC="$HXROOT/src"
+HXREPO="https://github.com/NousResearch/hermes-agent"
+HXBRANCH="main"
+HXPYYAML_VERSION="6.0.3"
 ACPROOT="$CLROOT/acp-claude"
 ACPSRC="/opt/cbox/acp-claude"
 CDACPROOT="$CLROOT/acp-codex"
@@ -133,7 +137,21 @@ _parsed_version() {
       v="$(_user_version_raw "$path" | awk '{print $NF; exit}')" || v=""
       ;;
     hermes)
-      v="$(timeout 60 "$HXROOT/bin/python" -c 'import importlib.metadata as m; print(m.version("hermes-agent"))' 2>/dev/null)" || v=""
+      v="$(timeout 60 "$HXROOT/bin/python" -I -c '
+import importlib.metadata as m, json, os, re, sys
+stamp = os.path.join(sys.argv[1], "install-stamp.json")
+if os.path.isfile(stamp):
+    with open(stamp, encoding="utf-8") as fh:
+        commit = str(json.load(fh).get("commit") or "")
+    base = "0.0.0"
+    with open(os.path.join(sys.argv[1], "hermes_cli", "__init__.py"), encoding="utf-8") as fh:
+        found = re.search(r"^__release_date__\s*=\s*[\x27\x22]([0-9]+(?:[.][0-9]+)+)[\x27\x22]", fh.read(), re.M)
+    if found:
+        base = found.group(1)
+    print("%s-g%s" % (base, commit[:12]))
+else:
+    print(m.version("hermes-agent"))
+' "$HXSRC" 2>/dev/null)" || v=""
       ;;
     *)
       v=""
@@ -147,7 +165,7 @@ _version_ok() {
   local name="$1" want_ver="$2" path="$3" v
   v="$(_parsed_version "$name" "$path")" || return 1
   case "$want_ver" in
-    stable|latest) return 0 ;;
+    stable|latest|main) return 0 ;;
     *) [ "$v" = "$want_ver" ] ;;
   esac
 }
@@ -227,11 +245,19 @@ _adopt_check() {
   cur_hash="$(_tool_hash "$name" "$resolved")" || return 1
   [ "$cur_hash" = "$want_hash" ] || return 1
   if [ "$name" = hermes ]; then
-    "$HXROOT/bin/python3" -c 'import importlib.metadata as m; assert m.version("agent-client-protocol") == "0.9.0"; assert m.version("mcp") == "1.26.0"; assert m.version("starlette") == "1.0.1"' >/dev/null 2>&1 || return 1
+    _hermes_deps_ready || return 1
   elif [ "$name" = claude ]; then
     _claude_acp_ready || return 1
   elif [ "$name" = codex ]; then
     _codex_acp_ready || return 1
+  fi
+}
+
+_hermes_deps_ready() {
+  if [ "$CBOX_HERMES_VERSION" = main ]; then
+    "$HXROOT/bin/python3" -c 'import importlib.metadata as m, yaml; assert m.version("agent-client-protocol") == "0.9.0"; m.version("mcp")' >/dev/null 2>&1
+  else
+    "$HXROOT/bin/python3" -c 'import importlib.metadata as m; assert m.version("agent-client-protocol") == "0.9.0"; assert m.version("mcp") == "1.26.0"; assert m.version("starlette") == "1.0.1"' >/dev/null 2>&1
   fi
 }
 
@@ -395,10 +421,94 @@ _hermes_strip_seed_endpoints() {
   done
 }
 
+_hermes_root_reset() {
+  find "$HXROOT" -mindepth 1 -maxdepth 1 ! -name '.prev' -exec rm -rf {} + || return 1
+  chown "$HOST_UID:$HOST_GID" "$HXROOT"
+}
+
 _hermes_venv_reset() {
   find "$HXROOT" -mindepth 1 -maxdepth 1 ! -name '.prev' -exec rm -rf {} + || return 1
   chown "$HOST_UID:$HOST_GID" "$HXROOT" || return 1
   _hxgosu python3 -m venv "$HXROOT"
+}
+
+_hermes_main_sha() {
+  local out sha
+  out="$(_hxgosu timeout 60 git ls-remote "$HXREPO" "refs/heads/$HXBRANCH" 2>/dev/null)" || return 1
+  sha="$(printf '%s\n' "$out" | awk -v r="refs/heads/$HXBRANCH" '$2 == r {print $1; exit}')"
+  printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$' || return 1
+  printf '%s' "$sha"
+}
+
+_hermes_fetch_artifact() {
+  local name="$1" out="$2" plat meta url sum
+  case "$(uname -m)" in
+    x86_64|amd64) plat=linux-x64 ;;
+    aarch64|arm64) plat=linux-arm64 ;;
+    *) echo "install-bins: hermes pins no $name build for $(uname -m)" >&2; return 1 ;;
+  esac
+  meta="$(python3 -I -c '
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    art = json.load(fh)["packages"][sys.argv[2]]["artifacts"][sys.argv[3]]
+print(art["url"])
+print(art["sha256"])
+' "$HXSRC/pm/lock.json" "$name" "$plat" 2>/dev/null)" || {
+    echo "install-bins: hermes pm/lock.json has no $name artifact for $plat" >&2
+    return 1
+  }
+  url="$(printf '%s\n' "$meta" | sed -n 1p)"
+  sum="$(printf '%s\n' "$meta" | sed -n 2p)"
+  case "$url" in
+    https://*) ;;
+    *) echo "install-bins: hermes $name artifact URL is not https" >&2; return 1 ;;
+  esac
+  printf '%s' "$sum" | grep -Eq '^[0-9a-f]{64}$' || { echo "install-bins: hermes $name artifact has no sha256 pin" >&2; return 1; }
+  _hxgosu curl -fsSL --connect-timeout 10 --retry 2 --retry-connrefused -o "$out" "$url" || return 1
+  printf '%s  %s\n' "$sum" "$out" | sha256sum -c --status - || {
+    echo "install-bins: hermes $name artifact digest mismatch" >&2
+    return 1
+  }
+}
+
+_hermes_git_install_in() {
+  local sha="$1" tmp="$2" uv
+  _hxgosu git init -q "$HXSRC" || return 1
+  _hxgosu git -C "$HXSRC" fetch -q --depth 1 "$HXREPO" "$sha" || return 1
+  _hxgosu git -C "$HXSRC" checkout -q FETCH_HEAD || return 1
+  [ "$(_hxgosu git -C "$HXSRC" rev-parse HEAD)" = "$sha" ] || {
+    echo "install-bins: hermes checkout is not at $sha" >&2
+    return 1
+  }
+  _hermes_fetch_artifact uv "$tmp/uv.tar.gz" || return 1
+  _hermes_fetch_artifact python "$tmp/python.tar.gz" || return 1
+  _hxgosu mkdir -p "$tmp/uv" "$HXROOT/python" || return 1
+  _hxgosu tar -xzf "$tmp/uv.tar.gz" -C "$tmp/uv" || return 1
+  uv="$(find "$tmp/uv" -type f -name uv | head -n1)"
+  if [ -z "$uv" ] || [ ! -x "$uv" ]; then
+    echo "install-bins: the pinned uv archive holds no uv binary" >&2
+    return 1
+  fi
+  _hxgosu tar -xzf "$tmp/python.tar.gz" -C "$HXROOT/python" --strip-components=1 || return 1
+  _hxgosu "$HXROOT/python/bin/python3" -m venv --without-pip "$HXROOT" || return 1
+  _hxgosu env UV_PROJECT_ENVIRONMENT="$HXROOT" UV_CACHE_DIR="$tmp/cache" UV_PYTHON="$HXROOT/python/bin/python3" \
+    UV_PYTHON_DOWNLOADS=never UV_NO_CONFIG=1 \
+    "$uv" sync --project "$HXSRC" --frozen --no-dev --extra mcp --extra acp --compile-bytecode --no-progress || return 1
+  _hxgosu env UV_CACHE_DIR="$tmp/cache" UV_PYTHON_DOWNLOADS=never UV_NO_CONFIG=1 \
+    "$uv" pip install --python "$HXROOT/bin/python" --compile-bytecode --no-progress "pyyaml==$HXPYYAML_VERSION" || return 1
+  ( cd "$HXSRC" && _hxgosu "$HXROOT/bin/python" scripts/write_install_stamp.py --output "$HXSRC/install-stamp.json" \
+      --commit "$sha" --branch "$HXBRANCH" --source git --distribution docker --update-mechanism external ) || return 1
+  rm -rf -- "$HXSRC/.git"
+  _hxgosu "$HXROOT/bin/python" -m compileall -q -j 0 -x '/(tests|website|apps|node_modules)/' "$HXSRC" >/dev/null \
+    || echo "install-bins: warning: some hermes sources did not byte-compile - they compile in memory at every start" >&2
+}
+
+_hermes_git_install() {
+  local sha="$1" tmp rc=0
+  tmp="$(_hxgosu mktemp -d /tmp/cbox-hermes-build.XXXXXX)" || return 1
+  _hermes_git_install_in "$sha" "$tmp" || rc=1
+  rm -rf -- "$tmp"
+  return "$rc"
 }
 
 _hermes_backup_dir() {
@@ -598,17 +708,30 @@ _HERMES_INSTALL_HASH=""
 _HERMES_INSTALL_VER=""
 
 _run_hermes_install() {
-  local spec rc=0 backed_up=0 take_rc=0
+  local spec="" git_sha="" rc=0 backed_up=0 take_rc=0
   _HERMES_INSTALL_VERIFIED=""
   _HERMES_INSTALL_HASH=""
   _HERMES_INSTALL_VER=""
-  if [ "$CBOX_HERMES_VERSION" = latest ]; then
-    spec="hermes-agent"
-  else
-    printf '%s' "$CBOX_HERMES_VERSION" | grep -Eq '^[0-9]+([.][0-9]+){1,3}$' \
-      || { echo "install-bins: CBOX_HERMES_VERSION must be latest or x.y[.z[.w]]" >&2; return 1; }
-    spec="hermes-agent==$CBOX_HERMES_VERSION"
-  fi
+  case "$CBOX_HERMES_VERSION" in
+    latest)
+      spec="hermes-agent"
+      ;;
+    main)
+      git_sha="$(_hermes_main_sha)" || {
+        echo "install-bins: cannot resolve $HXREPO $HXBRANCH to a commit" >&2
+        return 1
+      }
+      ;;
+    *-g*)
+      echo "install-bins: $CBOX_HERMES_VERSION is a $HXBRANCH build - it cannot be rebuilt from history, only restored from the local backup" >&2
+      return 1
+      ;;
+    *)
+      printf '%s' "$CBOX_HERMES_VERSION" | grep -Eq '^[0-9]+([.][0-9]+){1,3}$' \
+        || { echo "install-bins: CBOX_HERMES_VERSION must be latest, main or x.y[.z[.w]]" >&2; return 1; }
+      spec="hermes-agent==$CBOX_HERMES_VERSION"
+      ;;
+  esac
   mkdir -p "$HXROOT"
   exec 7< "$HXROOT"
   flock -w 900 7 || { echo "install-bins: timed out waiting for the hermes install lock" >&2; exec 7<&-; return 1; }
@@ -623,7 +746,13 @@ _run_hermes_install() {
   fi
   if [ -d "$(_hermes_backup_dir)" ]; then backed_up=1; fi
   if [ "$take_rc" = 0 ]; then
-    if _hermes_venv_reset; then
+    if [ -n "$git_sha" ]; then
+      if _hermes_root_reset; then
+        { _hermes_git_install "$git_sha" && _hermes_stamp_install_method && _hermes_seed_delegate_home || rc=1; } >&2
+      else
+        rc=1
+      fi
+    elif _hermes_venv_reset; then
       { _hxgosu "$HXROOT/bin/pip" install --no-cache-dir "$spec" 'agent-client-protocol==0.9.0' 'mcp==1.26.0' 'starlette==1.0.1' && _hermes_stamp_install_method && _hermes_seed_delegate_home || rc=1; } >&2
     else
       rc=1
@@ -1049,7 +1178,16 @@ _install_one() {
     fi
   fi
 
-  if [ "$force" != "1" ] && [ "$force" != "refresh" ] && _adopt_check "$name" "$want"; then
+  local hx_current=0 hx_remote hx_ver
+  if [ "$name" = hermes ] && [ "$force" = refresh ] && [ "$CBOX_HERMES_VERSION" = main ] && [ -f "$stamp" ] \
+    && hx_remote="$(_hermes_main_sha)"; then
+    hx_ver="$(_stamp_field "$stamp" 4)" || hx_ver=""
+    case "$hx_ver" in
+      *-g"${hx_remote:0:12}") hx_current=1 ;;
+    esac
+  fi
+
+  if [ "$force" != "1" ] && { [ "$force" != "refresh" ] || [ "$hx_current" = 1 ]; } && _adopt_check "$name" "$want"; then
     local v3 v4
     v3="$(_stamp_field "$stamp" 3)"
     v4="$(_stamp_field "$stamp" 4)"

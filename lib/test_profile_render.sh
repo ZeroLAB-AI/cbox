@@ -272,7 +272,10 @@ _ok "profile claude binds: explicit shared subpaths only - no whole-dir bind, no
 grep -qxF -- "      - $STORE/claude:$STORE/claude:rw" "$C" || _fail "store claude dir bind missing"
 grep -qxF -- "      - $STORE/usage:$STORE/usage:rw" "$C" || _fail "store usage dir bind missing"
 grep -qxF -- "      - $STORE/codex:\${HOST_HOME}/.codex:rw" "$C" || _fail "profile codex home must be the store codex dir"
-grep -qxF -- "      - $H/.codex/config.toml:\${HOST_HOME}/.codex/config.toml:ro" "$C" || _fail "shared codex config bind missing"
+if grep -qF -- ':${HOST_HOME}/.codex/config.toml:' "$C"; then
+  _fail "Codex preferences must allow atomic replacement in the writable home"
+fi
+grep -qxF -- "      - $EFFP/codex/managed_config.toml:/etc/codex/managed_config.toml:ro" "$C" || _fail "managed Codex settings bind missing"
 [ -d "$STORE/codex/packages" ] && [ -f "$STORE/codex/config.toml" ] || _fail "store codex mountpoints not precreated"
 for d in claude codex usage; do
   [ "$(stat -c %a "$STORE/$d")" = 700 ] || _fail "store dir $d mode is $(stat -c %a "$STORE/$d")"

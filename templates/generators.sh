@@ -406,11 +406,12 @@ _cbox_render_mcp_for_target() {
 _cbox_validate_hermes_version() {
   local v="$1"
   [ "$v" = latest ] && return 0
+  [ "$v" = main ] && return 0
   case "$v" in
-    *[!0-9.]*) die "invalid CBOX_HERMES_VERSION '$v' (expected latest or x.y[.z[.w]])" ;;
+    *[!0-9.]*) die "invalid CBOX_HERMES_VERSION '$v' (expected latest, main or x.y[.z[.w]])" ;;
   esac
   printf '%s' "$v" | grep -Eq '^[0-9]+([.][0-9]+){1,3}$' \
-    || die "invalid CBOX_HERMES_VERSION '$v' (expected latest or x.y[.z[.w]])"
+    || die "invalid CBOX_HERMES_VERSION '$v' (expected latest, main or x.y[.z[.w]])"
 }
 
 gen_dockerfile_into() {
@@ -1443,7 +1444,6 @@ EOF
     _cbox_codex_precreate_ro_pins "$codex_path"
     cat >> "$tmp" <<EOF
       - $codex_path:\${HOST_HOME}/.codex:rw
-      - $codex_path/config.toml:\${HOST_HOME}/.codex/config.toml:ro
       - $codex_path/AGENTS.md:\${HOST_HOME}/.codex/AGENTS.md:ro
       - $codex_path/cbox-host.config.toml:\${HOST_HOME}/.codex/cbox-host.config.toml:ro
 EOF
@@ -1456,6 +1456,9 @@ EOF
       - claude-local:\${HOST_HOME}/.local:ro
       - codex-packages:\${HOST_HOME}/.codex/packages:ro
       - $INSTALL_DIR/generated/codex/cbox-container.config.toml:\${HOST_HOME}/.codex/cbox-container.config.toml:ro
+      - $INSTALL_DIR/generated/codex/defaults.toml:/etc/codex/config.toml:ro
+      - $INSTALL_DIR/generated/codex/managed_config.toml:/etc/codex/managed_config.toml:ro
+      - $INSTALL_DIR/generated/codex/requirements.toml:/etc/codex/requirements.toml:ro
       - $INSTALL_DIR/generated/codex/AGENTS.override.md:\${HOST_HOME}/.codex/AGENTS.override.md:ro
       - $INSTALL_DIR/generated/codex/hooks.json:\${HOST_HOME}/.codex/hooks.json:ro
 EOF
@@ -2020,7 +2023,6 @@ EOF
       printf '      - %s:${HOST_HOME}/.codex:rw\n' "$codex_path" >> "$tmp"
     fi
     cat >> "$tmp" <<EOF
-      - $codex_path/config.toml:\${HOST_HOME}/.codex/config.toml:ro
       - $codex_path/AGENTS.md:\${HOST_HOME}/.codex/AGENTS.md:ro
       - $codex_path/cbox-host.config.toml:\${HOST_HOME}/.codex/cbox-host.config.toml:ro
 EOF
@@ -2033,6 +2035,9 @@ EOF
       - claude-local:\${HOST_HOME}/.local:ro
       - codex-packages:\${HOST_HOME}/.codex/packages:ro
       - $eff/codex/cbox-container.config.toml:\${HOST_HOME}/.codex/cbox-container.config.toml:ro
+      - $eff/codex/defaults.toml:/etc/codex/config.toml:ro
+      - $eff/codex/managed_config.toml:/etc/codex/managed_config.toml:ro
+      - $eff/codex/requirements.toml:/etc/codex/requirements.toml:ro
       - $eff/codex/AGENTS.override.md:\${HOST_HOME}/.codex/AGENTS.override.md:ro
       - $eff/codex/hooks.json:\${HOST_HOME}/.codex/hooks.json:ro
 EOF
@@ -2852,7 +2857,7 @@ gen_hermes_managed_into() {
   if [ -n "$model" ]; then
     _cbox_hermes_validate_model "$model" || die "invalid CBOX_HERMES_MODEL_NAME '$model'"
   fi
-  local effort="${CBOX_HERMES_EFFORT:-}"
+  local effort="${CBOX_HERMES_EFFORT:-xhigh}"
   if [ -n "$effort" ]; then
     _cbox_hermes_validate_effort "$effort" \
       || die "invalid CBOX_HERMES_EFFORT '$effort' (expected none, low, medium, or xhigh - none plus the levels the local qwen template documents)"
@@ -3135,6 +3140,8 @@ gen_codex_profile_into() {
     printf 'check_for_update_on_startup = false\n'
     printf 'project_doc_max_bytes = 65536\n'
     printf 'notify = ["python3", %s]\n' "$(_cbox_toml_string "$hooks_path/codex_notify.py")"
+    printf '\n[tui]\n'
+    printf 'status_line = ["model-with-reasoning", "five-hour-limit", "weekly-limit", "context-remaining", "git-branch"]\n'
     printf '\n[analytics]\n'
     printf 'enabled = false\n'
     printf '\n[otel]\n'
@@ -3157,6 +3164,15 @@ gen_codex_profile_into() {
   } > "$tmp"
   chmod 0644 "$tmp"
   mv "$tmp" "$outdir/cbox-container.config.toml"
+  local stage
+  stage="$(mktemp -d "$outdir/.cbox.XXXXXX")"
+  python3 "$INSTALL_DIR/etc/adapters/codex.py" settings-layers \
+    "$outdir/cbox-container.config.toml" "$hooks_path" "$stage" || return 1
+  chmod 0644 "$stage/defaults.toml" "$stage/managed_config.toml" "$stage/requirements.toml"
+  mv "$stage/defaults.toml" "$outdir/defaults.toml"
+  mv "$stage/managed_config.toml" "$outdir/managed_config.toml"
+  mv "$stage/requirements.toml" "$outdir/requirements.toml"
+  rmdir "$stage"
 }
 
 gen_codex_hooks_json_into() {

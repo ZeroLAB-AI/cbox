@@ -202,8 +202,8 @@ _cbox_val_named_no_validator() {
 
 _cbox_val_named_hermes_version() {
   local val="$1"
-  [ "$val" = latest ] || printf '%s' "$val" | grep -Eq '^[0-9]+([.][0-9]+){1,3}$' \
-    || { printf 'expected latest or a plain x.y[.z[.w]] version'; return 1; }
+  [ "$val" = latest ] || [ "$val" = main ] || printf '%s' "$val" | grep -Eq '^[0-9]+([.][0-9]+){1,3}$' \
+    || { printf 'expected latest, main, or a plain x.y[.z[.w]] version'; return 1; }
 }
 
 _cbox_val_named_claude_target() {

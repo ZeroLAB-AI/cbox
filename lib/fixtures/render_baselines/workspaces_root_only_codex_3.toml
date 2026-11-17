@@ -7,6 +7,9 @@ check_for_update_on_startup = false
 project_doc_max_bytes = 65536
 notify = ["python3", "@TMP@/home/.claude/hooks/codex_notify.py"]
 
+[tui]
+status_line = ["model-with-reasoning", "five-hour-limit", "weekly-limit", "context-remaining", "git-branch"]
+
 [analytics]
 enabled = false
 

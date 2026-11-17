@@ -702,12 +702,11 @@ def build_tool():
                     "type": "string",
                     "enum": list(VALID_EFFORTS),
                     "description": "Optional reasoning effort for this one call,"
-                                   " overriding the container default. 'none'"
-                                   " turns thinking off. Deeper levels cost"
-                                   " roughly three times the wall-clock for the"
-                                   " same task on a local model and tend to"
-                                   " shorten the final answer, so raise it only"
-                                   " when the task genuinely needs deliberation."},
+                                   " overriding CBOX_HERMES_EFFORT (default xhigh)"
+                                   " for either slot size. Choose none, low or"
+                                   " medium explicitly to reduce reasoning cost;"
+                                   " 'none' turns thinking off. Slot size only"
+                                   " selects the resource budget."},
                 "size": {
                     "type": "string",
                     "enum": ["full", "small"],
@@ -877,7 +876,7 @@ def _venv_python():
 
 
 def _effort_setting(override=None):
-    val = (override or os.environ.get(EFFORT_VAR) or "").strip()
+    val = (override or os.environ.get(EFFORT_VAR) or "xhigh").strip()
     if not val:
         return None
     if val not in VALID_EFFORTS:
@@ -1414,7 +1413,7 @@ def _apply_config(ephemeral_home, env_base, effort_override=None, budget=None,
         return ("invalid " + MODEL_VAR + " - expected characters from "
                  "[A-Za-z0-9._:/-]")
 
-    settings = []
+    settings = [("compression.enabled", "true")]
     if provider:
         settings.append(("model.provider", _provider_for_cli(provider)))
     if base_url:
@@ -1424,7 +1423,6 @@ def _apply_config(ephemeral_home, env_base, effort_override=None, budget=None,
     if provider == "local":
         settings.append(("model.context_length", str(budget or _context_length_setting())))
         settings.extend((
-            ("compression.enabled", "true"),
             ("compression.threshold", "0.90"),
             ("compression.target_ratio", "0.15"),
             ("compression.protect_first_n", "1"),
@@ -1438,7 +1436,7 @@ def _apply_config(ephemeral_home, env_base, effort_override=None, budget=None,
         ("tool_output.max_lines", str(max_lines)),
         ("file_read_max_chars", str(read_chars)),
     ))
-    effort = _effort_setting(effort_override or ("low" if size == "small" else None))
+    effort = _effort_setting(effort_override)
     if effort is False:
         return ("invalid reasoning effort - expected one of %r (a Qwen3.x chat"
                 " template raises on anything else and the endpoint answers HTTP 500)"

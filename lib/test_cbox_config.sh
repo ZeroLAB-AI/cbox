@@ -133,6 +133,10 @@ fi
 _ok "validator: URL shape (CBOX_LOCAL_MODEL_URL)"
 
 _cbox_config_validate_var CBOX_HERMES_VERSION "0.19.0" || _fail "hermes version: 0.19.0 should be valid"
+_cbox_config_validate_var CBOX_HERMES_VERSION "main" || _fail "hermes version: main should be valid"
+if _cbox_config_validate_var CBOX_HERMES_VERSION "mainline" >/dev/null 2>&1; then
+  _fail "hermes version: a word that only starts with main should be rejected"
+fi
 if _cbox_config_validate_var CBOX_HERMES_VERSION "not-a-version" >/dev/null 2>&1; then
   _fail "hermes version: garbage should be rejected"
 fi
@@ -513,6 +517,67 @@ manifest_conf_sha="$(_cbox_manifest_field "$EFF/manifest.sha256" conf)"
 [ -f "$ROOT/.cbox/runtime/cbox.conf.mirror" ] || _fail "e2e success: config set must refresh the in-project mirror"
 cmp -s "$ROOT/.cbox/runtime/cbox.conf.mirror" "$EFF/cbox.conf" || _fail "e2e success: mirror must match the effective conf after config set"
 _ok "e2e success: conf updated, regen ran, manifests stamped, mirror refreshed, pending.apply written"
+
+for race_mode in isolated global; do
+  for race_point in load render staged; do
+    (
+      race_dir="$TMPBASE/race-$race_mode-$race_point"
+      _setup_fixture_eff "$race_dir" "$ROOT"
+      _cbox_path_hash() { printf 'race-%s-%s' "$race_mode" "$race_point"; }
+      _cbox_workspace_root() { printf '%s' "$ROOT"; }
+      if [ "$race_mode" = isolated ]; then
+        race_eff="$HOME/.config/cbox/projects/$(_cbox_path_hash "$ROOT")"
+        mv "$race_dir" "$race_eff"
+        race_dir="$race_eff"
+      else
+        INSTALL_DIR="$race_dir"
+        require_global_conf() { :; }
+      fi
+      if [ "$race_point" = staged ]; then
+        _CBOX_CONFIG_EXPECTED_PATH="$race_dir/cbox.conf"
+        _CBOX_CONFIG_EXPECTED_SHA="$(_cbox_sha256 "$_CBOX_CONFIG_EXPECTED_PATH")"
+        printf 'CBOX_EXTERNAL_UPDATE=preserved\n' >> "$race_dir/cbox.conf"
+        if [ "$race_mode" = isolated ]; then
+          _cbox_manifest_write "$race_dir" "$ROOT" "$race_dir/cbox.conf"
+          _cbox_manifest_write_generated "$race_dir"
+        fi
+      fi
+      eval "$(declare -f _cbox_config_dep_gate_check | sed '1s/_cbox_config_dep_gate_check/_race_original_gate/')"
+      eval "$(declare -f _cbox_reg_conf_write_whitelist | sed '1s/_cbox_reg_conf_write_whitelist/_race_original_write/')"
+      _cbox_config_dep_gate_check() {
+        _race_original_gate || return
+        if [ "$race_point" = load ]; then
+          printf 'CBOX_EXTERNAL_UPDATE=preserved\n' >> "$race_dir/cbox.conf"
+        fi
+      }
+      _cbox_reg_conf_write_whitelist() {
+        _race_original_write "$@" || return
+        if [ "$race_point" = render ]; then
+          printf 'CBOX_EXTERNAL_UPDATE=preserved\n' >> "$race_dir/cbox.conf"
+        fi
+      }
+      _cbox_config_regen_isolated() { touch "$race_dir/unexpected-regen"; }
+      _cbox_config_regen_global() { touch "$race_dir/unexpected-regen"; }
+      CBOX_CONFIG_KEYS=(CBOX_GPU)
+      CBOX_CONFIG_VALS=(1)
+      rc=0
+      "_cbox_config_set_$race_mode" > "$race_dir/stdout" 2> "$race_dir/stderr" || rc=$?
+      [ "$rc" -ne 0 ] || _fail "$race_mode $race_point: concurrent edit was accepted"
+      grep -q 'concurrent writer race' "$race_dir/stderr" || _fail "$race_mode $race_point: missing race diagnostic"
+      grep -qx 'CBOX_EXTERNAL_UPDATE=preserved' "$race_dir/cbox.conf" || _fail "$race_mode $race_point: concurrent edit was overwritten"
+      grep -qx 'CBOX_GPU=0' "$race_dir/cbox.conf" || _fail "$race_mode $race_point: staged setting was committed"
+      [ ! -e "$race_dir/unexpected-regen" ] || _fail "$race_mode $race_point: regeneration ran"
+      [ ! -e "$race_dir/pending.apply" ] || _fail "$race_mode $race_point: pending state written"
+      [ "$(cat "$race_dir/generated/marker.txt")" = original-marker ] || _fail "$race_mode $race_point: artifacts modified"
+      python3 - "$race_dir" <<'PY'
+from pathlib import Path
+import sys
+assert not list(Path(sys.argv[1]).glob('.cbox.*'))
+PY
+    ) || _fail "$race_mode $race_point: race regression failed"
+    _ok "$race_mode $race_point: concurrent configuration edit survives refusal without regeneration"
+  done
+done
 
 ORDER_LOG="$TMPBASE/order.log"
 _cbox_manifest_write() {

@@ -13,6 +13,8 @@ def main():
     enabled = config.get("features", {}).get("codex_hooks") is True
     if enabled != ("PreToolUse" in hooks):
         raise ValueError("Codex profile and hooks gate disagree")
+    for key in ("model", "model_reasoning_effort", "hide_agent_reasoning", "tui"):
+        config.pop(key, None)
     config["hooks"] = hooks
     print(json.dumps(config, ensure_ascii=True, separators=(",", ":")))
 

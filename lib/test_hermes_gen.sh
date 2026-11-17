@@ -104,6 +104,7 @@ mkdir -p "$(dirname "$M1")"
   export INSTALL_DIR
   export HOME="/home/x"
   export CBOX_HERMES_PROVIDER=local
+  unset CBOX_HERMES_EFFORT
   export CBOX_HERMES_MODEL_URL=http://127.0.0.1:11434
   export CBOX_HERMES_MODEL_NAME=qwen2.5:7b
   source "$INSTALL_DIR/_common.sh"
@@ -119,6 +120,7 @@ grep -q '^HERMES_MANAGED_MODEL=qwen2.5:7b$' "$M1" || _fail "model line missing/w
 $(cat "$M1")"
 grep -q '^HERMES_MANAGED_CONTEXT_LENGTH=65536$' "$M1" || _fail "local provider must carry the registry-default context length (65536) so hermes budgets against the real ollama window:
 $(cat "$M1")"
+grep -q '^HERMES_MANAGED_EFFORT=xhigh$' "$M1" || _fail "unset reasoning effort must render xhigh"
 _ok "gen_hermes_managed_into: local provider url without /v1 gets /v1 appended, context length defaults to 65536"
 
 M1B="$TMPBASE/m1b/managed.env"
@@ -389,6 +391,8 @@ _apply_managed_env_fns() {
     /^_hermes_validate_provider\(\) \{/,/^\}$/ { print; next }
     /^_hermes_provider_for_cli\(\) \{/,/^\}$/ { print; next }
     /^_hermes_validate_context_length\(\) \{/,/^\}$/ { print; next }
+    /^_hermes_validate_effort\(\) \{/,/^\}$/ { print; next }
+    /^_hermes_apply_main_session_policy\(\) \{/,/^\}$/ { print; next }
     /^_hermes_apply_managed_env\(\) \{/,/^\}$/ { print; next }
   ' "$file"
 }
@@ -902,5 +906,31 @@ printf '%s\n' "$HOSTED_WIZ" | grep -q '^RESULT HERMES=on PROVIDER=anthropic URL=
   || _fail "step_hermes must not require a url for a hosted provider:
 $HOSTED_WIZ"
 _ok "wizard: step_hermes does not require a url for hosted providers"
+
+MAIN_POLICY_OUT="$TMPBASE/main_policy_calls.txt"
+(
+  _as_user() { printf '%s\n' "$*" >> "$MAIN_POLICY_OUT"; }
+  HERMES_HOME="$TMPBASE/hermes-main-home"
+  source "$APPLY_MANAGED_FNS"
+  _hermes_apply_main_session_policy
+)
+grep -q 'config set compression.enabled false$' "$MAIN_POLICY_OUT" \
+  || _fail "main session policy did not disable automatic compaction"
+if grep -q 'model.context_length' "$MAIN_POLICY_OUT"; then
+  _fail "main session policy must preserve the configured backend context window"
+fi
+if (
+  _as_user() { return 1; }
+  HERMES_HOME="$TMPBASE/hermes-main-home"
+  source "$APPLY_MANAGED_FNS"
+  _hermes_apply_main_session_policy
+) 2>"$TMPBASE/main_policy.stderr"; then
+  _fail "main session policy accepted a failed config write"
+fi
+grep -q 'cannot disable automatic compaction' "$TMPBASE/main_policy.stderr" \
+  || _fail "main session policy failure lacks an actionable diagnostic"
+grep -Fq '_hermes_apply_main_session_policy || exit 1' "$INSTALL_DIR/entrypoint.sh" \
+  || _fail "shared CLI/ACP startup does not enforce the main session policy"
+_ok "main CLI/ACP policy disables automatic compaction, preserves context and rejects write failure"
 
 echo "PASS: all hermes_gen checks"

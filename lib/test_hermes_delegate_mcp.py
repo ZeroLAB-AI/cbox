@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util
 import fcntl
+import glob
 import http.client
 import io
 import json
@@ -280,7 +281,7 @@ def make_template_home(tmpdir, hardened=True):
     os.makedirs(home, exist_ok=True)
     cfg = os.path.join(home, "config.yaml")
     with open(cfg, "w") as fh:
-        fh.write(json.dumps({"model": {"provider": "local"}}) + "\n")
+        fh.write(json.dumps({"model": {"provider": "local"}, "compression": {"enabled": False}}) + "\n")
     if hardened:
         os.chmod(cfg, 0o444)
         os.chmod(home, 0o555)
@@ -787,6 +788,7 @@ class HermesDelegateUnitTests(unittest.TestCase):
         with open(marker) as fh:
             calls = fh.read()
         self.assertIn("config set model.provider openai-api", calls)
+        self.assertIn("config set compression.enabled true", calls)
         self.assertNotIn("config set model.provider openai\n", calls)
 
     def test_no_provider_refuses_to_trust_the_seeded_template(self):
@@ -1553,7 +1555,7 @@ class HermesDelegateUnitTests(unittest.TestCase):
     def test_small_default_effort_and_explicit_override(self):
         os.environ[MOD.CONCURRENCY_VAR] = "2"
         os.environ[MOD.EFFORT_VAR] = "xhigh"
-        for effort in (None, "", "none", "medium", "xhigh"):
+        for effort in (None, "", "none", "low", "medium", "xhigh"):
             with self.subTest(effort=effort):
                 record = os.path.join(self.tmpdir, "effort-config.json")
                 write_control(self.control_file, config_record=record)
@@ -1564,7 +1566,7 @@ class HermesDelegateUnitTests(unittest.TestCase):
                 self.assertFalse(result["isError"], result)
                 with open(record) as fh:
                     cfg = json.load(fh)
-                self.assertEqual(cfg["agent"]["reasoning_effort"], effort or "low")
+                self.assertEqual(cfg["agent"]["reasoning_effort"], effort or "xhigh")
 
     def test_run_line_reports_budget_and_full_slot(self):
         write_control(self.control_file, mode="sqlite", sqlite_steps=2,
@@ -2445,8 +2447,10 @@ class KvBudgetTests(unittest.TestCase):
                     self.assertFalse(os.path.exists(os.path.join(self.lockdir, "slot.3")))
 
     def test_small_budget_meets_installed_minimum_context_length(self):
-        path = "/opt/hermes/lib/python3.12/site-packages/agent/model_metadata.py"
-        if not os.path.isfile(path):
+        candidates = ["/opt/hermes/src/agent/model_metadata.py"]
+        candidates += sorted(glob.glob("/opt/hermes/lib/python3*/site-packages/agent/model_metadata.py"))
+        path = next((c for c in candidates if os.path.isfile(c)), None)
+        if path is None:
             self.skipTest("installed hermes model_metadata.py not found")
         minimum = None
         with open(path, encoding="utf-8") as fh:
@@ -2661,10 +2665,10 @@ class PerCallEffortTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {MOD.EFFORT_VAR: "medium"}, clear=False):
             self.assertEqual(MOD._effort_setting(None), "medium")
 
-    def test_unset_everywhere_leaves_it_to_the_model(self):
+    def test_unset_everywhere_defaults_to_xhigh(self):
         with mock.patch.dict(os.environ, {MOD.EFFORT_VAR: ""}, clear=False):
-            self.assertIsNone(MOD._effort_setting())
-            self.assertIsNone(MOD._effort_setting(""))
+            self.assertEqual(MOD._effort_setting(), "xhigh")
+            self.assertEqual(MOD._effort_setting(""), "xhigh")
 
     def test_value_outside_the_enum_is_refused(self):
         for bad in ("high", "max", "ultra", "minimal", "banana"):

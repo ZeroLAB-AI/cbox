@@ -1316,8 +1316,8 @@
       "default": "latest",
       "role": "setting",
       "export": true,
-      "prompt": "setup: hermes version target (latest, or an x.y[.z[.w]] pin of hermes-agent on PyPI)",
-      "help": "latest or a plain x.y[.z[.w]] version pin of hermes-agent on PyPI.",
+      "prompt": "setup: hermes version target (latest = newest PyPI release, main = upstream development branch from GitHub, or an x.y[.z[.w]] PyPI pin)",
+      "help": "latest (newest hermes-agent release on PyPI), main (the upstream development branch, built from GitHub at its current commit), or a plain x.y[.z[.w]] PyPI version pin.",
       "validator": null
     },
     {
@@ -1352,11 +1352,11 @@
           "xhigh"
         ]
       },
-      "default": "medium",
+      "default": "xhigh",
       "role": "setting",
       "export": true,
       "prompt": "setup: hermes reasoning effort",
-      "help": "Reasoning effort applied to hermes as agent.reasoning_effort, for the console engine and for the hermes-local delegate (callers of the delegate may still pick a level per call). 'none' turns thinking off entirely. The accepted set is deliberately narrower than hermes itself accepts (hermes also knows minimal, high, max and ultra): only none plus the levels the local qwen template documents (low, medium, xhigh) are offered, so a level the local endpoint does not implement never reaches it. Measured on a local 27B model, the deepest level costs about three times the wall-clock of no thinking for the same task and yields a shorter final answer, so medium is the default and none is the cheap alternative.",
+      "help": "Reasoning effort applied to hermes as agent.reasoning_effort, for the console engine and for the hermes-local delegate (callers of the delegate may still pick a level per call). 'none' turns thinking off entirely. The accepted set is deliberately narrower than hermes itself accepts (hermes also knows minimal, high, max and ultra): only none plus the levels the local qwen template documents (low, medium, xhigh) are offered, so a level the local endpoint does not implement never reaches it. The default is xhigh for CLI, ACP and both delegate slot sizes. Orchestrators can explicitly choose none, low or medium per delegate call to reduce reasoning cost without changing the context budget.",
       "validator": null
     },
     {
@@ -2432,7 +2432,7 @@
       "role": "setting",
       "export": false,
       "prompt": "setup: codex model (e.g. gpt-6-astra): ",
-      "help": "Model slug rendered as model= into the generated read-only codex profile (cbox-container.config.toml).",
+      "help": "Initial Codex model default in /etc/codex/config.toml. Saved user preferences in ~/.codex/config.toml take precedence inside the container; managed safety settings stay read-only. Also used by the host profile.",
       "validator": null
     },
     {
@@ -2453,7 +2453,7 @@
       "role": "setting",
       "export": false,
       "prompt": "setup: codex reasoning effort",
-      "help": "Reasoning effort rendered as model_reasoning_effort= into the generated read-only codex profile (cbox-container.config.toml).",
+      "help": "Initial Codex reasoning effort in /etc/codex/config.toml. Saved user preferences take precedence inside the container; managed safety settings stay read-only. Also used by the host profile.",
       "validator": null
     },
     {

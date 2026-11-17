@@ -66,12 +66,14 @@ services:
       - @TMP@/home/.claude/templates:${HOST_HOME}/.claude-cbox/templates:ro
       - @TMP@/home/.claude/cbox-docs:${HOST_HOME}/.claude-cbox/cbox-docs:ro
       - @TMP@/home/.codex:${HOST_HOME}/.codex:rw
-      - @TMP@/home/.codex/config.toml:${HOST_HOME}/.codex/config.toml:ro
       - @TMP@/home/.codex/AGENTS.md:${HOST_HOME}/.codex/AGENTS.md:ro
       - @TMP@/home/.codex/cbox-host.config.toml:${HOST_HOME}/.codex/cbox-host.config.toml:ro
       - claude-local:${HOST_HOME}/.local:ro
       - codex-packages:${HOST_HOME}/.codex/packages:ro
       - @TMP@/glinstall/generated/codex/cbox-container.config.toml:${HOST_HOME}/.codex/cbox-container.config.toml:ro
+      - @TMP@/glinstall/generated/codex/defaults.toml:/etc/codex/config.toml:ro
+      - @TMP@/glinstall/generated/codex/managed_config.toml:/etc/codex/managed_config.toml:ro
+      - @TMP@/glinstall/generated/codex/requirements.toml:/etc/codex/requirements.toml:ro
       - @TMP@/glinstall/generated/codex/AGENTS.override.md:${HOST_HOME}/.codex/AGENTS.override.md:ro
       - @TMP@/glinstall/generated/codex/hooks.json:${HOST_HOME}/.codex/hooks.json:ro
 volumes:

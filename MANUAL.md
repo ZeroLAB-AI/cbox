@@ -34,6 +34,8 @@ Keep the project in Zed Restricted Mode and leave `session.trust_all_worktrees` 
 
 `cbox acp hermes`, `cbox acp claude`, and `cbox acp codex` start the project's container through the normal run path. Select the matching cbox agent in Zed. The Codex proxy locks each session to full-access mode inside the container and passes the managed Codex profile and hooks from the same files as terminal Codex. `CBOX_CODEX_HOOKS=off` leaves PreToolUse disabled in both paths; `on` passes the configured PreToolUse hook to the ACP app-server. If startup fails, the ACP proxy sends the recent cbox stderr text to the editor in the initialization error. For a later backend crash it sends an agent message and fails pending requests. Use Zed's `dev: open acp logs` command to inspect the exchange.
 
+Four saved engine entries and MCP calls from each main agent are the delivery target in [the integration plan](../docs/ANTIGRAVITY_CLI_FEASIBILITY.md). The three entries above exist today; the fourth ACP launcher is still planned. Choose the engine when starting a thread, then its supported model inside that agent. Switching engines does not automatically transfer a live conversation.
+
 ## Agents know this manual
 
 The manual and README are available inside each cbox container at `$HOST_HOME/.claude/cbox-docs/MANUAL.md` and `$HOST_HOME/.claude/cbox-docs/README.md`. Run `cbox setup update claude-md` on the host to deploy or refresh them, then restart the container to pick up the read-only bind. Agents read the manual on demand when asked about cbox setup, configuration, features or troubleshooting. The cbox CLI runs on the host only.
@@ -225,6 +227,12 @@ Render agent definitions for Claude Code (policies and custom agents). Pulled fr
 
 ### codex-mcp
 
+`cbox verify` checks MCP wiring in `cbox-container.config.toml`.
+The `codex-mcp` doctor row checks that same managed profile and the
+`ask_claude_mcp.py` bridge script. A bridge entry only in the base `config.toml`
+does not satisfy these managed-profile checks. `ACTIVE` reports wiring and
+file presence; it does not claim a successful live delegation.
+
 Enable or disable reverse orchestration: register Claude as an MCP tool inside Codex. When enabled, Codex gains an `ask-claude` tool. Codex can delegate questions and file edits to Claude; both subscriptions are charged per call (intended policy: propose-and-ask, never automatic).
 
 Parameters: `prompt` (question), `model` (haiku/sonnet/opus), `effort` (low/medium/high/max), `cwd` (optional, enables file edits), `max_turns` (optional).
@@ -236,6 +244,8 @@ Each call runs Claude Code in headless print mode (`claude -p ... --output-forma
 `CBOX_CODEX_HOOKS` (enum `off`/`on`, default `off`) is an experiment gate. `on` renders `[features].codex_hooks=true` into the codex profile and a PreToolUse Bash entry into `generated/codex/hooks.json` pointing at `codex_guard_bridge.py`, which translates codex's Bash-tool payload to the claude-shaped guards (rm-glob denies; commit is advisory; code-hygiene/agent-label/spawn/codex-mode have no codex analog under a Bash-only PreToolUse). `off` (default) keeps today's codex profile and hooks.json byte-for-byte (proven by the M3 frozen oracle). The binding stays `gated:codex-hooks-experiment` until the host runbook (`docs/M4_GUARD_EXPERIMENTS_RUNBOOK.md`) records real payloads and proves deny actually blocks.
 
 `CBOX_CODEX_MODEL` (model slug, default `gpt-6-astra`) and `CBOX_CODEX_EFFORT` (enum `low`/`medium`/`high`/`xhigh`/`max`/`ultra`, default `xhigh`) render as `model =` and `model_reasoning_effort =` in the generated read-only codex profile (`cbox-container.config.toml`). `CBOX_CODEX_MODEL` is validated as a plain slug (letters, digits, `.`, `-`, `_`; no whitespace, no leading `-`) since it is written into the profile TOML unescaped. These are the profile defaults picked up by every codex session in the container; a one-off `codex -m <model>` still overrides per-run.
+
+The generated Codex profile also renders a native footer with model, five-hour and weekly account limits, remaining context, and git branch. CBOX still captures the same account limits for Claude's shared status line. The profile is checked in the container, but confirming the footer renders requires a real host TTY session with `cbox run codex`.
 
 The codex delegates (`codex-astra`, `codex-sol`, `codex-luna`) run through a shim (`codex_mcp_shim.py`) that speaks MCP to Claude/hermes and drives `codex app-server` (JSON-RPC over stdio) as its backend, not `codex mcp-server`. `gpt-6-astra` is available on codex-cli 0.153.4 and later; `gpt-6-sol` and `gpt-6-luna` require codex-cli 0.156 or later (0.153.4 lists only `gpt-6-astra`).
 
@@ -278,6 +288,37 @@ Policies are read-only inside the container (mounted read-only in both mount and
 Two-part language rule rendered into the deployed conduct kernel: `CBOX_KERNEL_LANG_OUTPUT` (free text, default empty) and `CBOX_KERNEL_LANG_REASONING` (free text, default `slovencina bez diakritiky`). Empty output language means the rule is not rendered at all - no language is imposed unless one is set. When an output language is set, one line is added to the kernel: reason and think in the reasoning language, answer the human in the output language; files, code and commits stay ASCII per K3 and prompts to hermes-local stay English, and the line overrides any other language or diacritics instruction. Values are bounded to 64 ASCII characters, no control characters, no backslashes, no leading/trailing spaces, no `{`/`}`; non-ASCII input is refused, not transliterated. Set via the wizard section (`cbox setup update kernel-lang`) or `cbox config`; deploy the rendered kernel with `cbox setup update claude-md` (`apply_class: none`, `profile: skip` - the default preset keeps it off).
 
 ### settings
+
+Codex container settings have three layers: `/etc/codex/config.toml` supplies
+initial model, effort and TUI defaults; writable `~/.codex/config.toml` stores
+personal preferences; read-only `/etc/codex/managed_config.toml` and
+`/etc/codex/requirements.toml` supply cbox settings and enforced requirements.
+The container no longer selects the read-only `cbox-container` profile when
+starting Codex. Model/effort and status-line changes can therefore be saved
+atomically in the writable home and survive recreation. Mount mode stores
+them in the configured host Codex directory; volume mode stores them in the
+Codex volume. Named login profiles use their own writable Codex home.
+
+`CBOX_CODEX_MODEL` and `CBOX_CODEX_EFFORT` are initial defaults: an existing
+personal choice wins. Requirements preserve the container's existing
+`never` approval policy and `danger-full-access` sandbox posture, enforce
+cbox-managed hooks, and allow only the rendered MCP command/argument
+identities. Hook scripts, instructions and policy files remain read-only.
+Add MCP declarations through the host user layer. Native MCP identity rules
+match commands and arguments; they do not constrain extra environment keys.
+Managed defaults apply at startup; enforced hooks and approval/sandbox
+requirements remain the policy boundary during a session.
+
+After updating the checkout, run `cbox setup update` on the host, then
+`cbox down` and `cbox run codex` in an isolated project (`cbox up` in global
+mode). A changed entrypoint requires the regenerated image. Verify `/model`
+and `/statusline` in a real host terminal, then restart to check persistence.
+Inside the recreated container, from this checkout, run
+`python3 cbox/lib/test_codex_settings.py --runtime -v` to check actual system
+layer precedence, persistence and rejection of a hook-disable write without
+making a model request. Native layering is documented in
+[Config basics](https://learn.chatgpt.com/docs/config-file/config-basic) and
+[Managed configuration](https://learn.chatgpt.com/docs/enterprise/managed-configuration).
 
 Configure model routing: tiers (luna, sol, astra) and their associated Claude models + reasoning effort, plus approvals and billing. Pulls from `~/.claude/settings.json`. Changes stage with diffs before confirmation.
 
@@ -359,7 +400,7 @@ Manual offline rollback: before every claude/codex install, the host takes a one
 
 ### autoupdate
 
-Engine autoupdate (`CBOX_AUTOUPDATE`, default `on`; `CBOX_AUTOUPDATE_TTL_HOURS`, default 24). When the engine target is a channel (claude stable/latest, codex latest, hermes latest) and the TTL since the last check elapsed, cbox re-runs the host-side vendor installer into the shared bins volumes in the background at session start (same operation as `cbox reinstall-bins`), refreshing the version stamp; log at `~/.config/cbox/autoupdate.log`, including the version installed before and after the refresh for every tool it touches. Pinned versions never autoupdate. Hermes only participates when `CBOX_HERMES=on`.
+Engine autoupdate (`CBOX_AUTOUPDATE`, default `on`; `CBOX_AUTOUPDATE_TTL_HOURS`, default 24). When the engine target is a channel (claude stable/latest, codex latest, hermes latest or main) and the TTL since the last check elapsed, cbox re-runs the host-side vendor installer into the shared bins volumes in the background at session start (same operation as `cbox reinstall-bins`), refreshing the version stamp; log at `~/.config/cbox/autoupdate.log`, including the version installed before and after the refresh for every tool it touches. Pinned versions never autoupdate. Hermes only participates when `CBOX_HERMES=on`; with the `main` target the refresh first reads the current upstream `main` commit with `git ls-remote` and keeps the installed tree when it was built from that commit, so an unchanged branch costs no reinstall.
 
 A hold (see the binaries section above) suppresses autoupdate for the held tool only. If a health probe detects a bad binary and holds it, autoupdate is paused for that tool until `cbox bins unhold <tool>` is run.
 
@@ -401,9 +442,13 @@ Off by default. The third console engine, alongside `claude` and `codex`: [Herme
 
 Installed into the shared bins volume `cbox-bins-hermes`, exactly like the claude and codex CLIs: the host-side install container recreates the venv at `/opt/hermes` from scratch, runs `pip install hermes-agent[==<CBOX_HERMES_VERSION>]`, then reseeds the delegate template home at `/opt/hermes/delegate-home`. Because `pip install` executes arbitrary package build code, hermes always gets its own install container - it never runs alongside the writable claude/codex bins volumes - and the venv, pip, and `hermes setup` all run as the host user, not root; only the final 0555/0444 hardening of the seed is done as root. The venv is never reused across installs, so a previously planted `pip` or interpreter cannot re-execute itself on the next refresh, and the volume's integrity stamp is a tree digest over every file under `/opt/hermes`. The volume is mounted read-only in the running container and the image only prepares the mountpoint plus the `/usr/local/bin/hermes` symlink, so the image is hermes-invariant - toggling hermes or moving its version target never rebuilds the image. Supply-chain exception (explicit, v1 only): transitive pip dependencies are NOT pinned, and with the `latest` target the `hermes-agent` release itself moves on its own - a compromised or yanked release could change behavior without an explicit version bump here; pin an exact `x.y.z` to opt out.
 
-`CBOX_HERMES_EFFORT` (enum `none`/`low`/`medium`/`xhigh`, default `medium`) is applied to hermes as `agent.reasoning_effort`, for the console engine and for the hermes-local delegate alike; a caller of the delegate can still pick a level per call through the tool's `effort` argument. `none` turns thinking off entirely. The accepted set is deliberately narrower than hermes itself accepts (hermes also knows `minimal`, `high`, `max` and `ultra`): only `none` plus the levels the local qwen template documents are offered, so a level the local endpoint does not implement never reaches it. Measured on a local 27B model, the deepest level cost about three times the wall-clock of no thinking for the same task and produced a shorter final answer, so `medium` is the default and `none` is the cheap alternative.
+The `main` target installs the upstream development branch instead of a PyPI release (PyPI stopped receiving hermes-agent releases at 0.19.0, and upstream refuses wheel or sdist builds of newer trees). The install container resolves `refs/heads/main` of https://github.com/NousResearch/hermes-agent to a commit with `git ls-remote`, fetches exactly that commit (depth 1) into `/opt/hermes/src`, and builds the runtime from the pins in that commit's `pm/lock.json`: the pinned `uv` binary and the pinned CPython build (3.14), each checked against its sha256 from the lock before use. It then creates the venv at `/opt/hermes` with that interpreter and runs `uv sync --frozen --no-dev --extra mcp --extra acp --compile-bytecode` against the commit's `uv.lock`, so every dependency is the version upstream locked; the source is installed editable from `/opt/hermes/src`. cbox adds `pyyaml` (the delegate edits its ephemeral `config.yaml` with it) and writes upstream's `install-stamp.json` (`source` git, `branch` main, `updateMechanism` external), so `hermes --version` names the commit and hermes never tries to update itself. The `.git` directory is removed after the stamp is written and the sources are byte-compiled, because the volume is read-only at runtime. Everything runs as the host user like the pip path. The installed version reads `<release date>-g<12-hex commit>`, for example `2026.9.24-g085f562af53a`, in the stamp, `cbox bins history` and `cbox doctor`. The ACP dependency gate for a `main` build requires `agent-client-protocol` 0.9.0 and accepts whatever `mcp` and `starlette` the lock pins; a commit whose lock moves `agent-client-protocol` fails the gate and the previous tree stays live. A `main` tree is about 700 MB, and the kept `.prev` backup doubles that.
 
-Set `CBOX_HERMES=on` plus `CBOX_HERMES_VERSION` (default `latest`, or an exact `x.y[.z[.w]]` pin), `CBOX_HERMES_PROVIDER` (`local`, `nous`, `openrouter`, `openai`, or `anthropic`; default `local`), and for `local` provider `CBOX_HERMES_MODEL_URL` plus `CBOX_HERMES_MODEL_NAME` via this wizard section, `cbox setup update hermes`, or `--config`. This is a recreate-class change (`SEC_APPLY[hermes]=recreate`): compose recreates the container, and the binary itself lands via `cbox reinstall-bins` or the next autoupdate pass.
+`CBOX_HERMES_EFFORT` (enum `none`/`low`/`medium`/`xhigh`, default `xhigh`) sets `agent.reasoning_effort` for CLI, ACP and MCP delegates. The delegate's `effort` argument overrides it per call, including `size=small`; slot size controls resources, not reasoning. Orchestrators may explicitly select `none`, `low` or `medium` for cheaper tasks. `none` disables thinking. Unsupported effort values are rejected before starting the agent. Explicit values in existing project or host configuration are preserved; use `cbox config set CBOX_HERMES_EFFORT=xhigh` on the host in the relevant scope to change an existing setting.
+
+Main sessions (`cbox run hermes` and `cbox acp hermes`) set `compression.enabled=false` on every launch, including an existing home. They retain the full configured backend context window and do not take a delegate slot or apply its smaller budget. This disables automatic compaction, not the model's finite context limit; use manual `/compress` or a new session at that limit. MCP delegates keep their separate ephemeral home, automatic-compaction settings, context budget, first-compression stop and two-agent admission unchanged, even when the main home disables compaction. A main session using the local backend still consumes its resources; do not assume spare capacity for parallel local delegates.
+
+Set `CBOX_HERMES=on` plus `CBOX_HERMES_VERSION` (default `latest`, `main` for the upstream development branch, or an exact `x.y[.z[.w]]` pin), `CBOX_HERMES_PROVIDER` (`local`, `nous`, `openrouter`, `openai`, or `anthropic`; default `local`), and for `local` provider `CBOX_HERMES_MODEL_URL` plus `CBOX_HERMES_MODEL_NAME` via this wizard section, `cbox setup update hermes`, or `--config`. This is a recreate-class change (`SEC_APPLY[hermes]=recreate`): compose recreates the container, and the binary itself lands via `cbox reinstall-bins` or the next autoupdate pass.
 
 Managed-keys ownership: provider, base URL (local provider only; `/v1` appended if missing), model name, and context length (local provider only; the value of `CBOX_OLLAMA_CONTEXT_LENGTH`, so hermes and the ollama server cannot drift apart) are re-applied on every `cbox run hermes` via the official `hermes config set model.provider|base_url|default|context_length` CLI - never a copy-if-absent seed, never a hand-written YAML merge for these four keys. The cbox-side provider enum is translated at that CLI boundary: `local` becomes hermes's `custom` endpoint provider and `openai` becomes `openai-api` (hermes has no bare `openai` provider; its alias table would silently route bare `openai` to openrouter). Any other key in `~/.hermes-cbox/config.yaml` that the user or hermes itself sets is left untouched between starts, with one more managed exception: `mcp_servers` (see below), which is a hand-written top-level block replace precisely because `hermes config set`'s dotted-key CLI cannot express a nested mapping (its own model names contain dots, which collide with the dotted-key syntax) and `hermes mcp add` has no non-interactive flag for env maps, timeouts, or the enabled switch. Secrets (`.env` under `HERMES_HOME`) and Nous OAuth login are manual, host-operator steps: `cbox shell` into the running container, then run the relevant `hermes` auth/config command by hand.
 
@@ -411,7 +456,7 @@ MCP servers for hermes: cbox's MCP registry (`etc/mcp/delegates.json`, rendered 
 
 Degraded toolset note: the image ships the `hermes-agent` pip package only - no headless-browser or ffmpeg extras are installed, so any Hermes skills that depend on them are unavailable.
 
-Refresh safety: when `cbox reinstall-bins` or autoupdate refreshes the hermes venv, a failed refresh restores the previous venv from an in-volume backup (rollback via a `.prev` directory). A successful install now keeps that backup instead of deleting it, so the previous venv stays available for a manual `cbox bins rollback hermes` (offline, no network); the next install's own backup-take rotates it out (never more than one previous version on disk).
+Refresh safety: when `cbox reinstall-bins` or autoupdate refreshes the hermes venv, a failed refresh restores the previous venv from an in-volume backup (rollback via a `.prev` directory). A successful install now keeps that backup instead of deleting it, so the previous venv stays available for a manual `cbox bins rollback hermes` (offline, no network); the next install's own backup-take rotates it out (never more than one previous version on disk). A `main` build is restored only from that backup: the network fallback cannot rebuild a `<date>-g<commit>` version from history and reports the rollback as failed instead.
 
 First use: enable this section (`cbox setup update hermes` or the wizard), then run `cbox reinstall-bins` on the host to install hermes into the shared bins volume. Recreate the container with `cbox up` (or the next `cbox run hermes`), then `cbox run hermes`.
 
@@ -476,6 +521,8 @@ Owner self-heal on engine start: every engine start (`cbox run <bin>` and the `c
 The one case where a missing container is still created is the heal's own doing: before removing a dead container on the stale-network path it writes `.heal-recreate` in the owner directory, and clears it as soon as a start or reconcile succeeds. `cbox ollama up` and `cbox ollama reconcile` arm the same marker on their own stale-network path. If the follow-up start or reconcile fails, the marker survives, and the next engine start recreates the container instead of finding no container and returning silently - which would otherwise leave the owner dead for good, since every later heal would be a no-op. `cbox ollama down` and a de-rendering `cbox ollama reconcile` clear the marker too, so an operator taking the owner down is never overruled.
 
 On-demand CDI device node: with `CBOX_OLLAMA_GPU=cdi` every path that claims the GPU (`cbox ollama up`, `cbox ollama reconcile`, the engine-start self-heal, and `cbox ollama pull` - both its temporary pull container and the restart of the serving one at the end) first checks that `/dev/nvidia-uvm` and `/dev/nvidia-uvm-tools` exist. The driver creates them lazily for the first CUDA client, so after a boot or an eGPU replug they are absent while the CDI spec still lists them, and the container start fails with `failed to stat CDI host device "/dev/nvidia-uvm"` until something touches CUDA on the host. cbox creates them itself with `nvidia-modprobe -u -c 0` (setuid, no root needed), falling back to `nvidia-smi -L`, and says so. The preflight never fails a start on its own - a spec that does not list those nodes is legitimate, and refusing there would block a start that would otherwise work - so if the start still fails on `CDI host device`, the creation is attempted once more and the start retried exactly once; when neither tool can create the node, the failure names `cbox ollama gpu-check` instead of leaving the raw daemon error.
+
+Stale CDI spec: a start that fails with `failed to stat CDI host device "X"` for any node other than `/dev/nvidia-uvm` or `/dev/nvidia-uvm-tools` means the spec itself is out of date - typically `/dev/dri/cardN` or `renderDN` after `nvidia_drm` was unloaded or the DRM numbering moved, after the eGPU moved to another port or cable or was replugged, or `/dev/nvidia-modeset` after `nvidia_modeset` was unloaded. The ollama and hyperqwen owner starts and their engine-start self-heal then repair it themselves: cbox first makes sure `/dev/nvidia-uvm` exists and refuses to regenerate while it cannot (a spec generated without that node would leave it out and break CUDA in the container), finds every spec under `/etc/cdi` and `/var/run/cdi` that lists the missing node, and regenerates each with `nvidia-ctk cdi generate --output=<that file>` - directly when the file is writable, with `sudo -n` when sudo needs no password, with an interactive `sudo` only when stdin and stderr are a terminal, and otherwise it prints the exact `sudo nvidia-ctk cdi generate --output=...` command and stops. It then checks that the node is gone from the file and retries the start exactly once; every message names the missing node. The regenerated spec uses the plain `nvidia-ctk cdi generate` defaults, so options passed by hand to an earlier generation are not kept. Under rootless docker no daemon restart is needed because `/etc/cdi` already exists. `gpu-check` stays a raw probe and never repairs anything.
 
 Networking: one `internal:true` docker network per scope (`cbox-ollama-u<uid>-global`, `cbox-ollama-u<uid>-p<projecthash>`), never one shared network across scopes - `internal:true` blocks external routing but not member-to-member traffic, so a single shared network would let unrelated cbox containers reach each other's ollama. Each network joins exactly one cbox container plus the one ollama container, with the ollama container aliased `ollama` on each, so the endpoint is always `http://ollama:11434` regardless of scope. Both attachments are runtime `docker network connect` calls, re-applied for every running scope container by each `cbox run`, `cbox shell`, `cbox up`, `cbox ollama up` and `cbox ollama reconcile`, so an owner recreate (the heal's stale-network path) is repaired by the next engine start without any operator step. The stale sweep (disconnecting ollama from a per-scope network whose cbox side is gone) and the gc (removing per-scope networks with no members) only ever consider networks named under `cbox-ollama-u<uid>-p` (gc also the `-global` one); the owner project's own compose `default` network carries the same `cbox.component=ollama-net`/`cbox.owner` labels and is never disconnected or removed - removing it while ollama is stopped is exactly what made the next owner start fail with `network not found` and forced a recreate that dropped every attachment. A failed connect prints the docker daemon's own reason after `failed to attach`, not a bare failure line. Neither the egress network nor the tinyproxy/dante proxy carries ollama traffic; a per-scope model network's service name goes into `NO_PROXY` always (including under egress lockdown, since a direct route genuinely exists there), while external endpoints (a host IP, a remote tunnel IP) are never added to `NO_PROXY` under egress lockdown. The `NO_PROXY` entry is the bare token `ollama`; some clients (e.g. Python's `urllib`) do a no-dot-boundary suffix match, so a hostname ending in `ollama` would also be treated as proxy-exempt - under lockdown that only means the direct attempt fails (no route exists to it), so this is not currently an escalation, but the exemption must never be widened to a wildcard/pattern.
 
@@ -560,6 +607,14 @@ On the machine that wants to consume that ollama: `cbox wg client join <token> [
 A runtime preflight (shared with `cbox ollama reconcile`) reports a clear, actionable message rather than an opaque failure when `/dev/net/tun` is missing or `wireguard-tools` is not installed; these preflight paths, and the prerequisite install/firewall offers above, are unexercised in a container without `/dev/net/tun` or a docker socket - a live `sudo`, firewall change, or handshake is a host-side action, not something a cbox session can do on its own behalf.
 
 ## Global vs isolated mode
+
+An experimental engine isolation lab is available with
+`cbox isolation render --experimental --session <id> --workspace <git-root> --image <local-image>`.
+It emits a separate Compose JSON document: three independent empty engine home
+volumes, a read-only workspace, and no network. All services require the
+`engine-isolation` Compose profile; normal `cbox run` remains unchanged. This
+is an offline inspection harness, not a working client or delegate runtime.
+See [the host smoke gate and remaining work](../docs/ENGINE_ISOLATION_LAB.md).
 
 Set `CBOX_MODE` in `cbox.conf`:
 
@@ -662,6 +717,24 @@ cbox continuity migrate
 ```
 
 ## cbox config
+
+The launcher supports absolute and relative symlink chains, including paths
+with spaces. It resolves the installation directory before loading preflight
+checks, libraries or configuration.
+
+Both configuration writers stage their output beside the destination and check
+the loaded configuration hash before and after rendering. If an external edit
+is detected before commit, the command refuses without restoring an old backup
+over that edit. Regeneration failures after commit still use the rollback path.
+The regeneration lock serializes cooperating writers. Hash checks detect changes
+before rename; they cannot make an uncooperative writer's edit atomic with that
+rename. Read-modify-write callers that compute values before taking this lock
+still need their own transaction across the read and write. Netaccess grants
+carry the hash of the configuration used to compute their new list into the
+locked writer. A stale grant is refused before any configuration write or proxy
+apply; re-run the original command to compute it against the current list.
+This protects the stored grant list. Network attachment, policy rendering and
+proxy restart are not yet a single rollback transaction.
 
 Headless per-key settings get/set, for scripting and quick edits without the interactive wizard. Mode-dispatched the same way as `down`/`verify`: isolated mode reads/writes the per-project effective `cbox.conf` under `~/.config/cbox/projects/<hash>/`; global mode reads/writes the install-dir `cbox.conf`. No configuration in scope yet is a clear error pointing at first-run - it never silently prints defaults.
 
@@ -917,6 +990,14 @@ serializes cbox-managed legs so native-id discovery cannot cross-wire two new
 sessions. If an unrelated native process creates multiple same-project
 sessions during a new Codex or Hermes leg, cbox reports ambiguity and does not
 guess a mapping. Global mode still runs sessionless.
+
+Incremental transcript reads advance only past newline-terminated records.
+An unfinished final record is retried on the next read, including an oversized
+record still being written. Complete malformed or oversized records are skipped.
+Codex extraction retains the latest 512 conversation messages; tool events,
+reasoning and developer messages do not consume that retention window.
+Generated Codex hook commands quote their script paths, including spaces and
+shell metacharacters in the hooks directory.
 
 ## Host gates (verification)
 

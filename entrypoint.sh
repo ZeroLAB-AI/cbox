@@ -385,6 +385,17 @@ _multiplex_run() {
 }
 
 _codex_profile_preflight() {
+  local layer
+  for layer in config.toml managed_config.toml requirements.toml; do
+    if [ ! -s "/etc/codex/$layer" ] || [ -w "/etc/codex/$layer" ]; then
+      echo "entrypoint: /etc/codex/$layer must be present and read-only - run 'cbox setup update' on the host, then recreate the container" >&2
+      return 1
+    fi
+    if ! python3 -c 'import sys,tomllib; tomllib.load(open(sys.argv[1], "rb"))' "/etc/codex/$layer" 2>/dev/null; then
+      echo "entrypoint: invalid TOML in /etc/codex/$layer - run 'cbox setup update' on the host, then recreate the container" >&2
+      return 1
+    fi
+  done
   local profile="$HOST_HOME/.codex/cbox-container.config.toml"
   if [ ! -e "$profile" ]; then
     echo "entrypoint: codex managed profile missing at $profile - host re-bless required: run 'cbox setup update hooks' on the host, then recreate the container" >&2
@@ -520,6 +531,11 @@ _hermes_apply_managed_env() {
     echo "entrypoint: refusing to apply hermes-managed.env: the local provider needs HERMES_MANAGED_BASE_URL, otherwise the endpoint would come from the template home that the hermes package seeds for itself" >&2
     return 1
   fi
+}
+
+_hermes_apply_main_session_policy() {
+  _as_user env HERMES_HOME="$HERMES_HOME" /opt/hermes/bin/hermes config set compression.enabled false \
+    || { echo "entrypoint: cannot disable automatic compaction for the main hermes session" >&2; return 1; }
 }
 
 _sshd_listen_addr_present() {
@@ -885,12 +901,12 @@ case "${1:-}" in
       for _a in "$@"; do
         case "$_a" in
           -p|--profile|-p=*|--profile=*)
-            echo "entrypoint: -p/--profile may not be overridden - the container always runs codex --profile cbox-container" >&2
+            echo "entrypoint: -p/--profile may not be overridden - the container uses /etc/codex managed settings and writable user preferences" >&2
             exit 1
             ;;
         esac
       done
-      set -- --strict-config --profile cbox-container --dangerously-bypass-hook-trust "$@"
+      set -- --strict-config --dangerously-bypass-hook-trust "$@"
     fi
     if [ -t 0 ] && [ -t 1 ] \
         && { [ "${CBOX_SESSION_MULTIPLEX:-off}" = on ] \
@@ -924,7 +940,12 @@ case "${1:-}" in
       exit 1
     fi
     if [ "$_hermes_acp" = 1 ]; then
-      if ! /opt/hermes/bin/python3 -c 'import importlib.metadata as m; assert m.version("agent-client-protocol") == "0.9.0"; assert m.version("mcp") == "1.26.0"; assert m.version("starlette") == "1.0.1"' 2>/dev/null; then
+      if [ "$CBOX_HERMES_VERSION" = main ]; then
+        _hermes_deps_check='import importlib.metadata as m, yaml; assert m.version("agent-client-protocol") == "0.9.0"; m.version("mcp")'
+      else
+        _hermes_deps_check='import importlib.metadata as m; assert m.version("agent-client-protocol") == "0.9.0"; assert m.version("mcp") == "1.26.0"; assert m.version("starlette") == "1.0.1"'
+      fi
+      if ! /opt/hermes/bin/python3 -c "$_hermes_deps_check" 2>/dev/null; then
         echo "entrypoint: hermes ACP dependencies are missing or stale - run 'cbox reinstall-bins' on the host" >&2
         exit 1
       fi
@@ -938,6 +959,7 @@ case "${1:-}" in
         || { echo "entrypoint: 'hermes setup --non-interactive' failed - fix manually via 'cbox shell'" >&2; exit 1; }
     fi
     _hermes_apply_managed_env /etc/cbox/hermes-managed/managed.env || exit 1
+    _hermes_apply_main_session_policy || exit 1
     _hermes_apply_mcp_servers /etc/cbox/hermes-managed/mcp_servers.yaml "$HERMES_HOME/config.yaml" || exit 1
     if [ -f /etc/cbox/hermes-managed/hooks.yaml ]; then
       _hermes_hooks_preflight /etc/cbox/hermes-managed/hooks.yaml \

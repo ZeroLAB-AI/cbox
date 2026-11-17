@@ -106,4 +106,52 @@ _run_case "$FAKE_INSTALL" "$IN_CONTAINER_HOME" 1 on on mount "" >/dev/null
 [ "$(_row_status hermes-agent)" = ACTIVE ] || _fail "in-container present scenario: hermes-agent row should be ACTIVE, got $(_row_status hermes-agent)"
 _ok "in-container path resolves against \$HOME/.claude/agents (not CBOX_CLAUDE_PATH): missing then present both report correctly"
 
-echo "PASS: all hermes-agent doctor checks"
+python3 - "$INSTALL_DIR/cbox" "$TMPBASE" <<'PY'
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+
+source = Path(sys.argv[1]).read_text()
+home = Path(sys.argv[2]) / "diagnostic-home"
+config = home / ".codex"
+hooks = home / ".claude" / "hooks"
+config.mkdir(parents=True)
+hooks.mkdir(parents=True)
+line = next(line for line in source.splitlines() if 'if "${X[@]}" sh -c' in line and 'mcp_servers' in line)
+command = shlex.split(line)[4]
+start = source.index("  if grep -q '^\\[mcp_servers\\.claude\\]'", source.index('doctor() {'))
+end = source.index('\n  local shim_mode=', start)
+harness = '_cbox_doctor_row() { printf "%s\\n" "$2"; }\n' + source[start:end]
+env = dict(os.environ, HOME=str(home), codex_dir=str(config), hooks_dir=str(hooks), CBOX_CODEX_MCP="1")
+
+def state():
+    return subprocess.check_output(["bash", "-c", harness], env=env, text=True).strip()
+
+def probe():
+    return subprocess.run(["sh", "-c", command], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+
+(config / "config.toml").write_text('[mcp_servers.claude]\n')
+(hooks / "codex_mode_guard.py").touch()
+assert state() == "CONFIG-ONLY"
+assert probe() != 0
+(config / "cbox-container.config.toml").write_text('[mcp_servers.claude]\n')
+assert state() == "CONFIG-ONLY"
+assert probe() == 0
+(hooks / "ask_claude_mcp.py").touch()
+assert state() == "ACTIVE"
+(config / "config.toml").unlink()
+(hooks / "codex_mode_guard.py").unlink()
+assert state() == "ACTIVE"
+assert probe() == 0
+(config / "cbox-container.config.toml").write_text('model = "fixture"\n')
+assert state() == "CONFIG-ONLY"
+assert probe() != 0
+(config / "cbox-container.config.toml").unlink()
+env["CBOX_CODEX_MCP"] = "0"
+assert state() == "OFF"
+PY
+_ok "Codex diagnostics read the managed profile and require the reverse bridge script"
+
+echo "PASS: all agent doctor checks"

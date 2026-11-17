@@ -1952,14 +1952,14 @@ step_hermes() {
   ask_choice "setup: enable the hermes console engine" "$CBOX_HERMES" off on
   CBOX_HERMES="$ASK_VALUE"
   if [ "$CBOX_HERMES" = on ]; then
-    ask "setup: hermes version target (latest, or an x.y[.z[.w]] pin of hermes-agent on PyPI)" "$CBOX_HERMES_VERSION"
+    ask "setup: hermes version target (latest = newest PyPI release, main = upstream development branch from GitHub, or an x.y[.z[.w]] PyPI pin)" "$CBOX_HERMES_VERSION"
     CBOX_HERMES_VERSION="$ASK_VALUE"
-    if [ "$CBOX_HERMES_VERSION" != latest ]; then
+    if [ "$CBOX_HERMES_VERSION" != latest ] && [ "$CBOX_HERMES_VERSION" != main ]; then
       case "$CBOX_HERMES_VERSION" in
         *[!0-9.]*) CBOX_HERMES_VERSION="not-a-version" ;;
       esac
       if ! printf '%s' "$CBOX_HERMES_VERSION" | grep -Eq '^[0-9]+([.][0-9]+){1,3}$'; then
-        warn "hermes version target '$CBOX_HERMES_VERSION' is neither latest nor a plain x.y[.z[.w]] version - keeping hermes off until a valid target is set"
+        warn "hermes version target '$CBOX_HERMES_VERSION' is neither latest, main nor a plain x.y[.z[.w]] version - keeping hermes off until a valid target is set"
         CBOX_HERMES=off
         CBOX_HERMES_VERSION="${prev_ver:-latest}"
       fi
@@ -1978,8 +1978,8 @@ step_hermes() {
     fi
     ask "setup: hermes model name" "$(_setup_prefill_model "$CBOX_HERMES_MODEL_NAME" "$CBOX_HERMES_MODEL_URL")"
     CBOX_HERMES_MODEL_NAME="$ASK_VALUE"
-    note "reasoning effort: none turns thinking off; medium is the default. On a local 27B model the deepest level costs about three times the wall-clock for the same task and shortens the final answer. Only none plus the levels the local qwen template documents (low, medium, xhigh) are offered."
-    ask_choice "setup: hermes reasoning effort" "${CBOX_HERMES_EFFORT:-medium}" none low medium xhigh
+    note "reasoning effort: xhigh is the default for CLI, ACP and MCP. Choose none, low or medium explicitly for cheaper tasks; none turns thinking off. MCP callers can override effort per call independently of slot size."
+    ask_choice "setup: hermes reasoning effort" "${CBOX_HERMES_EFFORT:-xhigh}" none low medium xhigh
     CBOX_HERMES_EFFORT="$ASK_VALUE"
     if [ "$CBOX_HERMES_PROVIDER" = local ] && [ -z "$CBOX_HERMES_MODEL_URL" ]; then
       warn "hermes local endpoint url left empty - keeping hermes off (CBOX_HERMES=off) until CBOX_HERMES_MODEL_URL is set; the managed.env generator refuses provider=local without a url and that refusal would block every engine's regen, not just hermes"
@@ -1990,7 +1990,7 @@ step_hermes() {
     CBOX_HERMES_PROVIDER="${CBOX_HERMES_PROVIDER:-local}"
     CBOX_HERMES_MODEL_URL=""
     CBOX_HERMES_MODEL_NAME=""
-    CBOX_HERMES_EFFORT="${CBOX_HERMES_EFFORT:-medium}"
+    CBOX_HERMES_EFFORT="${CBOX_HERMES_EFFORT:-xhigh}"
   fi
   export CBOX_HERMES_VERSION CBOX_HERMES_PROVIDER CBOX_HERMES_MODEL_URL CBOX_HERMES_MODEL_NAME CBOX_HERMES_EFFORT
   if [ "$CBOX_HERMES" = "$prev_on" ] && [ "$CBOX_HERMES_VERSION" = "$prev_ver" ] \
@@ -3886,7 +3886,7 @@ _classic_feature_on() {
       CBOX_HERMES_PROVIDER=local
       CBOX_HERMES_MODEL_URL="$CBOX_LOCAL_MODEL_URL"
       CBOX_HERMES_MODEL_NAME="$CBOX_LOCAL_MODEL_NAME"
-      CBOX_HERMES_EFFORT=medium
+      CBOX_HERMES_EFFORT=xhigh
       ;;
     hermes-delegate)
       CBOX_HERMES_DELEGATE=on

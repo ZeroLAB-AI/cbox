@@ -83,7 +83,7 @@ def bounded_message(text):
     return "[message omitted: %d bytes exceeds cbox safety limit]" % len(raw)
 
 
-def jsonl_records(path, start=0, limit=0, keep="edges"):
+def jsonl_records(path, start=0, limit=0, keep="edges", accept=None):
     records = [] if not limit else collections.deque(maxlen=limit)
     first = []
     end = start
@@ -93,18 +93,25 @@ def jsonl_records(path, start=0, limit=0, keep="edges"):
             start = 0
         fh.seek(start)
         while True:
+            line_start = fh.tell()
             line = fh.readline(MAX_JSONL_LINE + 1)
             if not line:
                 break
             if len(line) > MAX_JSONL_LINE and not line.endswith(b"\n"):
                 while line and not line.endswith(b"\n"):
                     line = fh.readline(MAX_JSONL_LINE + 1)
+                if not line.endswith(b"\n"):
+                    fh.seek(line_start)
+                    break
                 continue
+            if not line.endswith(b"\n"):
+                fh.seek(line_start)
+                break
             try:
                 value = json.loads(line.decode("utf-8", "replace"))
             except (ValueError, UnicodeError):
                 continue
-            if isinstance(value, dict):
+            if isinstance(value, dict) and (accept is None or accept(value)):
                 if limit and keep == "edges" and len(first) < limit // 2:
                     first.append(value)
                 else:
@@ -364,7 +371,19 @@ def extract_codex(root, native_id, cursor):
     item = find_native(root, "codex", native_id)
     path = os.path.join(codex_home(), item["locator"])
     start = cursor_value(cursor, "byte")
-    records, end = jsonl_records(path, start, limit=EXTRACT_MESSAGES, keep="tail")
+    def is_conversation(row):
+        payload = row.get("payload")
+        if not isinstance(payload, dict):
+            return False
+        role = payload.get("role")
+        allowed = {"input_text"} if role == "user" else {"output_text"}
+        return (row.get("type") == "response_item"
+                and payload.get("type") == "message"
+                and role in ("user", "assistant")
+                and bool(text_blocks(payload.get("content"), allowed)))
+
+    records, end = jsonl_records(path, start, limit=EXTRACT_MESSAGES,
+                                keep="tail", accept=is_conversation)
     messages = []
     for row in records:
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}

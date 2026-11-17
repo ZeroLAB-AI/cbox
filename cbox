@@ -8,14 +8,28 @@ else
   unset _CBOX_HUB_T0
 fi
 
-_CBOX_PREFLIGHT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_CBOX_SOURCE="${BASH_SOURCE[0]}"
+_CBOX_LINK_DEPTH=0
+while [ -L "$_CBOX_SOURCE" ]; do
+  _CBOX_LINK_DEPTH=$((_CBOX_LINK_DEPTH + 1))
+  if [ "$_CBOX_LINK_DEPTH" -gt 40 ]; then
+    echo "cbox: launcher symlink chain exceeds 40 links" >&2
+    exit 1
+  fi
+  _CBOX_SOURCE_DIR="$(cd -P -- "$(dirname -- "$_CBOX_SOURCE")" && pwd)"
+  _CBOX_SOURCE="$(readlink -- "$_CBOX_SOURCE")"
+  case "$_CBOX_SOURCE" in
+    /*) ;;
+    *) _CBOX_SOURCE="$_CBOX_SOURCE_DIR/$_CBOX_SOURCE" ;;
+  esac
+done
+_CBOX_PREFLIGHT_DIR="$(cd -P -- "$(dirname -- "$_CBOX_SOURCE")" && pwd)"
 if [ -f "$_CBOX_PREFLIGHT_DIR/lib/portable_preflight.sh" ]; then
   . "$_CBOX_PREFLIGHT_DIR/lib/portable_preflight.sh"
   cbox_preflight_check bash || exit 1
 fi
-unset _CBOX_PREFLIGHT_DIR
-
-INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_DIR="$_CBOX_PREFLIGHT_DIR"
+unset _CBOX_PREFLIGHT_DIR _CBOX_SOURCE _CBOX_SOURCE_DIR _CBOX_LINK_DEPTH
 SERVICE=cbox
 CONF="$INSTALL_DIR/cbox.conf"
 
@@ -706,6 +720,7 @@ _netaccess_change() {
 
 netaccess_cmd() {
   local sub="${1:-}" mode root eff
+  local _CBOX_CONFIG_EXPECTED_PATH="" _CBOX_CONFIG_EXPECTED_SHA=""
   case "$sub" in
     status|allow|deny) ;;
     *)
@@ -728,6 +743,10 @@ netaccess_cmd() {
   case "$mode" in
     global)
       require_global_conf
+      _CBOX_CONFIG_EXPECTED_PATH="$INSTALL_DIR/cbox.conf"
+      _CBOX_CONFIG_EXPECTED_SHA="$(_cbox_sha256 "$_CBOX_CONFIG_EXPECTED_PATH")" || return 1
+      unset CBOX_NETACCESS_SCOPE CBOX_NETACCESS_NETWORKS CBOX_NETACCESS_CIDRS
+      . "$_CBOX_CONFIG_EXPECTED_PATH" || return 1
       if [ "$sub" = status ]; then
         _netaccess_print_status global ""
       else
@@ -741,8 +760,10 @@ netaccess_cmd() {
       [ -f "$eff/cbox.conf" ] || die "no effective config for $root - run 'cbox run codex' or 'cbox setup --local $root' first"
       (
         set -e
+        _CBOX_CONFIG_EXPECTED_PATH="$eff/cbox.conf"
+        _CBOX_CONFIG_EXPECTED_SHA="$(_cbox_sha256 "$_CBOX_CONFIG_EXPECTED_PATH")" || exit 1
         unset CBOX_NETACCESS_SCOPE CBOX_NETACCESS_NETWORKS CBOX_NETACCESS_CIDRS
-        . "$eff/cbox.conf"
+        . "$eff/cbox.conf" || exit 1
         if [ "$sub" = status ]; then
           _netaccess_print_status isolated "$eff"
         else
@@ -950,6 +971,88 @@ _cbox_nvidia_uvm_ensure() {
   _cbox_nvidia_uvm_present
 }
 
+_cbox_cdi_failed_node() {
+  printf '%s\n' "$1" | sed -n 's/.*failed to stat CDI host device "\([^"]*\)".*/\1/p' | head -n1
+}
+
+_cbox_cdi_spec_files_for() {
+  local node="$1" d f
+  for d in ${_CBOX_CDI_SPEC_DIRS:-/etc/cdi /var/run/cdi}; do
+    for f in "$d"/*.yaml "$d"/*.yml "$d"/*.json; do
+      [ -f "$f" ] || continue
+      grep -qF -- "$node" "$f" 2>/dev/null && printf '%s\n' "$f"
+    done
+  done
+  return 0
+}
+
+_cbox_cdi_spec_writable() {
+  [ -w "$(dirname -- "$1")" ] && { [ ! -e "$1" ] || [ -w "$1" ]; }
+}
+
+_cbox_cdi_spec_regenerate() {
+  local spec="$1" ctk err
+  ctk="$(command -v nvidia-ctk 2>/dev/null)" || ctk=""
+  if [ -z "$ctk" ]; then
+    echo "cbox: nvidia-ctk is not installed on this host, so cbox cannot regenerate $spec" >&2
+    return 1
+  fi
+  if _cbox_cdi_spec_writable "$spec"; then
+    err="$("$ctk" cdi generate --output="$spec" 2>&1)" && return 0
+  elif ! command -v sudo >/dev/null 2>&1; then
+    echo "cbox: $spec is not writable and sudo is not installed" >&2
+    return 1
+  elif sudo -n true >/dev/null 2>&1; then
+    err="$(sudo -n "$ctk" cdi generate --output="$spec" 2>&1)" && return 0
+  elif [ -t 0 ] && [ -t 2 ]; then
+    echo "cbox: regenerating $spec needs root - sudo may ask for your password to run: sudo $ctk cdi generate --output=$spec" >&2
+    err="$(sudo "$ctk" cdi generate --output="$spec" 2>&1)" && return 0
+  else
+    echo "cbox: regenerating $spec needs root and there is no terminal to ask for the sudo password" >&2
+    return 1
+  fi
+  printf '%s\n' "$err" | tail -n 3 >&2
+  return 1
+}
+
+_cbox_cdi_host_device_recover() {
+  local who="$1" out="$2" check="$3" node specs spec
+  node="$(_cbox_cdi_failed_node "$out")"
+  case "$node" in
+    ''|/dev/nvidia-uvm|/dev/nvidia-uvm-tools)
+      if _cbox_nvidia_uvm_ensure; then
+        echo "cbox: $who: the start failed on an on-demand CDI device node that did not exist yet - cbox created /dev/nvidia-uvm and is starting again" >&2
+        return 0
+      fi
+      echo "cbox: $who: the CDI spec lists a host device node that does not exist and cbox could not create it - run '$check' for the fix candidates" >&2
+      return 1
+      ;;
+  esac
+  if ! _cbox_nvidia_uvm_ensure; then
+    echo "cbox: $who: the CDI spec lists $node, which no longer exists on this host, but cbox does not regenerate the spec while /dev/nvidia-uvm is missing too - a spec generated now would leave that node out and break CUDA in the container; run '$check' for the fix candidates" >&2
+    return 1
+  fi
+  specs="$(_cbox_cdi_spec_files_for "$node")"
+  if [ -z "$specs" ]; then
+    echo "cbox: $who: the start failed on CDI host device $node, which no CDI spec in ${_CBOX_CDI_SPEC_DIRS:-/etc/cdi /var/run/cdi} lists - run '$check' for the fix candidates" >&2
+    return 1
+  fi
+  echo "cbox: $who: the CDI spec lists $node, which no longer exists on this host - the spec is stale (typical after the eGPU moves to another port or cable, a GPU replug, an unloaded nvidia_drm or nvidia_modeset module, or a driver upgrade), so cbox regenerates it" >&2
+  while IFS= read -r spec; do
+    [ -n "$spec" ] || continue
+    if ! _cbox_cdi_spec_regenerate "$spec"; then
+      echo "cbox: $who: the CDI spec was not regenerated - run 'sudo nvidia-ctk cdi generate --output=$spec' and start again; '$check' prints the other fix candidates" >&2
+      return 1
+    fi
+    if grep -qF -- "$node" "$spec" 2>/dev/null; then
+      echo "cbox: $who: $spec was regenerated but still lists $node - run '$check' for the fix candidates" >&2
+      return 1
+    fi
+  done <<<"$specs"
+  echo "cbox: $who: the CDI spec was regenerated without $node - starting again" >&2
+  return 0
+}
+
 _cbox_ollama_gpu_preflight() {
   [ "${CBOX_OLLAMA_GPU:-off}" = cdi ] || return 0
   _cbox_nvidia_uvm_present && return 0
@@ -981,15 +1084,12 @@ _cbox_ollama_owner_up() {
       fi
       ;;
     *"CDI host device"*)
-      if _cbox_nvidia_uvm_ensure; then
-        echo "cbox: ollama owner: the start failed on an on-demand CDI device node that did not exist yet - cbox created /dev/nvidia-uvm and is starting again" >&2
+      if _cbox_cdi_host_device_recover "ollama owner" "$out" "cbox ollama gpu-check"; then
         if out="$(_cbox_ollama_owner_compose up -d --remove-orphans 2>&1)"; then
           printf '%s\n' "$out" >&2
           _cbox_ollama_heal_recreate_clear
           return 0
         fi
-      else
-        echo "cbox: ollama owner: the CDI spec lists a host device node that does not exist and cbox could not create it - run 'cbox ollama gpu-check' for the fix list" >&2
       fi
       ;;
     *"nvidia-persistenced/socket"*|*"unresolvable CDI devices"*)
@@ -1079,7 +1179,7 @@ _cbox_ollama_gpu_check_cmd() {
   fi
   echo "cbox: gpu-check: FAIL - could not start a container with --device nvidia.com/gpu=all against $image, or nvidia-smi failed inside it" >&2
   echo "cbox: gpu-check: this is a preflight only - it never runs automatically and does not touch CBOX_OLLAMA_GPU" >&2
-  echo "cbox: gpu-check: fix candidates: (1) on rootless docker, restart the daemon once after the CDI spec directory is first created - rootlesskit starts the daemon with --copy-up=/etc and --copy-up=/run, so the daemon sees a snapshot of both taken at its own start: a /etc/cdi created afterwards is invisible to it (the symptom is 'unresolvable CDI devices nvidia.com/gpu=all' even though the spec file exists and is world-readable), and so is a /run/nvidia-persistenced created by a later (re)start of nvidia-persistenced, typically after an eGPU replug (the symptom is 'failed to fulfil mount request: open /run/nvidia-persistenced/socket: no such file or directory' while the socket exists on the host); 'systemctl --user restart docker' fixes both, and later edits inside an already-existing directory need no further restart; (2) regenerate the CDI spec after any GPU replug, notably an eGPU - 'sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml' (an eGPU's PCI address changes on every replug, invalidating the previous spec); (3) only on a docker daemon older than 28.3 (CDI is enabled by default from 28.3 on): enable CDI in the rootless daemon's own config (features.cdi in the rootless dockerd's daemon.json, not the system-wide /etc/docker/daemon.json); (4) not a CDI setting at all: no-cgroups = true in the nvidia-container-runtime config belongs to the legacy nvidia runtime hook path (--runtime nvidia / --gpus), which this verb does not exercise - only look there if you deliberately run ollama through that legacy path instead of CDI; (5) 'failed to stat CDI host device /dev/nvidia-uvm' means the spec is fine but the on-demand device node is missing - it is created by the first CUDA client after driver load or an eGPU replug, and nvidia-persistenced alone does not create it; the ollama start paths now create it themselves (nvidia-modprobe -u -c 0, then nvidia-smi -L as a fallback) and retry once, so this only surfaces here when neither tool is installed - install nvidia-modprobe or run any CUDA-touching command on the host once and retry" >&2
+  echo "cbox: gpu-check: fix candidates: (1) on rootless docker, restart the daemon once after the CDI spec directory is first created - rootlesskit starts the daemon with --copy-up=/etc and --copy-up=/run, so the daemon sees a snapshot of both taken at its own start: a /etc/cdi created afterwards is invisible to it (the symptom is 'unresolvable CDI devices nvidia.com/gpu=all' even though the spec file exists and is world-readable), and so is a /run/nvidia-persistenced created by a later (re)start of nvidia-persistenced, typically after an eGPU replug (the symptom is 'failed to fulfil mount request: open /run/nvidia-persistenced/socket: no such file or directory' while the socket exists on the host); 'systemctl --user restart docker' fixes both, and later edits inside an already-existing directory need no further restart; (2) regenerate the CDI spec after any GPU replug, notably an eGPU - 'sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml' (an eGPU's PCI address changes on every replug, invalidating the previous spec); the ollama and hyperqwen start paths now do this themselves when the failing node is not nvidia-uvm (they name the node, use sudo only with a terminal or a passwordless sudo, and retry once); (3) only on a docker daemon older than 28.3 (CDI is enabled by default from 28.3 on): enable CDI in the rootless daemon's own config (features.cdi in the rootless dockerd's daemon.json, not the system-wide /etc/docker/daemon.json); (4) not a CDI setting at all: no-cgroups = true in the nvidia-container-runtime config belongs to the legacy nvidia runtime hook path (--runtime nvidia / --gpus), which this verb does not exercise - only look there if you deliberately run ollama through that legacy path instead of CDI; (5) 'failed to stat CDI host device /dev/nvidia-uvm' means the spec is fine but the on-demand device node is missing - it is created by the first CUDA client after driver load or an eGPU replug, and nvidia-persistenced alone does not create it; the ollama start paths now create it themselves (nvidia-modprobe -u -c 0, then nvidia-smi -L as a fallback) and retry once, so this only surfaces here when neither tool is installed - install nvidia-modprobe or run any CUDA-touching command on the host once and retry" >&2
   return 1
 }
 
@@ -1505,14 +1605,11 @@ _cbox_ollama_owner_heal_impl() {
       fi
       ;;
     *"CDI host device"*)
-      if _cbox_nvidia_uvm_ensure; then
-        echo "cbox: the ollama owner could not start because an on-demand CDI device node did not exist yet - cbox created /dev/nvidia-uvm and is starting it again" >&2
+      if _cbox_cdi_host_device_recover "ollama owner" "$out" "cbox ollama gpu-check"; then
         if out="$(_cbox_ollama_owner_compose up -d ollama 2>&1)"; then
           _cbox_ollama_heal_recreate_clear
           return 0
         fi
-      else
-        echo "cbox: the ollama owner cannot start because the CDI spec lists a host device node that does not exist and cbox could not create it - run 'cbox ollama gpu-check' for the fix list" >&2
       fi
       ;;
   esac
@@ -1926,15 +2023,12 @@ _cbox_hyperqwen_owner_up() {
       fi
       ;;
     *"CDI host device"*)
-      if _cbox_nvidia_uvm_ensure; then
-        echo "cbox: hyperqwen owner: the start failed on an on-demand CDI device node that did not exist yet - cbox created /dev/nvidia-uvm and is starting again" >&2
+      if _cbox_cdi_host_device_recover "hyperqwen owner" "$out" "cbox hyperqwen gpu-check"; then
         if out="$(_cbox_hyperqwen_owner_compose up -d --remove-orphans 2>&1)"; then
           printf '%s\n' "$out" >&2
           _cbox_hyperqwen_heal_recreate_clear
           return 0
         fi
-      else
-        echo "cbox: hyperqwen owner: the CDI spec lists a host device node that does not exist and cbox could not create it - run 'cbox hyperqwen gpu-check' for the fix candidates" >&2
       fi
       ;;
     *"nvidia-persistenced/socket"*|*"unresolvable CDI devices"*)
@@ -2295,7 +2389,7 @@ _cbox_hyperqwen_gpu_check_cmd() {
   fi
   printf '%s\n' "$out" >&2
   echo "cbox: gpu-check: FAIL - could not start a container with --device $dev against $image, or nvidia-smi failed inside it" >&2
-  echo "cbox: gpu-check: fix candidates: (1) regenerate the CDI spec after any GPU replug - 'sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml'; (2) on rootless docker restart the daemon once after /etc/cdi or /run/nvidia-persistenced is first created ('systemctl --user restart docker'); (3) 'failed to stat CDI host device /dev/nvidia-uvm' means the on-demand node is missing - install nvidia-modprobe or run any CUDA command on the host once; (4) the image needs a driver of 580 or newer (CUDA 13); the longer list is printed by 'cbox ollama gpu-check'" >&2
+  echo "cbox: gpu-check: fix candidates: (1) regenerate the CDI spec after any GPU replug - 'sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml'; the ollama and hyperqwen start paths now do this themselves when the failing node is not nvidia-uvm (they name the node, use sudo only with a terminal or a passwordless sudo, and retry once); (2) on rootless docker restart the daemon once after /etc/cdi or /run/nvidia-persistenced is first created ('systemctl --user restart docker'); (3) 'failed to stat CDI host device /dev/nvidia-uvm' means the on-demand node is missing - install nvidia-modprobe or run any CUDA command on the host once; (4) the image needs a driver of 580 or newer (CUDA 13); the longer list is printed by 'cbox ollama gpu-check'" >&2
   return 1
 }
 
@@ -2339,14 +2433,11 @@ _cbox_hyperqwen_owner_heal_impl() {
       fi
       ;;
     *"CDI host device"*)
-      if _cbox_nvidia_uvm_ensure; then
-        echo "cbox: the hyperqwen owner could not start because an on-demand CDI device node did not exist yet - cbox created /dev/nvidia-uvm and is starting it again" >&2
+      if _cbox_cdi_host_device_recover "hyperqwen owner" "$out" "cbox hyperqwen gpu-check"; then
         if out="$(_cbox_hyperqwen_owner_compose up -d hyperqwen 2>&1)"; then
           _cbox_hyperqwen_heal_recreate_clear
           return 0
         fi
-      else
-        echo "cbox: the hyperqwen owner cannot start because the CDI spec lists a host device node that does not exist and cbox could not create it - run 'cbox hyperqwen gpu-check' for the fix candidates" >&2
       fi
       ;;
   esac
@@ -4753,7 +4844,7 @@ _bins_channel() {
       ;;
     hermes)
       _bins_hermes_on || return 1
-      case "${CBOX_HERMES_VERSION:-latest}" in latest) return 0 ;; esac
+      case "${CBOX_HERMES_VERSION:-latest}" in latest|main) return 0 ;; esac
       ;;
   esac
   return 1
@@ -5386,7 +5477,7 @@ case "$tool" in
   codex)
     argv="${CBOX_PROBE_CODEX_ARGV:-app-server}"
     case "$argv" in
-      ''|*[!a-zA-Z0-9_-]*) argv=app-server ;;
+      ""|*[!a-zA-Z0-9_-]*) argv=app-server ;;
     esac
     if ! timeout -k 5 "$to" "$path" $argv --help >/dev/null 2>&1; then
       echo "app-server --help failed"
@@ -7271,11 +7362,11 @@ case "$("$p" --version 2>&1)" in *"$v"*) exit 0;; *) exit 1;; esac
   fi
 
   if [ "${CBOX_CODEX_MCP:-0}" = 1 ]; then
-    v_t "codex-mcp wired in config.toml"
-    if "${X[@]}" sh -c 'grep -q "^\[mcp_servers\.claude\]" "$HOME/.codex/config.toml"' >/dev/null 2>&1; then
+    v_t "codex-mcp wired in managed container profile"
+    if "${X[@]}" sh -c 'grep -q "^\[mcp_servers\.claude\]" "$HOME/.codex/cbox-container.config.toml"' >/dev/null 2>&1; then
       v_ok
     else
-      v_fail "run cbox setup update codex-mcp"
+      v_fail "managed profile is missing the bridge - run cbox setup update hooks on the host"
     fi
   fi
 
@@ -8253,16 +8344,16 @@ doctor() {
     _cbox_doctor_row "git-identity" OFF "no ~/.gitconfig, CBOX_GITCONFIG=${CBOX_GITCONFIG:-0}"
   fi
 
-  if grep -q '^\[mcp_servers\.claude\]' "$codex_dir/config.toml" 2>/dev/null; then
-    if [ -f "$hooks_dir/codex_mode_guard.py" ]; then
-      _cbox_doctor_row "codex-mcp" ACTIVE "mcp_servers.claude wired in config.toml, guard hook present"
+  if grep -q '^\[mcp_servers\.claude\]' "$codex_dir/cbox-container.config.toml" 2>/dev/null; then
+    if [ -f "$hooks_dir/ask_claude_mcp.py" ]; then
+      _cbox_doctor_row "codex-mcp" ACTIVE "mcp_servers.claude wired in managed container profile, bridge script present"
     else
-      _cbox_doctor_row "codex-mcp" CONFIG-ONLY "mcp_servers.claude wired but codex_mode_guard.py missing"
+      _cbox_doctor_row "codex-mcp" CONFIG-ONLY "mcp_servers.claude wired but ask_claude_mcp.py missing"
     fi
   elif [ "${CBOX_CODEX_MCP:-0}" = 1 ]; then
-    _cbox_doctor_row "codex-mcp" CONFIG-ONLY "CBOX_CODEX_MCP=1 but not wired in config.toml"
+    _cbox_doctor_row "codex-mcp" CONFIG-ONLY "CBOX_CODEX_MCP=1 but not wired in managed container profile"
   else
-    _cbox_doctor_row "codex-mcp" OFF "no mcp_servers.claude in config.toml, CBOX_CODEX_MCP=${CBOX_CODEX_MCP:-0}"
+    _cbox_doctor_row "codex-mcp" OFF "no mcp_servers.claude in managed container profile, CBOX_CODEX_MCP=${CBOX_CODEX_MCP:-0}"
   fi
 
   local shim_mode="${CBOX_CODEX_PROGRESS_MODE:-}"
@@ -9281,6 +9372,17 @@ _cbox_config_set_isolated() {
   exec {cfg_lock_fd}> "$lockfile"
   _cbox_flock -x "$cfg_lock_fd" || { echo "cbox: cannot lock $lockfile" >&2; exec {cfg_lock_fd}>&-; return 1; }
 
+  local loaded_sha staged_conf
+  loaded_sha="$(_cbox_sha256 "$eff/cbox.conf")"
+  if [ -n "${_CBOX_CONFIG_EXPECTED_PATH:-}" ] && {
+    [ "$_CBOX_CONFIG_EXPECTED_PATH" != "$eff/cbox.conf" ] ||
+    [ "${_CBOX_CONFIG_EXPECTED_SHA:-}" != "$loaded_sha" ];
+  }; then
+    exec {cfg_lock_fd}>&-
+    echo "cbox: refusing - concurrent writer race since netaccess read; re-run the netaccess command" >&2
+    return 1
+  fi
+  staged_conf="$(mktemp "$eff/.cbox.XXXXXX")"
   local backup_conf backup_gen backup_override rc=0 had_override=0
   backup_conf="$(mktemp)"
   backup_gen="$(mktemp -d)"
@@ -9300,8 +9402,18 @@ _cbox_config_set_isolated() {
     . "$eff/cbox.conf"
     _cbox_reg_conf_defaults
     _cbox_config_apply_staged_vars
-    _cbox_config_dep_gate_check
-    _cbox_reg_conf_write_whitelist "$eff/cbox.conf" 1 "$eff/cbox.conf"
+    _cbox_config_dep_gate_check || exit 1
+    if [ "$(_cbox_sha256 "$eff/cbox.conf")" != "$loaded_sha" ]; then
+      echo "cbox: refusing - isolated cbox.conf changed on disk since load (concurrent writer race) - re-run config set" >&2
+      exit 1
+    fi
+    _cbox_reg_conf_write_whitelist "$staged_conf" 1 "$eff/cbox.conf" || exit 1
+    if [ "$(_cbox_sha256 "$eff/cbox.conf")" != "$loaded_sha" ]; then
+      echo "cbox: refusing - isolated cbox.conf changed on disk since load (concurrent writer race) - re-run config set" >&2
+      exit 1
+    fi
+    chmod 0644 "$staged_conf" || exit 1
+    mv "$staged_conf" "$eff/cbox.conf" || exit 1
     . "$eff/cbox.conf"
     _cbox_reg_export_vars
     _cbox_load_machine_scoped_vars
@@ -9328,6 +9440,14 @@ _cbox_config_set_isolated() {
       fi
     done
   ) || rc=$?
+
+  if [ "$rc" -ne 0 ] && [ -f "$staged_conf" ]; then
+    rm -f "$staged_conf" "$backup_conf" "$backup_override"
+    rm -rf "$backup_gen"
+    exec {cfg_lock_fd}>&-
+    echo "cbox: config set failed before commit - current configuration left untouched" >&2
+    return 1
+  fi
 
   if [ "$rc" -ne 0 ]; then
     local restore_tmp
@@ -9390,9 +9510,19 @@ _cbox_config_set_global() {
 
   local loaded_sha cur_sha
   loaded_sha="$(_cbox_sha256 "$conf")"
+  if [ -n "${_CBOX_CONFIG_EXPECTED_PATH:-}" ] && {
+    [ "$_CBOX_CONFIG_EXPECTED_PATH" != "$conf" ] ||
+    [ "${_CBOX_CONFIG_EXPECTED_SHA:-}" != "$loaded_sha" ];
+  }; then
+    exec {cfg_lock_fd}>&-
+    echo "cbox: refusing - concurrent writer race since netaccess read; re-run the netaccess command" >&2
+    return 1
+  fi
 
   local backup="$conf.bak"
   cp "$conf" "$backup"
+  local staged_conf
+  staged_conf="$(mktemp "$INSTALL_DIR/.cbox.XXXXXX")"
 
   local rc=0
   (
@@ -9400,23 +9530,20 @@ _cbox_config_set_global() {
     . "$conf"
     _cbox_reg_conf_defaults
     _cbox_config_apply_staged_vars
-    _cbox_config_dep_gate_check
+    _cbox_config_dep_gate_check || exit 1
     cur_sha="$(_cbox_sha256 "$conf")"
     if [ "$cur_sha" != "$loaded_sha" ]; then
       echo "cbox: refusing - global cbox.conf changed on disk since load (concurrent writer race) - re-run config set" >&2
       exit 1
     fi
-    local tmp
-    tmp="$(mktemp "$INSTALL_DIR/.cbox.XXXXXX")"
-    _cbox_reg_conf_write_whitelist "$tmp" 0 "$conf"
+    _cbox_reg_conf_write_whitelist "$staged_conf" 0 "$conf" || exit 1
     cur_sha="$(_cbox_sha256 "$conf")"
     if [ "$cur_sha" != "$loaded_sha" ]; then
-      rm -f "$tmp"
       echo "cbox: refusing - global cbox.conf changed on disk since load (concurrent writer race) - re-run config set" >&2
       exit 1
     fi
-    chmod 0644 "$tmp"
-    mv "$tmp" "$conf"
+    chmod 0644 "$staged_conf" || exit 1
+    mv "$staged_conf" "$conf" || exit 1
     . "$conf"
     _cbox_reg_export_vars
     if [ "${CBOX_CONFIG_MACHINE_ROUTED:-0}" != 1 ]; then
@@ -9424,6 +9551,13 @@ _cbox_config_set_global() {
     fi
     _cbox_conf_write_manifest "$conf"
   ) || rc=$?
+
+  if [ "$rc" -ne 0 ] && [ -f "$staged_conf" ]; then
+    rm -f "$staged_conf"
+    exec {cfg_lock_fd}>&-
+    echo "cbox: config set failed before commit - current global configuration left untouched" >&2
+    return 1
+  fi
 
   if [ "$rc" -ne 0 ]; then
     cp "$backup" "$conf"
@@ -10551,6 +10685,7 @@ usage() {
   echo "usage: $0 {acp <hermes|claude|codex>|run [--session <id>] [--profile <name>|--new-profile <name>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force] [--profile <name>]|restart [--gpu]|shell [--profile <name>]|logs [--profile <name>] [args]|update|reinstall-bins [--fresh|--force|--if-stale]|bins {status|history [tool]|rollback [tool]}|models check|install-hooks|profile {add <name>|list|ls|rm <name> [--yes]}|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|unset|diff|pending}|netaccess {status|allow|deny}|ollama {status|ps|up|down|pull <model>|reconcile|gpu-check}|hyperqwen {status|ps|up|down|prepare|reconcile|logs [-f]|gpu-check}|llm {status|use <ollama|hyperqwen> [--model <name>]}|wg {status|up [--yes]|down|keygen|peer {add|rm|list|config}|server add-client <name> [<pubkey>] [--endpoint host:port] [--plain] [--yes]|client join <token> [--yes]}|session-broker {status|access {disabled|viewer|full-attach}|window {off|<minutes>}|key {add <pubkey-file> [comment]|rm <fingerprint>|fingerprints}}|backup|login [--profile <name>] [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}"
   echo "cbox: with zero arguments and a TTY on stdin+stdout, bare '$0' opens the interactive hub instead of this usage text"
   echo "cbox: 'cbox ls' lists RUNNING isolated projects only, not every configured project"
+  echo "cbox: 'cbox isolation render --help' describes the opt-in offline engine isolation lab"
   exit 1
 }
 
@@ -10560,6 +10695,7 @@ case "${1:-}" in
   run) shift; run "$@";;
   session) shift; _cbox_session_cmd "$@";;
   profile) shift; _cbox_profile_cmd "$@";;
+  isolation) shift; python3 "$INSTALL_DIR/lib/cbox_isolation.py" "$@";;
   ai) shift; ai "$@";;
   up) shift; up "$@";;
   down)

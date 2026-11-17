@@ -240,6 +240,10 @@
       "layer": "host",
       "purpose": "python3-stdlib implementation backing lib/portable.sh (the P1 waist skeleton, docs/MULTIPLATFORM_DESIGN.md section 3); sourced/invoked host-side only"
     },
+    "lib/cbox_isolation.py": {
+      "layer": "host",
+      "purpose": "opt-in offline engine isolation lab renderer; prints a separate Compose document without launching containers or importing host credentials"
+    },
     "lib/cbox_bind_guard.py": {
       "layer": "host",
       "purpose": "stdlib bind source guard; 'roots-write' records the declared bind roots of a rendered compose (with their render-time real paths) in a sidecar, 'check' parses the compose files and refuses any bind source whose real path leaves its declared root, resolves into the XDG runtime dir, ~/.config/cbox, ~/.ssh, ~/.gnupg or ~/.docker outside a declared bridge/eff/store root, or exposes a protected credential path of a profile container; run host-side by cbox right before every compose up or run"
@@ -424,6 +428,10 @@
       "layer": "test",
       "purpose": "M4 codex guard dialect bridge test: DENY on a spec-based rm-glob PreToolUse fixture, allow on an innocuous fixture, no-crash degrade-to-allow on malformed input, confirms test_m3_oracle.sh verify still passes (knob off = byte-identical default render), and a CBOX_CODEX_HOOKS=on render assertion for [features].codex_hooks and the PreToolUse bridge entry"
     },
+    "lib/test_codex_settings.py": {
+      "layer": "test",
+      "purpose": "Codex preference persistence, managed layers, mounts and optional native runtime host gate"
+    },
     "lib/test_cbox_config.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
@@ -556,6 +564,10 @@
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
+    "lib/test_cbox_isolation.py": {
+      "layer": "test",
+      "purpose": "offline isolation topology, storage separation, input rejection and host dispatcher regression tests"
+    },
     "lib/test_file_inventory.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
@@ -597,6 +609,10 @@
       "purpose": "host-side test harness under the lib/test_* suite"
     },
     "lib/test_hermes_install_rollback.sh": {
+      "layer": "test",
+      "purpose": "host-side test harness under the lib/test_* suite"
+    },
+    "lib/test_hermes_main_install.sh": {
       "layer": "test",
       "purpose": "host-side test harness under the lib/test_* suite"
     },
@@ -695,6 +711,10 @@
     "lib/test_ollama_gpu_preflight.sh": {
       "layer": "test",
       "purpose": "ollama gpu preflight: the on-demand CDI device nodes are created before every owner start, a start that still fails on a missing node is retried exactly once, an uncreatable node names gpu-check, and the preflight never blocks a start on its own"
+    },
+    "lib/test_cdi_spec_heal.sh": {
+      "layer": "test",
+      "purpose": "stale CDI spec self-heal: failing node parsed from the daemon error, nvidia-uvm kept on the create-and-retry path, any other missing node regenerates the listing spec once (direct, sudo -n, or printed sudo command without a terminal) and retries the owner start exactly once"
     },
     "lib/test_ollama_network.sh": {
       "layer": "test",

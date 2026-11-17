@@ -85,12 +85,14 @@ services:
       - @TMP@/home/.claude/jobs:${HOST_HOME}/.claude-cbox/.host-jobs:rw
       - @TMP@/home/.claude/projects/@TMPSLUG@-pw-root:${HOST_HOME}/.claude-cbox/projects/@TMPSLUG@-pw-root:rw
       - @TMP@/home/.codex:${HOST_HOME}/.codex:rw
-      - @TMP@/home/.codex/config.toml:${HOST_HOME}/.codex/config.toml:ro
       - @TMP@/home/.codex/AGENTS.md:${HOST_HOME}/.codex/AGENTS.md:ro
       - @TMP@/home/.codex/cbox-host.config.toml:${HOST_HOME}/.codex/cbox-host.config.toml:ro
       - claude-local:${HOST_HOME}/.local:ro
       - codex-packages:${HOST_HOME}/.codex/packages:ro
       - @TMP@/eff_id/codex/cbox-container.config.toml:${HOST_HOME}/.codex/cbox-container.config.toml:ro
+      - @TMP@/eff_id/codex/defaults.toml:/etc/codex/config.toml:ro
+      - @TMP@/eff_id/codex/managed_config.toml:/etc/codex/managed_config.toml:ro
+      - @TMP@/eff_id/codex/requirements.toml:/etc/codex/requirements.toml:ro
       - @TMP@/eff_id/codex/AGENTS.override.md:${HOST_HOME}/.codex/AGENTS.override.md:ro
       - @TMP@/eff_id/codex/hooks.json:${HOST_HOME}/.codex/hooks.json:ro
 volumes:

@@ -108,7 +108,7 @@ run_change() {
           ;;
       esac
     }
-    _cbox_config_set() { printf "CONFIG_SET %s\n" "$*" >> "$CFGLOG"; }
+    _cbox_config_set() { printf "CONFIG_SET %s\n" "$*" >> "$CFGLOG"; return "${CONFIG_RC:-0}"; }
     _netaccess_apply_now() { printf "APPLIED\n"; return 0; }
     _netaccess_change "$1" isolated /eff "${@:2}"
   ' change "$action" "$@" 2>&1
@@ -118,6 +118,44 @@ out="$(NETS="" run_change list allow appnet)"
 grep -q 'CONFIG_SET CBOX_NETACCESS_NETWORKS=appnet' "$CFGLOG" || _fail "allow network must persist the network list: $out"
 printf '%s\n' "$out" | grep -q '^APPLIED' || _fail "allow must apply to the running proxy: $out"
 _ok "allow <network>: persists then applies"
+
+rc=0
+out="$(CONFIG_RC=1 NETS="" run_change list allow appnet)" || rc=$?
+[ "$rc" -ne 0 ] || _fail "configuration refusal must fail the grant"
+if printf '%s\n' "$out" | grep -q '^APPLIED'; then
+  _fail "configuration refusal must not apply proxy policy"
+fi
+_ok "configuration refusal stops the grant before proxy apply"
+
+for test_mode in global isolated; do
+  (
+    eval "$(_extract_fn "$INSTALL_DIR/cbox" netaccess_cmd)"
+    INSTALL_DIR="$TMPBASE/snapshot-$test_mode"
+    HOME="$INSTALL_DIR/home"
+    mkdir -p "$INSTALL_DIR/templates" "$HOME/.config/cbox/projects/hash"
+    : > "$INSTALL_DIR/templates/sections.sh"
+    conf="$INSTALL_DIR/cbox.conf"
+    [ "$test_mode" = global ] || conf="$HOME/.config/cbox/projects/hash/cbox.conf"
+    printf 'CBOX_NETACCESS_NETWORKS=fresh\nCBOX_NETACCESS_SCOPE=list\n' > "$conf"
+    _cbox_config_in_container() { return 1; }
+    _cbox_effective_mode() { printf '%s' "$test_mode"; }
+    _cbox_workspace_root() { printf '%s' "$TMPBASE/project"; }
+    _cbox_path_hash() { printf hash; }
+    _cbox_sha256() { sha256sum "$1" | cut -d ' ' -f 1; }
+    require_global_conf() { :; }
+    _cbox_netaccess_active() { return 0; }
+    _netaccess_change() {
+      [ "$CBOX_NETACCESS_NETWORKS" = fresh ] || return 1
+      [ "$_CBOX_CONFIG_EXPECTED_PATH" = "$conf" ] || return 1
+      [ "$_CBOX_CONFIG_EXPECTED_SHA" = "$(_cbox_sha256 "$conf")" ] || return 1
+      printf 'captured\n'
+    }
+    CBOX_NETACCESS_NETWORKS=stale
+    netaccess_cmd allow appnet > "$INSTALL_DIR/result"
+    grep -qx captured "$INSTALL_DIR/result"
+  ) || _fail "$test_mode grant did not capture its configuration snapshot"
+  _ok "$test_mode grant reloads the list and carries its hash to the write"
+done
 
 out="$(NETS="appnet" run_change list allow appnet)"
 printf '%s\n' "$out" | grep -q 'already allowed' || _fail "re-allowing must be reported as a no-op: $out"
@@ -324,6 +362,7 @@ ensure_out="$(bash -c '
   COMPOSE=("'"$FAKE_COMPOSE_BIN"'")
   _cbox_proxy_active() { return 0; }
   _cbox_netaccess_active() { return 0; }
+  _cbox_bind_guard() { echo "BIND $*"; return 0; }
   _cbox_netaccess_render() { echo "RENDER $*"; return 0; }
   _cbox_netaccess_verify_listener() { echo "VERIFY $*"; return 0; }
   '"$APPLY_GLOBAL_FN"'

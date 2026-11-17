@@ -40,7 +40,8 @@ for fn in \
   _cbox_hyperqwen_gpu_check_base_image _cbox_hyperqwen_gpu_check_cmd _cbox_hyperqwen_owner_heal_impl hyperqwen_cmd \
   _cbox_hyperqwen_container_running _cbox_hyperqwen_offload_preflight_warn \
   _cbox_hyperqwen_lock_file _cbox_hyperqwen_models_path_safe_fallback _cbox_hyperqwen_scope_networks \
-  _cbox_hyperqwen_validate_render _cbox_hyperqwen_prepare_args_safe _cbox_hyperqwen_owner_heal
+  _cbox_hyperqwen_validate_render _cbox_hyperqwen_prepare_args_safe _cbox_hyperqwen_owner_heal \
+  _cbox_cdi_failed_node _cbox_cdi_spec_files_for _cbox_cdi_spec_writable _cbox_cdi_spec_regenerate _cbox_cdi_host_device_recover
 do
   _load_fn "$fn"
 done

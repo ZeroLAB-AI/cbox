@@ -16,6 +16,15 @@ export HOME
 PROJ="$TMPBASE/project"
 EXTRA="$TMPBASE/extra"
 mkdir -p "$PROJ" "$EXTRA" "$HOME" "$TMPBASE/bin"
+mkdir -p "$TMPBASE/links with spaces"
+ln -s "$INSTALL_DIR/cbox" "$TMPBASE/links with spaces/absolute"
+ln -s '../links with spaces/absolute' "$TMPBASE/bin/relative"
+"$INSTALL_DIR/cbox" isolation render --help > "$TMPBASE/direct-help"
+for launcher in "$TMPBASE/links with spaces/absolute" "$TMPBASE/bin/relative"; do
+  "$launcher" isolation render --help > "$TMPBASE/link-help"
+  cmp "$TMPBASE/direct-help" "$TMPBASE/link-help" || fail "symlink launcher changed command dispatch"
+done
+ok "absolute and relative chained launchers resolve the installation directory"
 git -C "$PROJ" init -q
 hash="$(printf '%s' "$PROJ" | sha256sum)"
 eff="$HOME/.config/cbox/projects/${hash:0:12}"
@@ -65,7 +74,7 @@ ok "claude launcher invokes the project proxy"
 grep -qxF -- 'codex' "$ACP_ARGS" || fail "Codex backend engine missing"
 ok "codex launcher invokes the project proxy"
 
-printf 'approval_policy = "never"\nsandbox_mode = "danger-full-access"\n' > "$TMPBASE/codex-profile.toml"
+printf 'model = "user-default"\nmodel_reasoning_effort = "high"\nhide_agent_reasoning = true\napproval_policy = "never"\nsandbox_mode = "danger-full-access"\n' > "$TMPBASE/codex-profile.toml"
 python3 "$INSTALL_DIR/etc/adapters/codex.py" hooks-json "$TMPBASE/hooks" off > "$TMPBASE/codex-hooks.json"
 python3 "$INSTALL_DIR/lib/codex_acp_config.py" "$TMPBASE/codex-profile.toml" "$TMPBASE/codex-hooks.json" > "$TMPBASE/codex-config.json"
 python3 - "$TMPBASE/codex-config.json" <<'PY'
@@ -73,6 +82,7 @@ import json,sys
 c=json.load(open(sys.argv[1]))
 assert c['approval_policy']=='never'
 assert c['sandbox_mode']=='danger-full-access'
+assert not {'model', 'model_reasoning_effort', 'hide_agent_reasoning', 'tui'} & c.keys()
 assert 'PreToolUse' not in c['hooks']
 PY
 printf '[features]\ncodex_hooks = true\n' >> "$TMPBASE/codex-profile.toml"
@@ -89,6 +99,24 @@ if python3 "$INSTALL_DIR/lib/codex_acp_config.py" "$TMPBASE/codex-profile.toml" 
   fail "Codex ACP accepted a stale hooks gate"
 fi
 ok "Codex ACP config follows the managed profile and hook gate"
+
+python3 - "$INSTALL_DIR/etc/adapters/codex.py" "$TMPBASE" <<'PY'
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+hooks = Path(sys.argv[2]) / "hooks with space ' quote ; $literal"
+hooks.mkdir()
+for name in ("continuity_session_start.py", "codex_guard_bridge.py"):
+    (hooks / name).write_text('print("hook executed")\n', encoding="ascii")
+doc = json.loads(subprocess.check_output([sys.executable, sys.argv[1], "hooks-json", str(hooks), "on"]))
+for event in ("SessionStart", "PreToolUse"):
+    command = doc["hooks"][event][0]["hooks"][0]["command"]
+    result = subprocess.run(command, shell=True, check=True, capture_output=True, text=True)
+    assert result.stdout == "hook executed\n", result
+PY
+ok "generated hooks execute from paths with spaces and shell metacharacters"
 
 rc=0
 (cd "$TMPBASE" && "$INSTALL_DIR/cbox" acp hermes) > "$TMPBASE/out" 2> "$TMPBASE/err" || rc=$?

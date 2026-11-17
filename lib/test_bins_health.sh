@@ -23,8 +23,10 @@ _extract_fn() {
   awk -v fn="$2" '$0 == fn"() {" , $0 == "}"' "$1"
 }
 
-HEALTH_SH="$(sed -n "/^_CBOX_HEALTH_SH='\$/,/^'\$/p" "$INSTALL_DIR/cbox" | sed '1d;$d')"
+eval "$(sed -n "/^_CBOX_HEALTH_SH='\$/,/^'\$/p" "$INSTALL_DIR/cbox")"
+HEALTH_SH="${_CBOX_HEALTH_SH:-}"
 [ -n "$HEALTH_SH" ] || _fail "cannot extract _CBOX_HEALTH_SH from cbox"
+sh -n -c "$HEALTH_SH" || _fail "_CBOX_HEALTH_SH as the shell assigns it does not parse under sh"
 
 _mkstub() {
   local path="$1" body="$2"

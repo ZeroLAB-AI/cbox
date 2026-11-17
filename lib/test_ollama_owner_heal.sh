@@ -24,7 +24,8 @@ eval "$HEAL_FN"
 eval "$RESTART_FN"
 eval "$RECOVER_FN"
 eval "$OWNER_UP_FN"
-for fn in _cbox_ollama_heal_recreate_marker _cbox_ollama_heal_recreate_set _cbox_ollama_heal_recreate_clear; do
+for fn in _cbox_ollama_heal_recreate_marker _cbox_ollama_heal_recreate_set _cbox_ollama_heal_recreate_clear \
+  _cbox_cdi_failed_node _cbox_cdi_spec_files_for _cbox_cdi_spec_writable _cbox_cdi_spec_regenerate _cbox_cdi_host_device_recover; do
   body="$(_extract_fn "$INSTALL_DIR/cbox" "$fn")"
   [ -n "$body" ] || _fail "cannot extract $fn from cbox"
   eval "$body"

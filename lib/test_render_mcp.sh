@@ -290,7 +290,7 @@ test_codex_profile_toml_golden_mcp0() {
   )
   local got want
   got="$(sha256sum "$outdir/cbox-container.config.toml" | awk '{print $1}')"
-  want="897009040fddfa1b1019ba5c85b2ea37cfc0a3edb6dd324ce688e4bf4b1297f1"
+  want="5a3d7fe93849ddb567cd800f15ea450cc6e9a6b46c72eab3b83f4fc3f8892ca6"
   [ "$got" = "$want" ] || _fail "codex profile TOML (CBOX_CODEX_MCP=0) changed (got $got want $want)"
   echo "PASS: codex profile TOML golden CBOX_CODEX_MCP=0"
 }
@@ -308,7 +308,7 @@ test_codex_profile_toml_golden_mcp1() {
   )
   local got want
   got="$(sha256sum "$outdir/cbox-container.config.toml" | awk '{print $1}')"
-  want="05a0b33a79b3eb020ebbb76144ea93a31ef61eeeaabb1426589b72cc2d1694df"
+  want="ddeccd72c3e3c72c73442f2520e21ae247c657a1619dc8659b1477facbe43804"
   [ "$got" = "$want" ] || _fail "codex profile TOML (CBOX_CODEX_MCP=1) changed (got $got want $want)"
   echo "PASS: codex profile TOML golden CBOX_CODEX_MCP=1"
 }
