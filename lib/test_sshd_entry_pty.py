@@ -5,6 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import Mock, patch
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -87,6 +88,22 @@ class BuildAttachArgvTests(unittest.TestCase):
     def test_disabled_refused(self):
         with self.assertRaises(PermissionError):
             MOD.build_attach_argv("disabled", SESSION)
+
+    def test_ssh_spawn_creates_detached_session_and_stops_on_failure(self):
+        with patch.dict(os.environ, {"SSH_ORIGINAL_COMMAND": "spawn claude"}), \
+                patch.object(MOD, "connection_identity", return_value=("fixture", "local")), \
+                patch.object(MOD, "resolve_tier", return_value="full-attach"), \
+                patch.object(MOD, "window_open", return_value=True), \
+                patch.object(MOD, "audit"), \
+                patch.object(MOD, "subprocess", wraps=subprocess) as process, \
+                patch.object(MOD, "run_attach", return_value=0) as attach:
+            process.run = Mock(return_value=Mock(returncode=1))
+            self.assertEqual(MOD.main(), 1)
+            self.assertEqual(process.run.call_args.args[0][:4], ["tmux", "new-session", "-d", "-s"])
+            attach.assert_not_called()
+            process.run.return_value.returncode = 0
+            self.assertEqual(MOD.main(), 0)
+            attach.assert_called_once()
 
     def test_argv_never_carries_a_flag_beyond_the_fixed_set(self):
         for tier in ("viewer", "full-attach"):

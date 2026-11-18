@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 
 INSTALL = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(INSTALL / "lib"))
 MODULE = INSTALL / "lib" / "cbox_isolation.py"
 SPEC = importlib.util.spec_from_file_location("cbox_isolation", MODULE)
 isolation = importlib.util.module_from_spec(SPEC)
@@ -70,6 +71,26 @@ class IsolationTests(unittest.TestCase):
             for key in ("privileged", "devices", "ports", "pid", "ipc", "use_api_socket", "env_file", "extends", "volumes_from", "extra_hosts", "build"):
                 self.assertNotIn(key, service)
 
+    def test_fourth_worker_requires_explicit_offline_runtime(self):
+        engines = [*self.args["engines"], "antigravity"]
+        with self.assertRaises(ValueError):
+            self.render(engines=engines)
+        plan = self.render(engines=engines, runtime=True)
+        self.assertTrue(plan["name"].startswith("cbox-runtime-"))
+        self.assertFalse(plan["x-cbox-isolation"]["runtime_ready"])
+        self.assertNotIn("networks", plan)
+        for engine in engines:
+            worker = plan["services"][engine]
+            self.assertEqual(worker["network_mode"], "none")
+            self.assertEqual([mount["source"] for mount in worker["volumes"] if mount["type"] == "volume"],
+                             [engine + "-home"])
+            actual = {mount["source"] for mount in worker["volumes"] if mount["type"] == "bind"}
+            expected = {str(self.workspace), *(str(INSTALL / file) for file in isolation.RUNTIME_FILES)}
+            if engine == "antigravity":
+                expected.update(str(INSTALL / file) for file in ("etc/hooks/antigravity_guard.py", "etc/antigravity/hooks.json"))
+            self.assertEqual(actual, expected)
+            self.assertTrue(all(mount["read_only"] for mount in worker["volumes"] if mount["type"] == "bind"))
+
     def test_initializers_have_no_workspace_and_workers_are_nonroot(self):
         plan = self.render()
         for engine in self.args["engines"]:
@@ -104,6 +125,8 @@ class IsolationTests(unittest.TestCase):
         other.mkdir()
         (other / ".git").write_text("gitdir: /unmounted/git/worktrees/other\n", encoding="ascii")
         self.assertNotEqual(original["name"], self.render(workspace=str(other))["name"])
+        with self.assertRaisesRegex(ValueError, "local .git metadata"):
+            self.render(workspace=str(other), runtime=True)
 
     def test_subset_does_not_render_other_engines(self):
         plan = self.render(engines=["codex"])

@@ -9,6 +9,8 @@ import tempfile
 import tomllib
 import unittest
 
+from cbox_codex_auth import share
+
 
 INSTALL = Path(__file__).resolve().parents[1]
 RUNTIME = False
@@ -104,11 +106,44 @@ class SettingsTests(unittest.TestCase):
                     compose = (install / "docker-compose.yml" if scope == "global" else
                                eff / "docker-compose.yml")
                     text = compose.read_text()
+                    if mode == "mount":
+                        self.assertIn(str(self.root / "home/.codex/cbox-container-home") + ':${HOST_HOME}/.codex:rw', text)
+                    else:
+                        self.assertIn('codex:${HOST_HOME}/.codex', text)
+                    self.assertNotIn(str(self.root / "home/.codex") + ':${HOST_HOME}/.codex:rw', text)
                     self.assertNotIn(':${HOST_HOME}/.codex/config.toml:', text)
                     for name in ("config.toml", "managed_config.toml", "requirements.toml"):
                         self.assertIn(":/etc/codex/" + name + ":ro", text)
                     self.assertIn(':${HOST_HOME}/.codex/AGENTS.override.md:ro', text)
                     self.assertIn(':${HOST_HOME}/.codex/hooks.json:ro', text)
+
+    def test_opt_in_grant_and_refresh_lock_remain_shared_without_moving_host_config(self):
+        home = self.root / "home/.codex"
+        home.mkdir(mode=0o700)
+        auth = home / "auth.json"
+        auth.write_text("synthetic fixture", encoding="ascii")
+        auth.chmod(0o600)
+        host_lock = home / "auth.lock"
+        host_lock.touch(mode=0o644)
+        host_toml = home / "config.toml"
+        host_toml.write_text('model = "host-preference"\n', encoding="ascii")
+        identity = auth.stat().st_ino
+        lock_identity = host_lock.stat().st_ino
+        share(home)
+        share(home)
+        store = home / "cbox-container-home"
+        self.assertEqual(auth.resolve(), store / "auth.json")
+        self.assertEqual(auth.stat().st_ino, identity)
+        self.assertEqual(auth.stat().st_nlink, 1)
+        self.assertEqual(host_lock.resolve(), store / "auth.lock")
+        self.assertEqual(host_lock.stat().st_ino, lock_identity)
+        replacement = store / "auth-next"
+        replacement.write_text("new synthetic fixture", encoding="ascii")
+        replacement.chmod(0o600)
+        replacement.replace(store / "auth.json")
+        self.assertEqual(auth.read_text(), "new synthetic fixture")
+        self.assertEqual(host_toml.read_text(), 'model = "host-preference"\n')
+        self.assertFalse((store / "config.toml").exists())
 
     def server(self, home):
         env = dict(self.env, CODEX_HOME=str(home))

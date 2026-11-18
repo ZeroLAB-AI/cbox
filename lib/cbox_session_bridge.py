@@ -351,19 +351,21 @@ def extract_claude(root, native_id, cursor):
     item = find_native(root, "claude", native_id)
     path = os.path.join(claude_home(), item["locator"])
     start = cursor_value(cursor, "byte")
-    records, end = jsonl_records(path, start, limit=EXTRACT_MESSAGES, keep="tail")
-    messages = []
-    for row in records:
+    def conversation(row):
         kind = row.get("type")
         if kind not in ("user", "assistant"):
-            continue
+            return None
         msg = row.get("message") if isinstance(row.get("message"), dict) else {}
         role = msg.get("role")
         if role not in ("user", "assistant"):
-            continue
+            return None
         text = text_blocks(msg.get("content"), {"text"})
         if text:
-            messages.append(event(role, text, row.get("timestamp"), row.get("uuid")))
+            return event(role, text, row.get("timestamp"), row.get("uuid"))
+        return None
+
+    records, end = jsonl_records(path, start, limit=EXTRACT_MESSAGES, keep="tail", accept=conversation)
+    messages = [conversation(row) for row in records]
     return item, {"kind": "byte", "value": end}, messages
 
 
@@ -407,13 +409,10 @@ def extract_hermes(root, native_id, cursor):
     con = hermes_connection(path)
     try:
         rows = con.execute(
-            "select id,role,content,timestamp from messages where session_id=? and id>? and active=1 order by id desc limit ?",
+            "select id,role,content,timestamp from messages where session_id=? and id>? and active=1 "
+            "and role in ('user','assistant') and typeof(content)='text' and content<>'' order by id desc limit ?",
             (native_id, start, EXTRACT_MESSAGES),
         ).fetchall()
-        max_row = con.execute(
-            "select coalesce(max(id),?) from messages where session_id=? and id>? and active=1",
-            (start, native_id, start),
-        ).fetchone()
     finally:
         con.close()
     messages = []
@@ -421,8 +420,8 @@ def extract_hermes(root, native_id, cursor):
     for row_id, role, text, stamp in reversed(rows):
         if role in ("user", "assistant") and isinstance(text, str) and text:
             messages.append(event(role, text, iso_from_epoch(stamp), str(row_id)))
-    if max_row and isinstance(max_row[0], int):
-        end = max(end, max_row[0])
+    if rows:
+        end = rows[0][0]
     return item, {"kind": "rowid", "value": end}, messages
 
 

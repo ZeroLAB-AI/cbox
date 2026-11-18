@@ -107,6 +107,25 @@ create table messages (id integer primary key, session_id text, role text, conte
             again = bridge.extract(self.root, engine, native_id, json.dumps(delta["cursor"]))
             self.assertEqual(again["messages"], [])
 
+    def test_claude_and_hermes_tool_chatter_does_not_evict_conversation(self):
+        path = os.path.join(self.claude, "projects", "-project", self.claude_id + ".jsonl")
+        with open(path, "a", encoding="utf-8") as stream:
+            for _ in range(bridge.EXTRACT_MESSAGES + 2):
+                stream.write('{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"skip"}]}}\n')
+        delta = bridge.extract(self.root, "claude", self.claude_id, "")
+        self.assertEqual([x["text"] for x in delta["messages"]], ["claude request", "claude answer"])
+        db = os.path.join(self.hermes, "state.db")
+        with sqlite3.connect(db) as con:
+            con.executemany("insert into messages(session_id,role,content,timestamp,active) values (?,?,?,?,1)",
+                            [(self.hermes_id, "tool", "skip", 0)] * (bridge.EXTRACT_MESSAGES + 2))
+        delta = bridge.extract(self.root, "hermes", self.hermes_id, "")
+        self.assertEqual([x["text"] for x in delta["messages"]], ["hermes request", "hermes answer"])
+        with sqlite3.connect(db) as con:
+            con.execute("insert into messages(session_id,role,content,timestamp,active) values (?,?,?,?,1)",
+                        (self.hermes_id, "user", "next turn", 1))
+        after = bridge.extract(self.root, "hermes", self.hermes_id, json.dumps(delta["cursor"]))
+        self.assertEqual([x["text"] for x in after["messages"]], ["next turn"])
+
     def test_import_plan_maps_native_sessions_without_persisting_titles(self):
         records = bridge.discover(self.root)
         plan = bridge.import_plan(self.root, records)

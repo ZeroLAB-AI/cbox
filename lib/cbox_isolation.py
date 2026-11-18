@@ -8,8 +8,37 @@ import sys
 
 
 ENGINES = ("claude", "codex", "hermes")
+EXPERIMENTAL_ENGINES = (*ENGINES, "antigravity")
 PROFILE = "engine-isolation"
 RUNTIME_HOME = "/home/cbox"
+RUNTIME_ROOT = "/opt/cbox-runtime"
+RUNTIME_FILES = (
+    "etc/hooks/continuity_session_start.py",
+    "etc/hooks/conduct-kernel.txt",
+    "etc/hooks/session-core.txt",
+    "etc/hooks/rm_glob_guard.py",
+)
+
+
+def readonly_bind(source, target):
+    source = str(source)
+    if any(ord(char) < 32 or ord(char) == 127 or char == "$" for char in source):
+        raise ValueError("bind source must not contain control characters or Compose interpolation")
+    return {
+        "type": "bind", "source": source, "target": target,
+        "read_only": True, "bind": {"create_host_path": False},
+    }
+
+
+def runtime_files(files):
+    install = Path(__file__).resolve().parents[1]
+    mounts = []
+    for relative, target in files:
+        source = install / relative
+        if source.resolve(strict=True) != source or not source.is_file():
+            raise ValueError("runtime file must be a regular file inside CBOX: " + relative)
+        mounts.append(readonly_bind(source, target))
+    return mounts
 
 
 def workspace_path(value):
@@ -37,8 +66,10 @@ def workspace_path(value):
     return str(path)
 
 
-def render(workspace, image, session, engines, uid, gid):
+def render(workspace, image, session, engines, uid, gid, *, runtime=False, release=None):
     workspace = workspace_path(workspace)
+    if runtime and not (Path(workspace) / ".git").is_dir():
+        raise ValueError("offline runtime requires a checkout with local .git metadata, not a linked worktree")
     if not isinstance(session, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", session):
         raise ValueError("session must be 1-32 lowercase letters, digits or hyphens")
     if not isinstance(image, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/:@-]{0,254}", image):
@@ -46,18 +77,31 @@ def render(workspace, image, session, engines, uid, gid):
     for key, value in (("uid", uid), ("gid", gid)):
         if type(value) is not int or not 1 <= value <= 2147483647:
             raise ValueError(key + " must be a positive non-root numeric identity")
-    if not engines or len(set(engines)) != len(engines) or any(engine not in ENGINES for engine in engines):
-        raise ValueError("select distinct supported engines: " + ", ".join(ENGINES))
+    supported = EXPERIMENTAL_ENGINES if runtime else ENGINES
+    if not engines or len(set(engines)) != len(engines) or any(engine not in supported for engine in engines):
+        raise ValueError("select distinct supported engines: " + ", ".join(supported))
+    if release is not None and (not runtime or "antigravity" not in engines):
+        raise ValueError("a release requires --runtime and --engine antigravity")
+    bundle = runtime_files((file, RUNTIME_ROOT + "/" + file) for file in RUNTIME_FILES) if runtime else []
+    antigravity_mounts = []
+    if "antigravity" in engines:
+        antigravity_mounts = runtime_files((
+            ("etc/hooks/antigravity_guard.py", RUNTIME_ROOT + "/etc/hooks/antigravity_guard.py"),
+            ("etc/antigravity/hooks.json", RUNTIME_HOME + "/.gemini/config/hooks.json"),
+        ))
+        if release is not None:
+            from cbox_antigravity import verify_release
+            antigravity_mounts.append(readonly_bind(verify_release(release), "/opt/antigravity/agy"))
     digest = hashlib.sha256(workspace.encode()).hexdigest()[:16]
-    project = "cbox-isolation-" + session + "-" + digest
+    project = ("cbox-runtime-" if runtime else "cbox-isolation-") + session + "-" + digest
     services = {}
     volumes = {}
-    for engine in ENGINES:
+    for engine in supported:
         if engine not in engines:
             continue
         state = engine + "-home"
         prepare = engine + "-home-init"
-        labels = {"cbox.kind": "isolation-lab", "cbox.engine": engine, "cbox.session": session}
+        labels = {"cbox.kind": "offline-runtime" if runtime else "isolation-lab", "cbox.engine": engine, "cbox.session": session}
         mount = {"type": "volume", "source": state, "target": RUNTIME_HOME, "volume": {"nocopy": True}}
         volumes[state] = {"labels": labels}
         common = {
@@ -87,23 +131,29 @@ def render(workspace, image, session, engines, uid, gid):
             "entrypoint": ["/bin/sleep"],
             "command": ["infinity"],
             "working_dir": "/workspace",
-            "environment": {"HOME": RUNTIME_HOME, "CBOX_ENGINE": engine, "CBOX_RUNTIME": "isolation-lab"},
+            "environment": {"HOME": RUNTIME_HOME, "CBOX_ENGINE": engine, "CBOX_RUNTIME": labels["cbox.kind"]},
             "depends_on": {prepare: {"condition": "service_completed_successfully"}},
             "tmpfs": ["/tmp:rw,nosuid,nodev,noexec,mode=1777,size=67108864"],
-            "volumes": [mount, {
-                "type": "bind", "source": workspace, "target": "/workspace",
-                "read_only": True, "bind": {"create_host_path": False},
-            }],
+            "volumes": [mount, readonly_bind(workspace, "/workspace"), *bundle],
         }
+        if engine == "antigravity":
+            services[engine]["volumes"].extend(antigravity_mounts)
     return {
         "name": project,
         "services": services,
         "volumes": volumes,
-        "x-cbox-isolation": {"stage": "offline-lab", "schema": 1, "runtime_ready": False},
+        "x-cbox-isolation": {"stage": "offline-runtime" if runtime else "offline-lab", "schema": 1, "runtime_ready": False},
     }
 
 
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["agy-release"]:
+        from cbox_antigravity import main as release_main
+        return release_main(argv[1:])
+    if argv[:1] == ["agy"]:
+        from cbox_antigravity_runtime import main as runtime_main
+        return runtime_main(argv[1:])
     parser = argparse.ArgumentParser(prog="cbox isolation", description="Render an offline engine isolation lab; never launch containers or import credentials.")
     commands = parser.add_subparsers(dest="command", required=True)
     command = commands.add_parser("render", help="print an independent Compose JSON document")
@@ -111,14 +161,19 @@ def main(argv=None):
     command.add_argument("--workspace", required=True)
     command.add_argument("--image", required=True, help="existing local CBOX image; no build or pull")
     command.add_argument("--session", required=True)
-    command.add_argument("--engine", choices=ENGINES, action="append", dest="engines")
+    command.add_argument("--engine", choices=EXPERIMENTAL_ENGINES, action="append", dest="engines")
+    command.add_argument("--runtime", action="store_true", help="include the allowlisted offline runtime files")
+    command.add_argument("--antigravity-release", type=Path, help="verified release prepared by agy-release")
     command.add_argument("--uid", type=int, default=os.getuid())
     command.add_argument("--gid", type=int, default=os.getgid())
+    commands.add_parser("agy-release", help="prepare, verify or roll back an offline Antigravity release")
+    commands.add_parser("agy", help="configure, probe and start the isolated Antigravity engine")
     args = parser.parse_args(argv)
     if not args.experimental:
         parser.error("render requires --experimental; normal cbox run is unchanged")
     try:
-        document = render(args.workspace, args.image, args.session, args.engines or ENGINES, args.uid, args.gid)
+        document = render(args.workspace, args.image, args.session, args.engines or ENGINES,
+                          args.uid, args.gid, runtime=args.runtime, release=args.antigravity_release)
     except (OSError, ValueError, RuntimeError) as exc:
         parser.error(str(exc))
     json.dump(document, sys.stdout, indent=2, ensure_ascii=True)

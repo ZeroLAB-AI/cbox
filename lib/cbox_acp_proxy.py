@@ -678,7 +678,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", action="append", required=True)
     parser.add_argument("--project-root")
-    parser.add_argument("--engine", choices=("hermes", "claude", "codex"), default="hermes")
+    parser.add_argument("--engine", choices=("hermes", "claude", "codex", "antigravity"), default="hermes")
     parser.add_argument("--log")
     parser.add_argument("--max-line-bytes", type=int, default=8 * 1024 * 1024)
     args = parser.parse_args(argv[:split])

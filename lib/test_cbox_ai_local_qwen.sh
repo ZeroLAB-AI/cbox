@@ -170,6 +170,33 @@ test_engine_auto_headless_default_never_local_qwen() {
   echo "PASS: ai() headless prompt auto-run defaults to claude, not local-qwen"
 }
 
+test_ai_builders_keep_the_executable_and_permission_flags() {
+  local scope engine mode headless
+  local -a cmd
+  for scope in host container; do
+    for engine in claude codex; do
+      for mode in full analyse plan; do
+        for headless in 0 1; do
+          CBOX_AI_MODEL="" CBOX_AI_EFFORT="" CBOX_AI_PROMPT="fixture"
+          _cbox_readarray cmd < <("_cbox_ai_${scope}_${engine}_cmd" "$mode" "$headless")
+          [ "${cmd[0]}" = "$engine" ] || _fail "executable lost for $scope $engine $mode"
+          CBOX_AI_MODEL="fixture-model" CBOX_AI_EFFORT="high"
+          _cbox_readarray cmd < <("_cbox_ai_${scope}_${engine}_cmd" "$mode" "$headless")
+          [ "${cmd[0]}" = "$engine" ] || _fail "optional flags erased $scope $engine executable"
+          case " ${cmd[*]} " in
+            *' fixture-model '*) : ;;
+            *) _fail "model flag lost for $scope $engine" ;;
+          esac
+          if [ "$engine" = codex ]; then
+            [ "${cmd[1]}" = -a ] && [ "${cmd[2]}" = never ] && [ "${cmd[3]}" = -s ] || _fail "sandbox flags lost"
+          fi
+        done
+      done
+    done
+  done
+  echo "PASS: Claude and Codex retain executable and safety arguments in every launch mode"
+}
+
 test_preflight_refuses_when_local_model_off
 test_preflight_refuses_when_local_model_unset
 test_preflight_refuses_when_url_missing
@@ -182,4 +209,5 @@ test_container_cmd_uses_oss_local_provider_ollama
 test_container_cmd_interactive_omits_exec
 test_engine_auto_never_resolves_to_local_qwen
 test_engine_auto_headless_default_never_local_qwen
+test_ai_builders_keep_the_executable_and_permission_flags
 echo "all cbox-ai local-qwen tests passed"

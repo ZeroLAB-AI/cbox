@@ -5,11 +5,13 @@ import io
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 
 PROGRESS_TAIL_LINES = 40
 LEDGER_BYTE_CAP = 6000
+BRAIN_FILE_READ_CAP = 64 * 1024
 # The session core is cbox-owned, required orchestration text.  Reference
 # payloads come from the project worktree (ledger/progress) and can contain
 # arbitrary text, so keep their byte ceiling materially below the core's.
@@ -218,14 +220,45 @@ def _select_brain_dir(root):
     cbox_ledger = os.path.join(cbox_dir, "LEDGER.md")
     claude_ledger = os.path.join(claude_dir, "LEDGER.md")
 
-    if os.path.isfile(cbox_ledger):
+    if _regular_brain_file(cbox_ledger):
         return cbox_dir
-    if os.path.isfile(claude_ledger):
+    if _regular_brain_file(claude_ledger):
         sys.stderr.write(
             "continuity_session_start: .cbox/ brain not found, falling back to "
             ".claude/ - run 'cbox continuity migrate' to move it\n")
         return claude_dir
     return None
+
+
+def _regular_brain_file(path):
+    try:
+        return (stat.S_ISDIR(os.lstat(os.path.dirname(path)).st_mode)
+                and stat.S_ISREG(os.lstat(path).st_mode))
+    except OSError:
+        return False
+
+
+def _read_brain_file(path, *, tail=False):
+    brain_dir, filename = os.path.split(path)
+    root, brain = os.path.split(brain_dir)
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    root_fd = os.open(root, directory_flags)
+    try:
+        brain_fd = os.open(brain, directory_flags, dir_fd=root_fd)
+        try:
+            fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=brain_fd)
+        finally:
+            os.close(brain_fd)
+    finally:
+        os.close(root_fd)
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("not a regular brain file")
+        partial = info.st_size > BRAIN_FILE_READ_CAP
+        if tail and partial:
+            stream.seek(info.st_size - BRAIN_FILE_READ_CAP)
+        return stream.read(BRAIN_FILE_READ_CAP).decode("utf-8", "replace" if partial else "strict")
 
 
 def _newest_progress_path(brain_dir):
@@ -238,10 +271,11 @@ def _newest_progress_path(brain_dir):
 
     if today_str:
         today_path = os.path.join(brain_dir, "PROGRESS_%s.md" % today_str)
-        if os.path.isfile(today_path):
+        if _regular_brain_file(today_path):
             return today_path
 
-    candidates = sorted(glob.glob(os.path.join(brain_dir, "PROGRESS_*.md")))
+    candidates = sorted(path for path in glob.glob(os.path.join(brain_dir, "PROGRESS_*.md"))
+                        if _regular_brain_file(path))
     if candidates:
         return candidates[-1]
     return None
@@ -249,8 +283,7 @@ def _newest_progress_path(brain_dir):
 
 def _tail_lines(path, n):
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+        lines = _read_brain_file(path, tail=True).splitlines(keepends=True)
     except Exception as exc:
         _warn("progress tail read (%s)" % path, str(exc))
         return None
@@ -579,12 +612,10 @@ def main():
     if "ledger" in sections:
         ledger_path = os.path.join(brain_dir, "LEDGER.md")
         ledger_text = None
-        if os.path.isfile(ledger_path):
-            try:
-                with open(ledger_path, "r", encoding="utf-8") as f:
-                    ledger_text = f.read()
-            except Exception as exc:
-                _warn("ledger read (%s)" % ledger_path, str(exc))
+        try:
+            ledger_text = _read_brain_file(ledger_path)
+        except (OSError, ValueError) as exc:
+            _warn("ledger read (%s)" % ledger_path, str(exc))
 
         if ledger_text is not None:
             if profile == "light" or source in ("resume", "compact"):

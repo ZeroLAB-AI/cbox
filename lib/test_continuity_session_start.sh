@@ -66,6 +66,30 @@ _make_repo() {
   git -C "$d" config user.name t
 }
 
+test_brain_rejects_file_and_directory_symlinks() {
+  local d="$TMPBASE/brain-links" second="$TMPBASE/brain-dir-link" payload
+  _make_repo "$d"
+  _make_repo "$second"
+  mkdir -p "$d/.cbox" "$TMPBASE/outside-brain"
+  printf '%s\n' EXTERNAL_BRAIN_FIXTURE > "$TMPBASE/outside-brain/LEDGER.md"
+  ln -s "$TMPBASE/outside-brain/LEDGER.md" "$d/.cbox/PROGRESS_2099_12_31.md"
+  printf '# Trusted ledger\n' > "$d/.cbox/LEDGER.md"
+  printf 'Trusted progress\n' > "$d/.cbox/PROGRESS_2099_01_01.md"
+  ln -s "$TMPBASE/outside-brain" "$second/.cbox"
+  ln -s "$TMPBASE/outside-brain/LEDGER.md" "$second/.claude/LEDGER.md"
+  payload="$(printf '{"source":"startup","cwd":"%s"}\n' "$d" | python3 "$HOOK")"
+  case "$payload" in
+    *EXTERNAL_BRAIN_FIXTURE*) _fail "progress followed an external symlink" ;;
+    *"Trusted progress"*) : ;;
+    *) _fail "progress selection skipped the valid regular file" ;;
+  esac
+  payload="$(printf '{"source":"startup","cwd":"%s"}\n' "$second" | python3 "$HOOK")"
+  case "$payload" in
+    *EXTERNAL_BRAIN_FIXTURE*) _fail "ledger followed an external brain directory" ;;
+  esac
+  echo "PASS: project brain ignores symlinks and still reads the latest valid progress"
+}
+
 test_reference_payload_cap() {
   local d="$TMPBASE/reference" payload bytes
   _make_repo "$d"
@@ -1021,6 +1045,7 @@ JSON
   echo "PASS: a missing session-core.txt degrades to the light kernel with the review text rendered"
 }
 
+test_brain_rejects_file_and_directory_symlinks
 test_reference_payload_cap
 test_core_payload_cap
 test_core_payload_not_truncated

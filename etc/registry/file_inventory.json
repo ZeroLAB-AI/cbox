@@ -72,6 +72,10 @@
       "layer": "host",
       "purpose": "read by cbox doctor/dispatch on the host (cbox:3574 etc, marked host-side check)"
     },
+    "etc/hooks/antigravity_guard.py": {
+      "layer": "container",
+      "purpose": "Translate native Antigravity hook payloads to CBOX continuity and shell guards"
+    },
     "etc/hooks/agent_label_guard.py": {
       "layer": "template-generating-container-content",
       "purpose": "copied into generated/hooks, staged into container claude hooks"
@@ -168,6 +172,10 @@
       "layer": "host",
       "purpose": "host NetworkManager dispatcher script, sh not bash, /bin/sh shebang, host ip/docker restart on network events"
     },
+    "etc/mcp/antigravity_delegate.py": {
+      "layer": "container",
+      "purpose": "Bounded native headless stream and process ownership for the Antigravity delegate"
+    },
     "etc/mcp/cbox_net_mcp.py": {
       "layer": "template-generating-container-content",
       "purpose": "_cbox_write copies verbatim into generated/hooks, an in-container MCP server"
@@ -211,6 +219,30 @@
     "install-bins.sh": {
       "layer": "container",
       "purpose": "Linux bins installer with pinned Node and Claude ACP adapter checks"
+    },
+    "lib/test_cbox_antigravity.py": {
+      "layer": "test",
+      "purpose": "Verify offline release provenance, native hooks and stream, and relay identity and cancellation"
+    },
+    "lib/cbox_peer_mcp.py": {
+      "layer": "container",
+      "purpose": "stdio MCP proxy that forwards scoped peer turns to a private session relay"
+    },
+    "lib/cbox_delegate_relay.py": {
+      "layer": "container",
+      "purpose": "Session-scoped relay protocol and write admission for isolated engine delegates"
+    },
+    "lib/cbox_antigravity_runtime.py": {
+      "layer": "host",
+      "purpose": "Opt-in isolated Antigravity CLI, native ACP, release probe and vendor egress launcher"
+    },
+    "lib/cbox_codex_auth.py": {
+      "layer": "host",
+      "purpose": "Explicit sharing of one file-based Codex grant and refresh lock between separate preference homes"
+    },
+    "lib/cbox_antigravity.py": {
+      "layer": "host",
+      "purpose": "Offline Antigravity release staging with provenance checks and rollback"
     },
     "lib/cbox-ai.sh": {
       "layer": "host",

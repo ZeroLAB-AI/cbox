@@ -262,9 +262,12 @@ _run codex isolated "$PROJ_CONF" "deadbeefcafe"
 [ ! -s "$CONFIG_SET_LOG" ] || _fail "isolated, codex creds missing: must not mark applied, got: $(cat "$CONFIG_SET_LOG")"
 _ok "isolated scope, codex credentials missing - gate holds"
 
-mkdir -p "$TMPBASE/codex-present"
+mkdir -p "$TMPBASE/codex-present/cbox-container-home"
 printf '{"x":1}' > "$TMPBASE/codex-present/auth.json"
 sed -i "s#CODEX_PATH=.*#CODEX_PATH=$TMPBASE/codex-present#" "$PROJ_CONF"
+_run codex isolated "$PROJ_CONF" "deadbeefcafe"
+[ ! -s "$CONFIG_SET_LOG" ] || _fail "host-only codex grant must not mark lockdown applied"
+printf '{"x":1}' > "$TMPBASE/codex-present/cbox-container-home/auth.json"
 _run codex isolated "$PROJ_CONF" "deadbeefcafe"
 grep -q 'CBOX_EGRESS_APPLIED=1' "$CONFIG_SET_LOG" || _fail "isolated, codex creds present: expected apply, got: $(cat "$CONFIG_SET_LOG")"
 grep -q '^ISOLATED ' "$CONFIG_SET_LOG" \

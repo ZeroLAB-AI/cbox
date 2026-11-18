@@ -103,7 +103,7 @@ if grep -qF 'cbox.profile' "$TMPBASE/def_new.yml"; then _fail "default render ca
 if grep -qF "$H/.config/cbox/profiles" "$TMPBASE/def_new.yml"; then _fail "default render references the profile store"; fi
 if grep -qF 'credentials-mask' "$TMPBASE/def_new.yml"; then _fail "default render carries a credentials mask"; fi
 grep -qxF -- "      - $H/.claude:\${HOST_HOME}/.claude:rw" "$TMPBASE/def_new.yml" || _fail "default render lost the whole claude dir bind"
-grep -qxF -- "      - $H/.codex:\${HOST_HOME}/.codex:rw" "$TMPBASE/def_new.yml" || _fail "default render lost the whole codex dir bind"
+grep -qxF -- "      - $H/.codex/cbox-container-home:\${HOST_HOME}/.codex:rw" "$TMPBASE/def_new.yml" || _fail "default render lost the container-only codex home bind"
 grep -qxF -- '      - CBOX_REVIEW=ask' "$TMPBASE/def_new.yml" || _fail "default render lacks the CBOX_REVIEW env line"
 grep -qxF -- '      - CBOX_BUDGET_MODE=on' "$TMPBASE/def_new.yml" || _fail "default render lacks the CBOX_BUDGET_MODE=on env line"
 grep -qxF -- '      - CBOX_SUBSCRIPTION_PROFILE=high' "$TMPBASE/def_new.yml" || _fail "default render lacks the CBOX_SUBSCRIPTION_PROFILE=high env line"
@@ -127,7 +127,7 @@ for kv in CBOX_BUDGET_LOW_5H=10 CBOX_BUDGET_LOW_7D=25 CBOX_BUDGET_PACE_WINDOW_H=
 done
 _ok "isolated render: the regulator thresholds default to 15/20/3/8 and follow the configured values exactly once"
 grep -qxF -- '      - CODEX_GUARD_AUDIT=${HOST_HOME}/.claude/codex_guard_audit.container.jsonl' "$TMPBASE/def_new.yml" || _fail "default render changed the codex guard audit path"
-if grep -qF 'cbox-audit' "$TMPBASE/def_new.yml"; then _fail "default render carries the profile audit dir"; fi
+if grep -qF '${HOST_HOME}/.claude/cbox-audit' "$TMPBASE/def_new.yml"; then _fail "default render carries the profile audit dir"; fi
 grep -qF "name: cbox-p$(. "$INSTALL_DIR/_common.sh"; _cbox_path_hash "$ROOT")" "$TMPBASE/def_new.yml" || _fail "default compose name changed"
 grep -qF -- "- $H/.claude.json:\${HOST_HOME}/.claude.json:ro" "$TMPBASE/def_new.yml" || _fail "default render lost the host .claude.json seed bind"
 _ok "default render: no profile label, store, or mask; host .claude.json seed bind kept"

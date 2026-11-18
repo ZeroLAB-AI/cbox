@@ -65,7 +65,7 @@ services:
       - @TMP@/home/.claude/policies:${HOST_HOME}/.claude-cbox/policies:ro
       - @TMP@/home/.claude/templates:${HOST_HOME}/.claude-cbox/templates:ro
       - @TMP@/home/.claude/cbox-docs:${HOST_HOME}/.claude-cbox/cbox-docs:ro
-      - @TMP@/home/.codex:${HOST_HOME}/.codex:rw
+      - @TMP@/home/.codex/cbox-container-home:${HOST_HOME}/.codex:rw
       - @TMP@/home/.codex/AGENTS.md:${HOST_HOME}/.codex/AGENTS.md:ro
       - @TMP@/home/.codex/cbox-host.config.toml:${HOST_HOME}/.codex/cbox-host.config.toml:ro
       - claude-local:${HOST_HOME}/.local:ro

@@ -84,7 +84,7 @@ services:
       - @TMP@/home/.claude/tasks:${HOST_HOME}/.claude-cbox/.host-tasks:rw
       - @TMP@/home/.claude/jobs:${HOST_HOME}/.claude-cbox/.host-jobs:rw
       - @TMP@/home/.claude/projects/@TMPSLUG@-pw-root:${HOST_HOME}/.claude-cbox/projects/@TMPSLUG@-pw-root:rw
-      - @TMP@/home/.codex:${HOST_HOME}/.codex:rw
+      - @TMP@/home/.codex/cbox-container-home:${HOST_HOME}/.codex:rw
       - @TMP@/home/.codex/AGENTS.md:${HOST_HOME}/.codex/AGENTS.md:ro
       - @TMP@/home/.codex/cbox-host.config.toml:${HOST_HOME}/.codex/cbox-host.config.toml:ro
       - claude-local:${HOST_HOME}/.local:ro

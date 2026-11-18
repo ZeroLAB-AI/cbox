@@ -325,14 +325,14 @@ def _probe_hermes(base, timeout=HERMES_PROBE_TIMEOUT, join_deadline=HERMES_PROBE
             result.get("waiting"))
 
 
-def _update_hermes_cache(now):
-    path = os.path.join(_usage_dir(), "hermes.json")
+def _update_hermes_cache(now, *, cache_path=None, base=None):
+    path = cache_path if cache_path is not None else os.path.join(_usage_dir(), "hermes.json")
     data = _read_json_file(path)
     existing = data if isinstance(data, dict) else {}
     last_probe_ts = existing.get("last_probe_ts")
     if isinstance(last_probe_ts, (int, float)) and (now - last_probe_ts) < HERMES_PROBE_MIN_INTERVAL:
         return
-    base = _hermes_base_url()
+    base = _hermes_base_url() if base is None else base
     if not base:
         return
     pending = dict(existing)
@@ -838,8 +838,8 @@ def _hermes_external_load(state):
     return running + waiting
 
 
-def _hermes_segment(now, cwd=None):
-    if not _cbox_budget_mod().local_tier_present(cwd):
+def _hermes_segment(now, cwd=None, *, codex=False, state=None):
+    if not codex and not _cbox_budget_mod().local_tier_present(cwd):
         return None
     slots = _hermes_held_slots()
     held = len(slots)
@@ -847,7 +847,8 @@ def _hermes_segment(now, cwd=None):
     pool = "hermes: full %d/1" % (0 in slots)
     if limit > 1:
         pool += " small %d/%d" % (sum(i > 0 for i in slots), limit - 1)
-    state = _cbox_budget_mod().hermes_state(now)
+    if state is None:
+        state = _cbox_budget_mod().hermes_state(now)
     load = _hermes_external_load(state)
     foreign = load - held if load is not None else 0
     foreign_text = " +%s ext" % format(foreign, "g") if foreign > 0 else ""
@@ -856,6 +857,8 @@ def _hermes_segment(now, cwd=None):
             return pool + foreign_text
         if state.get("state") == "unavailable" and state.get("reachable") is False:
             return "hermes: down"
+        if codex and state.get("state") != "available":
+            return "hermes: unknown"
         return "hermes: idle"
     latest_unfinished, durations = _hermes_run_scan()
     if latest_unfinished is None:
@@ -1013,8 +1016,53 @@ def _run(data, now):
     return line
 
 
+def _codex_hermes_env(managed="/etc/codex/managed_config.toml", legacy=None):
+    import tomllib
+
+    if legacy is None:
+        legacy = os.path.join(os.path.expanduser("~"), ".codex", "cbox-container.config.toml")
+    for path in (managed, legacy):
+        try:
+            with open(path, "rb") as stream:
+                spec = tomllib.load(stream).get("mcp_servers", {}).get("hermes-local")
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, AttributeError):
+            return None
+        if not isinstance(spec, dict) or not spec.get("command") or spec.get("enabled", True) is not True:
+            return None
+        env = spec.get("env", {})
+        if not isinstance(env, dict):
+            return None
+        return {key: value for key, value in env.items() if isinstance(value, str) and key in {
+            "CBOX_HERMES_DELEGATE_BASE_URL", "CBOX_HERMES_MODEL_URL", "CBOX_LOCAL_MODEL_URL",
+            "CBOX_HERMES_DELEGATE_MAX_CONCURRENCY", "OLLAMA_NUM_PARALLEL",
+            "CBOX_HERMES_DELEGATE_LOCK_DIR", "CBOX_HERMES_DELEGATE_RUNS_DIR",
+        }}
+    return None
+
+
+def _codex_hermes_status(env, now):
+    os.environ.update(env)
+    base = _hermes_base_url()
+    state = {}
+    if base:
+        endpoint = hashlib.sha256(base.encode("utf-8")).hexdigest()
+        path = os.path.join(_usage_dir(), "hermes-endpoint-" + endpoint + ".json")
+        _update_hermes_cache(now, cache_path=path, base=base)
+        state = _cbox_budget_mod().hermes_state(now, cache_path=path)
+    return _hermes_segment(now, codex=True, state=state)
+
+
 def main():
     try:
+        if sys.argv[1:] in (["--codex-hermes-enabled"], ["--codex-hermes"]):
+            env = _codex_hermes_env()
+            if env is None:
+                return 1
+            if sys.argv[1] == "--codex-hermes":
+                print(_codex_hermes_status(env, time.time()))
+            return 0
         try:
             data = _read_stdin_json()
         except Exception:
@@ -1024,8 +1072,9 @@ def main():
         line = _run(data, time.time())
         print(line)
     except Exception:
-        pass
+        if sys.argv[1:] in (["--codex-hermes-enabled"], ["--codex-hermes"]):
+            return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

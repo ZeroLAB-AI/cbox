@@ -975,15 +975,46 @@ _cbox_cdi_failed_node() {
   printf '%s\n' "$1" | sed -n 's/.*failed to stat CDI host device "\([^"]*\)".*/\1/p' | head -n1
 }
 
+_cbox_cdi_spec_matches() {
+  local file="$1" node="$2"
+  [[ "$node" =~ ^/dev/[a-zA-Z0-9._/-]+$ ]] || return 1
+  [ "${file##*/}" = nvidia.yaml ] && [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  awk -v wanted="$node" '
+    function finish_node() {
+      if ((host != "" ? host : path) == wanted) found = 1
+      host = path = ""
+    }
+    /^[ ]*($|#)/ { next }
+    /^kind:/ { kinds++; nvidia = ($0 ~ /^kind:[ ]+nvidia\.com\/gpu[ ]*$/) }
+    /^cdiVersion:[ ]+[0-9]+\.[0-9]+\.[0-9]+[ ]*$/ { versions++ }
+    /^(---|\.\.\.)/ { documents++ }
+    {
+      match($0, /^ */); depth = RLENGTH
+      value = substr($0, depth + 1)
+      if (nodes && (depth < base || (depth == base && value !~ /^- /))) {
+        finish_node(); nodes = 0
+      }
+      if (value ~ /^deviceNodes:[ ]*$/) {
+        finish_node(); base = depth; nodes = 1
+        next
+      }
+      if (!nodes) next
+      if (value ~ /^- /) { finish_node(); sub(/^- +/, "", value) }
+      if (value ~ /^path: +/) { sub(/^path: +/, "", value); sub(/ +$/, "", value); path = value }
+      if (value ~ /^hostPath: +/) { sub(/^hostPath: +/, "", value); sub(/ +$/, "", value); host = value }
+    }
+    END { finish_node(); exit !(kinds == 1 && nvidia && versions == 1 && !documents && found) }
+  ' "$file" 2>/dev/null
+}
+
 _cbox_cdi_spec_files_for() {
   local node="$1" d f
-  for d in ${_CBOX_CDI_SPEC_DIRS:-/etc/cdi /var/run/cdi}; do
-    for f in "$d"/*.yaml "$d"/*.yml "$d"/*.json; do
-      [ -f "$f" ] || continue
-      grep -qF -- "$node" "$f" 2>/dev/null && printf '%s\n' "$f"
-    done
+  local -a dirs
+  read -r -a dirs <<< "${_CBOX_CDI_SPEC_DIRS:-/etc/cdi /var/run/cdi}"
+  for d in "${dirs[@]}"; do
+    f="$d/nvidia.yaml"
+    if _cbox_cdi_spec_matches "$f" "$node"; then printf '%s\n' "$f"; fi
   done
-  return 0
 }
 
 _cbox_cdi_spec_writable() {
@@ -1033,18 +1064,22 @@ _cbox_cdi_host_device_recover() {
     return 1
   fi
   specs="$(_cbox_cdi_spec_files_for "$node")"
-  if [ -z "$specs" ]; then
-    echo "cbox: $who: the start failed on CDI host device $node, which no CDI spec in ${_CBOX_CDI_SPEC_DIRS:-/etc/cdi /var/run/cdi} lists - run '$check' for the fix candidates" >&2
+  if [ -z "$specs" ] || [[ "$specs" == *$'\n'* ]]; then
+    echo "cbox: $who: no unique generated NVIDIA CDI spec names $node as a host device - run '$check' to inspect the CDI configuration" >&2
     return 1
   fi
   echo "cbox: $who: the CDI spec lists $node, which no longer exists on this host - the spec is stale (typical after the eGPU moves to another port or cable, a GPU replug, an unloaded nvidia_drm or nvidia_modeset module, or a driver upgrade), so cbox regenerates it" >&2
   while IFS= read -r spec; do
     [ -n "$spec" ] || continue
+    if ! _cbox_cdi_spec_matches "$spec" "$node"; then
+      echo "cbox: $who: the CDI spec changed before regeneration - run '$check' to inspect it" >&2
+      return 1
+    fi
     if ! _cbox_cdi_spec_regenerate "$spec"; then
       echo "cbox: $who: the CDI spec was not regenerated - run 'sudo nvidia-ctk cdi generate --output=$spec' and start again; '$check' prints the other fix candidates" >&2
       return 1
     fi
-    if grep -qF -- "$node" "$spec" 2>/dev/null; then
+    if _cbox_cdi_spec_matches "$spec" "$node"; then
       echo "cbox: $who: $spec was regenerated but still lists $node - run '$check' for the fix candidates" >&2
       return 1
     fi
@@ -3987,6 +4022,8 @@ _cbox_scope_creds_ready() {
     store="$(_cbox_profile_store_dir "$profile")" || return 1
     claude_creds="$store/claude"
     codex_creds="$store/codex"
+  elif [ "$codex_mode" = mount ]; then
+    codex_path="$codex_path/cbox-container-home"
   fi
   _cbox_engine_ready claude "$scope" "$hash" "$claude_mode" "$claude_path" "$claude_creds" && return 0
   _cbox_engine_ready codex "$scope" "$hash" "$codex_mode" "$codex_path" "$codex_creds" && return 0
@@ -6116,8 +6153,9 @@ _cbox_run_dispatch() {
 acp() {
   local engine="${1:-}" root eff mode w cwd
   local -a roots=() workspaces=()
-  [ "$#" -eq 1 ] || { echo "cbox: usage: $0 acp {hermes|claude|codex}" >&2; return 2; }
+  [ "$#" -eq 1 ] || { echo "cbox: usage: $0 acp {hermes|claude|codex|antigravity}" >&2; return 2; }
   case "$engine" in
+    antigravity) exec python3 "$INSTALL_DIR/lib/cbox_antigravity_runtime.py" acp ;;
     hermes|claude|codex) ;;
     *) echo "cbox: unknown acp engine: $engine" >&2; return 2 ;;
   esac
@@ -6232,6 +6270,13 @@ run() {
   local bin="${1:-}"
   [ -n "$bin" ] || { echo "cbox: usage: $0 run [--session <id>] [--profile <name>|--new-profile <name>] <bin> [args...]" >&2; return 1; }
   shift
+  if [ "$bin" = antigravity ]; then
+    if [ -n "$session_id" ] || [ -n "${_CBOX_PF_NAME:-}" ]; then
+      echo "cbox: Antigravity uses its isolated workspace state; --session and --profile are unavailable" >&2
+      return 2
+    fi
+    exec python3 "$INSTALL_DIR/lib/cbox_antigravity_runtime.py" cli "$@"
+  fi
   while [ $# -gt 0 ]; do
     _cbox_profile_flag_take 1 "$@" && prc=0 || prc=$?
     case "$prc" in
@@ -6910,7 +6955,7 @@ continuity_migrate() {
 
 backup() {
   require_global_conf
-  local ts v vols=()
+  local ts v vols=() dir="$INSTALL_DIR/backups" tmp name rc=0
   if [ "${CBOX_CLAUDE_MODE:-mount}" = volume ]; then vols+=("${CBOX_NAME:-cbox}-claude"); fi
   if [ "${CBOX_CODEX_MODE:-mount}" = volume ]; then vols+=("${CBOX_NAME:-cbox}-codex"); fi
   if [ "${CBOX_VENV_MODE:-none}" = volume ]; then vols+=("${CBOX_NAME:-cbox}-venv"); fi
@@ -6918,20 +6963,32 @@ backup() {
     container-keys|mixed) vols+=("${CBOX_NAME:-cbox}-ssh");;
   esac
   ts="$(date +%Y%m%d-%H%M%S)"
-  mkdir -p "$INSTALL_DIR/backups"
+  if [ -L "$dir" ] || ! mkdir -m 0700 -p "$dir" || ! chmod 0700 "$dir"; then
+    echo "cbox: cannot secure the backup directory: $dir" >&2
+    return 1
+  fi
   for v in "${vols[@]}"; do
     if ! docker volume inspect "$v" >/dev/null 2>&1; then
       echo "cbox: volume $v not found - skipped"
       continue
     fi
-    docker run --rm -v "$v:/src:ro" -v "$INSTALL_DIR/backups:/out" ubuntu:24.04 tar czf "/out/$v-$ts.tar.gz" -C /src .
-    du -h "$INSTALL_DIR/backups/$v-$ts.tar.gz"
+    tmp="$(mktemp "$dir/.$v-$ts.XXXXXXXX")" || return 1
+    name="${tmp##*/}"
+    if docker run --rm --network none -v "$v:/src:ro" ubuntu:24.04 tar czf - -C /src . > "$tmp" \
+        && mv -- "$tmp" "$dir/${name#.}.tar.gz"; then
+      du -h "$dir/${name#.}.tar.gz"
+    else
+      rm -f -- "$tmp"
+      echo "cbox: backup failed for $v" >&2
+      rc=1
+    fi
   done
   local iso_vols
   iso_vols="$(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -c '^cbox-p' || true)"
   if [ "${iso_vols:-0}" -gt 0 ] 2>/dev/null; then
     echo "cbox: note: $iso_vols isolated project volume(s) (cbox-p*) are not covered by this backup - archive them per project: docker run --rm -v <vol>:/src:ro -v <dest>:/out ubuntu:24.04 tar czf /out/<vol>.tar.gz -C /src ."
   fi
+  return "$rc"
 }
 
 _socat_exec_addr() {
@@ -10682,7 +10739,7 @@ print(json.dumps(out))
 }
 
 usage() {
-  echo "usage: $0 {acp <hermes|claude|codex>|run [--session <id>] [--profile <name>|--new-profile <name>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force] [--profile <name>]|restart [--gpu]|shell [--profile <name>]|logs [--profile <name>] [args]|update|reinstall-bins [--fresh|--force|--if-stale]|bins {status|history [tool]|rollback [tool]}|models check|install-hooks|profile {add <name>|list|ls|rm <name> [--yes]}|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|unset|diff|pending}|netaccess {status|allow|deny}|ollama {status|ps|up|down|pull <model>|reconcile|gpu-check}|hyperqwen {status|ps|up|down|prepare|reconcile|logs [-f]|gpu-check}|llm {status|use <ollama|hyperqwen> [--model <name>]}|wg {status|up [--yes]|down|keygen|peer {add|rm|list|config}|server add-client <name> [<pubkey>] [--endpoint host:port] [--plain] [--yes]|client join <token> [--yes]}|session-broker {status|access {disabled|viewer|full-attach}|window {off|<minutes>}|key {add <pubkey-file> [comment]|rm <fingerprint>|fingerprints}}|backup|login [--profile <name>] [oauth-url]|login-codex|gc|net-refresh|ls|images [list|rm <hash>]}"
+  echo "usage: $0 {acp <hermes|claude|codex|antigravity>|run [--session <id>] [--profile <name>|--new-profile <name>] <bin> [args]|session {list|new|close <id>|show <id>}|ai <analyse|plan|full> [claude|codex|auto] [--host|--container] [-p <prompt>|-] [--model M] [--effort E] [--dry-run]|up [--gpu]|down [--force] [--profile <name>]|restart [--gpu]|shell [--profile <name>]|logs [--profile <name>] [args]|update|reinstall-bins [--fresh|--force|--if-stale]|bins {status|history [tool]|rollback [tool]}|models check|install-hooks|profile {add <name>|list|ls|rm <name> [--yes]}|continuity migrate|verify [--gpu|--isolated]|doctor|config {get|set|unset|diff|pending}|netaccess {status|allow|deny}|ollama {status|ps|up|down|pull <model>|reconcile|gpu-check}|hyperqwen {status|ps|up|down|prepare|reconcile|logs [-f]|gpu-check}|llm {status|use <ollama|hyperqwen> [--model <name>]}|wg {status|up [--yes]|down|keygen|peer {add|rm|list|config}|server add-client <name> [<pubkey>] [--endpoint host:port] [--plain] [--yes]|client join <token> [--yes]}|session-broker {status|access {disabled|viewer|full-attach}|window {off|<minutes>}|key {add <pubkey-file> [comment]|rm <fingerprint>|fingerprints}}|backup|login [--profile <name>] [oauth-url]|login-codex|codex-auth-share [absolute-host-codex-dir]|gc|net-refresh|ls|images [list|rm <hash>]}"
   echo "cbox: with zero arguments and a TTY on stdin+stdout, bare '$0' opens the interactive hub instead of this usage text"
   echo "cbox: 'cbox ls' lists RUNNING isolated projects only, not every configured project"
   echo "cbox: 'cbox isolation render --help' describes the opt-in offline engine isolation lab"
@@ -10696,6 +10753,11 @@ case "${1:-}" in
   session) shift; _cbox_session_cmd "$@";;
   profile) shift; _cbox_profile_cmd "$@";;
   isolation) shift; python3 "$INSTALL_DIR/lib/cbox_isolation.py" "$@";;
+  codex-auth-share)
+    shift
+    [ "$#" -le 1 ] || die "usage: cbox codex-auth-share [absolute-host-codex-dir]"
+    python3 "$INSTALL_DIR/lib/cbox_codex_auth.py" "${1:-${CBOX_CODEX_PATH:-$HOME/.codex}}"
+    ;;
   ai) shift; ai "$@";;
   up) shift; up "$@";;
   down)

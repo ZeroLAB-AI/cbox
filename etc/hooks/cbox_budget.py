@@ -914,9 +914,9 @@ def budget_for_family(family, now=None):
     return result
 
 
-def hermes_state(now=None):
+def hermes_state(now=None, *, cache_path=None):
     now = time.time() if now is None else now
-    path = os.path.join(usage_dir(), "hermes.json")
+    path = cache_path if cache_path is not None else os.path.join(usage_dir(), "hermes.json")
     data = safe_read_json(path)
     if not isinstance(data, dict):
         return {"state": "unknown", "reachable": None, "model_loaded": None, "age_seconds": None}

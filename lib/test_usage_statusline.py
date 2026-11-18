@@ -205,6 +205,33 @@ class HermesCacheTests(unittest.TestCase):
         self.mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.mod)
 
+    def test_codex_reads_own_mcp_and_reports_idle_without_claude_registration(self):
+        managed = pathlib.Path(self._tmp.name) / "managed.toml"
+        legacy = pathlib.Path(self._tmp.name) / "cbox-container.config.toml"
+        config = ('[mcp_servers.hermes-local]\ncommand = "python3"\n'
+                  '[mcp_servers.hermes-local.env]\nCBOX_HERMES_DELEGATE_BASE_URL = "http://example.invalid/v1"\n')
+        legacy.write_text(config)
+        managed.write_text('[mcp_servers.hermes-local]\ncommand = "python3"\nenabled = false\n')
+        self.assertIsNone(self.mod._codex_hermes_env(managed, legacy))
+        managed.write_text(config)
+        env = self.mod._codex_hermes_env(managed, legacy)
+        os.environ["CLAUDE_CONFIG_DIR"] = ABSENT_CFG
+        with mock.patch.object(self.mod, "_probe_hermes", return_value=(True, True, 0, 0)) as probe:
+            self.assertEqual(self.mod._codex_hermes_status(env, time.time()), "hermes: idle")
+        probe.assert_called_once_with("http://example.invalid")
+        managed.unlink()
+        self.assertEqual(self.mod._codex_hermes_env(managed, legacy), env)
+
+    def test_codex_cache_keeps_distinct_backend_status_under_the_same_usage_dir(self):
+        stable = {"CBOX_HERMES_DELEGATE_BASE_URL": "http://reachable.invalid"}
+        failed = {"CBOX_HERMES_DELEGATE_BASE_URL": "http://failed.invalid"}
+        now = time.time()
+        with mock.patch.object(self.mod, "_probe_hermes", side_effect=[(True, True, 0, 0), (False, False, None, None)]) as probe:
+            self.assertEqual(self.mod._codex_hermes_status(stable, now), "hermes: idle")
+            self.assertEqual(self.mod._codex_hermes_status(failed, now + 1), "hermes: down")
+            self.assertEqual(self.mod._codex_hermes_status(stable, now + 2), "hermes: idle")
+        self.assertEqual(probe.call_count, 2)
+
     def _probe(self, result):
         with mock.patch.object(self.mod, "_probe_hermes", return_value=result) as probe:
             self.mod._update_hermes_cache(time.time())

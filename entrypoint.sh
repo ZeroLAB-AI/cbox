@@ -368,10 +368,17 @@ _multiplex_run() {
   status_file="$status_dir/status"
   conf="$status_dir/tmux.conf"
   _write_tmux_conf "$conf"
+  local -a tmux_env=() tmux_status=()
+  if [ "$engine" = codex ] && [ -n "${_codex_hermes_status_hook:-}" ]; then
+    tmux_env=(-e "CBOX_CODEX_HERMES_STATUS_HOOK=$_codex_hermes_status_hook")
+    tmux_status=(\; set-option -t "$session" status on
+      \; set-option -t "$session" status-interval 15
+      \; set-option -t "$session" 'status-format[0]' '#(/usr/bin/python3 #{q:CBOX_CODEX_HERMES_STATUS_HOOK} --codex-hermes)')
+  fi
   inner="$(printf '%q ' "$@")"
   inner="$inner; __rc=\$?; printf %s \$__rc > $(printf '%q' "$status_file"); exit \$__rc"
   _as_user env SHELL=/bin/bash LANG=C.UTF-8 \
-    tmux -u -f "$conf" new-session -s "$session" -c "$PWD" "$inner" || trc=$?
+    tmux -u -f "$conf" new-session -s "$session" -c "$PWD" "${tmux_env[@]}" "$inner" "${tmux_status[@]}" || trc=$?
   if rc="$(_multiplex_status_read "$status_file")"; then
     :
   elif [ "$trc" -ne 0 ]; then
@@ -907,6 +914,11 @@ case "${1:-}" in
         esac
       done
       set -- --strict-config --dangerously-bypass-hook-trust "$@"
+      _codex_hermes_status_hook=""
+      if [ -t 0 ] && [ -t 1 ] && [ -f "$HOST_HOME/.claude/hooks/usage_statusline.py" ] \
+          && _as_user python3 "$HOST_HOME/.claude/hooks/usage_statusline.py" --codex-hermes-enabled; then
+        _codex_hermes_status_hook="$HOST_HOME/.claude/hooks/usage_statusline.py"
+      fi
     fi
     if [ -t 0 ] && [ -t 1 ] \
         && { [ "${CBOX_SESSION_MULTIPLEX:-off}" = on ] \
@@ -917,6 +929,9 @@ case "${1:-}" in
         _multiplex_run "$_verb" "$_resolved" "$@"
       fi
       echo "entrypoint: session multiplexing wanted (CBOX_SESSION_MULTIPLEX=${CBOX_SESSION_MULTIPLEX:-off}, CBOX_LIMIT_AUTORESUME=${CBOX_LIMIT_AUTORESUME:-off}, CBOX_REGULATOR_AUTORESUME=${CBOX_REGULATOR_AUTORESUME-on}, CBOX_SAFEGUARD_AUTOCONFIRM=${CBOX_SAFEGUARD_AUTOCONFIRM:-off}) but tmux is missing in this image - rebuild on the host (next 'cbox run' after re-bless); running without a session wrapper" >&2
+    fi
+    if [ "$_verb" = codex ] && [ -n "${_codex_hermes_status_hook:-}" ]; then
+      _as_user python3 "$_codex_hermes_status_hook" --codex-hermes >&2 || true
     fi
     _run_as_user "$_resolved" "$@"
     ;;

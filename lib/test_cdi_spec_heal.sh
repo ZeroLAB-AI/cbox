@@ -14,7 +14,7 @@ _extract_fn() {
   awk -v fn="$2" '$0 == fn"() {", $0 == "}"' "$1"
 }
 
-for fn in _cbox_cdi_failed_node _cbox_cdi_spec_files_for _cbox_cdi_spec_writable _cbox_cdi_spec_regenerate \
+for fn in _cbox_cdi_failed_node _cbox_cdi_spec_matches _cbox_cdi_spec_files_for _cbox_cdi_spec_writable _cbox_cdi_spec_regenerate \
   _cbox_cdi_host_device_recover _cbox_ollama_owner_up; do
   body="$(_extract_fn "$INSTALL_DIR/cbox" "$fn")"
   [ -n "$body" ] || _fail "cannot extract $fn from cbox"
@@ -70,8 +70,8 @@ if [ -n "$out" ]; then
   {
     echo "cdiVersion: 0.5.0"
     echo "kind: nvidia.com/gpu"
-    echo "containers:"
-    echo "- devices:"
+    echo "containerEdits:"
+    echo "  deviceNodes:"
     echo "  - path: /dev/nvidia0"
   } > "$out"
 fi
@@ -99,8 +99,8 @@ _write_spec() {
   {
     echo "cdiVersion: 0.5.0"
     echo "kind: nvidia.com/gpu"
-    echo "containers:"
-    echo "- devices:"
+    echo "containerEdits:"
+    echo "  deviceNodes:"
     echo "  - path: /dev/nvidia0"
     echo "  - path: /dev/dri/card0"
     echo "  - path: /dev/dri/renderD129"
@@ -159,6 +159,21 @@ if out="$(_cbox_cdi_host_device_recover "ollama owner" "$CARD7_ERR" "cbox ollama
 ! grep -q '^ctk ' "$CALLS" || _fail "case 5: no spec lists the node, so nothing may be regenerated"
 case "$out" in *"cbox ollama gpu-check"*) ;; *) _fail "case 5: the failure must point at gpu-check, got: $out" ;; esac
 _ok "case 5: an unlisted node fails and names the check"
+
+_reset
+printf '%s\n' 'cdiVersion: 0.5.0' 'kind: other.example/gpu' 'containerEdits:' '  deviceNodes:' '  - path: /dev/dri/card0' > "$SPEC"
+if _cbox_cdi_host_device_recover "ollama owner" "$ERR" "gpu-check" >/dev/null 2>&1; then _fail "foreign kind must fail"; fi
+printf '%s\n' 'cdiVersion: 0.5.0' 'kind: nvidia.com/gpu' 'containerEdits:' '  deviceNodes:' '  - path: /dev/dri/card01' '  - path: /dev/dri/card0' '    hostPath: /dev/dri/card9' > "$SPEC"
+if _cbox_cdi_host_device_recover "ollama owner" "$ERR" "gpu-check" >/dev/null 2>&1; then _fail "substring and container paths must fail"; fi
+! grep -q '^ctk ' "$CALLS" || _fail "unsafe definitions must never be regenerated"
+_ok "foreign kind, substring and container-only paths cannot select a CDI file"
+
+_reset
+mkdir -p "$TMPBASE/second-cdi"
+cp "$SPEC" "$TMPBASE/second-cdi/nvidia.yaml"
+if _CBOX_CDI_SPEC_DIRS="$TMPBASE/cdi $TMPBASE/second-cdi" _cbox_cdi_host_device_recover "ollama owner" "$ERR" "gpu-check" >/dev/null 2>&1; then _fail "ambiguous candidates must fail"; fi
+! grep -q '^ctk ' "$CALLS" || _fail "ambiguous definitions must never be regenerated"
+_ok "two matching NVIDIA definitions require manual selection"
 
 _reset
 _cbox_cdi_spec_writable() { return 1; }

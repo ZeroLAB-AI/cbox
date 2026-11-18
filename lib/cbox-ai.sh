@@ -270,8 +270,9 @@ _cbox_ai_codex_model_args() {
 
 _cbox_ai_container_claude_cmd() {
   local mode="$1" headless="$2"
-  local -a inner=(claude)
-  _cbox_readarray inner < <(_cbox_ai_claude_model_args)
+  local -a model_args
+  _cbox_readarray model_args < <(_cbox_ai_claude_model_args)
+  local -a inner=(claude "${model_args[@]}")
   if [ "$mode" = full ]; then
     if [ "$headless" = 1 ]; then
       inner+=(-p "$CBOX_AI_PROMPT" --output-format text --dangerously-skip-permissions)
@@ -292,8 +293,9 @@ _cbox_ai_container_claude_cmd() {
 
 _cbox_ai_container_codex_cmd() {
   local mode="$1" headless="$2"
-  local -a inner=(codex -a never -s danger-full-access -c "$(_cbox_ai_developer_instructions_arg "$mode")")
-  _cbox_readarray inner < <(_cbox_ai_codex_model_args)
+  local -a model_args
+  _cbox_readarray model_args < <(_cbox_ai_codex_model_args)
+  local -a inner=(codex -a never -s danger-full-access -c "$(_cbox_ai_developer_instructions_arg "$mode")" "${model_args[@]}")
   inner+=(-C "$PWD")
   if [ "$headless" = 1 ]; then
     inner+=(exec "$CBOX_AI_PROMPT")
@@ -367,8 +369,9 @@ _cbox_ai_host_claude_permission_mode() {
 
 _cbox_ai_host_claude_cmd() {
   local mode="$1" headless="$2"
-  local -a cmd=(claude)
-  _cbox_readarray cmd < <(_cbox_ai_claude_model_args)
+  local -a model_args
+  _cbox_readarray model_args < <(_cbox_ai_claude_model_args)
+  local -a cmd=(claude "${model_args[@]}")
   local pmode txt
   pmode="$(_cbox_ai_host_claude_permission_mode "$mode")"
   if [ "$mode" != full ]; then
@@ -393,8 +396,9 @@ _cbox_ai_host_codex_sandbox() {
 _cbox_ai_host_codex_cmd() {
   local mode="$1" headless="$2" sandbox
   sandbox="$(_cbox_ai_host_codex_sandbox "$mode")"
-  local -a cmd=(codex -a never -s "$sandbox" -c "$(_cbox_ai_developer_instructions_arg "$mode")")
-  _cbox_readarray cmd < <(_cbox_ai_codex_model_args)
+  local -a model_args
+  _cbox_readarray model_args < <(_cbox_ai_codex_model_args)
+  local -a cmd=(codex -a never -s "$sandbox" -c "$(_cbox_ai_developer_instructions_arg "$mode")" "${model_args[@]}")
   cmd+=(-C "$PWD" --strict-config --profile cbox-host)
   if [ "$headless" = 1 ]; then
     cmd+=(exec "$CBOX_AI_PROMPT")

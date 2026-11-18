@@ -1,0 +1,25 @@
+{
+  "cbox-continuity": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "/usr/bin/python3 /opt/cbox-runtime/etc/hooks/antigravity_guard.py session-start",
+        "timeout": 15
+      }
+    ]
+  },
+  "cbox-tool-policy": {
+    "PreToolUse": [
+      {
+        "matcher": "run_command|view_file|write_to_file|replace_file_content|multi_replace_file_content|list_dir|find_by_name|grep_search",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 /opt/cbox-runtime/etc/hooks/antigravity_guard.py pre-tool",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

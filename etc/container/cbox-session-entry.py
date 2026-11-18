@@ -319,15 +319,16 @@ def main():
         session = new_session_name(engine)
         audit({"op": "spawn", "engine": engine, "session": session, "outcome": "start", "tier": tier,
                "identityKind": id_kind, "identity": id_value})
-        inner = "exec tmux new-session -s %s /entrypoint.sh %s" % (session, engine)
-        subprocess.Popen(
-            ["sh", "-c", inner],
+        launch = subprocess.run(
+            ["tmux", "new-session", "-d", "-s", session, "/entrypoint.sh", engine],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            check=False,
         )
-        time.sleep(0.5)
+        if launch.returncode != 0:
+            audit({"op": "spawn", "engine": engine, "session": session, "outcome": "failed",
+                   "tier": tier, "rc": launch.returncode, "identityKind": id_kind, "identity": id_value})
+            return launch.returncode
         argv = build_attach_argv(tier, session)
         rc = run_attach(argv, tier)
         audit({"op": "spawn", "engine": engine, "session": session, "outcome": "end", "tier": tier, "rc": rc,

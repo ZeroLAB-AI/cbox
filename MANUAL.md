@@ -34,7 +34,13 @@ Keep the project in Zed Restricted Mode and leave `session.trust_all_worktrees` 
 
 `cbox acp hermes`, `cbox acp claude`, and `cbox acp codex` start the project's container through the normal run path. Select the matching cbox agent in Zed. The Codex proxy locks each session to full-access mode inside the container and passes the managed Codex profile and hooks from the same files as terminal Codex. `CBOX_CODEX_HOOKS=off` leaves PreToolUse disabled in both paths; `on` passes the configured PreToolUse hook to the ACP app-server. If startup fails, the ACP proxy sends the recent cbox stderr text to the editor in the initialization error. For a later backend crash it sends an agent message and fails pending requests. Use Zed's `dev: open acp logs` command to inspect the exchange.
 
-Four saved engine entries and MCP calls from each main agent are the delivery target in [the integration plan](../docs/ANTIGRAVITY_CLI_FEASIBILITY.md). The three entries above exist today; the fourth ACP launcher is still planned. Choose the engine when starting a thread, then its supported model inside that agent. Switching engines does not automatically transfer a live conversation.
+When Antigravity has its own workspace runtime configured and has passed the
+offline host probe, add a fourth custom entry `cbox Antigravity` with the same
+absolute `command` and `args: ["acp", "antigravity"]`. See the
+[isolated launcher procedure](../docs/ENGINE_ISOLATION_LAB.md). Choose the engine
+when starting a thread and the model inside that agent. Cross-engine handoff
+is a separate operation. Production peer MCP routing is tracked in the
+[integration plan](../docs/ANTIGRAVITY_CLI_FEASIBILITY.md).
 
 ## Agents know this manual
 
@@ -251,6 +257,15 @@ The codex delegates (`codex-astra`, `codex-sol`, `codex-luna`) run through a shi
 
 ### codex-progress
 
+Codex uses its native footer for model, quotas and context. When the managed
+Codex configuration registers `hermes-local`, CBOX also shows the Hermes
+availability and slot counts in the tmux status row with
+`CBOX_SESSION_MULTIPLEX=on`. Without multiplexing, CBOX prints the Hermes status
+at interactive startup. This reads Codex's own configured delegate endpoint
+and works with `CBOX_CODEX_HOOKS=off`. If it shows `hermes: down`, test the
+configured hostname inside the affected project container. For HyperQwen use
+`cbox run getent hosts hyperqwen` from the project on the host.
+
 `CBOX_CODEX_PROGRESS_MODE` (enum `off`/`shim`, default `shim`) turns on the live progress relay: MCP calls show live Claude Code UI activity during Codex delegation instead of a bare spinner. The relay (`~/.claude/hooks/codex_mcp_shim.py`) is always in the path for every `codex-*` MCP server (it also pins model/effort and enforces the cwd/git guard); this toggle only controls whether it also translates Codex events into standard MCP `notifications/progress`. It stays forced to `off` outside claude mount mode: the shim binary is deployed to `~/.claude/hooks` via staged, host-reviewed `cbox install-hooks` (mount mode only - the container's `~/.claude` is the host's real directory there), so volume mode has no reviewed path to ship it turned on; this is a deployment-mechanism gap, not a reliability one, and stays until a volume-mode install path is built.
 
 Even with progress off, a client that gave Claude Code more than 1800s of silence would otherwise abort a working delegation. To prevent that regardless of the progress toggle, the shim sends a heartbeat `notifications/progress` at least every 30s while a turn is running and the call carried a `_meta.progressToken` (elapsed seconds and the last item kind seen, e.g. `elapsed 35s, last: commandExecution`), independent of real Codex item events; heartbeats still only go out when progress is on (`CBOX_CODEX_PROGRESS_MODE=shim`).
@@ -295,9 +310,24 @@ personal preferences; read-only `/etc/codex/managed_config.toml` and
 `/etc/codex/requirements.toml` supply cbox settings and enforced requirements.
 The container no longer selects the read-only `cbox-container` profile when
 starting Codex. Model/effort and status-line changes can therefore be saved
-atomically in the writable home and survive recreation. Mount mode stores
-them in the configured host Codex directory; volume mode stores them in the
-Codex volume. Named login profiles use their own writable Codex home.
+atomically in the writable home and survive recreation. Default mount mode
+uses `cbox-container-home/` under `CBOX_CODEX_PATH` for container state.
+Host Codex keeps its own configuration and credentials. Sign in once inside
+the new container home with `codex login --device-auth`. Existing host history
+stays in the host home. Volume mode and named login profiles keep their own
+state and credentials in their existing stores.
+
+To reuse an existing file-based sign-in in default mount mode, close the host
+and container Codex sessions and run `cbox codex-auth-share` on the host before
+signing in again. Pass the absolute `CBOX_CODEX_PATH` as the argument for a
+custom directory. This explicitly moves the existing grant and refresh lock
+into the writable container store and leaves host symlinks to those same
+files. Tokens remain a single shared grant. Both clients must support atomic
+credential updates through symlinks (verified in the 0.169.0 source).
+Run this only if you want to share authentication. Keyring-only logins need
+their own container sign-in. The command refuses an existing different grant.
+Host logout removes the host link. Container logout removes the shared
+credential file, so the host link then has no grant to load.
 
 `CBOX_CODEX_MODEL` and `CBOX_CODEX_EFFORT` are initial defaults: an existing
 personal choice wins. Requirements preserve the container's existing

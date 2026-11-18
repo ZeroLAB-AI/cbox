@@ -72,6 +72,16 @@ _cbox_codex_precreate_ro_pins() {
   done
 }
 
+_cbox_codex_container_store() {
+  local path="$1/cbox-container-home"
+  if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
+    echo "cbox: refusing a Codex container home that is not a plain directory: $path" >&2
+    return 1
+  fi
+  (umask 077; mkdir -p "$path") || return 1
+  printf '%s\n' "$path"
+}
+
 _cbox_tz_env_into() {
   local tmp="$1" tzname=""
   if [ -L /etc/localtime ]; then
@@ -1442,8 +1452,10 @@ EOF
   fi
   if [ "$codex_mode" = "mount" ]; then
     _cbox_codex_precreate_ro_pins "$codex_path"
+    local codex_store
+    codex_store="$(_cbox_codex_container_store "$codex_path")" || return 1
     cat >> "$tmp" <<EOF
-      - $codex_path:\${HOST_HOME}/.codex:rw
+      - $codex_store:\${HOST_HOME}/.codex:rw
       - $codex_path/AGENTS.md:\${HOST_HOME}/.codex/AGENTS.md:ro
       - $codex_path/cbox-host.config.toml:\${HOST_HOME}/.codex/cbox-host.config.toml:ro
 EOF
@@ -2020,7 +2032,9 @@ EOF
       mkdir -p "$store/codex/packages" || return 1
       printf '      - %s/codex:${HOST_HOME}/.codex:rw\n' "$store" >> "$tmp"
     else
-      printf '      - %s:${HOST_HOME}/.codex:rw\n' "$codex_path" >> "$tmp"
+      local codex_store
+      codex_store="$(_cbox_codex_container_store "$codex_path")" || return 1
+      printf '      - %s:${HOST_HOME}/.codex:rw\n' "$codex_store" >> "$tmp"
     fi
     cat >> "$tmp" <<EOF
       - $codex_path/AGENTS.md:\${HOST_HOME}/.codex/AGENTS.md:ro
