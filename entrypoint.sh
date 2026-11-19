@@ -391,6 +391,13 @@ _multiplex_run() {
   exit "$rc"
 }
 
+_codex_management_cmd() {
+  case "${1:-}" in
+    login|logout|mcp|plugin|features|completion|sandbox|cloud) return 0 ;;
+  esac
+  return 1
+}
+
 _codex_profile_preflight() {
   local layer
   for layer in config.toml managed_config.toml requirements.toml; do
@@ -913,11 +920,13 @@ case "${1:-}" in
             ;;
         esac
       done
-      set -- --strict-config --dangerously-bypass-hook-trust "$@"
       _codex_hermes_status_hook=""
-      if [ -t 0 ] && [ -t 1 ] && [ -f "$HOST_HOME/.claude/hooks/usage_statusline.py" ] \
-          && _as_user python3 "$HOST_HOME/.claude/hooks/usage_statusline.py" --codex-hermes-enabled; then
-        _codex_hermes_status_hook="$HOST_HOME/.claude/hooks/usage_statusline.py"
+      if ! _codex_management_cmd "${1:-}"; then
+        set -- --strict-config --dangerously-bypass-hook-trust "$@"
+        if [ -t 0 ] && [ -t 1 ] && [ -f "$HOST_HOME/.claude/hooks/usage_statusline.py" ] \
+            && _as_user python3 "$HOST_HOME/.claude/hooks/usage_statusline.py" --codex-hermes-enabled; then
+          _codex_hermes_status_hook="$HOST_HOME/.claude/hooks/usage_statusline.py"
+        fi
       fi
     fi
     if [ -t 0 ] && [ -t 1 ] \

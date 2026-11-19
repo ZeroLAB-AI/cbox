@@ -117,6 +117,29 @@ class SettingsTests(unittest.TestCase):
                     self.assertIn(':${HOST_HOME}/.codex/AGENTS.override.md:ro', text)
                     self.assertIn(':${HOST_HOME}/.codex/hooks.json:ro', text)
 
+    def test_management_subcommands_skip_session_flags(self):
+        entry = INSTALL / "entrypoint.sh"
+        probe = ('eval "$(awk \'/^_codex_management_cmd\\(\\) \\{/,/^}$/\' "$1")"; shift; '
+                 'for a in "$@"; do if _codex_management_cmd "$a"; then echo "$a=skip"; '
+                 'else echo "$a=flags"; fi; done')
+        names = ["login", "logout", "mcp", "plugin", "features", "completion", "sandbox", "cloud",
+                 "", "exec", "e", "review", "resume", "fork", "agents", "app-server",
+                 "exec-server", "remote-control", "-m", "fix the bug"]
+        out = subprocess.run(["bash", "-c", probe, "probe", str(entry), *names],
+                             env=self.env, check=True, capture_output=True, text=True).stdout
+        result = dict(line.split("=", 1) for line in out.splitlines())
+        for name in names[:8]:
+            self.assertEqual(result[name], "skip", name)
+        for name in names[8:]:
+            self.assertEqual(result[name], "flags", name)
+        branch = entry.read_text(encoding="utf-8")
+        gate = branch.index('if ! _codex_management_cmd "${1:-}"; then')
+        prefix = branch.index('set -- --strict-config --dangerously-bypass-hook-trust "$@"')
+        status = branch.index('--codex-hermes-enabled; then', gate)
+        self.assertLess(gate, prefix)
+        self.assertLess(prefix, status)
+        self.assertEqual(branch.count("set -- --strict-config"), 1)
+
     def test_opt_in_grant_and_refresh_lock_remain_shared_without_moving_host_config(self):
         home = self.root / "home/.codex"
         home.mkdir(mode=0o700)
